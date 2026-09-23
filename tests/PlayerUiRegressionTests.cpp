@@ -119,6 +119,23 @@ void WriteTinyAvi(const std::filesystem::path& path, uint32_t width, uint32_t he
 }
 } // namespace
 
+// A 24-bit bottom-up BMP of `width` x `height` whose left half is black and right
+// half white: the smallest file WIC decodes without an encoder of our own.
+static void write_half_white_bmp(const std::filesystem::path& path, uint32_t width, uint32_t height)
+{
+    const uint32_t stride = (width * 3 + 3) & ~3u;
+    std::vector<uint8_t> file(54 + size_t(stride) * height, 0);
+    const auto put32 = [&](size_t at, uint32_t value) { for (int shift = 0; shift < 32; shift += 8) file[at + size_t(shift / 8)] = uint8_t(value >> shift); };
+    file[0] = 'B'; file[1] = 'M'; put32(2, uint32_t(file.size())); put32(10, 54);
+    put32(14, 40); put32(18, width); put32(22, height); file[26] = 1; file[28] = 24; put32(34, uint32_t(stride) * height);
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x)
+            for (int channel = 0; channel < 3; ++channel)
+                file[54 + size_t(y) * stride + size_t(x) * 3 + size_t(channel)] = x >= width / 2 ? 255 : 0;
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(file.data()), std::streamsize(file.size()));
+}
+
 // Names each case after the member function that runs it, so a failure line
 // reads [toolbar_pills_and_progress_panel_test] rather than a file and line
 // in a two-thousand-line function.
@@ -2114,6 +2131,62 @@ struct PlayerAppTestAccess {
         app.m_comparison = entry; app.m_zoomStep = entryZoom; app.m_comparison.strength = 1.0f; app.ApplyComparison(false);
     }
 
+    // The spatial mask on the Mix: loaded for a source, remembered for it, restored when
+    // it comes back, and forgotten on Clear.
+    static void CheckComparisonMask(PlayerApp& app)
+    {
+        const std::wstring path = app.m_path, page = app.m_youtubePageUrl;
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        const auto image = app.SettingsPath().parent_path() / L"ui-mask.bmp";
+        write_half_white_bmp(image, 16, 8);
+        app.m_youtubePageUrl.clear();
+        app.m_path = L"C:\\videos\\masked.mp4";
+        app.SyncMaskToSource();
+        CHECK(app.m_maskSource.pixels.empty());
+        CHECK(!app.EffectiveComparison().mask);
+        CHECK(app.LoadMask(image, 0, false, true));
+        CHECK_EQ(16u, app.m_maskFeathered.width);
+        CHECK(app.EffectiveComparison().mask);
+        CHECK(ComparisonReadsReference(app.EffectiveComparison()));
+        wchar_t saved[512]{};
+        GetPrivateProfileStringW(L"ComparisonMasks", app.m_maskSourceKey.c_str(), L"", saved, 512, app.SettingsPath().c_str());
+        const auto record = compare_mask::Parse(saved);
+        CHECK(record.has_value());
+        if (record) { CHECK(record->path == image.wstring()); CHECK_EQ(0, record->feather); CHECK(!record->invert); }
+        // Feather and invert are remembered too; the feather softens the edge.
+        const auto hard = app.m_maskFeathered.pixels;
+        app.SetMaskFeather(3);
+        CHECK_EQ(16, app.m_maskFeather);
+        CHECK(app.m_maskFeathered.pixels != hard);
+        app.ToggleMaskInvert();
+        CHECK(app.EffectiveComparison().maskInvert);
+        // Another source has no mask; coming back restores this one as it was left.
+        app.m_path = L"C:\\videos\\other.mp4";
+        app.SyncMaskToSource();
+        CHECK(app.m_maskSource.pixels.empty());
+        CHECK(!app.EffectiveComparison().mask);
+        app.m_path = L"C:\\Videos\\MASKED.mp4";
+        app.SyncMaskToSource();
+        CHECK(!app.m_maskSource.pixels.empty());
+        CHECK_EQ(16, app.m_maskFeather);
+        CHECK(app.m_maskInvert);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_COMPARE_MASK_INVERT, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        // Clear forgets it for this source.
+        app.HandleCommand(IDM_COMPARE_MASK_CLEAR);
+        CHECK(app.m_maskSource.pixels.empty());
+        GetPrivateProfileStringW(L"ComparisonMasks", app.m_maskSourceKey.c_str(), L"", saved, 512, app.SettingsPath().c_str());
+        CHECK(std::wstring(saved).empty());
+        // A remembered mask whose file is gone is left alone, and the source plays unmasked.
+        CHECK(app.LoadMask(image, 8, false, true));
+        std::error_code ignored; std::filesystem::remove(image, ignored);
+        app.m_path = L"C:\\videos\\other.mp4"; app.SyncMaskToSource();
+        app.m_path = L"C:\\videos\\masked.mp4"; app.SyncMaskToSource();
+        CHECK(app.m_maskSource.pixels.empty());
+        WritePrivateProfileStringW(L"ComparisonMasks", nullptr, nullptr, app.SettingsPath().c_str());
+        app.m_path = path; app.m_youtubePageUrl = page; app.SyncMaskToSource();
+        if (SUCCEEDED(com)) CoUninitialize();
+    }
+
     static void CheckComparisonAvailability(PlayerApp& app)
     {
         const HMENU menu = GetMenu(app.m_hwnd);
@@ -2138,6 +2211,7 @@ struct PlayerAppTestAccess {
         CHECK_EQ(app.m_comparison.strength, 0.0f);
         app.m_comparison.strength = 1.0f;
         CheckCompareBarAndPeek(app);
+        CheckComparisonMask(app);
         // Z steps along the ladder; with no render window or output to measure it is
         // multiples of Fit, where 1:1 does not magnify and is skipped.
         app.HandleCommand(IDM_COMPARE_ZOOM);

@@ -60,7 +60,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.3](#p23) | A quality ladder for cache and export: CQ, 10-bit, lossless | M | Pipeline | ✅ |
 | [P2.4](#p24) | Guide A/B harness, then evaluate Video Depth Anything | S / M-L | Pipeline | |
 | [P2.5](#p25) | Temporal stability with motion compensation | M | Pipeline, Player | |
-| [P2.6](#p26) | Spatial mask and feather; face protection later | S-M | Pipeline, Player | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
 | [P2.11](#p211) | Quality metrics in the app | M | Player, Pipeline | |
 | [P2.12](#p212) | Scene-cut controls and duplicate-frame handling | S / M | Pipeline | |
@@ -248,23 +247,6 @@ This is the defining failure mode of neural video: Merserk ships shimmer
 suppression, and Topaz has said on the record that it has no deflicker.
 
 Refs: [Lai et al., ECCV 2018](https://arxiv.org/pdf/1808.00449)
-
----
-
-<a id="p26"></a>
-### P2.6 · Spatial mask and feather; face protection later
-
-`S-M` · **Pipeline, Player** · _old 3.3_
-
-Neural strength is already a per-frame blend in the presentation shader, so
-making it vary across the frame is one texture and a lerp, done in *our*
-compositor (NGX mask inputs are inert, `docs/ARCHITECTURE.md`).
-
-**Do** — ship a manual mask with feathering first. Face and skin protection
-is now the loudest criticism of DLSS 5 ("beautified" faces), and NVIDIA's own
-answer is masking. A ComfyUI pack already ships an automatic skin mask, and
-Merserk has an open mask issue (#65). Detection is a separate dependency;
-defer it.
 
 ---
 

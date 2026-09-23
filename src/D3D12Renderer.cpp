@@ -381,7 +381,11 @@ float3 SampleFootprint(Texture2D tex,float2 uv,float2 footprint,bool srgb){
     }
     return sum/float(taps.x*taps.y);
 }
-// Parameters only the window compositor below reads. A second cbuffer rather than more
+)"
+// MSVC caps one string literal at 16 KiB, and this program outgrew it; the text goes
+// on in a second raw literal, concatenated by the compiler, so the string - and every
+// program compiled from it - is exactly what one literal would hold.
+R"(// Parameters only the window compositor below reads. A second cbuffer rather than more
 // members of Params: PSPresent never references it, so fxc drops it from that program
 // and the cache capture's bytecode stays byte for byte what every cached render on disk
 // was made with. The label atlas at t4 is the compositor's alone for the same reason.
@@ -392,9 +396,17 @@ cbuffer Compose:register(b1){
     float4 Target;  // xy = backbuffer size px
     float4 Loupe;   // xy = image UV under the pointer, z = circle radius px, w = px per output texel (0 = off)
     float4 LoupeAt; // xy = centre of the left circle, zw = of the right one, px
-    float4 Diff;    // x = difference gain, y = 1 for grey luma, 0 per channel
+    float4 Diff;    // x = difference gain, y = 1 for grey luma, 0 per channel, z = mask on, w = mask inverted
 }
-Texture2D Labels:register(t4);
+Texture2D Mask:register(t3); Texture2D Labels:register(t4);
+// The spatial mask on the Mix: where it is white the neural member stays as dialled,
+// where it is black the original shows through, and grey is a blend - so a face can be
+// protected from the model while the rest of the frame keeps it. Stretched over the
+// frame; feathered on the CPU when it was loaded.
+float3 MaskedNeural(float3 c,float3 ref,float2 uv){
+    if(Diff.z>0.5){float w=Mask.SampleLevel(S,uv,0).r;if(Diff.w>0.5)w=1.0-w;c=lerp(ref,c,w);}
+    return c;
+}
 // One tag from the premultiplied atlas over an sRGB-encoded colour, with its top-left
 // corner at `anchor` in backbuffer pixels. Load, not Sample: the tags were drawn by GDI
 // at the window's DPI and are shown texel for pixel.
@@ -419,7 +431,9 @@ float3 LoupeColour(float2 uv,bool original){
     if(original)c=SRGBToLinear(Ref.Load(int3(min(int2(uv*float2(rw,rh)),int2(rw,rh)-1),0)).rgb);
     else{
         c=T.Load(int3(min(int2(uv*float2(w,h)),int2(w,h)-1),0)).rgb;
-        if(ColorB.z!=1.0)c=ApplyNeuralStrength(c,SRGBToLinear(Ref.SampleLevel(S,uv,0).rgb),ColorB.z,max(ColorB.w,1.0));
+        float3 ref=SRGBToLinear(Ref.SampleLevel(S,uv,0).rgb);
+        if(ColorB.z!=1.0)c=ApplyNeuralStrength(c,ref,ColorB.z,max(ColorB.w,1.0));
+        c=MaskedNeural(c,ref,uv);
     }
     return LinearToSRGB(ApplyVideoAdjustments(c));
 }
@@ -453,9 +467,10 @@ float4 PSPresentScaled(V i):SV_Target{
     int mode=int(Compare.x+0.5);
     float strength=ColorB.z;
     bool swap=Pane.y>0.5;
-    if(mode!=0||strength!=1.0){
+    if(mode!=0||strength!=1.0||Diff.z>0.5){
         float3 ref=SampleFootprint(Ref,uv,footprint,true);
         if(strength!=1.0)c=ApplyNeuralStrength(c,ref,strength,max(ColorB.w,1.0));
+        c=MaskedNeural(c,ref,uv);
         if(mode==1)c=ref;
         else if(mode==2)c=lerp(ref,c,saturate(Compare.y));
         else if(mode==5)c=DifferenceOf(c,ref);
@@ -1404,6 +1419,8 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     const bool labels=useReference&&cmp.labels&&m_labelAtlas&&m_labelRowHeight;
     // The loupe shows the original, so it needs the reference as much as a split does.
     const bool loupe=useReference&&cmp.loupe&&cmp.loupeRadius>0.0f;
+    // So does the mask, which blends back to it; and there has to be one uploaded.
+    const bool mask=useReference&&cmp.mask&&m_mask;
     const float inset=float(m_labelRowHeight/2u);
     const float compose[ComposeConstantCount]={
         0,useReference&&cmp.swap?1.0f:0.0f,0,labels?1.0f:0.0f,
@@ -1412,7 +1429,7 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
         float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),0,0,
         cmp.loupeU,cmp.loupeV,cmp.loupeRadius,loupe?std::max(cmp.loupeMagnification,1.0f):0.0f,
         cmp.loupeLeftX,cmp.loupeLeftY,cmp.loupeRightX,cmp.loupeRightY,
-        std::max(cmp.differenceGain,0.0f),cmp.differenceLuma?1.0f:0.0f,0,0};
+        std::max(cmp.differenceGain,0.0f),cmp.differenceLuma?1.0f:0.0f,mask?1.0f:0.0f,cmp.maskInvert?1.0f:0.0f};
     cmd->SetGraphicsRoot32BitConstants(RootCompose,ComposeConstantCount,compose,0);
     cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(OverlaySRV));
 }
@@ -1449,6 +1466,19 @@ bool D3D12Renderer::UploadStaticTexture(ComPtr<ID3D12Resource>&texture,DXGI_FORM
     m_device->CreateShaderResourceView(created.Get(),&srv,SRVCPU(srvIndex));
     texture=std::move(created);m_presentStale=true;
     return true;
+}
+
+bool D3D12Renderer::SetMask(const uint8_t*gray,uint32_t width,uint32_t height){
+    return UploadStaticTexture(m_mask,DXGI_FORMAT_R8_UNORM,gray,width,height,1u,OverlaySRV,L"Compositor_Spatial_Mask");
+}
+
+void D3D12Renderer::ClearMask(){
+    if(!m_mask||!m_device||!m_srvHeap)return;
+    // A frame in flight may still sample the mask through the view this nulls.
+    if(!WaitGPUForContinuedUse())return;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;srv.Format=DXGI_FORMAT_R8_UNORM;
+    m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(OverlaySRV));
+    m_mask.Reset();m_presentStale=true;
 }
 
 bool D3D12Renderer::SetLabelAtlas(const uint8_t*premultipliedBgra,uint32_t width,uint32_t height,

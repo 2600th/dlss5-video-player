@@ -100,6 +100,15 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     // C and Shift+C walk the modes; listed so the keys reach the shortcut sheet.
     add(compare, IDM_COMPARE_NEXT_MODE, L"menu.compare_next_mode"); add(compare, IDM_COMPARE_PREVIOUS_MODE, L"menu.compare_previous_mode");
     add(compare, IDM_COMPARE_BLEND_LESS, L"menu.compare_blend_less"); add(compare, IDM_COMPARE_BLEND_MORE, L"menu.compare_blend_more"); add(compare, IDM_COMPARE_SWAP, L"menu.compare_swap"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
+    // The spatial mask on the Mix: load, how soft its edge is, which way round, gone.
+    add(compare, IDM_COMPARE_MASK_LOAD, L"menu.compare_mask_load");
+    HMENU feather = CreatePopupMenu();
+    for (UINT index = 0; index < IDM_COMPARE_MASK_FEATHER_COUNT; ++index) {
+        const std::wstring key = L"menu.compare_mask_feather_" + std::to_wstring(index);
+        add(feather, IDM_COMPARE_MASK_FEATHER_FIRST + index, key.c_str());
+    }
+    AppendMenuW(compare, MF_POPUP, reinterpret_cast<UINT_PTR>(feather), localizer.Get(L"menu.compare_mask_feather").c_str());
+    add(compare, IDM_COMPARE_MASK_INVERT, L"menu.compare_mask_invert"); add(compare, IDM_COMPARE_MASK_CLEAR, L"menu.compare_mask_clear"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
     // How the Difference view is drawn.
     add(compare, IDM_COMPARE_DIFFERENCE_LESS, L"menu.compare_difference_less"); add(compare, IDM_COMPARE_DIFFERENCE_MORE, L"menu.compare_difference_more"); add(compare, IDM_COMPARE_DIFFERENCE_LUMA, L"menu.compare_difference_luma"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
     add(compare, IDM_COMPARE_ZOOM, L"menu.compare_zoom"); add(compare, IDM_COMPARE_ZOOM_OUT, L"menu.compare_zoom_out"); add(compare, IDM_COMPARE_ZOOM_FIT, L"menu.compare_zoom_fit"); add(compare, IDM_COMPARE_LOUPE, L"menu.compare_loupe");
@@ -515,6 +524,21 @@ bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable
         ok = EnableMenuItem(menu, command, MF_BYCOMMAND | (zoomAvailable && zoomed ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
     ok = EnableMenuItem(menu, IDM_COMPARE_LOUPE, MF_BYCOMMAND | (modesAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
     return CheckMenuItem(menu, IDM_COMPARE_LOUPE, MF_BYCOMMAND | (loupe ? MF_CHECKED : MF_UNCHECKED)) != static_cast<DWORD>(-1) && ok;
+}
+
+bool UpdateMaskMenu(HMENU menuBar, bool loadAvailable, bool maskLoaded, bool inverted, UINT featherIndex)
+{
+    const HMENU menu = find_menu_containing_command(menuBar, IDM_COMPARE_MASK_LOAD);
+    if (!menu) return false;
+    bool ok = EnableMenuItem(menu, IDM_COMPARE_MASK_LOAD, MF_BYCOMMAND | (loadAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1);
+    for (const UINT command : {IDM_COMPARE_MASK_INVERT, IDM_COMPARE_MASK_CLEAR})
+        ok = EnableMenuItem(menu, command, MF_BYCOMMAND | (maskLoaded ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
+    ok = CheckMenuItem(menu, IDM_COMPARE_MASK_INVERT, MF_BYCOMMAND | (maskLoaded && inverted ? MF_CHECKED : MF_UNCHECKED)) != static_cast<DWORD>(-1) && ok;
+    const UINT last = IDM_COMPARE_MASK_FEATHER_FIRST + IDM_COMPARE_MASK_FEATHER_COUNT - 1;
+    for (UINT command = IDM_COMPARE_MASK_FEATHER_FIRST; command <= last; ++command)
+        ok = EnableMenuItem(menuBar, command, MF_BYCOMMAND | (maskLoaded ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
+    return CheckRadioCommand(menuBar, IDM_COMPARE_MASK_FEATHER_FIRST, last,
+                             IDM_COMPARE_MASK_FEATHER_FIRST + std::min(featherIndex, IDM_COMPARE_MASK_FEATHER_COUNT - 1)) && ok;
 }
 
 bool CheckRadioCommand(HMENU menuBar, UINT first, UINT last, UINT chosen)

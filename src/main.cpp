@@ -117,6 +117,8 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "StartScreenPolicy.h"
 #include "CompareBarPolicy.h"
 #include "CompareViewPolicy.h"
+#include "CompareMaskPolicy.h"
+#include "CompareImageIO.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -1234,6 +1236,18 @@ static std::wstring PickVideoFile(HWND owner, const Localizer& loc) {
         }
     }
     return PickVideoFileFallback(owner,loc);
+}
+
+// A mask for the Mix (P2.6): any still image WIC reads, used as grey.
+static std::filesystem::path PickMaskImage(HWND owner, const Localizer& loc) {
+    wchar_t path[32768]{};
+    std::wstring filter=loc.Get(L"compare.mask.filter");filter.push_back(L'\0');
+    filter+=L"*.png;*.bmp;*.jpg;*.jpeg;*.tif;*.tiff;*.gif";filter.push_back(L'\0');filter.push_back(L'\0');
+    const std::wstring title=loc.Get(L"compare.mask.dialog");
+    OPENFILENAMEW o{};o.lStructSize=sizeof(o);o.hwndOwner=owner;o.lpstrFile=path;o.nMaxFile=static_cast<DWORD>(std::size(path));
+    o.lpstrFilter=filter.c_str();o.nFilterIndex=1;o.lpstrTitle=title.c_str();
+    o.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_EXPLORER|OFN_NOCHANGEDIR;
+    return GetOpenFileNameW(&o)?std::filesystem::path(path):std::filesystem::path{};
 }
 
 static std::wstring TimeText(double sec) {
@@ -3889,6 +3903,7 @@ private:
         effective.loupe=false;
         if(!ComparisonModesAvailable()){effective.mode=ComparisonMode::Neural;effective.strength=1.0f;return effective;}
         if(m_peekOriginal)effective.mode=ComparisonMode::Original;
+        effective.mask=!m_maskFeathered.pixels.empty();effective.maskInvert=m_maskInvert;
         // The loupe exists while the pointer is over the picture. Backbuffer pixels are
         // the render window's client pixels, because the backbuffers follow it.
         RECT client{};
@@ -3940,13 +3955,16 @@ private:
         // either way it is no longer known to be the remembered pair's.
         m_referencePair.reset();m_referenceRenderer=nullptr;
         if(!m_renderer||original.bgra.empty())return false;
+        // First, because a mask remembered for this source is itself a reason to read
+        // the original.
+        SyncMaskToSource();
         const ComparisonSettings effective=EffectiveComparison();
         // The early-out below is also what makes an NV12 source cheap: the pure
         // neural view needs no reference at all, so the conversion under it runs
         // only while someone is actually comparing - a paused inspection, where
         // a CPU pass over one frame costs nothing anyone can perceive.
         if(!ComparisonReadsReference(effective))return false;
-        EnsureLabelAtlas();
+        EnsureLabelAtlas();EnsureMask();
         if(original.layout==VideoPixelLayout::Nv12){
             Nv12ToBgraBt709Limited(original.bgra.data(),m_decoder.Width(),m_decoder.Height(),
                                    m_referenceBgra);
@@ -3968,8 +3986,9 @@ private:
     }
     void ApplyComparison(bool refreshPaused=true){
         if(m_renderer){
+            SyncMaskToSource();
             m_renderer->SetComparison(EffectiveComparison());
-            if(ComparisonModesAvailable())EnsureLabelAtlas();
+            if(ComparisonModesAvailable()){EnsureLabelAtlas();EnsureMask();}
             if(refreshPaused&&!m_playing&&!m_seeking){UploadPausedComparisonReference();if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
         }
         SyncFeatureMenuState();InvalidateCompareBar();
@@ -4058,6 +4077,113 @@ private:
         ApplyComparisonView();
     }
     void ToggleLoupe(){if(!ComparisonModesAvailable())return;m_loupe=!m_loupe;ApplyComparison();}
+
+    // --- The spatial mask on the Mix (P2.6) -------------------------------------
+    // Which source the mask state belongs to. Compared by the two strings that
+    // identify it before anything is built, because this runs per presented pair.
+    std::wstring MaskIdentity()const{
+        if(!m_youtubePageUrl.empty()){
+            const std::string id=CanonicalYouTubeVideoId(m_youtubePageUrl);
+            if(!id.empty())return L"youtube:"+std::wstring(id.begin(),id.end());
+        }
+        return m_path.empty()?std::wstring{}:L"file:"+m_path;
+    }
+    void SyncMaskToSource(){
+        if(m_path==m_maskForPath&&m_youtubePageUrl==m_maskForPage)return;
+        m_maskForPath=m_path;m_maskForPage=m_youtubePageUrl;
+        const std::wstring identity=MaskIdentity();
+        const std::wstring key=identity.empty()?std::wstring{}:compare_mask::SourceKey(identity);
+        if(key==m_maskSourceKey)return;
+        m_maskSourceKey=key;
+        DropMask();
+        if(key.empty())return;
+        wchar_t saved[4096]{};
+        GetPrivateProfileStringW(L"ComparisonMasks",key.c_str(),L"",saved,static_cast<DWORD>(std::size(saved)),SettingsPath().c_str());
+        const auto record=compare_mask::Parse(saved);
+        if(!record)return;
+        if(!LoadMask(record->path,record->feather,record->invert,false))
+            LOG("The mask remembered for this source was not restored.");
+    }
+    void DropMask(){
+        if(m_maskSource.pixels.empty()&&m_maskFeathered.pixels.empty())return;
+        m_maskSource={};m_maskFeathered={};m_maskPath.clear();++m_maskRevision;
+    }
+    // Reads, shrinks and feathers a mask; `remember` records it for this source.
+    bool LoadMask(const std::filesystem::path& path,int feather,bool invert,bool remember){
+        compare_mask::Gray gray;
+        const HRESULT hr=compare_image::LoadGray(path,gray);
+        if(FAILED(hr)){LOG("Mask image could not be read: hr="<<HexText(hr)<<" path="<<WideToUtf8(path.wstring()));return false;}
+        m_maskSource=compare_mask::Shrink(gray);m_maskPath=path;m_maskFeather=feather;m_maskInvert=invert;
+        RefeatherMask();
+        if(remember)RememberMask();
+        LOG("Comparison mask loaded: "<<gray.width<<"x"<<gray.height<<" kept at "<<m_maskSource.width<<"x"<<m_maskSource.height
+            <<" feather="<<m_maskFeather<<" invert="<<m_maskInvert);
+        return true;
+    }
+    void RefeatherMask(){
+        m_maskFeathered=m_maskSource;
+        const uint32_t frameW=m_renderer&&m_renderer->OutputW()?m_renderer->OutputW():m_decoder.Width();
+        compare_mask::Feather(m_maskFeathered,compare_mask::MaskRadius(m_maskFeather,m_maskFeathered.width,frameW));
+        ++m_maskRevision;
+    }
+    void RememberMask(){
+        if(m_maskSourceKey.empty()||m_maskPath.empty())return;
+        const auto path=SettingsPath();
+        // The section as it stands, to number this entry after the newest and to find
+        // the oldest ones past the bound.
+        std::vector<wchar_t> section(65536,L'\0');
+        const DWORD length=GetPrivateProfileSectionW(L"ComparisonMasks",section.data(),static_cast<DWORD>(section.size()),path.c_str());
+        std::map<std::wstring,compare_mask::Record> records;uint64_t newest=0;
+        for(size_t at=0;at<length&&section[at];){
+            const std::wstring line(section.data()+at);at+=line.size()+1;
+            const size_t equals=line.find(L'=');if(equals==std::wstring::npos)continue;
+            if(const auto record=compare_mask::Parse(std::wstring_view(line).substr(equals+1))){
+                records[line.substr(0,equals)]=*record;newest=std::max(newest,record->sequence);
+            }
+        }
+        const compare_mask::Record record{newest+1,m_maskFeather,m_maskInvert,m_maskPath.wstring()};
+        records[m_maskSourceKey]=record;
+        WritePrivateProfileStringW(L"ComparisonMasks",m_maskSourceKey.c_str(),compare_mask::Format(record).c_str(),path.c_str());
+        for(const std::wstring& stale:compare_mask::Evict(records))WritePrivateProfileStringW(L"ComparisonMasks",stale.c_str(),nullptr,path.c_str());
+    }
+    void LoadMaskFromDialog(){
+        if(!m_loaded)return;
+        const auto path=PickMaskImage(m_hwnd,m_loc);if(path.empty())return;
+        SyncMaskToSource();
+        if(!LoadMask(path,m_maskFeather,false,true)){
+            m_sourceNotice=T(L"compare.mask.failed");UpdateCachedStatus();return;
+        }
+        ApplyComparison();
+    }
+    void ClearMaskForSource(){
+        if(m_maskSource.pixels.empty())return;
+        DropMask();
+        if(!m_maskSourceKey.empty())WritePrivateProfileStringW(L"ComparisonMasks",m_maskSourceKey.c_str(),nullptr,SettingsPath().c_str());
+        ApplyComparison();
+    }
+    void SetMaskFeather(size_t index){
+        if(m_maskSource.pixels.empty()||index>=compare_mask::kFeathers.size())return;
+        m_maskFeather=compare_mask::kFeathers[index];RefeatherMask();RememberMask();ApplyComparison();
+    }
+    void ToggleMaskInvert(){if(m_maskSource.pixels.empty())return;m_maskInvert=!m_maskInvert;RememberMask();ApplyComparison();}
+    // Uploads the feathered mask when the renderer lacks this revision of it, and takes
+    // it away when there is none. Synchronous (it drains), so only on a change.
+    void EnsureMask(){
+        if(!m_renderer)return;
+        if(m_maskFeathered.pixels.empty()){if(m_renderer->HasMask())m_renderer->ClearMask();return;}
+        if(m_renderer->HasMask()&&m_maskUploadedRevision==m_maskRevision)return;
+        if(m_maskRefusedBy==m_renderer.get()&&m_maskRefusedRevision==m_maskRevision)return;
+        if(m_renderer->SetMask(m_maskFeathered.pixels.data(),m_maskFeathered.width,m_maskFeathered.height)){
+            m_maskUploadedRevision=m_maskRevision;m_maskRefusedBy=nullptr;
+        }else{
+            m_maskRefusedBy=m_renderer.get();m_maskRefusedRevision=m_maskRevision;
+            LOG("Comparison mask not uploaded ("<<m_maskFeathered.width<<"x"<<m_maskFeathered.height<<").");
+        }
+    }
+    UINT MaskFeatherIndex()const{
+        for(size_t index=0;index<compare_mask::kFeathers.size();++index)if(compare_mask::kFeathers[index]==m_maskFeather)return UINT(index);
+        return 0;
+    }
     // View > Fit, Fill and 1:1 pixels; A and the toolbar pill flip between the first two.
     void SetAspect(bool fill,bool onePixel){m_fill=fill;m_onePixel=onePixel;Layout();SyncFeatureMenuState();InvalidateControls();}
     // A press on the picture: the divider, a drag, or the press-and-hold A/B; see
@@ -4180,6 +4306,7 @@ private:
             app_menu::CheckRadioCommand(menu,IDM_ASPECT_FIT,IDM_ASPECT_ONE_TO_ONE,m_onePixel?IDM_ASPECT_ONE_TO_ONE:(m_fill?IDM_ASPECT_FILL:IDM_ASPECT_FIT));
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
             app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_zoomStep>0,m_comparison.swap,m_loupe,m_comparison.differenceLuma);
+            app_menu::UpdateMaskMenu(menu,m_loaded,!m_maskSource.pixels.empty(),m_maskInvert,MaskFeatherIndex());
             DrawMenuBar(m_hwnd);
         }
     }
@@ -6619,7 +6746,10 @@ private:
         RECT zoomValue=layout.zoomValue;DrawTextW(dc,(m_zoomStep>0?ZoomStepText(m_zoomStep):T(L"compare.zoom.fit")).c_str(),-1,&zoomValue,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
         if(layout.hint.right>layout.hint.left){
             SetTextColor(dc,ui_palette::SecondaryText);RECT hint=layout.hint;
-            DrawTextW(dc,T(available?L"compare.hint.hold":L"compare.hint.unavailable").c_str(),-1,&hint,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+            // A mask changes what DLSS 5 shows, so while one is on the bar says which.
+            const std::wstring text=!available?T(L"compare.hint.unavailable")
+                :(!m_maskPath.empty()?T(L"compare.hint.mask")+m_maskPath.filename().wstring():T(L"compare.hint.hold"));
+            DrawTextW(dc,text.c_str(),-1,&hint,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         }
         SelectObject(dc,oldFont);
     }
@@ -9596,6 +9726,7 @@ private:
         if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::NativeMenu,id)){Rehook();return;}
         if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::NativeMenu,id,false)){ActivateYouTube();return;}
         if(const ExampleVideo* example=app_menu::ExampleVideoForCommand(id)){ActivateExampleVideo(*example);return;}
+        if(id>=IDM_COMPARE_MASK_FEATHER_FIRST&&id<IDM_COMPARE_MASK_FEATHER_FIRST+IDM_COMPARE_MASK_FEATHER_COUNT){SetMaskFeather(size_t(id-IDM_COMPARE_MASK_FEATHER_FIRST));return;}
         if(const auto quality=app_menu::YouTubeQualityForCommand(id)){SetYouTubeSourceQuality(*quality);return;}
         if(id>=IDM_AUDIO_TRACK_FIRST&&id<IDM_AUDIO_TRACK_FIRST+IDM_AUDIO_TRACK_COUNT){
             ChooseAudioTrack(int(id-IDM_AUDIO_TRACK_FIRST));return;}
@@ -9635,6 +9766,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         // the view Blend became, the neural frame at the Mix.
         case IDM_COMPARE_NEURAL:case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_ORIGINAL:SetComparisonMode(ComparisonMode::Original);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustMix(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustMix(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
+        case IDM_COMPARE_MASK_LOAD:LoadMaskFromDialog();break;case IDM_COMPARE_MASK_INVERT:ToggleMaskInvert();break;case IDM_COMPARE_MASK_CLEAR:ClearMaskForSource();break;
         case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_DIFFERENCE:SetComparisonMode(ComparisonMode::Difference);break;
         case IDM_COMPARE_DIFFERENCE_LESS:StepDifferenceGain(-1);break;case IDM_COMPARE_DIFFERENCE_MORE:StepDifferenceGain(+1);break;case IDM_COMPARE_DIFFERENCE_LUMA:ToggleDifferenceLuma();break;case IDM_COMPARE_ZOOM_OUT:ZoomBy(-1,false,PointerOverPicture());break;case IDM_COMPARE_ZOOM_FIT:ZoomToFit();break;case IDM_COMPARE_LOUPE:ToggleLoupe();break;
         case IDM_ASPECT_ONE_TO_ONE:SetAspect(false,true);break;case IDM_COMPARE_NEXT_MODE:CycleComparisonMode(false);break;case IDM_COMPARE_PREVIOUS_MODE:CycleComparisonMode(true);break;
@@ -9906,6 +10038,16 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     bool m_loupe=false;
     // View > 1:1 pixels: the render window is the output's size.
     bool m_onePixel=false;
+    // The spatial mask on the Mix: the image as loaded (grey, shrunk to at most
+    // compare_mask::kMaxSide) and the feathered copy the renderer is given, the source
+    // they belong to, and which revision the renderer holds.
+    compare_mask::Gray m_maskSource,m_maskFeathered;
+    std::filesystem::path m_maskPath;
+    int m_maskFeather=compare_mask::kDefaultFeather;
+    bool m_maskInvert=false;
+    uint64_t m_maskRevision=0,m_maskUploadedRevision=0,m_maskRefusedRevision=0;
+    const D3D12Renderer* m_maskRefusedBy=nullptr;
+    std::wstring m_maskForPath,m_maskForPage,m_maskSourceKey;
     // A middle-button pan in progress, and where the last pan step left the pointer.
     bool m_middlePan=false,m_renderTracking=false;
     POINT m_panLast{};

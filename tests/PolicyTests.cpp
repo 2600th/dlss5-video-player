@@ -62,6 +62,8 @@
 #include "StartScreenPolicy.h"
 #include "CompareBarPolicy.h"
 #include "CompareViewPolicy.h"
+#include "CompareMaskPolicy.h"
+#include "CompareImageIO.h"
 #include <d3dcompiler.h>
 #include <d3d12shader.h>
 #ifdef small
@@ -2032,6 +2034,16 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_DIFFERENCE, false, false, false, false));
     CHECK(checked(app_menu::IDM_COMPARE_DIFFERENCE));CHECK(!checked(app_menu::IDM_COMPARE_WIPE));
     CHECK(!checked(app_menu::IDM_COMPARE_DIFFERENCE_LUMA));
+    // The mask rows: Load needs a source, the rest a mask; the feather is a radio block.
+    CHECK(app_menu::UpdateMaskMenu(menu, false, false, false, 0));
+    CHECK(grayed(app_menu::IDM_COMPARE_MASK_LOAD) && grayed(app_menu::IDM_COMPARE_MASK_CLEAR));
+    CHECK(grayed(app_menu::IDM_COMPARE_MASK_FEATHER_FIRST + 2));
+    CHECK(app_menu::UpdateMaskMenu(menu, true, true, true, 2));
+    CHECK(!grayed(app_menu::IDM_COMPARE_MASK_LOAD) && !grayed(app_menu::IDM_COMPARE_MASK_INVERT));
+    CHECK(checked(app_menu::IDM_COMPARE_MASK_INVERT));
+    CHECK(checked(app_menu::IDM_COMPARE_MASK_FEATHER_FIRST + 2));
+    CHECK(!checked(app_menu::IDM_COMPARE_MASK_FEATHER_FIRST));
+    CHECK_EQ(size_t(app_menu::IDM_COMPARE_MASK_FEATHER_COUNT), compare_mask::kFeathers.size());
 
     using app_menu::CommandForPlayerKey;
     CHECK(CommandForPlayerKey('I', false, false) == app_menu::IDM_MARK_IN);
@@ -7776,6 +7788,91 @@ void compare_loupe_and_one_to_one_placement_test()
     CHECK(ComparisonReadsReference(comparison));CHECK(ComparisonNeedsCompositor(comparison));
 }
 
+// A 24-bit bottom-up BMP of `width` x `height` whose left half is black and right
+// half white: the smallest file WIC decodes without an encoder of our own.
+static void write_half_white_bmp(const std::filesystem::path& path, uint32_t width, uint32_t height)
+{
+    const uint32_t stride = (width * 3 + 3) & ~3u;
+    std::vector<uint8_t> file(54 + size_t(stride) * height, 0);
+    const auto put32 = [&](size_t at, uint32_t value) { for (int shift = 0; shift < 32; shift += 8) file[at + size_t(shift / 8)] = uint8_t(value >> shift); };
+    file[0] = 'B'; file[1] = 'M'; put32(2, uint32_t(file.size())); put32(10, 54);
+    put32(14, 40); put32(18, width); put32(22, height); file[26] = 1; file[28] = 24; put32(34, uint32_t(stride) * height);
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x)
+            for (int channel = 0; channel < 3; ++channel)
+                file[54 + size_t(y) * stride + size_t(x) * 3 + size_t(channel)] = x >= width / 2 ? 255 : 0;
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(file.data()), std::streamsize(file.size()));
+}
+
+// The spatial mask: what happens to the image before it reaches the GPU, and how the
+// player remembers which mask belongs to which source.
+void compare_mask_shrinks_feathers_and_is_remembered_per_source_test()
+{
+    using namespace compare_mask;
+    // Kept at most kMaxSide on a side, box-averaged by a whole factor.
+    Gray wide;wide.width=5000;wide.height=4;wide.pixels.assign(size_t(5000)*4,0);
+    for(uint32_t y=0;y<4;++y)for(uint32_t x=0;x<5000;++x)wide.pixels[size_t(y)*5000+x]=x%2?200:100;
+    const Gray kept=Shrink(wide);
+    CHECK_EQ(2500u,kept.width);CHECK_EQ(2u,kept.height);CHECK_EQ(150,int(kept.pixels[0]));
+    CHECK_EQ(3u,Shrink(Gray{3,1,{1,2,3}}).width);
+    CHECK(Shrink(Gray{3,1,{1}}).pixels.empty());
+    // The feather softens a hard edge over about its radius, symmetrically, and
+    // leaves flat regions exactly as they were.
+    Gray edge;edge.width=64;edge.height=8;edge.pixels.resize(size_t(64)*8);
+    for(uint32_t y=0;y<8;++y)for(uint32_t x=0;x<64;++x)edge.pixels[size_t(y)*64+x]=x<32?0:255;
+    Gray soft=edge;Feather(soft,0);CHECK(soft.pixels==edge.pixels);
+    Feather(soft,12);
+    const auto at=[&](uint32_t x){return int(soft.pixels[size_t(4)*64+x]);};
+    CHECK_EQ(0,at(2));CHECK_EQ(255,at(61));
+    CHECK(at(31)>40&&at(31)<215);
+    CHECK(std::abs(at(31)+at(32)-255)<=2);
+    for(uint32_t x=1;x<64;++x)CHECK(at(x)>=at(x-1));
+    CHECK(at(26)>0&&at(37)<255);  // it reaches out several pixels either side
+    // The radius is chosen in frame pixels and applied in mask pixels.
+    CHECK_EQ(4,MaskRadius(8,960,1920));CHECK_EQ(16,MaskRadius(8,3840,1920));
+    CHECK_EQ(0,MaskRadius(0,960,1920));CHECK_EQ(8,MaskRadius(8,960,0));
+    // A remembered record round-trips; a malformed one is refused; a hand-edited
+    // feather is snapped onto the offered choices.
+    const Record record{41,16,true,L"C:\\masks\\face|left.png"};
+    const auto parsed=Parse(Format(record));
+    CHECK(parsed.has_value());if(parsed)CHECK(*parsed==record);
+    CHECK(!Parse(L"").has_value());CHECK(!Parse(L"1|8|2|x.png").has_value());CHECK(!Parse(L"a|8|0|x.png").has_value());
+    CHECK(!Parse(L"1|8|0|").has_value());CHECK(!Parse(L"1|8|0").has_value());
+    const auto snapped=Parse(L"3|20|0|m.png");
+    CHECK(snapped.has_value());if(snapped)CHECK_EQ(16,snapped->feather);
+    const auto huge=Parse(L"3|99999|0|m.png");
+    CHECK(huge.has_value());if(huge)CHECK_EQ(64,huge->feather);
+    // At most kMaxRemembered survive, the newest.
+    std::map<std::wstring,Record> records;
+    for(uint64_t index=0;index<kMaxRemembered+3;++index)records[L"k"+std::to_wstring(index)]=Record{index+1,8,false,L"m.png"};
+    const auto evicted=Evict(records);
+    CHECK_EQ(size_t{3},evicted.size());
+    CHECK(std::find(evicted.begin(),evicted.end(),L"k0")!=evicted.end());
+    CHECK(std::find(evicted.begin(),evicted.end(),L"k34")==evicted.end());
+    CHECK(Evict(std::map<std::wstring,Record>{}).empty());
+    // A source's key ignores case, as Windows paths do, and is 16 hex digits.
+    CHECK(SourceKey(L"file:C:\\Videos\\A.mp4")==SourceKey(L"file:c:\\videos\\a.MP4"));
+    CHECK(SourceKey(L"file:C:\\Videos\\A.mp4")!=SourceKey(L"file:C:\\Videos\\B.mp4"));
+    CHECK_EQ(size_t{16},SourceKey(L"x").size());
+    // A mask is read through WIC as grey; its brightness is the mask.
+    const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+    const auto bmp=std::filesystem::temp_directory_path()/L"compare-mask-test.bmp";
+    write_half_white_bmp(bmp,8,4);
+    Gray loaded;
+    CHECK(SUCCEEDED(compare_image::LoadGray(bmp,loaded)));
+    CHECK_EQ(8u,loaded.width);CHECK_EQ(4u,loaded.height);
+    if(loaded.pixels.size()==32){CHECK_EQ(0,int(loaded.pixels[0]));CHECK_EQ(255,int(loaded.pixels[7]));CHECK_EQ(255,int(loaded.pixels[31]));}
+    Gray missing;
+    CHECK(FAILED(compare_image::LoadGray(bmp.parent_path()/L"no-such-mask.png",missing)));
+    CHECK(missing.pixels.empty());
+    std::error_code ignored;std::filesystem::remove(bmp,ignored);
+    if(SUCCEEDED(com))CoUninitialize();
+    // The mask blends back to the original, so it needs the reference and the compositor.
+    ComparisonSettings comparison;comparison.mask=true;
+    CHECK(ComparisonReadsReference(comparison));CHECK(ComparisonNeedsCompositor(comparison));
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -11428,6 +11525,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_bar_lays_out_and_hit_tests_test),
     TEST_CASE(compare_zoom_ladder_zooms_at_the_pointer_and_pans_test),
     TEST_CASE(compare_loupe_and_one_to_one_placement_test),
+    TEST_CASE(compare_mask_shrinks_feathers_and_is_remembered_per_source_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
     TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),

@@ -29,6 +29,11 @@ private:
             {L"menu.adjustments", L"Image adjustments...\tCtrl+E   (Overlay: Ctrl+Alt+C)"},
             {L"menu.compare", L"Compare"}, {L"menu.compare_neural", L"DLSS 5"}, {L"menu.compare_original", L"Original"}, {L"menu.compare_split", L"Split"}, {L"menu.compare_wipe", L"Wipe"}, {L"menu.compare_difference", L"Difference"},
             {L"menu.compare_difference_less", L"Less difference gain\tShift+["}, {L"menu.compare_difference_more", L"More difference gain\tShift+]"}, {L"menu.compare_difference_luma", L"Difference as brightness only"},
+            {L"menu.compare_mask_load", L"Load mask image\u2026"}, {L"menu.compare_mask_feather", L"Mask feather"}, {L"menu.compare_mask_invert", L"Invert mask"}, {L"menu.compare_mask_clear", L"Clear mask"},
+            {L"menu.compare_mask_feather_0", L"Off"}, {L"menu.compare_mask_feather_1", L"4 px"}, {L"menu.compare_mask_feather_2", L"8 px"},
+            {L"menu.compare_mask_feather_3", L"16 px"}, {L"menu.compare_mask_feather_4", L"32 px"}, {L"menu.compare_mask_feather_5", L"64 px"},
+            {L"compare.mask.dialog", L"Load a mask image (white keeps DLSS 5, black shows the original)"}, {L"compare.mask.filter", L"Images"},
+            {L"compare.hint.mask", L"Mask: "}, {L"compare.mask.failed", L"The mask image could not be read"},
             {L"menu.compare_blend_less", L"Mix less\t["}, {L"menu.compare_blend_more", L"Mix more\t]"}, {L"menu.compare_swap", L"Swap sides\tX"}, {L"menu.compare_next_mode", L"Next mode\tC"}, {L"menu.compare_previous_mode", L"Previous mode\tShift+C"}, {L"menu.compare_zoom", L"Zoom in (Fit, 1:1, 2x, 4x, 8x)\tZ"}, {L"menu.compare_zoom_out", L"Zoom out\tShift+Z"}, {L"menu.compare_zoom_fit", L"Zoom to fit"}, {L"menu.compare_loupe", L"Loupe\tL"},
             // The compare bar over the control strip, and the tags drawn on the picture.
             {L"compare.mode.neural", L"DLSS 5"}, {L"compare.mode.original", L"Original"}, {L"compare.mode.split", L"Split"}, {L"compare.mode.wipe", L"Wipe"}, {L"compare.mode.difference", L"Difference"},

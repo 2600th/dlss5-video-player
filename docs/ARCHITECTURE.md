@@ -235,7 +235,12 @@ its bindings (a PolicyTests case reflects both programs). A comparison that
 needs the compositor takes it even when the window is exactly the output's
 size (`ComparisonNeedsCompositor`); there, one bilinear tap at each texel's
 centre is the picture `PSPresent` would have drawn. The tags are drawn by GDI
-at the window's DPI into a premultiplied atlas and uploaded once per DPI.
+at the window's DPI into a premultiplied atlas and uploaded once per DPI; the
+spatial mask on the Mix is an R8 texture at t3, read through WIC, shrunk to at
+most 4096 on a side and feathered on the CPU (three box passes) before its one
+upload. Neither reaches the capture: the export draws `PSPresent` with default
+comparison constants, which is also why there is no "export with mask" - the
+export path cannot apply the Mix at all.
 
 During neural pre-render, `RenderFrameForCache` copies the evaluated output to a
 dedicated readback resource and emits tightly packed BGRA frames to a bounded

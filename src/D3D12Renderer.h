@@ -175,6 +175,10 @@ struct ComparisonSettings {
     // move a difference that is not in the render.
     float differenceGain = 4.0f;
     bool differenceLuma = true;
+    // The spatial mask on the Mix (SetMask): white shows DLSS 5 at the Mix, black the
+    // original, in every view of the neural member. Drawn only once a mask is uploaded.
+    bool mask = false;
+    bool maskInvert = false;
 };
 
 // Whether a comparison needs the window compositor (PSPresentScaled) even when the
@@ -185,13 +189,14 @@ struct ComparisonSettings {
 // does not, and the player then skips uploading one (a source-size copy per frame).
 inline bool ComparisonReadsReference(const ComparisonSettings& comparison)
 {
-    return comparison.mode != ComparisonMode::Neural || comparison.strength != 1.0f || comparison.loupe;
+    return comparison.mode != ComparisonMode::Neural || comparison.strength != 1.0f || comparison.loupe ||
+           comparison.mask;
 }
 
 inline bool ComparisonNeedsCompositor(const ComparisonSettings& comparison)
 {
     return (comparison.mode != ComparisonMode::Neural && comparison.mode != ComparisonMode::Blend) ||
-           comparison.loupe;
+           comparison.loupe || comparison.mask;
 }
 
 class D3D12Renderer {
@@ -432,6 +437,12 @@ public:
     bool SetLabelAtlas(const uint8_t* premultipliedBgra, uint32_t width, uint32_t height,
                        uint32_t rowHeight, const std::array<uint32_t, 4>& rowWidths);
     bool HasLabelAtlas() const { return m_labelAtlas != nullptr; }
+    // The spatial mask, 8-bit grey at any size (the compositor stretches it over the
+    // frame). Synchronous like SetLabelAtlas; ClearMask drains too, because the view
+    // it nulls may be bound by a frame in flight.
+    bool SetMask(const uint8_t* gray, uint32_t width, uint32_t height);
+    void ClearMask();
+    bool HasMask() const { return m_mask != nullptr; }
     // Something the present pass reads - colours, comparison, debug view, the
     // reference - changed since the last present was attempted. A paused player
     // presents only then, instead of re-presenting the same image at 60 Hz.
@@ -505,8 +516,8 @@ private:
     // motion. The cost and reverse slots hold null descriptors when the engine offered
     // neither, because the reference table spans both of them.
     static constexpr uint32_t NvofFlowSRV = 9, NvofCostSRV = 10, NvofBackFlowSRV = 11;
-    // The compositor's overlay table: a spare slot (t3) and the label atlas (t4). Both
-    // hold null views until something is uploaded.
+    // The compositor's overlay table: the spatial mask (t3) and the label atlas (t4).
+    // Both hold null views until something is uploaded.
     static constexpr uint32_t OverlaySRV = 12, LabelSRV = 13;
     static constexpr uint32_t SRVCount = 14;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
@@ -676,6 +687,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_reference;   // source-size BGRA original member
     Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[ReferenceUploads];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_labelAtlas;  // premultiplied BGRA tags, see SetLabelAtlas
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_mask;        // R8 spatial mask, see SetMask
     uint32_t m_labelAtlasW = 0, m_labelAtlasH = 0, m_labelRowHeight = 0;
     std::array<uint32_t, 4> m_labelWidths{};
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap; // 2 timestamps per frame slot

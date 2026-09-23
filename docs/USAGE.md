@@ -191,6 +191,16 @@ also under **Video > Compare**:
   costs a present, not a re-render, and it is the same value as **DLSS 5 mix**
   in Image adjustments. It replaces both the old Blend mode and the Neural
   strength slider: a saved Blend opens as the neural view at the same Mix.
+- **A mask** limits where DLSS 5 shows. **Video > Compare > Load mask
+  image...** takes any PNG, BMP, JPEG, TIFF or GIF and uses its brightness,
+  stretched over the frame: white keeps DLSS 5 at the Mix, black shows the
+  original, grey blends. It applies wherever DLSS 5 is shown - the neural view,
+  its side of Split and Wipe, Difference and the loupe - and, like the Mix, only
+  to what you watch: exports and the cache are unchanged. **Mask feather**
+  softens its edge by 4 to 64 rendered pixels (8 by default), **Invert mask**
+  swaps white and black, and **Clear mask** removes it. The mask, feather and
+  invert are remembered per video in `[ComparisonMasks]` and come back when the
+  video is opened again; the bar shows the mask's file name while one is on.
 - **Hold the left mouse button still on the picture** for 150 ms to see the
   original in place of any mode; release to go back. Moving the pointer while
   holding turns the hold into the drag it would have been.
