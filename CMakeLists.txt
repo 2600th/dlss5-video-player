@@ -253,6 +253,7 @@ add_library(player_app OBJECT
     src/DLSSGBackend.cpp src/DLSSGBackend.h
     src/FrameGenerationPass.cpp src/FrameGenerationPass.h
     src/AudioPlayer.cpp src/AudioPlayer.h src/WasapiRenderer.cpp
+    src/SubtitleOverlay.cpp src/SubtitleOverlay.h src/SubtitlePolicy.h
     src/RecentMedia.cpp src/RecentMedia.h
     src/SynchronizedPlayback.cpp src/SynchronizedPlayback.h
     src/NeuralReceipt.cpp src/NeuralReceipt.h

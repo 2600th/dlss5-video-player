@@ -1,6 +1,7 @@
 #include "MediaPipeline.h"
 #include "NeuralSegmentIndex.h"
 #include "RuntimePolicy.h"
+#include "SubtitleOverlay.h"
 #include "SynchronizedPlayback.h"
 #include "VideoDecoder.h"
 #include "TestSupport.h"
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -948,6 +950,252 @@ void LivePlaybackSwitchesOntoTheJoinedRunTest(const std::filesystem::path& helpe
     CHECK_EQ(size_t{parts.size()}, republished->RetiredFiles().size());
 }
 
+// ---- Subtitles --------------------------------------------------------------
+
+// Whether any pixel of `frame` inside [x0,x1)x[y0,y1) carries coverage, and
+// whether any outside it does.
+struct Coverage { size_t inside = 0, outside = 0; };
+Coverage CoverageOf(const subtitle::Frame& frame, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
+{
+    Coverage coverage;
+    if (frame.Empty()) return coverage;
+    for (uint32_t y = 0; y < frame.height; ++y)
+        for (uint32_t x = 0; x < frame.width; ++x) {
+            const uint8_t* pixel = frame.bgra.data() + (size_t(y) * frame.width + x) * 4u;
+            if (!pixel[3]) continue;
+            // Premultiplied: no channel may exceed the coverage.
+            CHECK(pixel[0] <= pixel[3] && pixel[1] <= pixel[3] && pixel[2] <= pixel[3]);
+            ((x >= x0 && x < x1 && y >= y0 && y < y1) ? coverage.inside : coverage.outside)++;
+        }
+    return coverage;
+}
+
+// The frame on screen at `at`, once the overlay knows it is final, or null.
+std::shared_ptr<const subtitle::Frame> SettledFrame(SubtitleOverlay& overlay, double at)
+{
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        // Asking is also what tells the worker the clock has moved on.
+        overlay.FrameAt(at);
+        if (overlay.Settled(at)) return overlay.FrameAt(at);
+        std::this_thread::sleep_for(10ms);
+    }
+    std::cerr << "no settled subtitle frame at " << at << " s\n";
+    CHECK(false);
+    return nullptr;
+}
+
+std::optional<subtitle::Discovery> WaitForDiscovery(SubtitleOverlay& overlay)
+{
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (auto found = overlay.TakeDiscovery()) return found;
+        std::this_thread::sleep_for(10ms);
+    }
+    return std::nullopt;
+}
+
+constexpr std::string_view kTwoLineSrt =
+    "1\r\n00:00:01,000 --> 00:00:02,000\r\nHello world\r\n\r\n"
+    "2\r\n00:00:04,000 --> 00:00:05,500\r\nSecond line\r\n";
+
+// The subtitle overlay end to end with the staged FFmpeg: a generated SRT drawn
+// onto a transparent canvas has coverage while a line is up and none outside
+// it, in premultiplied BGRA at the canvas size, and a seek back starts over at
+// the right picture. The file's name carries every character the filtergraph
+// escapes, and a Windows-1252 copy needs the charenc the policy picks.
+void SubtitlesDrawOnATransparentCanvasTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto srt = fixture.path / L"Film, it's [1];x.srt";
+    Write(srt, kTwoLineSrt);
+    SubtitleOverlay overlay(helpers);
+    overlay.Discover(srt.wstring(), false);
+    const auto found = WaitForDiscovery(overlay);
+    CHECK(found.has_value());
+    if (!found) return;
+    CHECK(found->probed);
+    CHECK_EQ(size_t{1}, found->tracks.size());
+    if (found->tracks.size() != 1) return;
+    CHECK_EQ(std::string("subrip"), found->tracks[0].codec);
+
+    SubtitleOverlay::Source source;
+    source.path = srt.wstring(); source.external = true; source.codec = "subrip";
+    SubtitleOverlay::Canvas canvas;
+    canvas.width = 320; canvas.height = 180; canvas.rate = 24.0; canvas.duration = 8.0;
+    overlay.Show(source, canvas, 0.0);
+    // Nothing is up at first: a frame, but an empty one.
+    auto frame = SettledFrame(overlay, 0.5);
+    CHECK(frame && frame->Empty());
+    // The first line, in the lower part of the canvas where the default style puts it.
+    frame = SettledFrame(overlay, 1.5);
+    CHECK(frame && !frame->Empty());
+    if (frame && !frame->Empty()) {
+        CHECK_EQ(320u, frame->width);
+        CHECK_EQ(180u, frame->height);
+        CHECK(std::abs(frame->pts - 1.0) < 0.05);
+        const Coverage coverage = CoverageOf(*frame, 0, 90, 320, 180);
+        CHECK(coverage.inside > 100);
+        CHECK_EQ(size_t{0}, coverage.outside);
+    }
+    frame = SettledFrame(overlay, 2.5);
+    CHECK(frame && frame->Empty());
+    frame = SettledFrame(overlay, 4.2);
+    CHECK(frame && !frame->Empty());
+    frame = SettledFrame(overlay, 6.0);
+    CHECK(frame && frame->Empty());
+    // Back to the first line: the frames read so far cannot answer it, so the
+    // child starts over there, and its first frame is the picture at the start.
+    overlay.Seek(1.25);
+    frame = SettledFrame(overlay, 1.25);
+    CHECK(frame && !frame->Empty());
+    if (frame) CHECK(frame->pts <= 1.25);
+    overlay.Hide();
+    CHECK(!overlay.FrameAt(1.25));
+
+    // The same file in Windows-1252 with an accent: refused by FFmpeg without a
+    // charenc, drawn with the one the policy picks.
+    const auto legacy = fixture.path / L"legacy.srt";
+    std::string cp1252(kTwoLineSrt);
+    cp1252.replace(cp1252.find("Hello"), 5, "Caf\xE9!");
+    Write(legacy, cp1252);
+    const std::vector<uint8_t> head(cp1252.begin(), cp1252.end());
+    const auto encoding = subtitle::DetectTextEncoding(head);
+    CHECK(encoding == subtitle::TextEncoding::Legacy);
+    source.path = legacy.wstring();
+    source.charenc = subtitle::CharencFor(encoding, 1252);
+    overlay.Show(source, canvas, 1.5);
+    frame = SettledFrame(overlay, 1.5);
+    CHECK(frame && !frame->Empty());
+    overlay.Hide();
+}
+
+// A PGS stream: pictures, not text. Built byte by byte (FFmpeg has no PGS
+// encoder): a 240x30 white box shown from 1 s to 2 s at (200,300) of a 640x360
+// presentation, then a 100x50 box from 4 s to 5.5 s at (100,40).
+char Byte(uint32_t value) { return static_cast<char>(value & 0xFFu); }
+
+std::string PgsSegment(double seconds, uint8_t type, const std::string& data)
+{
+    std::string segment = "PG";
+    const uint32_t pts = uint32_t(seconds * 90000.0);
+    for (int shift = 24; shift >= 0; shift -= 8) segment.push_back(char((pts >> shift) & 0xFF));
+    segment.append(4, '\0');
+    segment.push_back(char(type));
+    segment.push_back(char((data.size() >> 8) & 0xFF));
+    segment.push_back(char(data.size() & 0xFF));
+    return segment + data;
+}
+
+std::string Be16(uint32_t value) { return {char((value >> 8) & 0xFF), char(value & 0xFF)}; }
+
+std::string PgsShow(double at, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t composition)
+{
+    const std::string pcs = Be16(640) + Be16(360) + char(0x10) + Be16(composition) + Byte(0x80) + char(0) + char(0) +
+                            char(1) + Be16(0) + char(0) + char(0) + Be16(x) + Be16(y);
+    const std::string wds = std::string(1, char(1)) + char(0) + Be16(x) + Be16(y) + Be16(w) + Be16(h);
+    const std::string pds = std::string{char(0), char(0), char(1), Byte(235), Byte(128), Byte(128), Byte(255)};
+    std::string rle;
+    for (uint32_t row = 0; row < h; ++row)
+        rle += std::string{char(0), Byte(0xC0 | (w >> 8)), char(w & 0xFF), char(1), char(0), char(0)};
+    const std::string object = Be16(w) + Be16(h) + rle;
+    const uint32_t length = uint32_t(object.size());
+    const std::string ods = Be16(0) + char(0) + Byte(0xC0) + char((length >> 16) & 0xFF) + Be16(length & 0xFFFF) + object;
+    return PgsSegment(at, 0x16, pcs) + PgsSegment(at, 0x17, wds) + PgsSegment(at, 0x14, pds) +
+           PgsSegment(at, 0x15, ods) + PgsSegment(at, 0x80, {});
+}
+
+std::string PgsClear(double at, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t composition)
+{
+    const std::string pcs = Be16(640) + Be16(360) + char(0x10) + Be16(composition) + char(0) + char(0) + char(0) + char(0);
+    const std::string wds = std::string(1, char(1)) + char(0) + Be16(x) + Be16(y) + Be16(w) + Be16(h);
+    return PgsSegment(at, 0x16, pcs) + PgsSegment(at, 0x17, wds) + PgsSegment(at, 0x80, {});
+}
+
+void BitmapSubtitlesAreScaledOntoTheCanvasTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto sup = fixture.path / L"boxes.sup";
+    Write(sup, PgsShow(1.0, 200, 300, 240, 30, 0) + PgsClear(2.0, 200, 300, 240, 30, 1) +
+                   PgsShow(4.0, 100, 40, 100, 50, 2) + PgsClear(5.5, 100, 40, 100, 50, 3));
+    SubtitleOverlay overlay(helpers);
+    overlay.Discover(sup.wstring(), false);
+    const auto found = WaitForDiscovery(overlay);
+    CHECK(found && found->tracks.size() == 1);
+    if (!found || found->tracks.size() != 1) return;
+    CHECK_EQ(std::string("hdmv_pgs_subtitle"), found->tracks[0].codec);
+    CHECK(found->tracks[0].Drawn() == subtitle::Kind::Bitmap);
+
+    SubtitleOverlay::Source source;
+    source.path = sup.wstring(); source.external = true; source.codec = found->tracks[0].codec;
+    SubtitleOverlay::Canvas canvas;
+    canvas.width = 320; canvas.height = 180; canvas.duration = 8.0;
+    overlay.Show(source, canvas, 0.0);
+    // The 640x360 presentation halves onto the 320x180 canvas: the first box is
+    // (100,150)-(220,165), give or take the bilinear edge.
+    auto frame = SettledFrame(overlay, 1.5);
+    CHECK(frame && !frame->Empty());
+    if (frame && !frame->Empty()) {
+        const Coverage coverage = CoverageOf(*frame, 99, 149, 221, 166);
+        CHECK(coverage.inside >= 120 * 15);
+        CHECK_EQ(size_t{0}, coverage.outside);
+    }
+    frame = SettledFrame(overlay, 2.5);
+    CHECK(!frame || frame->Empty());
+    // A seek forward past what was read starts over, reading from before the
+    // target so a picture already up would still be found.
+    overlay.Seek(4.2);
+    frame = SettledFrame(overlay, 4.2);
+    CHECK(frame && !frame->Empty());
+    if (frame && !frame->Empty()) {
+        const Coverage coverage = CoverageOf(*frame, 49, 19, 101, 46);
+        CHECK(coverage.inside >= 50 * 25);
+        CHECK_EQ(size_t{0}, coverage.outside);
+    }
+    frame = SettledFrame(overlay, 6.0);
+    CHECK(!frame || frame->Empty());
+    overlay.Hide();
+}
+
+// A text track inside a video: found with its language and default flag, the
+// same-named file beside it found too, and the track drawn after it is copied
+// out of the video once.
+void EmbeddedSubtitleTracksAreListedAndDrawnTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto srt = fixture.path / L"source.srt";
+    Write(srt, kTwoLineSrt);
+    const auto video = fixture.path / L"clip.mkv";
+    CHECK(RunTool(helpers / L"ffmpeg.exe",
+                  {L"-hide_banner", L"-loglevel", L"error", L"-y", L"-f", L"lavfi", L"-i", L"testsrc2=s=320x180:r=24:d=6",
+                   L"-i", srt.wstring(), L"-map", L"0:v", L"-map", L"1", L"-c:v", L"libx264", L"-preset", L"ultrafast",
+                   L"-c:s", L"srt", L"-metadata:s:s:0", L"language=fre", L"-disposition:s:0", L"default", video.wstring()},
+                  fixture.path / L"mux.log"));
+    Write(fixture.path / L"clip.en.srt", kTwoLineSrt);
+    SubtitleOverlay overlay(helpers);
+    overlay.Discover(video.wstring(), true);
+    const auto found = WaitForDiscovery(overlay);
+    CHECK(found.has_value());
+    if (!found) return;
+    CHECK_EQ(size_t{1}, found->tracks.size());
+    CHECK((std::filesystem::path(found->sidecar).filename() == L"clip.en.srt"));
+    if (found->tracks.size() != 1) return;
+    CHECK_EQ(std::string("fre"), found->tracks[0].language);
+    CHECK(found->tracks[0].isDefault);
+    CHECK_EQ(size_t{0}, subtitle::SelectDefault(found->tracks));
+
+    SubtitleOverlay::Source source;
+    source.path = video.wstring(); source.codec = found->tracks[0].codec; source.origin = found->origin;
+    SubtitleOverlay::Canvas canvas;
+    canvas.width = 320; canvas.height = 180; canvas.videoWidth = 320; canvas.videoHeight = 180; canvas.duration = 6.0;
+    overlay.Show(source, canvas, 0.0);
+    auto frame = SettledFrame(overlay, 1.5);
+    CHECK(frame && !frame->Empty());
+    frame = SettledFrame(overlay, 3.0);
+    CHECK(frame && frame->Empty());
+    overlay.Hide();
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -977,6 +1225,9 @@ int wmain(int argc, wchar_t** argv)
     SynchronizedPlaybackPairsRealMediaTest(helpers);
     LivePlaybackSwitchesOntoTheJoinedRunTest(helpers);
     UntaggedVideoDecodesWithTheMatrixItsSizeImpliesTest(helpers);
+    SubtitlesDrawOnATransparentCanvasTest(helpers);
+    BitmapSubtitlesAreScaledOntoTheCanvasTest(helpers);
+    EmbeddedSubtitleTracksAreListedAndDrawnTest(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";
     return 0;

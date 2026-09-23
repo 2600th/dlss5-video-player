@@ -5,6 +5,7 @@
 #include "Log.h"
 #include "AudioFadePolicy.h"
 #include "AudioTrackPolicy.h"
+#include "SubtitlePolicy.h"
 #include "SourceDigestMemo.h"
 #include "AudioEndpointPolicy.h"
 #include "AudioPassthroughPolicy.h"
@@ -11318,6 +11319,213 @@ void audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test()
     DestroyMenu(menu);
 }
 
+// Subtitles are off unless the file asks for them: a track marked default is
+// what its author wants shown, and failing that a forced one, which carries
+// only the lines nobody could follow otherwise. A stream the player cannot draw
+// is never picked, even when it is the one marked.
+void subtitle_track_choice_follows_the_container_test()
+{
+    using namespace subtitle;
+    const auto make = [](int index, const char* language, const char* codec) {
+        Track track; track.subtitleIndex = index; track.language = language; track.codec = codec;
+        return track;
+    };
+    CHECK_EQ(kNoTrack, SelectDefault({}));
+    const Track plain[] = {make(0, "eng", "subrip"), make(1, "fre", "ass")};
+    CHECK_EQ(kNoTrack, SelectDefault(plain));
+
+    Track marked = make(1, "fre", "ass"); marked.isDefault = true;
+    const Track withDefault[] = {make(0, "eng", "subrip"), marked};
+    CHECK_EQ(size_t{1}, SelectDefault(withDefault));
+
+    Track forced = make(0, "eng", "hdmv_pgs_subtitle"); forced.forced = true;
+    const Track withForced[] = {make(0, "eng", "subrip"), forced};
+    CHECK_EQ(size_t{1}, SelectDefault(withForced));
+    // The default wins over a forced track listed ahead of it.
+    const Track both[] = {forced, marked};
+    CHECK_EQ(size_t{1}, SelectDefault(both));
+    // Teletext cannot be drawn, so its default flag is passed over.
+    Track teletext = make(0, "deu", "dvb_teletext"); teletext.isDefault = true;
+    const Track undrawable[] = {teletext, make(1, "eng", "subrip")};
+    CHECK_EQ(kNoTrack, SelectDefault(undrawable));
+
+    CHECK(KindForCodec("subrip") == Kind::Text);
+    CHECK(KindForCodec("ass") == Kind::Text);
+    CHECK(KindForCodec("webvtt") == Kind::Text);
+    CHECK(KindForCodec("mov_text") == Kind::Text);
+    CHECK(KindForCodec("hdmv_pgs_subtitle") == Kind::Bitmap);
+    CHECK(KindForCodec("dvd_subtitle") == Kind::Bitmap);
+    CHECK(KindForCodec("dvb_teletext") == Kind::Unsupported);
+    CHECK(KindForCodec("") == Kind::Unsupported);
+
+    // The labels read like the audio track list's.
+    Track sdh = make(1, "eng", "subrip"); sdh.title = "SDH"; sdh.hearingImpaired = true;
+    CHECK_EQ(std::string("2. English - SDH - SRT (for the hard of hearing)"), Describe(sdh));
+    CHECK_EQ(std::string("1. English - PGS (forced)"), Describe(forced));
+    CHECK_EQ(std::string("1. Teletext (not supported)"), Describe(make(0, "", "dvb_teletext")));
+    CHECK_EQ(std::string("3. Timed Text"), Describe(make(2, "und", "mov_text")));
+}
+
+// "Film.srt" beside "Film.mkv" is loaded without asking; so is "Film.en.srt"
+// when there is no plain one. The answer cannot depend on listing order.
+void subtitle_sidecar_is_the_video_name_with_a_subtitle_extension_test()
+{
+    using subtitle::FindSidecar;
+    const std::vector<std::wstring> none{L"Film.mkv", L"Other.srt", L"Film.txt", L"Film.sub", L"Filmic.srt"};
+    CHECK(!FindSidecar(L"Film.mkv", none).has_value());
+    const std::vector<std::wstring> tagged{L"Film.mkv", L"Film.fr.srt", L"Film.en.srt"};
+    CHECK(FindSidecar(L"Film.mkv", tagged) == std::optional<std::wstring>(L"Film.en.srt"));
+    const std::vector<std::wstring> exact{L"Film.en.ass", L"FILM.SRT", L"Film.mkv"};
+    CHECK(FindSidecar(L"Film.mkv", exact) == std::optional<std::wstring>(L"FILM.SRT"));
+    // ASS keeps its styling, so it beats SRT for the same name; text beats pictures.
+    const std::vector<std::wstring> styled{L"Film.srt", L"Film.sup", L"Film.ass"};
+    CHECK(FindSidecar(L"Film.mkv", styled) == std::optional<std::wstring>(L"Film.ass"));
+    const std::vector<std::wstring> pictures{L"Film.idx", L"Film.sub", L"Film.sup"};
+    CHECK(FindSidecar(L"Film.mkv", pictures) == std::optional<std::wstring>(L"Film.sup"));
+    // Two tags deep is somebody else's film ("Film.Part2.en.srt").
+    const std::vector<std::wstring> deeper{L"Film.Part2.en.srt"};
+    CHECK(!FindSidecar(L"Film.mkv", deeper).has_value());
+    // Dots in the video's own name are part of its stem.
+    const std::vector<std::wstring> dotted{L"The.Film.2024.srt"};
+    CHECK(FindSidecar(L"The.Film.2024.mkv", dotted) == std::optional<std::wstring>(L"The.Film.2024.srt"));
+    CHECK(subtitle::IsSidecarExtension(L".SRT"));
+    CHECK(!subtitle::IsSidecarExtension(L".sub"));
+}
+
+// libass takes UTF-8. FFmpeg converts a UTF-16 file with a byte-order mark by
+// itself; without one, and for a legacy code page, it needs to be told.
+void subtitle_text_encoding_is_detected_test()
+{
+    using namespace subtitle;
+    const auto detect = [](std::initializer_list<uint8_t> bytes) {
+        const std::vector<uint8_t> head(bytes);
+        return DetectTextEncoding(head);
+    };
+    CHECK(detect({0xEF, 0xBB, 0xBF, '1'}) == TextEncoding::Utf8Bom);
+    CHECK(detect({0xFF, 0xFE, '1', 0}) == TextEncoding::Utf16LeBom);
+    CHECK(detect({0xFE, 0xFF, 0, '1'}) == TextEncoding::Utf16BeBom);
+    CHECK(detect({'1', 0, '\r', 0, '\n', 0, '0', 0, '0', 0}) == TextEncoding::Utf16Le);
+    CHECK(detect({0, '1', 0, '\r', 0, '\n', 0, '0', 0, '0'}) == TextEncoding::Utf16Be);
+    // "Café" in UTF-8, and in Windows-1252.
+    CHECK(detect({'C', 'a', 'f', 0xC3, 0xA9}) == TextEncoding::Utf8);
+    CHECK(detect({'C', 'a', 'f', 0xE9, ' '}) == TextEncoding::Legacy);
+    // A sequence cut off by the end of the sample is not held against the file,
+    // an overlong one is.
+    CHECK(detect({'C', 'a', 'f', 0xC3}) == TextEncoding::Utf8);
+    CHECK(detect({0xC0, 0xAF}) == TextEncoding::Legacy);
+    CHECK(detect({0xED, 0xA0, 0x80}) == TextEncoding::Legacy);
+    CHECK(detect({}) == TextEncoding::Utf8);
+    CHECK(CharencFor(TextEncoding::Utf8, 1252).empty());
+    CHECK(CharencFor(TextEncoding::Utf16LeBom, 1252).empty());
+    CHECK_EQ(std::wstring(L"UTF-16LE"), CharencFor(TextEncoding::Utf16Le, 1252));
+    CHECK_EQ(std::wstring(L"CP1251"), CharencFor(TextEncoding::Legacy, 1251));
+}
+
+// A Windows path inside a filtergraph passes two parsers, each with its own
+// escaping; the command lines are what the overlay runs.
+void subtitle_command_lines_escape_paths_for_both_filtergraph_parsers_test()
+{
+    using namespace subtitle;
+    // Option level: C\:/Films/A, b\'s [1].srt; graph level escapes those
+    // backslashes and the quote again, and the , [ ] the graph parser splits on.
+    CHECK_EQ(std::wstring(L"C\\\\:/Films/A\\, b\\\\\\'s \\[1\\].srt"),
+             EscapeFilterValue(L"C:\\Films\\A, b's [1].srt"));
+    CHECK_EQ(std::wstring(L"plain.srt"), EscapeFilterValue(L"plain.srt"));
+
+    RenderCommand text;
+    text.input = L"C:\\t\\x.mks"; text.stream = 0; text.width = 1280; text.height = 720;
+    text.videoWidth = 1920; text.videoHeight = 1080; text.rate = 23.976; text.start = 12.5; text.duration = 60.0;
+    const std::wstring textArgs = RenderArguments(text);
+    CHECK(textArgs.find(L"color=c=0x10EF60:s=1280x720:r=23.976:d=48.500000,") != std::wstring::npos);
+    CHECK(textArgs.find(L"setpts=PTS+12.500000/TB,subtitles=f=C\\\\:/t/x.mks:si=0:original_size=1920x1080,mpdecimate=hi=0:lo=0:frac=0") != std::wstring::npos);
+    CHECK(textArgs.find(L"original_size=1920x1080:alpha=1,format=bgra[subs]") != std::wstring::npos);
+    CHECK(textArgs.find(L"-stats_mux_pre pipe:2 -stats_mux_pre_fmt \"SUBT {pts} {tb}\" -f rawvideo pipe:1") != std::wstring::npos);
+    CHECK(textArgs.find(L"-ss ") == std::wstring::npos);
+    text.charenc = L"CP1252"; text.duration = 0.0;
+    const std::wstring legacy = RenderArguments(text);
+    CHECK(legacy.find(L":si=0:charenc=CP1252:original_size=") != std::wstring::npos);
+    CHECK(legacy.find(L":d=21600.000000,") != std::wstring::npos);
+
+    RenderCommand bitmap = text;
+    bitmap.kind = Kind::Bitmap; bitmap.input = L"C:\\v\\film.mkv"; bitmap.stream = 2; bitmap.start = 100.0;
+    const std::wstring bitmapArgs = RenderArguments(bitmap);
+    CHECK(bitmapArgs.find(L"-copyts -ss 70.000000 -i \"C:\\v\\film.mkv\"") != std::wstring::npos);
+    CHECK(bitmapArgs.find(L"[0:s:2]format=gbrap,premultiply=inplace=1,scale=1280x720:flags=bilinear,format=bgra[subs]") != std::wstring::npos);
+    bitmap.start = 10.0;
+    CHECK(RenderArguments(bitmap).find(L"-ss ") == std::wstring::npos);
+
+    CHECK(ExtractArguments(L"a.mkv", 1, "subrip", L"o.mks").find(L"-map 0:s:1 -map 0:t? -c:s copy -c:t copy -f matroska \"o.mks\"") != std::wstring::npos);
+    CHECK(ExtractArguments(L"a.mp4", 0, "mov_text", L"o.mks").find(L"-c:s ass") != std::wstring::npos);
+
+    CHECK(ParseStatsLine("SUBT 72 1/24") == std::optional<double>(3.0));
+    CHECK(ParseStatsLine("SUBT 4000000 1/1000000\r") == std::optional<double>(4.0));
+    CHECK(!ParseStatsLine("SUBT 72 1/0").has_value());
+    CHECK(!ParseStatsLine("[Parsed_subtitles_0] error").has_value());
+    CHECK(!ParseStatsLine("SUBT x 1/24").has_value());
+}
+
+// Frames come only when the picture changes, so the one on screen is the newest
+// that has started; a seek is answered from them only when they bracket it.
+void subtitle_timing_follows_the_clock_and_the_delay_test()
+{
+    using namespace subtitle;
+    CHECK_EQ(100, StepDelay(0, +1));
+    CHECK_EQ(-200, StepDelay(-100, -1));
+    CHECK_EQ(kDelayLimitMs, StepDelay(kDelayLimitMs, +1));
+    CHECK_EQ(-kDelayLimitMs, StepDelay(-kDelayLimitMs, -1));
+    // A positive delay shows each line later: at video 10 s the 9.5 s line is up.
+    CHECK_EQ(9.5, SubtitleClock(10.0, 500));
+    CHECK_EQ(10.25, SubtitleClock(10.0, -250));
+
+    const std::vector<double> pts{3.0, 4.0, 5.5};
+    CHECK_EQ(kNoTrack, FrameOnScreen(pts, 2.9));
+    CHECK_EQ(size_t{0}, FrameOnScreen(pts, 3.0));
+    CHECK_EQ(size_t{1}, FrameOnScreen(pts, 5.4));
+    CHECK_EQ(size_t{2}, FrameOnScreen(pts, 60.0));
+    CHECK(QueueAnswers(pts, false, 4.5));
+    CHECK(!QueueAnswers(pts, false, 2.0));   // behind everything kept
+    CHECK(!QueueAnswers(pts, false, 6.0));   // past everything drawn so far
+    CHECK(QueueAnswers(pts, true, 6.0));     // unless the child has finished
+    CHECK(!QueueAnswers({}, true, 1.0));
+
+    CHECK(!ClockJumped(10.0, 10.016));
+    CHECK(ClockJumped(10.0, 9.9));
+    CHECK(ClockJumped(10.0, 20.0));
+
+    CHECK_EQ(23.976, CanvasRate(23.976));
+    CHECK_EQ(30.0, CanvasRate(59.94));
+    CHECK_EQ(10.0, CanvasRate(1.0));
+    CHECK_EQ(24.0, CanvasRate(0.0));
+    CHECK(CanvasUsable(1280, 720));
+    CHECK(!CanvasUsable(8, 720));
+    CHECK(!CanvasUsable(0, 0));
+}
+
+// The choice a viewer made for one source comes back with it.
+void subtitle_choice_round_trips_through_the_settings_file_test()
+{
+    using namespace subtitle;
+    Choice off; off.mode = Choice::Mode::Off; off.delayMs = -300; off.sequence = 4;
+    CHECK_EQ(std::wstring(L"4|off|-300|"), FormatChoice(off));
+    CHECK(ParseChoice(FormatChoice(off)) == std::optional<Choice>(off));
+    Choice track; track.mode = Choice::Mode::Track; track.track = 2; track.sequence = 9;
+    CHECK(ParseChoice(FormatChoice(track)) == std::optional<Choice>(track));
+    Choice file; file.mode = Choice::Mode::File; file.file = L"D:\\Subs\\a|b.srt"; file.delayMs = 1200; file.sequence = 1;
+    CHECK(ParseChoice(FormatChoice(file)) == std::optional<Choice>(file));
+    CHECK(!ParseChoice(L"").has_value());
+    CHECK(!ParseChoice(L"1|file|0|").has_value());
+    CHECK(!ParseChoice(L"1|track:x|0|").has_value());
+    CHECK(!ParseChoice(L"1|sideways|0|").has_value());
+    CHECK(!ParseChoice(L"1|off|99999999|").has_value());
+    std::map<std::wstring, Choice> remembered;
+    for (uint64_t index = 0; index < 5; ++index) {
+        Choice choice; choice.sequence = 10 - index;
+        remembered[L"k" + std::to_wstring(index)] = choice;
+    }
+    CHECK((Evict(remembered, 3) == std::vector<std::wstring>{L"k4", L"k3"}));
+    CHECK(Evict(remembered, 5).empty());
+}
+
 // Five distinct causes shared one opaque string, and the 1,143-line module
 // most exposed to upstream breakage logged nothing at all. "YouTube helper
 // files are missing beside the app" was wrong for four of the five: on a
@@ -12222,6 +12430,12 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_helper_stderr_keeps_a_bounded_tail_and_reports_only_bad_exits_test),
     TEST_CASE(audio_child_stderr_is_drained_and_logged_when_it_fails_test),
     TEST_CASE(audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test),
+    TEST_CASE(subtitle_track_choice_follows_the_container_test),
+    TEST_CASE(subtitle_sidecar_is_the_video_name_with_a_subtitle_extension_test),
+    TEST_CASE(subtitle_text_encoding_is_detected_test),
+    TEST_CASE(subtitle_command_lines_escape_paths_for_both_filtergraph_parsers_test),
+    TEST_CASE(subtitle_timing_follows_the_clock_and_the_delay_test),
+    TEST_CASE(subtitle_choice_round_trips_through_the_settings_file_test),
     TEST_CASE(youtube_helper_refusals_each_say_which_one_happened_test),
     TEST_CASE(source_digest_is_computed_once_per_file_and_never_survives_a_change_test),
     TEST_CASE(audio_endpoint_notifications_fire_only_for_the_stream_we_are_on_test),
