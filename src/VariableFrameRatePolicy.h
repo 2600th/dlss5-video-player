@@ -59,6 +59,35 @@ inline constexpr double kDeviatingFraction = 0.05;
 // is "cannot tell" rather than a guess in either direction.
 inline constexpr double kMaximumReorderedFraction = 0.25;
 
+// Packets past kRecommendedSamples a caller reading them in DECODE order asks
+// for, so PresentationOrder can hand back a gap-free window. 16 is the most
+// frames H.264 and HEVC allow to be held for reordering (the DPB's own cap);
+// no conforming stream moves a frame further than that.
+inline constexpr size_t kReorderSlack = 16;
+
+// Presentation timestamps of the first `samples` frames, rebuilt from packet
+// timestamps listed in DECODE order - which is how a container lists them, and
+// with B-frames that order puts 3,1,2 where the picture has 1,2,3, so more
+// than a quarter of the raw gaps come out non-positive and Classify refuses
+// to decide on most films and phone video.
+//
+// Sorting is sound for a spacing test because the question is about the SET
+// of presentation times: each packet carries its own pts, sorting is exactly
+// the order the frames are shown in, and no timestamp is invented or moved.
+// The one thing sorting cannot repair is the tail. Cutting the read after N
+// packets can leave out a B-frame decoded after the cut but shown before the
+// last anchor that was read, which would sort into a doubled gap. A frame
+// decoded after the cut is preceded in decode order by every sampled packet,
+// and at most kReorderSlack of those are shown after it, so reading
+// samples + kReorderSlack packets and keeping the lowest `samples` returns a
+// window with no frame missing from it.
+inline std::vector<double> PresentationOrder(std::vector<double> decodeOrderTimes, size_t samples)
+{
+    std::sort(decodeOrderTimes.begin(), decodeOrderTimes.end());
+    if (decodeOrderTimes.size() > samples) decodeOrderTimes.resize(samples);
+    return decodeOrderTimes;
+}
+
 struct Verdict {
     // False when there was not enough usable evidence. The caller keeps
     // whatever answer it already had - it must never read as "variable",
@@ -73,7 +102,7 @@ struct Verdict {
 };
 
 // `presentationTimesSeconds` is consecutive frame presentation timestamps in
-// the order the container lists them.
+// presentation order - PresentationOrder() for timestamps read off packets.
 inline Verdict Classify(std::span<const double> presentationTimesSeconds)
 {
     Verdict verdict{};

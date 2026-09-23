@@ -568,9 +568,11 @@ void VideoDecoder::ProbePacketSpacing(const std::wstring& path, const std::wstri
     if (m_source.stillImage || m_sourceKind != MediaSourceKind::LocalFile) return;
     if (m_ffprobeExe.empty()) return;
 
+    // Packets come back in decode order; the slack is what lets
+    // PresentationOrder return a window with no B-frame missing from its end.
     const std::wstring args =
         L"-v error -select_streams v:0 -read_intervals \"%+#" +
-        std::to_wstring(variable_frame_rate::kRecommendedSamples) +
+        std::to_wstring(variable_frame_rate::kRecommendedSamples + variable_frame_rate::kReorderSlack) +
         L"\" -show_entries packet=pts_time -of default=noprint_wrappers=1 " +
         inputOptions + L"-i " + Quote(path);
 
@@ -583,9 +585,10 @@ void VideoDecoder::ProbePacketSpacing(const std::wstring& path, const std::wstri
     }
 
     std::vector<double> times;
-    times.reserve(variable_frame_rate::kRecommendedSamples);
+    times.reserve(variable_frame_rate::kRecommendedSamples + variable_frame_rate::kReorderSlack);
     std::istringstream lines(text);
     std::string line;
+    bool cutShort = false;
     while (std::getline(lines, line)) {
         if (line.rfind("pts_time=", 0) != 0) continue;
         const std::string value = line.substr(9);
@@ -594,10 +597,18 @@ void VideoDecoder::ProbePacketSpacing(const std::wstring& path, const std::wstri
         // rather than inventing a gap.
         double time = 0.0;
         const auto parsed = std::from_chars(value.data(), value.data() + value.size(), time);
-        if (parsed.ec != std::errc{} || !std::isfinite(time)) break;
+        if (parsed.ec != std::errc{} || !std::isfinite(time)) { cutShort = true; break; }
         times.push_back(time);
     }
 
+    // Classifying the decode order directly left every B-frame source
+    // undecided: 3,1,2 has two non-positive gaps in three. A sample stopped
+    // early by an untimestamped packet has no slack behind its cut, so the
+    // slack comes off what it did read instead.
+    const size_t keep = cutShort
+        ? (times.size() > variable_frame_rate::kReorderSlack ? times.size() - variable_frame_rate::kReorderSlack : 0)
+        : variable_frame_rate::kRecommendedSamples;
+    times = variable_frame_rate::PresentationOrder(std::move(times), keep);
     const auto verdict = variable_frame_rate::Classify(times);
     if (!verdict.decided) {
         LOG("ffprobe: " << times.size() << " packet timestamps is too few to judge the spacing; "

@@ -7147,6 +7147,18 @@ int run_fake_media_child(int argc,wchar_t* argv[])
             const bool nopackets=all.find(L"vfrspacing_nopackets")!=std::wstring::npos;
             if(all.find(L"packet=pts_time")!=std::wstring::npos){
                 if(nopackets){std::cout<<std::flush;return 0;}
+                // A B-frame film: packets listed in decode order (0,3,1,2,6,4,5,...
+                // periods), as many as the -read_intervals count asked for.
+                if(all.find(L"vfrspacing_bframes")!=std::wstring::npos){
+                    size_t count=0;
+                    const size_t at=all.find(L"%+#");
+                    if(at!=std::wstring::npos)try{count=std::stoul(all.substr(at+3));}catch(...){}
+                    std::vector<int> order{0};
+                    for(int anchor=3;order.size()<count;anchor+=3){order.push_back(anchor);order.push_back(anchor-2);order.push_back(anchor-1);}
+                    order.resize(count);
+                    for(const int shown:order)std::cout<<"pts_time="<<std::to_string(double(shown)/24.0)<<'\n';
+                    std::cout<<std::flush;return 0;
+                }
                 double now=0.0;
                 for(int index=0;index<120;++index){
                     std::cout<<"pts_time="<<std::to_string(now)<<'\n';
@@ -8677,6 +8689,80 @@ void variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_t
     CHECK(reordered.constant);
 }
 
+// A container lists packets in DECODE order. With B-frames that is
+// 0,3,1,2,6,4,5,... frame periods, and two gaps in every three come out
+// non-positive - so the probe, which classified exactly that list, left every
+// film and phone video undecided and fell back to the declared rates the
+// spacing test exists to replace. PresentationOrder rebuilds the order the
+// frames are shown in; the cut at the end of the read must not leave a
+// doubled gap where a B-frame decoded after the cut belongs.
+void variable_frame_rate_is_decided_on_b_frame_decode_order_test()
+{
+    using namespace variable_frame_rate;
+
+    // Presentation times, reordered the way an IPBB... stream decodes them:
+    // each anchor goes ahead of the two B-frames shown before it.
+    const auto decodeOrder = [](const std::vector<double>& shown) {
+        std::vector<double> coded;
+        if (shown.empty()) return coded;
+        coded.push_back(shown[0]);
+        for (size_t anchor = 3; anchor < shown.size(); anchor += 3) {
+            coded.push_back(shown[anchor]);
+            coded.push_back(shown[anchor - 2]);
+            coded.push_back(shown[anchor - 1]);
+        }
+        return coded;
+    };
+    const size_t read = kRecommendedSamples + kReorderSlack + 1;
+
+    std::vector<double> film;
+    for (size_t index = 0; index < read; ++index) film.push_back(double(index) * (1001.0 / 24000.0));
+    const std::vector<double> coded = decodeOrder(film);
+    // Exactly the lead's example at the head of the list.
+    const double period = 1001.0 / 24000.0;
+    const double expectedHead[] = {0.0, 3.0, 1.0, 2.0, 6.0, 4.0, 5.0};
+    for (size_t index = 0; index < std::size(expectedHead); ++index)
+        CHECK(std::abs(coded[index] - expectedHead[index] * period) < 1e-12);
+
+    // The old probe's answer on that list: undecided, never constant.
+    const auto raw = Classify(coded);
+    CHECK(!raw.decided);
+    CHECK(raw.reorderedIntervals > 0);
+
+    const auto sorted = PresentationOrder(coded, kRecommendedSamples);
+    CHECK_EQ(kRecommendedSamples, sorted.size());
+    const auto constant = Classify(sorted);
+    CHECK(constant.decided);
+    CHECK(constant.constant);
+    CHECK_EQ(size_t{0}, constant.deviatingIntervals);
+    CHECK_EQ(size_t{0}, constant.reorderedIntervals);
+
+    // Cut the read right after an anchor, so its two B-frames are missing:
+    // sorting alone would end on a gap three periods wide. The slack trims it.
+    // coded is 0 then groups of {anchor, B, B}, so a length of 1 + 3g + 1
+    // ends on an anchor whose B-frames were never read.
+    std::vector<double> cut = coded;
+    cut.resize(kRecommendedSamples + kReorderSlack - 2);
+    CHECK((cut.size() - 1) % 3 == 1);
+    const auto untrimmed = PresentationOrder(cut, cut.size());
+    CHECK(std::abs((untrimmed.back() - untrimmed[untrimmed.size() - 2]) - 3.0 * period) < 1e-9);
+    const auto trimmed = PresentationOrder(cut, kRecommendedSamples);
+    CHECK_EQ(kRecommendedSamples, trimmed.size());
+    for (size_t index = 1; index < trimmed.size(); ++index)
+        CHECK(std::abs((trimmed[index] - trimmed[index - 1]) - period) < 1e-9);
+
+    // A screen recording that also uses B-frames must still read as variable.
+    std::vector<double> capture;
+    double now = 0.0;
+    for (size_t index = 0; index < read; ++index) {
+        capture.push_back(now);
+        now += (index % 7 == 0) ? 3.0 / 60.0 : 1.0 / 60.0;
+    }
+    const auto variable = Classify(PresentationOrder(decodeOrder(capture), kRecommendedSamples));
+    CHECK(variable.decided);
+    CHECK(!variable.constant);
+}
+
 // The two rates a container declares and the spacing its packets actually
 // have can disagree in both directions, and the spacing is the one that is
 // true. Both halves matter: a capture wrongly called constant hands frame
@@ -8698,6 +8784,13 @@ void constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test()
     auto film = VideoDecoderTestAccess::Create(fixture.directory);
     CHECK(film->Open(L"vfrspacing_film", MediaSourceKind::LocalFile));
     CHECK(film->ConstantFrameRate());
+
+    // The same film coded with B-frames, whose packets the container lists in
+    // decode order. The probe used to classify that order as-is and come back
+    // undecided, which left the declared 23-against-24 in charge.
+    auto bframes = VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(bframes->Open(L"vfrspacing_bframes", MediaSourceKind::LocalFile));
+    CHECK(bframes->ConstantFrameRate());
 
     // No packets came back - a container ffprobe can describe but not walk.
     // The declared rates are all there is, so the old answer stands rather
@@ -9436,6 +9529,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(neural_presets_round_trip_and_default_to_the_shipped_settings_test),
     TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
     TEST_CASE(variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test),
+    TEST_CASE(variable_frame_rate_is_decided_on_b_frame_decode_order_test),
     TEST_CASE(constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test),
     TEST_CASE(audio_fade_is_a_raised_cosine_that_starts_and_ends_flat_test),
     TEST_CASE(audio_fade_in_scales_whole_frames_and_stops_once_it_is_open_test),

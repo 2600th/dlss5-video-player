@@ -58,7 +58,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.4](#p04) | YouTube: the cache manager is still built on every paint | S | Player | ✅ |
 | [P0.5](#p05) | The software-encoder retry cannot pass the receipt gate | S | Pipeline | ✅ |
 | [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
-| [P0.8](#p08) | VFR detection never decides on B-frame video | XS | Pipeline, Player | ✅ |
 | [P0.9](#p09) | Video freezes while a menu, drag or message box is open | S | Player | 🔍 |
 | [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
 | **P1** | | | | |
@@ -272,27 +271,6 @@ flag at `:1978` guards against, shuffled frames are published as verified.
 **Fix** — record the identity in the readback slot when the copy is queued,
 return it when the slot resolves, and compare it with the frame queued in
 that position.
-
----
-
-<a id="p08"></a>
-### P0.8 · VFR detection never decides on B-frame video
-
-`XS` · **Pipeline, Player** · ✅ · _the old 3.9 fix was incomplete_
-
-**Where** — `VideoDecoder.cpp:571-575`, `VariableFrameRatePolicy.h:88-95`
-
-The spacing probe reads `packet=pts_time`, which lists packets in decode
-order. With B-frames, more than 25% of the intervals come out non-positive,
-so `Classify` returns undecided and the code falls back to the declared
-rates that 3.9 said cannot be trusted.
-
-**Impact** — Pipeline: the frame-generation refusal is wrong on most films
-and phone video. Player: every open still pays the extra ffprobe run for
-nothing.
-
-**Fix** — sort the sampled PTS before `Classify`, or probe
-`frame=best_effort_timestamp_time`. Add a B-frame clip to the policy tests.
 
 ---
 
