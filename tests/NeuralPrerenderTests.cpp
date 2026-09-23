@@ -4205,6 +4205,35 @@ void live_playback_crosses_a_seam_whose_end_rounds_below_the_next_start_test()
     CHECK(playback.LastFault().empty());
 }
 
+// The same seam, with the next file published only after the current one was
+// opened - the order a live render produces. The index closes the seam in its
+// own record, but the copy playback holds kept the old end, so the next file
+// looked like it began after a hole: no prefetch, and the boundary opened it
+// on the presenting thread. With the render loading the GPU that open took
+// ~250 ms, and a live 1080p30 session dropped 10-14 frames at that boundary.
+void live_playback_prefetches_across_a_seam_published_after_the_open_test()
+{
+    LiveFrameLibrary library;library.Add(L"original.mkv",20);
+    library.Add(L"neural-00000.mkv",5);library.Add(L"neural-00001.mkv",5);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(RoundedSegmentRecord(L"neural-00000.mkv",0,0,5));
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{},{}));
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    segments->Append(RoundedSegmentRecord(L"neural-00001.mkv",1,5,5));
+    for(uint64_t expected=1;expected<10;++expected){
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        const auto* pair=playback.CurrentPair();CHECK(pair!=nullptr);
+        if(!pair)return;
+        CHECK_EQ(expected,pair->frameNumber);
+        if(expected==1)CHECK(library.WaitForOpen(L"neural-00001.mkv",1));
+    }
+    CHECK_EQ(1,library.Opens(L"neural-00001.mkv"));
+    CHECK(library.OpenThread(L"neural-00001.mkv")!=std::this_thread::get_id());
+    CHECK(playback.LastFault().empty());
+}
+
 void neural_segment_index_covers_the_rounding_hole_but_not_a_real_gap_test()
 {
     NeuralSegmentIndex index;
@@ -5414,6 +5443,7 @@ int wmain(int argc, wchar_t* argv[])
     synchronized_playback_opens_a_described_original_without_a_probe_test();
     neural_segment_index_orders_appends_and_locates_by_timestamp_test();
     neural_segment_index_resumes_after_retained_coverage_test();
+    live_playback_prefetches_across_a_seam_published_after_the_open_test();
     neural_segment_index_covers_the_rounding_hole_but_not_a_real_gap_test();
     live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test();
     live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test();

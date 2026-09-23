@@ -538,7 +538,7 @@ struct SynchronizedPlayback::Impl {
         // file of a region across a hole is not this playhead's.
         if(segmentExhausted&&segmentSource&&covering&&SameSegment(*covering,segment)){
             auto following=segments->After(segment.firstTimestamp100ns);
-            if(!following||following->firstTimestamp100ns>segment.end100ns)
+            if(!following||following->firstTimestamp100ns>std::max(segment.end100ns,covering->end100ns))
                 return SynchronizedReadResult::WaitingForRender;
             return AdoptSegment(std::move(*following),timestamp100ns,stop,true);
         }
@@ -560,12 +560,20 @@ struct SynchronizedPlayback::Impl {
     // file's end.
     std::optional<NeuralSegment> Continuation()const
     {
-        if(auto owner=segments->Containing(segment.firstTimestamp100ns);
-           owner&&!SameSegment(*owner,segment)&&owner->end100ns>segment.end100ns)
+        const auto owner=segments->Containing(segment.firstTimestamp100ns);
+        if(owner&&!SameSegment(*owner,segment)&&owner->end100ns>segment.end100ns)
             return owner;
+        // The end this file has NOW. The copy held here was taken when the file
+        // was opened, often before the next one was published; publishing it
+        // closes the sub-frame seam in the index's record (NeuralSegmentIndex::
+        // Append), not in this copy. Judged on the stale end, a 30 fps seam 20
+        // ticks wide read as a hole, nothing was prefetched, and the boundary
+        // opened the file on the presenting thread: ~250 ms with the render
+        // loading the GPU, 10-14 dropped frames at one boundary in every run.
+        const int64_t end=owner&&SameSegment(*owner,segment)?std::max(segment.end100ns,owner->end100ns):segment.end100ns;
         auto following=segments->After(segment.firstTimestamp100ns);
         // Only the file that continues this region is worth a process start.
-        if(!following||following->firstTimestamp100ns>segment.end100ns)return std::nullopt;
+        if(!following||following->firstTimestamp100ns>end)return std::nullopt;
         return following;
     }
 
