@@ -76,6 +76,11 @@ public:
     void Reset();
     void SetControls(const GuideControls& controls);
     const GuideControls& Controls() const { return m_controls; }
+    // The rung of the Scene cuts ladder (SceneCut.h) image evidence is judged
+    // against. Off takes no cut from the picture; declared resets still apply.
+    // Like the controls above it survives Reset(): it describes the job.
+    void SetSceneCutSensitivity(scene_cut::Sensitivity sensitivity) { m_cutSensitivity = sensitivity; }
+    scene_cut::Sensitivity SceneCutSensitivity() const { return m_cutSensitivity; }
     // Incremented every time this generator declares a reset.
     uint32_t HistoryGeneration() const { return m_historyGeneration; }
     // Every scene-cut decision this generator has taken or withheld. Reset()
@@ -161,4 +166,5 @@ private:
     bool m_haveAcceptedCut = false;
     SceneCutAccounting m_sceneCuts;
     GuideControls m_controls;
+    scene_cut::Sensitivity m_cutSensitivity = scene_cut::Sensitivity::Default;
 };

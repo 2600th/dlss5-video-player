@@ -2,6 +2,7 @@
 #include "ReShadeConfig.h"
 #include "NeuralCache.h"
 #include "NeuralSettings.h"
+#include "TemporalSettings.h"
 #include "OpticalFlowNvof.h"
 #include "TestSupport.h"
 #include "TestEnvironment.h"
@@ -261,6 +262,40 @@ void source_conversion_changes_the_render_key_and_the_default_path_is_unchanged(
     CHECK_EQ(BuildNeuralCacheKey(shippedIdentity), BuildNeuralCacheKey(identity));
     identity.quality = NeuralRenderPipelineIdentity(true, kDefaultNvencPreset, kDefaultGpuColorConversion);
     CHECK(BuildNeuralCacheKey(identity) != BuildNeuralCacheKey(shippedIdentity));
+}
+
+// The Scene cuts ladder (P2.12) changes which frames reset the neural history,
+// so it is a key term - but the default rung must add nothing, or every render
+// in the field would be retired by the setting's mere existence.
+void temporal_settings_change_the_render_key_only_off_their_defaults()
+{
+    const std::string shipped =
+        "DLAA|strict-timeline-v3|armed-inline-interception-v3|bt709-export-v1";
+    const auto pipeline = [&](const TemporalSettings& temporal) {
+        return NeuralRenderPipelineIdentity(false, kDefaultNvencPreset, kDefaultGpuColorConversion) +
+               TemporalPipelineTerm(temporal);
+    };
+    CHECK(TemporalSettings{}.IsDefault());
+    CHECK_EQ(std::string{}, TemporalPipelineTerm(TemporalSettings{}));
+    CHECK_EQ(shipped, pipeline(TemporalSettings{}));
+    std::vector<std::string> terms;
+    for (const auto rung : {scene_cut::Sensitivity::More, scene_cut::Sensitivity::Less,
+                            scene_cut::Sensitivity::Off}) {
+        TemporalSettings temporal;
+        temporal.sceneCuts = rung;
+        CHECK(!temporal.IsDefault());
+        terms.push_back(pipeline(temporal));
+        CHECK(terms.back() != shipped);
+        // The canonical form is what the helper parses; it has to come back whole.
+        const auto parsed = ParseTemporalSettings(CanonicalTemporalSettings(temporal));
+        CHECK(parsed.has_value());
+        if (parsed) CHECK(*parsed == temporal);
+    }
+    // Every rung its own entry: two rungs reset on different frames.
+    CHECK(terms[0] != terms[1] && terms[1] != terms[2] && terms[0] != terms[2]);
+    CHECK_EQ(std::string("cuts=default"), CanonicalTemporalSettings(TemporalSettings{}));
+    for (const std::string_view bad : {"", "cuts=", "cuts=Default", "cuts=more,", "stability=off", "cuts=on"})
+        CHECK(!ParseTemporalSettings(bad).has_value());
 }
 
 void encoder_settings_that_change_the_written_pixels_change_the_render_key()
@@ -766,6 +801,7 @@ int main()
     manifest_accepts_legacy_and_valid_settings_but_rejects_malformed_extension();
     default_identity_key_is_stable_and_range_or_guides_change_it();
     source_conversion_changes_the_render_key_and_the_default_path_is_unchanged();
+    temporal_settings_change_the_render_key_only_off_their_defaults();
     encoder_settings_that_change_the_written_pixels_change_the_render_key();
     schema_three_manifests_parse_with_defaults_and_stay_reusable();
     current_schema_manifest_round_trips_with_receipt_digest();

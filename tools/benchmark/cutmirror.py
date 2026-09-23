@@ -18,6 +18,10 @@ import numpy as np
 # --- shipped criterion (TemporalGuides.cpp ClassifySceneCut) -------------------------
 CUT_RESIDUAL_STRONG, CUT_RESIDUAL_WEAK, CUT_HISTOGRAM_OVERLAP = 0.30, 0.10, 0.85
 MIN_SECONDS_BETWEEN_CUTS = 0.3
+# The Scene cuts ladder (src/SceneCut.h ThresholdsFor): strong, weak, histogram gate per
+# rung. Off takes no cut from image evidence at all, so it has no thresholds.
+LADDER = {"default": (CUT_RESIDUAL_STRONG, CUT_RESIDUAL_WEAK, CUT_HISTOGRAM_OVERLAP),
+          "more": (0.18, 0.10, 0.85), "less": (0.40, 0.10, 0.85), "off": None}
 CUT_MATCH_FRAMES = 1
 
 # --- scale-free candidate (roadmap survey item 3) ------------------------------------
@@ -243,6 +247,26 @@ class FailedFractionCriterion(Criterion):
         if fraction > self.weak and (self.overlap is None or feature["histogram_overlap"] < self.overlap):
             return self.WEAK
         return self.NONE
+
+
+class NeverCriterion(Criterion):
+    """The ladder's Off rung: every pair continues the history."""
+
+    name = "off"
+
+    def __str__(self) -> str:
+        return "off"
+
+    def score(self, feature: dict) -> float:
+        return feature["residual"]
+
+    def classify(self, feature: dict) -> int:
+        return self.NONE
+
+
+def ladder_criterion(rung: str) -> Criterion:
+    thresholds = LADDER[rung]
+    return NeverCriterion() if thresholds is None else ResidualCriterion(*thresholds)
 
 
 def min_frames_between_cuts(fps: float, seconds: float = MIN_SECONDS_BETWEEN_CUTS) -> int:

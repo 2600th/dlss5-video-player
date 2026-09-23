@@ -637,6 +637,42 @@ void nonexistent_helper_fails_test()
     CHECK(progressCount == 0);
 }
 
+// The temporal settings reach the helper as one canonical pair, and only when
+// they leave the defaults: a default job's command line stays the one every
+// earlier helper accepts, and a value this build cannot name is refused.
+void temporal_settings_reach_the_helper_only_off_their_defaults_test()
+{
+    NeuralRenderRequest request = TestRequest(L"source.mkv");
+    const HANDLE metadata = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(123));
+    auto view = [](const std::vector<std::wstring>& arguments) {
+        std::vector<std::wstring_view> values{L"NeuralWorker.exe"};
+        for (const auto& argument : arguments) values.emplace_back(argument);
+        return values;
+    };
+    const auto plain = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
+    for (const auto& argument : plain) CHECK(argument != L"--temporal");
+    const auto plainView = view(plain);
+    const auto parsedPlain = neural_worker_detail::ParseWorkerArguments(plainView);
+    CHECK(parsedPlain.has_value());
+    if (parsedPlain) CHECK(parsedPlain->request.temporal == TemporalSettings{});
+
+    request.temporal.sceneCuts = scene_cut::Sensitivity::Off;
+    const auto tuned = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
+    const auto flag = std::find(tuned.begin(), tuned.end(), L"--temporal");
+    CHECK(flag != tuned.end() && flag + 1 != tuned.end());
+    if (flag != tuned.end() && flag + 1 != tuned.end()) CHECK_EQ(std::wstring(L"cuts=off"), *(flag + 1));
+    const auto tunedView = view(tuned);
+    const auto parsedTuned = neural_worker_detail::ParseWorkerArguments(tunedView);
+    CHECK(parsedTuned.has_value());
+    if (parsedTuned) CHECK(parsedTuned->request.temporal == request.temporal);
+
+    auto unknown = tuned;
+    for (size_t index = 0; index + 1 < unknown.size(); ++index)
+        if (unknown[index] == L"--temporal") unknown[index + 1] = L"cuts=sometimes";
+    const auto unknownView = view(unknown);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(unknownView).has_value());
+}
+
 void helper_main_parser_accepts_normal_and_restarted_contracts_test()
 {
     NeuralRenderRequest request = TestRequest(L"source.mkv");
@@ -2508,6 +2544,7 @@ int wmain(int argc, wchar_t** argv)
     SetEnvironmentVariableW(kTestRunVariable, std::to_wstring(GetCurrentProcessId()).c_str());
     nonexistent_helper_fails_test();
     helper_main_parser_accepts_normal_and_restarted_contracts_test();
+    temporal_settings_reach_the_helper_only_off_their_defaults_test();
     cancellation_of_running_child_is_bounded_test();
     a_still_running_helper_is_not_reported_as_exit_code_259_test();
     a_shutdown_frame_to_an_unread_pipe_gives_up_instead_of_hanging_test();

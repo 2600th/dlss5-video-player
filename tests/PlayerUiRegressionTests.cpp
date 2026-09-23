@@ -432,6 +432,14 @@ struct PlayerAppTestAccess {
         app.HandleCommand(IDM_UPSCALE_AUTO);
         CHECK(app.m_upscaleAuto);
         CHECK_EQ(app.m_upscaleTargetHeight,1440u);
+        // Hold repeated frames is off on a fresh install - measured, it changes
+        // nothing visible on the runtime tested - and the menu toggles and persists it.
+        CHECK(!app.m_frameGenHoldDuplicates);
+        app.HandleCommand(IDM_FRAMEGEN_HOLD_DUPLICATES);
+        CHECK(app.m_frameGenHoldDuplicates);
+        CHECK_EQ(GetPrivateProfileIntW(L"FrameGeneration",L"HoldDuplicates",0,app.SettingsPath().c_str()),UINT{1});
+        app.HandleCommand(IDM_FRAMEGEN_HOLD_DUPLICATES);
+        CHECK(!app.m_frameGenHoldDuplicates);
         upscalingContent = app.ButtonContent(ToolbarAction::ToggleUpscaling);
         CHECK(!upscalingContent.enabled);
         frameGenerationContent = app.ButtonContent(ToolbarAction::ToggleFrameGeneration);
@@ -3118,7 +3126,7 @@ struct PlayerAppTestAccess {
 
     static void CheckNeuralSettingsDialog(PlayerApp& app)
     {
-        app.m_neuralSettings = {}; app.m_renderGuides = {};
+        app.m_neuralSettings = {}; app.m_renderGuides = {}; app.m_temporalSettings = {};
         app.ShowNeuralSettings();
         CHECK(app.m_neuralWnd != nullptr);
         if (!app.m_neuralWnd) return;
@@ -3175,6 +3183,14 @@ struct PlayerAppTestAccess {
         CHECK((app.m_renderGuides == GuideControls{true, false}));
         CHECK(!app.m_guides.Controls().depth);
         CHECK(app.m_guideReset && app.m_dlssReset);
+        // The Scene cuts ladder: the combo index is the rung, and the choice reaches
+        // the live guide generator as well as the next render.
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_SCENE_CUTS), CB_GETCOUNT, 0, 0)), 4);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_SCENE_CUTS), CB_GETCURSEL, 0, 0)), 0);
+        SendMessageW(GetDlgItem(dialog, IDC_NS_SCENE_CUTS), CB_SETCURSEL, 3, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_SCENE_CUTS, CBN_SELCHANGE), 0);
+        CHECK(app.m_temporalSettings.sceneCuts == scene_cut::Sensitivity::Off);
+        CHECK(app.m_guides.SceneCutSensitivity() == scene_cut::Sensitivity::Off);
         // Every control the dialog offers carries help text, and the text is the
         // localized tip rather than an empty tool.
         const auto tipHost = app.m_tipHosts.find(dialog);
@@ -3184,7 +3200,7 @@ struct PlayerAppTestAccess {
             CHECK(tools >= 12);
             for (const int id : {IDC_NS_INTENSITY, IDC_NS_STRUCTURE, IDC_NS_TONE, IDC_NS_SKIN,
                                  IDC_NS_STYLE, IDC_NS_AUTOMASK, IDC_NS_GUIDE_MV, IDC_NS_GUIDE_DEPTH,
-                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_NS_APPLY, IDC_NS_RESET}) {
+                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_NS_SCENE_CUTS, IDC_NS_APPLY, IDC_NS_RESET}) {
                 wchar_t text[512] = {};
                 TTTOOLINFOW info{};
                 info.cbSize = TTTOOLINFOW_V2_SIZE;
@@ -3204,6 +3220,10 @@ struct PlayerAppTestAccess {
             CHECK(LoadNeuralSettings(app.SettingsPath(), saved));
             CHECK(saved == app.m_neuralSettings);
             CHECK_EQ(GetPrivateProfileIntW(L"NeuralGuides", L"Depth", 1, app.SettingsPath().c_str()), UINT{0});
+            // By name, so a later build that reorders the rungs reads the same choice.
+            wchar_t cuts[32] = {};
+            GetPrivateProfileStringW(L"Temporal", L"SceneCuts", L"", cuts, 32, app.SettingsPath().c_str());
+            CHECK_EQ(std::wstring(L"off"), std::wstring(cuts));
         }
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_RESET, BN_CLICKED), 0);
         CHECK(app.m_neuralSettings == NeuralSettings{});
@@ -3213,6 +3233,9 @@ struct PlayerAppTestAccess {
         CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_NS_CHAINED)) == FALSE);
         CHECK(app.m_renderGuides.IsDefault());
         CHECK(app.m_guides.Controls().depth);
+        CHECK(app.m_temporalSettings.IsDefault());
+        CHECK(app.m_guides.SceneCutSensitivity() == scene_cut::Sensitivity::Default);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_SCENE_CUTS), CB_GETCURSEL, 0, 0)), 0);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_INTENSITY), TBM_GETPOS, 0, 0)), 100);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_GETCHECK, 0, 0)), BST_CHECKED);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);

@@ -11,6 +11,8 @@ its cache or the committed runtime.
 python tools/benchmark/corpus.py                       # build-upscaling/benchmark-corpus/*.mkv + manifest.json
 python tools/benchmark/corpus.py --clips pan-fast zoom-fast           # a subset, into its own --corpus dir
 python tools/benchmark/cutlab.py --sweep               # scores the cut criterion against the labelled cuts
+python tools/benchmark/cutlab.py --ladder              # the player's Scene cuts rungs on the same labels
+python tools/benchmark/duplab.py --grid                # frame generation's duplicate test on clips re-timed onto twos
 python tools/benchmark/run.py --clips text-subtitles cuts-motion --profiles baseline mv-off --repeats 3
 python tools/benchmark/run.py --ablation --repeats 2   # every profile in run.ABLATION
 python tools/benchmark/run.py --profiles depth-constant depth-proxy  # the depth A/B
@@ -31,7 +33,8 @@ with the RenoDX/ReShade runtime beside it, and an NVIDIA GPU with `nvml.dll`
 | `run.py` | Profiles, ablation matrix, two-pass, preflight receipts, worker launches, NVML sampling |
 | `analyze.py` | Per-run metrics, medians per clip/profile, guide and two-pass deltas, cut scores, `report.md` |
 | `cutmirror.py` | The mirror of `src/TemporalGuides.cpp`'s cut path (analysis grid, cell luma, global search, histogram overlap, per-cell match costs, both criteria, the debounce), shared by `analyze.py` and `cutlab.py` |
-| `cutlab.py` | Scores the cut criterion itself against the manifest's labelled cuts and sweeps it; needs no GPU, no worker and no render |
+| `cutlab.py` | Scores the cut criterion itself against the manifest's labelled cuts and sweeps it; `--ladder` scores the four Scene cuts rungs the player offers; needs no GPU, no worker and no render |
+| `duplab.py` | Scores `scene_cut::IsDuplicateDecodedPair` - frame generation's hold-a-repeat test - on corpus clips re-timed onto twos through libx264, against the real pairs of the same files and a small object crossing a still frame; needs no GPU |
 | `blind.py` | Randomized A/B stills + excerpts with a sealed `key.json`; every candidate frame is provably inside a manifest shot and each excerpt is clipped to that shot, so `--seconds` caps a length it does not guarantee; `--score` tallies a ballot |
 | `common.py` | Paths, `ffprobe`/`framemd5` helpers, NWR1 protocol v6 decoder (progress, result, preflight, segment; unknown kinds are skipped by payload length, so a helper that adds one stays readable) |
 | `build-upscaling/benchmark-corpus/` | Generated clips and `manifest.json` |
@@ -151,6 +154,12 @@ the decision is the fraction of failed cells rather than a mean residual. As of
 2026-09-14 the two families reach the identical best operating point, so nothing in
 `src/` uses the candidate; see `docs/BENCHMARK.md` for the measurement and why the
 shipped thresholds were left alone.
+
+`--ladder` scores the rungs of the player's **Scene cuts** setting
+(`cutmirror.LADDER`, the mirror of `ThresholdsFor` in `src/SceneCut.h`). Each rung
+moves one number of the default, and the table it prints - precision, recall,
+false positives, missed cuts, over-resets and every accepted reset per clip - is
+the evidence that rung was chosen on.
 
 ## Profiles and ablation
 

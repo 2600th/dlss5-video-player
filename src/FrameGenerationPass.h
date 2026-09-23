@@ -61,6 +61,16 @@ struct FrameGenerationRequest {
     // Default p5; the trade is measured beside EncoderSpec::nvencPreset in
     // MediaPipeline.h, and this pass is where it was measured end to end.
     uint32_t nvencPreset{5};
+    // Hold the older frame instead of emitting generated ones when a pair is the
+    // same picture twice - animation drawn on twos or threes, a telecine or capture
+    // repeat (scene_cut::IsDuplicateDecodedPair). Off by default, because on the
+    // runtime measured it buys nothing visible: real-game-motion re-timed onto twos
+    // and converted 2x on an RTX 4080 SUPER, the frame DLSS-G generated between two
+    // copies of one frame sat 0.025 of a code (mean absolute) from the held frame -
+    // the same distance NVENC puts between two encodes of that one frame - while the
+    // detector's error on real motion is a held pair where one was wanted
+    // (tools/benchmark/duplab.py). FrameGenerationSmoke's seventh argument runs it.
+    bool holdDuplicates{false};
 };
 
 struct FrameGenerationProgress {
@@ -95,6 +105,10 @@ struct FrameGenerationResult {
     // frames, not generated ones: each cut contributes multiplier-1 repeats and
     // therefore lowers generatedFrames without changing framesWritten.
     uint64_t sceneCuts{};
+    // Pairs held because they were duplicates (request.holdDuplicates). Like a cut,
+    // each contributes multiplier-1 held frames and no generated ones; unlike a cut,
+    // the evaluates still ran, so the runtime's history saw every frame.
+    uint64_t duplicateHolds{};
 };
 
 class FrameGenerationPass {

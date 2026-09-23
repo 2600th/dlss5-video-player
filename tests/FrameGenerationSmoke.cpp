@@ -64,7 +64,11 @@
 // audio track the carriage assertions need.
 //
 // Usage: FrameGenerationSmoke [source] [multiplier] [ffmpegBinDir] [output] [streamSource]
-//                              [expectedSceneCuts]
+//                              [expectedSceneCuts] [holdDuplicates]
+//
+// holdDuplicates (0 or 1, default 0) turns on FrameGenerationRequest::holdDuplicates,
+// for a clip drawn on twos: the accounting below then expects every held pair to
+// generate nothing, exactly as it expects of a cut.
 #include <windows.h>
 
 #include "FrameGenerationPass.h"
@@ -430,7 +434,7 @@ int wmain(int argc, wchar_t** argv)
     // more of them than there are: say what they are rather than silently
     // ignoring one, because a mistyped fifth argument is a run whose audio
     // came from somewhere other than the file the caller meant.
-    if (argc > 7) {
+    if (argc > 8) {
         std::wcerr << L"Usage: FrameGenerationSmoke [source] [multiplier] [ffmpegBinDir] [output] "
                       L"[streamSource]\n"
                       L"  streamSource: the file the audio, subtitles and chapters are expected from -\n"
@@ -455,6 +459,7 @@ int wmain(int argc, wchar_t** argv)
     // A clip whose cuts nobody counted still exercises the accounting invariant
     // below; only a clip built to hold a cut can prove the detector fires.
     const long expectedSceneCuts = argc > 6 ? std::wcstol(argv[6], nullptr, 10) : -1;
+    const bool holdDuplicates = argc > 7 && std::wcstol(argv[7], nullptr, 10) != 0;
     std::error_code directoryError;
     fs::create_directories(output.parent_path(), directoryError);
 
@@ -576,6 +581,7 @@ int wmain(int argc, wchar_t** argv)
         request.streamSource = streamSource;
         request.output = output;
         request.multiplier = multiplier;
+        request.holdDuplicates = holdDuplicates;
         // The file the carriage assertions are measured against: without a
         // stream source it is the file being converted - the synthesised copy
         // when the given clip was silent - and with one it is the stream
@@ -637,6 +643,8 @@ int wmain(int argc, wchar_t** argv)
                   << "framesWritten=" << result.framesWritten << "\n"
                   << "generatedFrames=" << result.generatedFrames << "\n"
                   << "sceneCuts=" << result.sceneCuts << "\n"
+                  << "holdDuplicates=" << (holdDuplicates ? "true" : "false") << "\n"
+                  << "duplicateHolds=" << result.duplicateHolds << "\n"
                   << "evaluations=" << result.evaluations << "\n"
                   << "progressReports=" << progressReports << "\n"
                   << "probedFrameCount=" << outputProbe.frameCount << "\n"
@@ -855,12 +863,17 @@ int wmain(int argc, wchar_t** argv)
             // one it did not count. (A decoder discontinuity would break it
             // too, which is correct: these clips are local lossless files that
             // do not produce one, so a discontinuity here is a defect.)
+            // A held repeat is the same situation: its pair generates nothing, and a
+            // pass that holds without the flag, or counts a hold it did not make, fails
+            // the identity the same way.
             const uint64_t pairs = latest.sourceFramesRead > 0 ? latest.sourceFramesRead - 1 : 0;
-            const uint64_t generating = result.sceneCuts <= pairs ? pairs - result.sceneCuts : 0;
+            const uint64_t refused = result.sceneCuts + result.duplicateHolds;
+            const uint64_t generating = refused <= pairs ? pairs - refused : 0;
             const uint64_t expectedGenerated =
                 effectiveMultiplier > 1 ? generating * (effectiveMultiplier - 1) : 0;
             const bool sceneCutAccountingHeld =
-                result.sceneCuts <= pairs && result.generatedFrames == expectedGenerated;
+                refused <= pairs && result.generatedFrames == expectedGenerated &&
+                (holdDuplicates || result.duplicateHolds == 0);
             // And, where the clip was built around a known edit, that the
             // detector found it. Without this a detector that never fires would
             // satisfy the identity above trivially.

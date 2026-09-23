@@ -1219,6 +1219,13 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"--gpu-source-conversion");
         arguments.emplace_back(L"1");
     }
+    // Absent means the defaults, so a default job's command line is the one this
+    // helper has always taken and an older helper still accepts it.
+    if (!request.temporal.IsDefault()) {
+        const std::string temporal = CanonicalTemporalSettings(request.temporal);
+        arguments.emplace_back(L"--temporal");
+        arguments.emplace_back(temporal.begin(), temporal.end());
+    }
     if (pauseEvent) {
         arguments.emplace_back(L"--pause-event");
         arguments.emplace_back(HandleText(pauseEvent));
@@ -1276,7 +1283,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
-               OutputWidth, OutputHeight, RequireNeural, ProcessingScale, KeyCount };
+               OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1286,7 +1293,9 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // Absent on every helper invocation that does not upscale, which keeps
         // an older helper binary compatible with a newer player for the jobs
         // that binary can actually do.
-        L"--output-width", L"--output-height", L"--require-neural", L"--processing-scale"};
+        L"--output-width", L"--output-height", L"--require-neural", L"--processing-scale",
+        // Absent at the defaults, for the same reason.
+        L"--temporal"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1411,6 +1420,12 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         if (!ParseUnsigned(*values[ProcessingScale], percent) || percent > UINT32_MAX ||
             !IsProcessingScaleRung(static_cast<uint32_t>(percent))) return std::nullopt;
         request.processingScale = static_cast<uint32_t>(percent);
+    }
+    if (values[Temporal]) {
+        const auto temporal = ParseTemporalSettings(
+            narrow_text::StrictAscii(*values[Temporal]).value_or(std::string{}));
+        if (!temporal) return std::nullopt;
+        request.temporal = *temporal;
     }
     if (values[GpuColorConversion]) {
         uint64_t enabled = 0;

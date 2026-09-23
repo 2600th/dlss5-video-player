@@ -161,6 +161,7 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
             ",\"end\":" + std::to_string(request.range.end100ns) + "}";
     json += ",\"prerollFrames\":" + std::to_string(request.prerollFrames);
     json += ",\"guides\":" + Quoted(CanonicalGuideControls(request.guides));
+    json += ",\"temporal\":" + Quoted(CanonicalTemporalSettings(request.temporal));
     json += ",\"frameRetryLimit\":" + std::to_string(request.frameRetryLimit);
     json += "}";
 

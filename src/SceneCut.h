@@ -4,7 +4,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <string_view>
 
 // The scene-cut criterion, as one place, for the two consumers that need the
 // same answer from different evidence.
@@ -77,11 +79,105 @@ inline constexpr double kHistogramOverlap = 0.85;  // luma distribution no longe
 // second reset where it used to produce one; no clip in the corpus does.
 inline constexpr double kMinSecondsBetweenCuts = 0.3;
 
+// The More and Less sensitive rungs of the Sensitivity ladder below. Each moves ONE
+// number of the default, on the evidence `tools/benchmark/cutlab.py --ladder` prints
+// (re-run 2026-09-23 over the thirteen clips corpus.py builds from a clean checkout:
+// the nine synthetic ones and the four real captures, 12 labelled hard cuts).
+//
+// The default itself does not move. The same sweep's best residual point is 0.40 /
+// 0.13 with no histogram gate, exactly as docs/BENCHMARK.md recorded it, and it is
+// rejected for the recorded reason: over all twenty clips, the seven camera-original
+// ones included, the shipped point takes 22 of 22 real cuts with no false positive,
+// so the synthetic clips are the only thing a new default could be tuned for.
+//
+//   * More sensitive lowers the strong arm to 0.18. That is the class the default
+//     cannot see: a cut between two shots that share a luma histogram (cuts-similar,
+//     residual 0.185-0.213 at overlap 0.88-0.98) - 12/12 cuts against 9/12. The
+//     fastest aligned pan in the corpus stays well under it (0.1252, cuts-motion
+//     frame 39; the camera-original pans were 0.10-0.13), and the price is one more
+//     reset on the adversarial flash clip: its return frame now fires the strong arm,
+//     which is never debounced.
+//   * Less sensitive raises the strong arm to 0.40, which moves every real cut in the
+//     corpus (0.217-0.397) onto the debounced weak arm. The frame-91 double reset on
+//     cuts-motion disappears and nothing labelled is lost at this corpus's spacing;
+//     the risk it takes is a genuine cut within 0.3 s of the previous one, which the
+//     debounce would now withhold. That is the trade someone asking for fewer resets
+//     is asking for.
+inline constexpr double kMoreSensitiveResidualStrong = 0.18;
+inline constexpr double kMoreSensitiveResidualWeak = kResidualWeak;
+inline constexpr double kMoreSensitiveHistogramOverlap = kHistogramOverlap;
+inline constexpr double kLessSensitiveResidualStrong = 0.40;
+inline constexpr double kLessSensitiveResidualWeak = kResidualWeak;
+inline constexpr double kLessSensitiveHistogramOverlap = kHistogramOverlap;
+
+// The three numbers one decision is taken against. The constants above are the
+// Default rung; the other rungs of the Sensitivity ladder below move them.
+struct Thresholds {
+    double residualStrong{kResidualStrong};
+    double residualWeak{kResidualWeak};
+    double histogramOverlap{kHistogramOverlap};
+
+    friend constexpr bool operator==(const Thresholds&, const Thresholds&) = default;
+};
+
+inline constexpr Strength Classify(double residual, double histogramOverlap,
+                                   const Thresholds& thresholds) noexcept
+{
+    if (residual > thresholds.residualStrong) return Strength::Residual;
+    if (residual > thresholds.residualWeak && histogramOverlap < thresholds.histogramOverlap)
+        return Strength::Histogram;
+    return Strength::None;
+}
+
 inline constexpr Strength Classify(double residual, double histogramOverlap) noexcept
 {
-    if (residual > kResidualStrong) return Strength::Residual;
-    if (residual > kResidualWeak && histogramOverlap < kHistogramOverlap) return Strength::Histogram;
-    return Strength::None;
+    return Classify(residual, histogramOverlap, Thresholds{});
+}
+
+// The user-facing ladder over the criterion above (P2.12). SVP users ask both for
+// more aggressive cut detection and for none at all, so one fixed point satisfies
+// nobody - but every rung is still a point from the same sweep, not a free slider:
+// `tools/benchmark/cutlab.py --ladder` scores all four against the labelled corpus,
+// and the numbers each rung was chosen on are recorded beside it.
+//
+// Off takes no cut from the picture at all. Declared resets - the first frame, a
+// seek, a dropped frame, a source change - still reset the history, because those
+// are facts about the timeline and not evidence to be tuned.
+enum class Sensitivity : uint8_t { Default, More, Less, Off };
+
+// nullopt for Off: there is no threshold that means "never", and a sentinel
+// (a residual above 1) would still classify on a corrupt measurement.
+inline constexpr std::optional<Thresholds> ThresholdsFor(Sensitivity sensitivity) noexcept
+{
+    switch (sensitivity) {
+    case Sensitivity::Default: return Thresholds{};
+    case Sensitivity::More: return Thresholds{kMoreSensitiveResidualStrong, kMoreSensitiveResidualWeak,
+                                              kMoreSensitiveHistogramOverlap};
+    case Sensitivity::Less: return Thresholds{kLessSensitiveResidualStrong, kLessSensitiveResidualWeak,
+                                              kLessSensitiveHistogramOverlap};
+    case Sensitivity::Off: break;
+    }
+    return std::nullopt;
+}
+
+// Canonical spelling for the worker argument, the cache-key term and the receipt.
+inline constexpr std::string_view SensitivityName(Sensitivity sensitivity) noexcept
+{
+    switch (sensitivity) {
+    case Sensitivity::Default: return "default";
+    case Sensitivity::More: return "more";
+    case Sensitivity::Less: return "less";
+    case Sensitivity::Off: return "off";
+    }
+    return "default";
+}
+
+inline constexpr std::optional<Sensitivity> ParseSensitivity(std::string_view text) noexcept
+{
+    for (const Sensitivity candidate :
+         {Sensitivity::Default, Sensitivity::More, Sensitivity::Less, Sensitivity::Off})
+        if (SensitivityName(candidate) == text) return candidate;
+    return std::nullopt;
 }
 
 inline uint32_t MinFramesBetweenCuts(double fps) noexcept
@@ -128,6 +224,14 @@ struct PairEvidence {
     // of a conversion whose geometry this function could not read.
     double residual = 0.0;
     double histogramOverlap = 1.0;
+    // Fraction of the samples whose luma moved by more than kDuplicateSampleChange.
+    // The duplicate test below needs it because a mean cannot see a small object: a
+    // 20 px ball crossing a still 1080p frame moves the mean by a fraction of a code.
+    double changedFraction = 0.0;
+    // False when nothing was sampled. The defaults above read as "identical", which
+    // is the safe answer for a cut test and the unsafe one for a duplicate test, so
+    // the duplicate test refuses an unmeasured pair instead of trusting them.
+    bool measured = false;
 };
 
 // At most this many samples per frame. The two quantities above are a mean and
@@ -136,6 +240,32 @@ struct PairEvidence {
 // sampling error is far under the margin between a pan and a cut. Cheap enough
 // that the frame-generation pass, which is bounded by its encoder, absorbs it.
 inline constexpr size_t kMaxPairSamples = 320 * 180;
+
+// A decoded pair that is the same picture twice: animation drawn on twos or threes,
+// a telecine repeat, a capture that duplicated a frame to hold its rate (P2.12).
+// Interpolating between two identical frames has nothing to interpolate, and what
+// frame generation hands back for such a pair is at best the frame again and at
+// worst a frame with the runtime's own artifacts in it; holding is exact.
+//
+// Near-exact rather than exact, because a lossy encode codes the repeat again and
+// its decode differs by grain-level noise. The numbers are set by
+// `tools/benchmark/duplab.py`, which re-encodes corpus clips on twos at a streaming
+// bitrate and measures them with this function's own sampling. Two tests, both
+// required, and on thirteen clips re-timed onto twos through libx264 CRF 23:
+//   * the mean luma change is under half an 8-bit code. The worst repeat measured
+//     0.31 of a code (fine-detail, a noise texture a codec cannot hold still) and
+//     the stillest real pair 0.37 (text-subtitles), so the margin is thin there
+//     and wide everywhere else - which is why this test does not stand alone;
+//   * at most one sample in 10,000 moved by more than 32 codes. Codec noise on a
+//     repeat never reached 32 codes on any clip; an object crossing a still frame
+//     does at every edge it moves. A mean cannot see such an object - a 64 px
+//     square stepping 8 px over a 1080p frame moves it by a fraction of a code.
+// Together: 768 of 768 repeats held, 8 of 755 real pairs held - at least seven of
+// them repeats already present in the demo capture - and 59 of 897 small-object
+// pairs held, against 894 with the mean alone.
+inline constexpr double kDuplicateResidual = 0.5 / 255.0;
+inline constexpr double kDuplicateSampleChange = 32.0 / 255.0;
+inline constexpr double kDuplicateChangedFraction = 1.0e-4;
 
 // Measures a decoded BGRA pair of the same geometry. Tightly packed rows.
 inline PairEvidence MeasureDecodedPair(std::span<const uint8_t> previous,
@@ -152,7 +282,7 @@ inline PairEvidence MeasureDecodedPair(std::span<const uint8_t> previous,
     while ((size_t(width / step + 1) * size_t(height / step + 1)) > kMaxPairSamples) ++step;
     std::array<float, kHistogramBins> ha{}, hb{};
     double sum = 0.0;
-    size_t samples = 0;
+    size_t samples = 0, changed = 0;
     for (uint32_t y = 0; y < height; y += step) {
         const uint8_t* rowA = previous.data() + size_t(y) * width * 4u;
         const uint8_t* rowB = current.data() + size_t(y) * width * 4u;
@@ -161,7 +291,9 @@ inline PairEvidence MeasureDecodedPair(std::span<const uint8_t> previous,
             const float b = LumaFromBgra(rowB + size_t(x) * 4u);
             ++ha[size_t(std::clamp(int(a * kHistogramBins), 0, kHistogramBins - 1))];
             ++hb[size_t(std::clamp(int(b * kHistogramBins), 0, kHistogramBins - 1))];
-            sum += std::abs(double(a) - double(b));
+            const double difference = std::abs(double(a) - double(b));
+            sum += difference;
+            changed += difference > kDuplicateSampleChange;
             ++samples;
         }
     }
@@ -170,6 +302,8 @@ inline PairEvidence MeasureDecodedPair(std::span<const uint8_t> previous,
     for (int i = 0; i < kHistogramBins; ++i) overlap += std::min(ha[size_t(i)], hb[size_t(i)]);
     evidence.residual = sum / double(samples);
     evidence.histogramOverlap = double(overlap) / double(samples);
+    evidence.changedFraction = double(changed) / double(samples);
+    evidence.measured = true;
     return evidence;
 }
 
@@ -193,6 +327,15 @@ inline PairEvidence MeasureDecodedPair(std::span<const uint8_t> previous,
 inline bool IsCutBetweenDecodedFrames(const PairEvidence& evidence) noexcept
 {
     return evidence.residual > kResidualWeak && evidence.histogramOverlap < kHistogramOverlap;
+}
+
+// See kDuplicateResidual. An unmeasured pair is never a duplicate: holding a frame
+// the pass could not read would freeze the picture on exactly the frames it knows
+// least about.
+inline bool IsDuplicateDecodedPair(const PairEvidence& evidence) noexcept
+{
+    return evidence.measured && evidence.residual < kDuplicateResidual &&
+           evidence.changedFraction <= kDuplicateChangedFraction;
 }
 
 } // namespace scene_cut

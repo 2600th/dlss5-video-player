@@ -35,6 +35,7 @@
 #include "PlatformPaths.h"
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
+#include "TemporalSettings.h"
 #include "AudioPlayer.h"
 #include "Localization.h"
 #include "AppMenu.h"
@@ -331,6 +332,8 @@ static constexpr int IDC_NS_CHAINED = 7310;
 static constexpr int IDC_NS_GUIDE_MV = 7311;
 static constexpr int IDC_NS_GUIDE_DEPTH = 7312;
 // 7313-7315 were the encoder controls, moved to their own dialog below.
+// The Temporal group (TemporalSettings.h).
+static constexpr int IDC_NS_SCENE_CUTS = 7340;
 static constexpr int IDC_NS_RESET = 7320;
 static constexpr int IDC_NS_APPLY = 7321;
 static constexpr int IDC_NS_CLOSE = 7322;
@@ -936,6 +939,7 @@ struct NeuralJobCompletion {
     // The settings and guides the render identity was built from.
     NeuralSettings settings;
     GuideControls guides;
+    TemporalSettings temporal;
     std::filesystem::path receiptPath;
 };
 
@@ -1454,6 +1458,8 @@ struct StageExportJob {
     std::filesystem::path helpers;
     uint32_t sourceWidth{},sourceHeight{};
     double fps{},duration{};
+    // FrameGenerationRequest::holdDuplicates for the frame-generation pass.
+    bool holdDuplicates{};
     // Whole for the dialog. A range reaches the worker pass only; frame
     // generation then reads that pass's carrier, which covers just the range.
     NeuralRenderRange range{};
@@ -1551,6 +1557,7 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
         request.output=stageTwo;
         request.multiplier=plan.multiplier;
         request.nvencPreset=job.nvencPreset;
+        request.holdDuplicates=job.holdDuplicates;
         const uint32_t generatePass=plan.workerStage?2u:1u;
         report({generatePass,passes,L"export.progress.pass_framegen",0,0});
         const FrameGenerationResult result=FrameGenerationPass(job.helpers).Run(request,stop,
@@ -2383,7 +2390,7 @@ private:
         if(!m_cachedPlayback||m_neuralPath.empty()||m_exportWorker.joinable())return;
         // The file on disk carries the settings it was rendered with. Saving it
         // after the user changed them would write something they never saw.
-        if(m_cachedSettings!=m_neuralSettings||m_cachedGuides!=m_renderGuides){
+        if(m_cachedSettings!=m_neuralSettings||m_cachedGuides!=m_renderGuides||m_cachedTemporal!=m_temporalSettings){
             const std::wstring message=T(L"export.settings_changed"),caption=T(L"app.title");
             if(MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_YESNO|MB_ICONQUESTION)==IDYES)RenderRangeOfCurrentSource(m_cachedRange);
             return;
@@ -2454,7 +2461,8 @@ private:
         // result - and turning the toggle off is how someone asks for the
         // original instead. `framegen.confirm.neural` says which file it is.
         if(m_cachedPlayback&&!m_neuralPath.empty()&&m_comparisonView==ComparisonView::Neural&&
-           CachedRangeCoversSource()&&m_cachedSettings==m_neuralSettings&&m_cachedGuides==m_renderGuides)
+           CachedRangeCoversSource()&&m_cachedSettings==m_neuralSettings&&m_cachedGuides==m_renderGuides&&
+           m_cachedTemporal==m_temporalSettings)
             return{m_neuralPath.wstring(),true};
         if(m_sourceKind==MediaSourceKind::LocalFile||m_cachedSourceFile)return{m_path,false};
         // A stream the cache already holds a complete copy of IS convertible,
@@ -2722,6 +2730,14 @@ private:
     // that lands unevenly. Off by default, because the unevenness it avoids is
     // one refresh period wide whatever the rate - see FrameRatePolicy.h - while
     // the step it refuses is halved.
+    // Off by default: measured on an RTX 4080 SUPER, the frames it replaces were
+    // already the held frame to within encoder noise (FrameGenerationRequest).
+    void SetHoldDuplicateFrames(bool enabled){
+        if(m_frameGenHoldDuplicates==enabled)return;
+        m_frameGenHoldDuplicates=enabled;
+        LOG("Hold repeated frames "<<(enabled?"on":"off")<<"; the next conversion uses it.");
+        SaveVideoSettings();SyncFeatureMenuState();
+    }
     void SetEvenCadenceOnly(bool enabled){
         if(m_evenCadenceOnly==enabled)return;
         m_evenCadenceOnly=enabled;
@@ -2993,6 +3009,7 @@ private:
         request.output=output;
         request.multiplier=plan.multiplier;
         request.nvencPreset=m_nvencPreset;
+        request.holdDuplicates=m_frameGenHoldDuplicates;
         m_frameGenProgress={};
         m_frameGenMultiplier=plan.multiplier;
         m_frameGenTargetFps=plan.targetFps;
@@ -3699,6 +3716,7 @@ private:
         // This setting opts back into the divides-the-refresh-or-nothing
         // behaviour the player shipped with.
         m_evenCadenceOnly=ReadIniFloat(L"Playback",L"EvenCadenceOnly",0.0f)!=0.0f;
+        m_frameGenHoldDuplicates=GetPrivateProfileIntW(L"FrameGeneration",L"HoldDuplicates",0,SettingsPath().c_str())!=0;
         const uint32_t storedTarget=uint32_t(ReadIniFloat(L"Playback",L"UpscaleHeight",1440.0f));
         if(UpscaleRungWidth(storedTarget))m_upscaleTargetHeight=storedTarget;
         const float quality=ReadIniFloat(L"Playback",L"YouTubeQuality",0.0f);
@@ -3713,6 +3731,14 @@ private:
         m_colorSettings.tint=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Tint",0.0f),-1.0f,1.0f);
         m_renderGuides.motionVectors=GetPrivateProfileIntW(L"NeuralGuides",L"MotionVectors",1,SettingsPath().c_str())!=0;
         m_renderGuides.depth=GetPrivateProfileIntW(L"NeuralGuides",L"Depth",1,SettingsPath().c_str())!=0;
+        {
+            // Stored by name, so an unknown or absent value is the default rung rather
+            // than whatever an index happens to point at in a later build.
+            wchar_t cuts[32]{};
+            GetPrivateProfileStringW(L"Temporal",L"SceneCuts",L"default",cuts,static_cast<DWORD>(std::size(cuts)),SettingsPath().c_str());
+            m_temporalSettings.sceneCuts=scene_cut::ParseSensitivity(WideToUtf8(cuts)).value_or(scene_cut::Sensitivity::Default);
+            m_guides.SetSceneCutSensitivity(m_temporalSettings.sceneCuts);
+        }
         m_gpuColorConversion=GetPrivateProfileIntW(L"Encoding",L"GpuColorConversion",0,SettingsPath().c_str())!=0;
         m_gpuSourceConversion=GetPrivateProfileIntW(L"Encoding",L"GpuSourceConversion",0,SettingsPath().c_str())!=0;
         m_nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,SettingsPath().c_str())),1,7);
@@ -3866,6 +3892,7 @@ private:
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
         WriteIniFloat(L"Playback",L"FrameGenerationGenerated",static_cast<float>(m_frameGenPreference));
         WriteIniFloat(L"Playback",L"EvenCadenceOnly",m_evenCadenceOnly?1.0f:0.0f);
+        WritePrivateProfileStringW(L"FrameGeneration",L"HoldDuplicates",m_frameGenHoldDuplicates?L"1":L"0",SettingsPath().c_str());
         WriteIniFloat(L"Playback",L"YouTubeQuality",static_cast<float>(m_youtubeSourceQuality));
         WriteIniFloat(L"VideoAdjustments",L"Brightness",m_colorSettings.brightness);
         WriteIniFloat(L"VideoAdjustments",L"Contrast",m_colorSettings.contrast);
@@ -3878,6 +3905,7 @@ private:
         WriteIniFloat(L"VideoAdjustments",L"NeuralStrength",m_comparison.strength);
         WritePrivateProfileStringW(L"NeuralGuides",L"MotionVectors",m_renderGuides.motionVectors?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"NeuralGuides",L"Depth",m_renderGuides.depth?L"1":L"0",SettingsPath().c_str());
+        WritePrivateProfileStringW(L"Temporal",L"SceneCuts",Utf8ToWide(std::string(scene_cut::SensitivityName(m_temporalSettings.sceneCuts))).c_str(),SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuSourceConversion",m_gpuSourceConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"NvencPreset",std::to_wstring(m_nvencPreset).c_str(),SettingsPath().c_str());
@@ -4425,6 +4453,8 @@ private:
             // this is a constraint on the multiple, not one of the choices.
             CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
                           MF_BYCOMMAND|(m_evenCadenceOnly?MF_CHECKED:MF_UNCHECKED));
+            CheckMenuItem(menu,IDM_FRAMEGEN_HOLD_DUPLICATES,
+                          MF_BYCOMMAND|(m_frameGenHoldDuplicates?MF_CHECKED:MF_UNCHECKED));
             const UINT outputState=(m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())?MF_GRAYED:MF_ENABLED;
             for(const UINT item:{IDM_UPSCALE_AUTO,IDM_UPSCALE_1080,IDM_UPSCALE_1440,IDM_UPSCALE_2160})
                 EnableMenuItem(menu,item,MF_BYCOMMAND|outputState);
@@ -4801,6 +4831,8 @@ private:
         // The combo lists 1..4 and the setting IS the pass count, so the
         // index is one below it.
         select(IDC_NS_PASSES,std::clamp(m_neuralSettings.passes,1,4)-1);
+        // The combo lists the rungs in the enum's own order, so the index IS the rung.
+        select(IDC_NS_SCENE_CUTS,static_cast<int>(m_temporalSettings.sceneCuts));
         const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         check(IDC_NS_CHAINED,m_neuralSettings.chainedHistory);
@@ -4824,7 +4856,9 @@ private:
         m_neuralSettings.chainedHistory=checked(IDC_NS_CHAINED);
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
-        if(guides!=m_renderGuides){m_renderGuides=guides;ApplyLiveGuideControls();}
+        TemporalSettings temporal=m_temporalSettings;
+        temporal.sceneCuts=static_cast<scene_cut::Sensitivity>(std::clamp(sel(IDC_NS_SCENE_CUTS,static_cast<int>(temporal.sceneCuts)),0,3));
+        if(guides!=m_renderGuides||temporal!=m_temporalSettings){m_renderGuides=guides;m_temporalSettings=temporal;ApplyLiveGuideControls();}
         UpdateNeuralSettingValueLabels(h);
         // Sliders fire continuously; the preview waits for them to settle.
         SchedulePausedSettingsPreview();
@@ -4832,7 +4866,7 @@ private:
 
     // The persisted guide switches also drive the live (non-cached) guide
     // generator so the debug views reflect them without a re-render.
-    void ApplyLiveGuideControls(){m_guides.SetControls(m_renderGuides);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
+    void ApplyLiveGuideControls(){m_guides.SetControls(m_renderGuides);m_guides.SetSceneCutSensitivity(m_temporalSettings.sceneCuts);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
 
     void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr){
         HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16,y,116,20);
@@ -4880,16 +4914,26 @@ private:
         CreateSettingsGroupHeading(h,L"neural.settings.group_guides",424);
         CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,452,116,L"neural.tip.guide_mv");
         CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,452,80,L"neural.tip.guide_depth");
-        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,492,418,38,0,DialogAnchor::StretchNote);
-        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,120,538,86,30);
-        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,216,538,122,30,true);
-        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,348,538,86,30);
+        // What the render does across time rather than to one frame: when a cut
+        // resets the history. A ladder, not a slider - every rung is a measured
+        // point (SceneCut.h), and Default is the one labelled recommended.
+        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",492);
+        {
+            const std::wstring cuts[]={T(L"neural.scene_cuts.default"),T(L"neural.scene_cuts.more"),
+                                       T(L"neural.scene_cuts.less"),T(L"neural.scene_cuts.off")};
+            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",522,
+                              {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts");
+        }
+        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,562,418,38,0,DialogAnchor::StretchNote);
+        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,120,608,86,30);
+        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,216,608,122,30,true);
+        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,348,608,86,30);
         AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
         SyncNeuralSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kNeuralDesignW=466,kNeuralDesignH=622;
+    static constexpr int kNeuralDesignW=466,kNeuralDesignH=692;
 
     // Like a preset: the next render takes it, a paused frame re-previews with
     // it, and a render already running finishes at the scale it started with.
@@ -4943,7 +4987,7 @@ private:
     // preview flag, not that comparison, is what says the picture is current.
     bool SettingsAheadOfRender()const{
         return m_cachedPlayback&&!m_liveSession&&!m_previewShown&&
-               (m_cachedSettings!=m_neuralSettings||m_cachedGuides!=m_renderGuides);
+               (m_cachedSettings!=m_neuralSettings||m_cachedGuides!=m_renderGuides||m_cachedTemporal!=m_temporalSettings);
     }
     // Raised from the paths that cannot preview, cleared when the picture catches
     // up - by a preview or by the settings coming back to what rendered it - and
@@ -5000,7 +5044,7 @@ private:
         case WM_SIZE:ResizeSettingsChildren(h,kNeuralDesignW,kNeuralDesignH);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
+            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
             // Every combo and box the dialog builds has to be named here or it
@@ -5008,7 +5052,7 @@ private:
             // it back, and the setting the user thinks they picked never
             // reaches the render. Adding a control without adding it to this
             // line is the one mistake this dialog invites, and it is silent.
-            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES)&&code==CBN_SELCHANGE)||
+            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS)&&code==CBN_SELCHANGE)||
                ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
         }
@@ -5270,6 +5314,7 @@ private:
         job.sourceWidth=m_decoder.Width();job.sourceHeight=m_decoder.Height();
         job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
         job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
+        job.holdDuplicates=m_frameGenHoldDuplicates;
         HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{
             m_exportWorker=std::jthread([=](std::stop_token stop){
@@ -5405,7 +5450,7 @@ private:
         // a settings preview still settling, or a neural toggle pressed during
         // a seek, would otherwise fire on the next file's first seek.
         CancelPausedSettingsPreview();m_previewShown=false;m_neuralToggleDeferred=false;m_livePaceConfirmedKey.clear();
-        m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_decodeNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;m_gesture={};m_peekOriginal=false;m_dragMix=false;m_middlePan=false;m_renderTracking=false;
+        m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_decodeNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_cachedTemporal={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;m_gesture={};m_peekOriginal=false;m_dragMix=false;m_middlePan=false;m_renderTracking=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_nextPairFrame.reset();m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
         m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();m_sourceCache.reset();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
@@ -5527,6 +5572,7 @@ private:
                 candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
                 GuideFrame guide;
                 candidate->guides.SetControls(m_guides.Controls());
+                candidate->guides.SetSceneCutSensitivity(m_guides.SceneCutSensitivity());
                 // The frame says which layout it is in. Playback opens NV12 for
                 // any even-dimension BT.709-limited source, which is most of
                 // them, so taking the Bgra default here read past the end of
@@ -7710,7 +7756,8 @@ private:
     // same neural settings, same guides. Anything else and the frames on disk
     // are not the frames the user would get now.
     std::string LiveRetentionKey()const{
-        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettings(m_neuralSettings)+"|"+CanonicalGuideControls(m_renderGuides);
+        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettings(m_neuralSettings)+"|"+CanonicalGuideControls(m_renderGuides)+
+               "|"+CanonicalTemporalSettings(m_temporalSettings);
     }
     // Deletes the segment files a published run retired (ReplaceRun), except
     // one a live decoder still has open or is opening: that one goes on a later
@@ -7969,7 +8016,7 @@ private:
             m_neuralPath=live_session::ExportableEntry(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns},
                                                        CoverageSpan{completion.range.start100ns,completion.range.end100ns},LiveFrame100ns())
                 ?completion.neuralPath:std::filesystem::path{};
-            m_cachedReceiptPath=completion.receiptPath;m_cachedSettings=completion.settings;m_cachedGuides=completion.guides;
+            m_cachedReceiptPath=completion.receiptPath;m_cachedSettings=completion.settings;m_cachedGuides=completion.guides;m_cachedTemporal=completion.temporal;
             LOG("Active neural session rendered "<<completion.result.frameCount<<" frames and published its cache entry; save="<<(m_cachedPlayback&&!m_neuralPath.empty()&&!m_exportWorker.joinable()&&!ActivityBusy())<<" wholeRange="<<!m_neuralPath.empty()<<" entry="<<(completion.neuralPath.empty()?std::string("(none)"):WideToUtf8(completion.neuralPath.wstring())));
         }else{
             TransitionToFailure(completion.result.failure);NoteNeuralFailure(completion);
@@ -8019,7 +8066,7 @@ private:
         if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         const VideoFrame frame=*m_synchronizedPlayback.VisibleFrame();
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
-        m_cachedPlayback=true;m_cachedRange=m_liveRange;m_cachedSettings=m_neuralSettings;m_cachedGuides=m_renderGuides;m_cachedReceiptPath.clear();m_neuralPath.clear();
+        m_cachedPlayback=true;m_cachedRange=m_liveRange;m_cachedSettings=m_neuralSettings;m_cachedGuides=m_renderGuides;m_cachedTemporal=m_temporalSettings;m_cachedReceiptPath.clear();m_neuralPath.clear();
         if(!RenderVideoFrame(frame,true)){LOG("Active neural playback could not present its first pair.");m_synchronizedPlayback.Close();m_cachedPlayback=false;m_comparisonView=ComparisonView::Original;return false;}
         RememberRenderedCachedPair();m_cachedPresentedFrames=1;m_currentSec=double(frame.timestamp100ns)*1e-7;m_guideReset=false;m_dlssReset=false;
         if(Audio().Start(m_path,m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!wasPlaying);}
@@ -8511,7 +8558,7 @@ private:
         const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
         SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         try{
-            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const std::wstring driverVersion=m_opt.detectedGpu.driverVersion;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;const bool gpuColorConversion=m_gpuColorConversion;const bool gpuSourceConversion=m_gpuSourceConversion;const uint32_t nvencPreset=m_nvencPreset;const uint32_t processingScale=m_processingScale;
+            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const std::wstring driverVersion=m_opt.detectedGpu.driverVersion;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const TemporalSettings temporal=m_temporalSettings;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;const bool gpuColorConversion=m_gpuColorConversion;const bool gpuSourceConversion=m_gpuSourceConversion;const uint32_t nvencPreset=m_nvencPreset;const uint32_t processingScale=m_processingScale;
             // The background acquisition of this very source, when one is in
             // flight: the job waits for it rather than downloading again.
             const std::shared_ptr<SourcePrefetchState> prefetch=(sourceKind==MediaSourceKind::YouTube&&!pageUrl.empty()&&pageUrl==m_prefetchPageUrl)?m_prefetchState:nullptr;
@@ -8560,7 +8607,7 @@ private:
             // neural frame reaches the screen.
             m_coldStart=std::make_shared<NeuralColdStartRecord>();
             const std::shared_ptr<NeuralColdStartRecord> coldStart=m_coldStart;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset,processingScale,sourceDigestMemo=m_sourceDigestMemo](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,temporal,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset,processingScale,sourceDigestMemo=m_sourceDigestMemo](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 // Set the moment the job knows its local source; every progress
@@ -8675,7 +8722,7 @@ private:
                     // model is shown rather than how the result is encoded.
                     const auto modelStore=ResolveNeuralModelStore(driverVersion,stop);
                     LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest);
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion)+ProcessingScaleIdentityTerm(processingScale)+UntaggedColorIdentityTerm(untaggedBt709),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
+                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion)+ProcessingScaleIdentityTerm(processingScale)+UntaggedColorIdentityTerm(untaggedBt709)+TemporalPipelineTerm(temporal),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;completion->temporal=temporal;
                     LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
                     if(const auto cached=cache.LookupRender(renderKey,stop)){
                         // LookupRender already verifies the full payload hash and
@@ -8774,7 +8821,7 @@ private:
                     }
                     const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=cacheFailureText.Describe(cache);goto finish;}
                     {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
-                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.firstSegmentFrames=liveIndex?firstSegmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;request.processingScale=processingScale;
+                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.temporal=temporal;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.firstSegmentFrames=liveIndex?firstSegmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;request.processingScale=processingScale;
                     NeuralRenderReceiptInputs receipt{preflightJson,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
                     NeuralSegmentSink sink{};
                     if(liveIndex){
@@ -8947,7 +8994,7 @@ private:
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         const VideoFrame first=*m_synchronizedPlayback.VisibleFrame();if(!RenderVideoFrame(first,true)){Unload();return false;}
         NoteNeuralFramePresented();
-        m_neuralPath=completion.neuralPath;m_cachedRange=completion.range;m_cachedReceiptPath=completion.receiptPath;m_cachedSettings=completion.settings;m_cachedGuides=completion.guides;m_currentSec=double(first.timestamp100ns)*1e-7;m_haveNext=false;m_cachedPlayback=true;m_comparisonView=desiredView;m_cachedPresentedFrames=1;RememberRenderedCachedPair();
+        m_neuralPath=completion.neuralPath;m_cachedRange=completion.range;m_cachedReceiptPath=completion.receiptPath;m_cachedSettings=completion.settings;m_cachedGuides=completion.guides;m_cachedTemporal=completion.temporal;m_currentSec=double(first.timestamp100ns)*1e-7;m_haveNext=false;m_cachedPlayback=true;m_comparisonView=desiredView;m_cachedPresentedFrames=1;RememberRenderedCachedPair();
         if(!m_decoder.IsStillImage())m_audio.Start(completion.sourcePath.wstring(),m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_synchronizedPlayback.SetPaused(m_decoder.IsStillImage());m_playStartSec=m_currentSec;m_playStart=Clock::now();
         m_loaded=true;m_path=completion.sourcePath.wstring();m_sourceKind=completion.sourceKind;m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;m_displayTitle=DisplayTitleForSource(completion.sourceKind,completion.displayTitle);if(m_displayTitle.empty())m_displayTitle=completion.sourcePath.stem().wstring();
         m_droppedFrames=0;m_presentStride=1;m_presentPhase=0;m_cadenceReanchors=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;m_guideReset=false;m_dlssReset=false;
@@ -9248,7 +9295,7 @@ private:
         m_synchronizedPlayback.Close();
         m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;
         ForgetRenderedCachedPair();m_cachedRange={};m_cachedReceiptPath.clear();
-        m_cachedSettings={};m_cachedGuides={};m_neuralPath.clear();m_markers={};
+        m_cachedSettings={};m_cachedGuides={};m_cachedTemporal={};m_neuralPath.clear();m_markers={};
         const std::wstring source=std::move(completion.result.mediaUrl),audioSource=std::move(completion.result.audioUrl),pageUrl=std::move(completion.pageUrl),title=std::move(completion.displayTitle);const bool shouldPlay=completion.commitKind==NetworkCommitKind::InitialOpen?true:completion.resumeAfterSeek;HWND oldRenderWindow=nullptr;D3D12RendererOwner oldRenderer;std::unique_ptr<AudioPlayer> oldNetworkAudio;
         const bool viewportWasVisible=IsWindowVisible(m_viewport)!=FALSE;
         const bool committed=CommitPreparedAudioHandoff(
@@ -9455,6 +9502,7 @@ private:
             if(!CachedRangeCoversSource())text+=L" \u00b7 Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);
             if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;
             text+=L" \u00b7 "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);
+            if(!m_cachedTemporal.IsDefault())text+=L"/"+Utf8ToWide(CanonicalTemporalSettings(m_cachedTemporal));
             if(m_liveSession)text=LiveSessionStatusText()+L" \u00b7 "+text;
             if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;
             if(const std::wstring dropped=m_dropNote.Visible(m_loaded,m_path);!dropped.empty())text=dropped+L" \u00b7 "+text;
@@ -9891,6 +9939,7 @@ private:
         case IDM_FRAMEGEN_5X:SetFrameGenerationPreference(4);break;
         case IDM_FRAMEGEN_MAX:SetFrameGenerationPreference(0);break;
         case IDM_FRAMEGEN_EVEN_ONLY:SetEvenCadenceOnly(!m_evenCadenceOnly);break;
+        case IDM_FRAMEGEN_HOLD_DUPLICATES:SetHoldDuplicateFrames(!m_frameGenHoldDuplicates);break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
         case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:SetAspect(false,false);break;case IDM_ASPECT_FILL:SetAspect(true,false);break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
         case IDM_MARK_IN:SetMarker(true,Position100ns());break;case IDM_MARK_OUT:SetMarker(false,Position100ns());break;case IDM_CLEAR_MARKS:ClearMarkers();break;case IDM_GOTO_TIMECODE:ShowTimecodeDialog();break;
@@ -9954,6 +10003,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // Generate only when the rate divides the display's refresh. Off: see
     // SetEvenCadenceOnly and FrameRatePolicy.h for why that is the default.
     bool m_evenCadenceOnly=false;
+    bool m_frameGenHoldDuplicates=false;
     Clock::time_point m_frameGenStarted{};
     // When the current pair first came back NotReady, or the epoch when one is
     // assembling normally, beside when this was last asked for a pair at all.
@@ -10153,6 +10203,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     GuideFrame m_guideFrame;
     // Read when a job starts; changing them only affects the next render.
     GuideControls m_renderGuides;
+    // The render's temporal choices (TemporalSettings.h); cache-key terms like the guides.
+    TemporalSettings m_temporalSettings;
     // Capture conversion: NV12 converted on the GPU, or BGRA converted by ffmpeg on
     // the CPU. Not part of NeuralSettings, because it changes how a frame is encoded
     // and not what the model is asked for, so it stays out of the cache key.
@@ -10228,6 +10280,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // Settings the playing cache entry was rendered with (its receipt has the full record).
     NeuralSettings m_cachedSettings;
     GuideControls m_cachedGuides;
+    TemporalSettings m_cachedTemporal;
     // Range of the playing cache entry (Whole() for full renders) and its
     // receipt.json beside the payload (empty when the entry has none).
     NeuralRenderRange m_cachedRange;

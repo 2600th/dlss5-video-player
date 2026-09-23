@@ -245,9 +245,10 @@ the fourth pane's Mix are remembered in `[Comparison]`.
 
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
 local structure, local tone, skin structure, style and automatic mask, the
-number of neural passes and whether temporal history carries between them, plus
-the motion-vector and depth guide switches. The controls are grouped under
-**Look**, **Quality and render time** and **Guides sent to the model**, so which
+number of neural passes and whether temporal history carries between them, the
+motion-vector and depth guide switches, and how readily a scene cut resets the
+render's temporal history. The controls are grouped under **Look**, **Quality and
+render time**, **Guides sent to the model** and **Across frames**, so which
 ones answer the same question is visible before you read their labels. These change
 the render identity: **Apply** restarts an active session at the playhead, or
 re-previews the paused frame, while playback image adjustments remain instant.
@@ -276,6 +277,18 @@ A rung is part of the render identity, so a render made at 50% is never served
 for 100%. It applies to renders at the source size: live and cached playback,
 and an export with Neural rendering but not Super Resolution. An export that
 upscales runs the model on the upscaled frame whatever this says.
+
+**Scene cuts** is a ladder of four measured points rather than a slider. **Default
+(recommended)** is the criterion the player has always used: over the twenty-clip
+benchmark corpus it found all 22 labelled cuts in real footage with no false
+alarm. **More sensitive** also catches a cut between two shots that share a
+brightness distribution, which Default cannot see, at the price of one more reset
+on a camera flash. **Less sensitive** resets less often - it removes a double
+reset the corpus shows one frame after a cut - and can miss a second cut that
+follows the first within 0.3 s. **Off** never resets on the picture; seeks,
+dropped frames and a new source still do. Each rung renders its own cache entry.
+`python tools/benchmark/cutlab.py --ladder` prints what each rung does on the
+labelled corpus.
 
 Color strength and the render preset are deliberately not in that dialog. Each
 was measured against the pinned runtime and changes nothing - the add-on echoes
@@ -531,6 +544,16 @@ higher one that does not. 30 fps becomes 60 on a 60 Hz panel and 120 at 4x on a
 120 Hz panel; 24 fps film becomes 120 at 5x on a 120 Hz panel, and 48 on a 60 Hz
 one - held for 1 or 2 refreshes, which is the cadence the film was already shown
 with, at half the step. The confirmation says so when it applies.
+
+**Hold repeated frames (animation on twos)**, in the same submenu, is for
+animation drawn on twos or threes, where every drawing is shown for two or three
+frames. With it on, a pair of source frames that is the same picture twice - up
+to codec noise - is not generated between: the frame is held for those slots,
+which is exact, instead of whatever the runtime makes between two copies of one
+image. It is off by default: measured on an RTX 4080 SUPER, the frame the runtime
+generates between two copies of one frame is already that frame to within the
+encoder's own noise, so holding changes nothing visible there, while the detector
+(`tools/benchmark/duplab.py`) can still hold a pair a small object moves in.
 
 **Even cadence only** generates nothing unless the rate divides the refresh. A
 source already at the refresh, a panel that cannot double the source, a still

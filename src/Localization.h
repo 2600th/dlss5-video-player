@@ -69,6 +69,7 @@ private:
             // A checkbox under the multiples. Off by default; FrameRatePolicy.h
             // carries the measurement that made it a setting instead of a rule.
             {L"menu.framegen_even_only", L"Even cadence only"},
+            {L"menu.framegen_hold_duplicates", L"Hold repeated frames (animation on twos)"},
             {L"framegen.refusal.preference", L"This display cannot show %u\u00d7 this video's frame rate evenly, but it can show %u\u00d7.\n\nRaise DLSS > Generated frames to convert it."},
             {L"framegen.refusal.preference.short", L"set to %u\u00d7, needs %u\u00d7"},
             // Frame generation names ONE feature on every surface. Before this
@@ -297,6 +298,10 @@ private:
             {L"neural.settings.group_look", L"Look"},
             {L"neural.settings.group_cost", L"Quality and render time"},
             {L"neural.settings.group_guides", L"Guides sent to the model"},
+            {L"neural.settings.group_temporal", L"Across frames"},
+            {L"neural.settings.scene_cuts", L"Scene cuts"},
+            {L"neural.scene_cuts.default", L"Default (recommended)"}, {L"neural.scene_cuts.more", L"More sensitive"},
+            {L"neural.scene_cuts.less", L"Less sensitive"}, {L"neural.scene_cuts.off", L"Off"},
             {L"neural.settings.note", L"These change the neural model: they apply to the paused preview and to the next conversion; playback color adjustments are instant."},
             {L"neural.settings.ahead", L"Settings changed - this is the previous render; pause to preview them, or convert again"},
             {L"encoder.settings.title", L"Encoder settings"},
@@ -319,6 +324,7 @@ private:
             {L"encoder.tip.nvenc_preset", L"Speed/quality preset for the hevc_nvenc encoder that writes neural renders and frame-generation conversions. p5 is the default. Measured at 2560x1440 on an RTX 5090: p7 takes twice the encode time of p5 and buys 0.12 VMAF on ordinary content, 0.53 on noise-heavy content, at 95-98 VMAF. The encoder is the long pole on both paths, so whole conversions ran 8.8 s against 6.3 s. Applies to the next render."},
             {L"neural.tip.guide_mv", L"Sends this player's estimated motion to the model so it can reuse the previous frame.\nVideo carries no real motion vectors, so these are estimated per frame and rejected where the estimate is not trustworthy."},
             {L"neural.tip.guide_depth", L"Sends this player's estimated depth proxy.\nMeasured: it only changes the image while Motion vectors is on - with motion off, depth makes no difference."},
+            {L"neural.tip.scene_cuts", L"How readily a cut in the video starts the model's temporal history over.\nDefault found every one of 22 labelled cuts in real footage with no false alarm. More sensitive also catches cuts between similar-looking shots, at the price of an extra reset on flashes; Less sensitive resets less often and can miss a second cut that follows within 0.3 s. Off never resets on the picture - only seeks and dropped frames do.\nChanging it renders again."},
             {L"neural.tip.apply", L"Applies these settings to what is on screen: an active session restarts at the playhead, a paused frame is rendered again.\nEvery distinct combination is rendered from scratch - about 10 s for one 1080p frame - and repeats come back from cache."},
             {L"neural.tip.passes", L"Runs the model over each frame more than once.\nThe add-on warns games away from this because every extra pass is another full neural evaluate against a frame budget; a conversion has no frame budget, so the cost lands on render time instead.\nMeasured on the 72-frame range clip: two passes took 9.81 s against 8.01 s and wrote 932,019 bytes against 780,048."},
             {L"neural.tip.chained", L"Gives every stacked pass its own temporal history, reset only on a scene cut.\nTurning it off makes passes 2 and up stateless - NVIDIA documents a per-frame reset as a flicker and aliasing risk, so this is an A/B switch for suspected ghosting rather than a setting to leave off.\nNo effect at one pass."},

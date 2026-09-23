@@ -81,6 +81,9 @@ inline constexpr UINT IDM_FRAMEGEN_MAX = 344;
 inline constexpr UINT IDM_FRAMEGEN_EVEN_ONLY = 345;
 // Fit, Fill and 1:1 pixels are one radio group by POSITION (see CheckRadioCommand):
 // 1:1 sits under Fill in the menu with an id past the two that were already taken.
+// Hold a repeated frame instead of generating between two copies of it
+// (FrameGenerationRequest::holdDuplicates). A toggle beside Even cadence only.
+inline constexpr UINT IDM_FRAMEGEN_HOLD_DUPLICATES = 346;
 inline constexpr UINT IDM_ASPECT_FIT = 400;
 inline constexpr UINT IDM_ASPECT_FILL = 401;
 inline constexpr UINT IDM_ASPECT_ONE_TO_ONE = 404;

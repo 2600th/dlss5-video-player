@@ -569,7 +569,10 @@ bool TemporalGuideGenerator::Generate(const uint8_t* pixels, size_t pixelBytes,
         // Judge cuts on correspondence quality plus histogram overlap, so fast
         // camera pans are not mistaken for cuts and real cuts never keep history.
         histogramOverlap = LumaHistogramIntersection(cur, reference);
-        cutStrength = ClassifySceneCut(globalCost, histogramOverlap);
+        // The evidence is measured and reported whatever the rung; only the verdict
+        // depends on it, and Off has no thresholds to reach a verdict with.
+        if (const auto thresholds = scene_cut::ThresholdsFor(m_cutSensitivity))
+            cutStrength = scene_cut::Classify(globalCost, histogramOverlap, *thresholds);
         // The weak arm alone is not worth a history wipe this soon after the last one: a
         // burst of near-threshold frames inside one transition would otherwise reset DLSS
         // repeatedly, which is exactly the artifact S3.13 warns about. A Residual-strength

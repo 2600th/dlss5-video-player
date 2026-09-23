@@ -233,6 +233,9 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     // A constraint on the multiple, not a choice of one: with it on, nothing is
     // generated unless the generated rate divides the display's refresh.
     add(framegenMultiple, IDM_FRAMEGEN_EVEN_ONLY, L"menu.framegen_even_only");
+    // Also a constraint rather than a multiple: which source pairs are generated
+    // between at all. For animation drawn on twos and threes.
+    add(framegenMultiple, IDM_FRAMEGEN_HOLD_DUPLICATES, L"menu.framegen_hold_duplicates");
     AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(framegenMultiple),
                 localizer.Get(L"menu.framegen_multiple").c_str());
     AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);

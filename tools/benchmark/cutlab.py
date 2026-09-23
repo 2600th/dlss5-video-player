@@ -12,12 +12,16 @@ land on, ``soft_cuts`` are gradual transitions where one reset is tolerated and 
 inside the same transition is not, and a clip with neither must never reset at all.
 
     python tools/benchmark/cutlab.py [--corpus DIR] [--cache DIR] [--clips NAME ...]
-                                     [--sweep] [--debounce S ...] [--json OUT]
+                                     [--sweep] [--ladder] [--debounce S ...] [--json OUT]
 
 Cell features are expensive to extract and independent of every threshold, so they are
 cached under ``--cache`` (default ``<corpus>/cutlab-cache``) keyed by the clip's frame
 digest; a sweep after the first run costs nothing but the replay. ``--cache`` exists
 because a shared labelled corpus is often mounted read-only.
+
+``--ladder`` scores the four rungs of the player's Scene cuts setting (Default, More
+sensitive, Less sensitive, Off - ``cutmirror.LADDER``, the mirror of ``src/SceneCut.h``)
+over the same labelled set, which is the evidence each rung was chosen on.
 
 ``--debounce`` sweeps the minimum-interval window instead of the thresholds. The window
 is the one decision a threshold sweep cannot reach: it adjudicates only weak-arm fires
@@ -247,6 +251,7 @@ def main() -> int:
     parser.add_argument("--clips", nargs="*", help="clip names; default every clip in the manifest")
     parser.add_argument("--cache", type=Path, help="feature cache; default <corpus>/cutlab-cache")
     parser.add_argument("--sweep", action="store_true", help="also sweep both criteria over the labelled set")
+    parser.add_argument("--ladder", action="store_true", help="also score the player's Scene cuts rungs")
     parser.add_argument("--debounce", type=float, nargs="*", metavar="SECONDS",
                         help="sweep the minimum-interval window instead of the thresholds; "
                              "omit the values for a default bracket around the shipped one")
@@ -313,6 +318,20 @@ def main() -> int:
             lines.append(f"| {kind} | {len(ranked)} | {len(clean)} | {fmt(fewest)} | "
                          f"{fmt(max((r['pooled']['f1'] or 0.0) for r in ranked))} |")
 
+    ladder: list[dict] = []
+    if args.ladder:
+        ladder = [dict(rung=rung, **evaluate(clips, features, cm.ladder_criterion(rung)))
+                  for rung in cm.LADDER]
+        lines += ["", "## The Scene cuts ladder", "",
+                  "| rung | criterion | P | R | F1 | FP | missed | multi | resets per clip |",
+                  "|---|---|---:|---:|---:|---:|---:|---:|---|"]
+        for result in ladder:
+            p = result["pooled"]
+            fired = "; ".join(f"{v['clip']} {v['fired']}" for v in result["verdicts"] if v["fired"]) or "none"
+            lines.append(f"| {result['rung']} | {result['criterion'].replace('|', '/')} | {fmt(p['precision'])} | "
+                         f"{fmt(p['recall'])} | {fmt(p['f1'])} | {p['false_positives']} | {p['missed']} | "
+                         f"{p['multi_fire']} | {fired} |")
+
     debounce: list[dict] = []
     if args.debounce is not None:
         windows = args.debounce or [0.0, 0.1, 0.133, 0.167, 0.2, 0.3, 0.4, 0.5, 0.567, 0.6, 0.8]
@@ -325,6 +344,8 @@ def main() -> int:
         write_json(args.json, dict(corpus=str(args.corpus), results=results,
                                    sweep={k: [dict(criterion=r["criterion"], pooled=r["pooled"]) for r in v]
                                           for k, v in sweep.items()},
+                                   ladder=[dict(rung=r["rung"], criterion=r["criterion"], pooled=r["pooled"])
+                                           for r in ladder],
                                    debounce=[dict(window=r["window"], verdicts=r["verdicts"],
                                                   pooled=r["pooled"]) for r in debounce]))
     return 0

@@ -577,6 +577,121 @@ void a_strong_scene_cut_fires_inside_the_minimum_interval_test()
     CHECK(out.sceneCutResidual > 0.30f);
 }
 
+// The Scene cuts ladder (P2.12), on the corpus evidence each rung was chosen on.
+void scene_cut_ladder_moves_one_threshold_per_rung_test()
+{
+    using scene_cut::Sensitivity;
+    using scene_cut::Strength;
+    const auto classify = [](Sensitivity rung, double residual, double overlap) {
+        const auto thresholds = scene_cut::ThresholdsFor(rung);
+        return thresholds ? scene_cut::Classify(residual, overlap, *thresholds) : Strength::None;
+    };
+    // Default is the shipped criterion, unchanged.
+    CHECK(scene_cut::ThresholdsFor(Sensitivity::Default) == scene_cut::Thresholds{});
+    CHECK(!scene_cut::ThresholdsFor(Sensitivity::Off).has_value());
+    // A cut between two shots that share a histogram (cuts-similar, 0.185 / 0.983):
+    // only More sensitive sees it.
+    CHECK_EQ(Strength::None, classify(Sensitivity::Default, 0.185, 0.983));
+    CHECK_EQ(Strength::Residual, classify(Sensitivity::More, 0.185, 0.983));
+    // ...while the fastest aligned pan in the corpus stays a pan on every rung.
+    for (const auto rung : {Sensitivity::Default, Sensitivity::More, Sensitivity::Less, Sensitivity::Off})
+        CHECK_EQ(Strength::None, classify(rung, 0.1252, 0.915));
+    // cuts-motion frame 91, the double reset: strong on Default, weak - and so
+    // debounceable - on Less sensitive.
+    CHECK_EQ(Strength::Residual, classify(Sensitivity::Default, 0.3739, 0.1282));
+    CHECK_EQ(Strength::Histogram, classify(Sensitivity::Less, 0.3739, 0.1282));
+    // Every real cut in the corpus is still a cut on Less sensitive.
+    for (const auto [residual, overlap] : {std::pair{0.3363, 0.561}, {0.2504, 0.587}, {0.2174, 0.710}})
+        CHECK(classify(Sensitivity::Less, residual, overlap) != Strength::None);
+    for (const auto rung : {Sensitivity::Default, Sensitivity::More, Sensitivity::Less, Sensitivity::Off})
+        CHECK(scene_cut::ParseSensitivity(scene_cut::SensitivityName(rung)) == rung);
+    CHECK(!scene_cut::ParseSensitivity("Default").has_value());
+}
+
+// Off takes no cut from the picture: the evidence is still measured and reported,
+// the history continues through it, and a declared reset still resets.
+void scene_cuts_off_keeps_the_history_through_a_cut_test()
+{
+    TemporalGuideGenerator guides;
+    guides.SetSceneCutSensitivity(scene_cut::Sensitivity::Off);
+    GuideFrame out;
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(0, 0), 0, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(3, 1), 1, out));
+    const uint32_t generation = guides.HistoryGeneration();
+    // A cut to black: the strong arm on every other rung.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(6, 2, -1.0), 2, out));
+    CHECK_EQ(SceneCutStrength::None, out.sceneCut);
+    CHECK(out.hasHistory);
+    CHECK_EQ(HistoryReset::None, out.id.reset);
+    CHECK(out.sceneCutResidual > 0.30f);
+    CHECK_EQ(generation, guides.HistoryGeneration());
+    CHECK_EQ(SceneCutAccounting{}, guides.SceneCuts());
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(9, 3), 3, out, HistoryReset::Seek));
+    CHECK_EQ(HistoryReset::Seek, out.id.reset);
+    // The rung describes the job, so a declared reset does not clear it.
+    guides.Reset();
+    CHECK(guides.SceneCutSensitivity() == scene_cut::Sensitivity::Off);
+
+    TemporalGuideGenerator more;
+    more.SetSceneCutSensitivity(scene_cut::Sensitivity::More);
+    CHECK(GenerateAtCutFps(more, TexturedFrame(0, 0), 0, out));
+    CHECK(GenerateAtCutFps(more, TexturedFrame(3, 1), 1, out));
+    CHECK(GenerateAtCutFps(more, TexturedFrame(6, 2, -1.0), 2, out));
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
+}
+
+// Frame generation's duplicate test (P2.12): a repeat that went through a lossy
+// encode is still a repeat, a small object crossing a still frame is not, and a
+// pair that could not be measured is never held.
+void decoded_pair_duplicates_are_near_exact_repeats_test()
+{
+    constexpr uint32_t w = 1920, h = 1080;
+    std::vector<uint8_t> still(size_t(w) * h * 4u);
+    for (size_t i = 0; i < still.size(); i += 4) {
+        const size_t pixel = i / 4;
+        const uint8_t value = uint8_t(40 + (pixel * 7 + (pixel / w) * 13) % 160);
+        still[i] = still[i + 1] = still[i + 2] = value;
+        still[i + 3] = 255;
+    }
+    CHECK(scene_cut::IsDuplicateDecodedPair(scene_cut::MeasureDecodedPair(still, still, w, h)));
+
+    // Codec noise: one pixel in four off by one code, which is the size of what a
+    // re-coded repeat measured at (duplab.py: the worst repeat's mean was 0.31 of
+    // a code, and no repeat moved a sample by 32).
+    std::vector<uint8_t> noisy = still;
+    for (size_t i = 0; i < noisy.size(); i += 4) {
+        const int delta = (i / 4) % 4 == 0 ? 1 : 0;
+        for (size_t c = 0; c < 3; ++c) noisy[i + c] = uint8_t(std::clamp(int(noisy[i + c]) + delta, 0, 255));
+    }
+    const auto noise = scene_cut::MeasureDecodedPair(still, noisy, w, h);
+    CHECK(noise.measured);
+    CHECK(scene_cut::IsDuplicateDecodedPair(noise));
+
+    // A 64 px square moved 8 px across the still frame: its mean is a fraction of a
+    // code, and it is still motion frame generation must keep interpolating.
+    auto withSquare = [&](uint32_t x0) {
+        std::vector<uint8_t> frame = still;
+        for (uint32_t y = 500; y < 564; ++y)
+            for (uint32_t x = x0; x < x0 + 64; ++x)
+                for (size_t c = 0; c < 3; ++c) frame[(size_t(y) * w + x) * 4 + c] = 250;
+        return frame;
+    };
+    const auto moved = scene_cut::MeasureDecodedPair(withSquare(900), withSquare(908), w, h);
+    CHECK(moved.residual < scene_cut::kDuplicateResidual);
+    CHECK(!scene_cut::IsDuplicateDecodedPair(moved));
+
+    // An ordinary pan is not a repeat either.
+    std::vector<uint8_t> panned(still.size());
+    std::copy(still.begin() + 4 * 3, still.end(), panned.begin());
+    CHECK(!scene_cut::IsDuplicateDecodedPair(scene_cut::MeasureDecodedPair(still, panned, w, h)));
+
+    // Unmeasured reads as identical to the cut test and as "not a repeat" here.
+    const auto unmeasured = scene_cut::MeasureDecodedPair({}, {}, w, h);
+    CHECK(!unmeasured.measured);
+    CHECK(!scene_cut::IsDuplicateDecodedPair(unmeasured));
+    CHECK(!scene_cut::IsDuplicateDecodedPair(scene_cut::PairEvidence{}));
+}
+
 void a_declared_reset_rearms_the_scene_cut_interval_test()
 {
     TemporalGuideGenerator guides;
@@ -1066,6 +1181,9 @@ int main()
     a_real_cut_one_frame_inside_the_old_window_is_taken_test();
     a_strong_scene_cut_fires_inside_the_minimum_interval_test();
     a_declared_reset_rearms_the_scene_cut_interval_test();
+    scene_cut_ladder_moves_one_threshold_per_rung_test();
+    scene_cuts_off_keeps_the_history_through_a_cut_test();
+    decoded_pair_duplicates_are_near_exact_repeats_test();
     scene_cut_accounting_survives_reset_and_counts_each_arm_test();
     synchronized_range_offsets_neural_frames_onto_the_original_timeline_test();
     synchronized_range_ends_on_a_rebased_original_timestamp_test();

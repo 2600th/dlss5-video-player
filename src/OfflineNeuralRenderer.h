@@ -5,6 +5,7 @@
 #include "MediaPipeline.h"
 #include "NeuralRenderTypes.h"
 #include "TemporalGuides.h"
+#include "TemporalSettings.h"
 
 #include <windows.h>
 
@@ -95,6 +96,9 @@ struct NeuralRenderRequest {
     // parent) puts the model on the reduced input. Only for a job whose output
     // is the source size: it is refused beside an upscaling output.
     uint32_t processingScale{100};
+    // How readily a scene cut resets the history (TemporalSettings.h). Defaults to
+    // what every job did before the setting existed.
+    TemporalSettings temporal{};
 };
 
 struct NeuralRenderProgress {

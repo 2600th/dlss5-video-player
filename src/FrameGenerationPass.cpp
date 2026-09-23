@@ -854,6 +854,13 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         const bool sceneCut = scene_cut::IsCutBetweenDecodedFrames(evidence);
         if (sceneCut) ++result.sceneCuts;
         const bool pairIsContinuous = !decoded.discontinuity && !sceneCut;
+        // A repeat is continuous - nothing about history is wrong across it - so the
+        // evaluates below still run and the runtime sees every frame in order. Only
+        // what is written changes: the older frame again, which a pair of identical
+        // frames is exactly, instead of whatever the runtime made between them.
+        const bool holdDuplicate =
+            request.holdDuplicates && pairIsContinuous && scene_cut::IsDuplicateDecodedPair(evidence);
+        if (holdDuplicate) ++result.duplicateHolds;
         if (!pairIsContinuous) {
             if (!establishHistory()) {
                 result.evaluations = backend.EvaluationCount();
@@ -894,6 +901,12 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
             result.evaluations = backend.EvaluationCount();
 
             for (uint32_t index = 0; index < generatedPerSource; ++index) {
+                if (holdDuplicate) {
+                    if (const EncodeError error = writeFrame(previous); error != EncodeError::None) {
+                        return encodeFailure(error);
+                    }
+                    continue;
+                }
                 uint8_t* mapped = nullptr;
                 if (FAILED(readbacks[index]->Map(0, nullptr, reinterpret_cast<void**>(&mapped)))) {
                     return fail(FrameGenerationError::Device, L"A generated frame could not be read back.");

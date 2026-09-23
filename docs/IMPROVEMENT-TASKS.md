@@ -62,7 +62,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.5](#p25) | Temporal stability with motion compensation | M | Pipeline, Player | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
 | [P2.11](#p211) | Quality metrics in the app | M | Player, Pipeline | |
-| [P2.12](#p212) | Scene-cut controls and duplicate-frame handling | S / M | Pipeline | |
 | [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
 | **P3** | | | | |
@@ -281,19 +280,6 @@ For offline work, add CGVQM and ColorVideoVDP error maps to `tools/benchmark`.
 
 Refs: [CGVQM](https://github.com/IntelLabs/cgvqm) ·
 [ColorVideoVDP](https://github.com/gfxdisp/ColorVideoVDP)
-
----
-
-<a id="p212"></a>
-### P2.12 · Scene-cut controls and duplicate-frame handling
-
-`S` slider · `M` dedup · **Pipeline** · _old 3.12_
-
-Expose the cut threshold that is already computed, and ship a defensible
-default from `cutlab.py --sweep`. SVP users ask both for more aggressive cut
-detection and for none at all, so one fixed value satisfies nobody. Animation
-drawn on twos and threes needs duplicate-frame handling before frame
-generation.
 
 ---
 

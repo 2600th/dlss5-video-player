@@ -1940,6 +1940,12 @@ struct ProductionEvaluatorAdapter {
     // What the live renderer was actually built for, so Initialize can tell a
     // retained device that still fits this job from one that does not.
     bool builtGpuColorConversion{false};
+    // The job's temporal choices (TemporalSettings.h), set before Initialize like the
+    // conversion flags above. Pure CPU state, applied wherever the guide controls are.
+    TemporalSettings temporal{};
+    void ApplyGuideSettings(const GuideControls& controls){
+        guides.SetControls(controls);guides.SetSceneCutSensitivity(temporal.sceneCuts);
+    }
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
     // Which conversion the live renderer's source pass was COMPILED for, which is
@@ -1992,7 +1998,7 @@ struct ProductionEvaluatorAdapter {
         if(reused){
             // Guide controls are pure CPU state and are the one thing a job may
             // change without rebuilding anything.
-            guides.SetControls(controls);return true;
+            ApplyGuideSettings(controls);return true;
         }
         Release();
         width=w;height=h;outputWidth=ow;outputHeight=oh;fps=rate;sourceLayout=layout;sourceConversion=conversion;
@@ -2020,7 +2026,7 @@ struct ProductionEvaluatorAdapter {
         // Nobody looks at this renderer's swapchain - the encoder is fed from the cache
         // render target EnqueueEvaluatedFrameCapture draws for itself - but every frame
         // still presents: the RenoDX add-on performs its feature-18 pass per present.
-        guides.SetControls(controls);renderer->SetDLSS(true);return true;
+        ApplyGuideSettings(controls);renderer->SetDLSS(true);return true;
     }
     // Drops the device, the NGX instance and the feature-18 workset the add-on
     // holds. The readback worker is joined first: it copies out of mapped
@@ -2062,7 +2068,7 @@ struct ProductionEvaluatorAdapter {
     void ResetForJob(const GuideControls& controls){
         DiscardPending();
         successfulEvaluations=0;lastFailure=NeuralRenderFailure::None;
-        guides={};guides.SetControls(controls);
+        guides={};ApplyGuideSettings(controls);
         guideCost={};
         captureScratch.pixels.clear();captureScratch.id={};
         if(renderer){renderer->ResetStageCounters();renderer->ResetPeakLocalVideoMemory();}
@@ -2753,6 +2759,7 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     state.source.gpuConversion=request.gpuSourceConversion&&!state.source.reduction.Active();
     state.evaluator.gpuColorConversion=request.gpuColorConversion;
     state.evaluator.superResolutionCarrier=state.source.reduction.Active();
+    state.evaluator.temporal=request.temporal;
     // Read before the reset, because the reset is allowed to drop the feature.
     const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();
     state.evaluator.ResetForJob(request.guides);

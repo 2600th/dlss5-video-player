@@ -202,6 +202,23 @@ justified leaving them alone. The consequence when changing the generator:
 `AnalysisGrid`, `DownsampleLuma`, `ClassifySceneCut` and `MinFramesBetweenCuts`
 have a second reader, and it is Python.
 
+Those thresholds are the **Default** rung of the **Scene cuts** setting
+(`scene_cut::Sensitivity` in `SceneCut.h`). **More sensitive** lowers the strong
+arm to 0.18, which catches cuts between shots that share a histogram;
+**Less sensitive** raises it to 0.40, which moves every real cut onto the
+debounced weak arm; **Off** takes no cut from image evidence at all while
+declared resets still apply. The rung travels as `TemporalSettings` - one
+canonical `--temporal` argument, a receipt field and a render-key term that is
+empty at the default, so every render published before the setting keeps its key
+- and `cutmirror.LADDER` mirrors it for `cutlab.py --ladder`.
+
+Frame generation reads the same header for one more test. With **Hold repeated
+frames** on, a decoded pair that `IsDuplicateDecodedPair` calls the same picture
+twice - mean luma change under half a code and almost no sample moved past 32
+codes - is held instead of generated between; the evaluates still run, so the
+runtime's history sees every frame. `tools/benchmark/duplab.py` measures that test
+on corpus clips re-timed onto twos.
+
 ## D3D12 renderer
 
 `D3D12Renderer` owns:
