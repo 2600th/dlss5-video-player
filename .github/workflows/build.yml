@@ -66,6 +66,21 @@ jobs:
         shell: cmd
         run: ctest --test-dir build-upscaling -C Release -LE "gpu|audio" --output-on-failure
 
+      # Symbols for the minidumps CrashDump.h writes from both processes. The
+      # PDBs never enter a zip (the packager copies an explicit list and the
+      # verifier's allowlist refuses anything else); they are kept here, with
+      # the executables they match, so a dump from this build can be symbolised.
+      - name: Upload symbols
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: symbols-${{ github.sha }}
+          path: |
+            build-upscaling/Release/DLSSVideoPlayer.exe
+            build-upscaling/Release/DLSSVideoPlayer.pdb
+            build-upscaling/Release/neural-runtime/NeuralWorker.exe
+            build-upscaling/Release/neural-runtime/NeuralWorker.pdb
+          if-no-files-found: error
+
       # The same packager the release workflow runs, on the build ctest just
       # ran, so a packaging break is found on the pull request and not on the
       # tag.

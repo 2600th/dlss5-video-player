@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P1** | | | | |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
-| [P1.19](#p119) | No PDBs for crash dumps; builds are not reproducible | S | Release, Player | 🔍 |
 | [P1.20](#p120) | CI hardening | M | Release | 🔍 |
 | [P1.21](#p121) | Build structure: one set of objects, one set of flags | M | Release | 🔍 |
 | [P1.22](#p122) | Test hygiene and coverage gaps | M | Release | 🔍 |
@@ -152,23 +151,6 @@ These matter because the copies **disagree**, not because they are repeated.
 implementation.
 
 ## Release and CI
-
-<a id="p119"></a>
-### P1.19 · No PDBs for crash dumps; builds are not reproducible
-
-`S` · **Release, Player** · 🔍
-
-`CrashDump.h` writes minidumps from both processes, but Release links without
-`/DEBUG`, so the dumps cannot be symbolised. There is no `/Brepro`, and zip
-entries keep file mtimes (`tools/package_release.ps1:329-334`), so nobody can
-rebuild the core zip to check it against the attestation.
-
-**Fix** — build both shipped targets with `/Zi` and link with
-`/DEBUG /OPT:REF /OPT:ICF`. Adding `/DEBUG` turns off the linker's default
-REF/ICF, so state those explicitly. Publish the PDBs as a CI artifact, not
-in the zip. Add `/Brepro` and fixed zip timestamps.
-
----
 
 <a id="p120"></a>
 ### P1.20 · CI hardening

@@ -217,5 +217,14 @@ experimental package is assembled locally, attached to the draft as
 the release published. A publish that failed can be re-run for the same tag
 from the Actions tab (`workflow_dispatch` with the tag as input).
 
+The two shipped executables are linked with `/DEBUG` and `/Brepro`: each has
+a PDB beside it in the build tree, for the minidumps the player and the worker
+write, and a clean rebuild from the same checkout path with the same toolset
+gives the same bytes. The PDBs are never packaged. CI keeps them as the
+`symbols-*` workflow artifact; keep your own for a package you build locally,
+since its executables match only the PDBs from that build. Zip entries carry
+one fixed timestamp (`SOURCE_DATE_EPOCH` if set, otherwise the commit time), so
+packaging the same build twice with Windows PowerShell gives the same zip.
+
 Review the applicable third-party terms before distributing any package.
 End users run the extracted player, not these build scripts.

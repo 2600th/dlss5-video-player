@@ -326,12 +326,50 @@ $utf8NoBom = New-Object Text.UTF8Encoding $false
 if (Test-Path -LiteralPath $zipPath) { throw 'Archive already exists. Select a new PackageSuffix.' }
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+# Every entry gets the same timestamp. CreateEntryFromFile stamped each one
+# with its file's mtime, which is the time of the checkout, the build or this
+# run, so two packagings of the same bytes gave two different zips and nobody
+# could rebuild the core zip to check it against its attestation. The stamp is
+# SOURCE_DATE_EPOCH when the caller sets one, otherwise the commit time of
+# HEAD, otherwise a constant; it is taken in UTC so the builder's time zone
+# cannot move it. Deflate output also depends on the compressor, so a
+# byte-identical zip needs the same PowerShell edition CI packages with
+# (Windows PowerShell 5.1, through package_public_release.bat).
+$entryEpoch = $null
+if ($env:SOURCE_DATE_EPOCH -match '^[0-9]{1,12}$') {
+    $entryEpoch = [int64]$env:SOURCE_DATE_EPOCH
+}
+else {
+    # Windows PowerShell turns a native command's stderr into a terminating
+    # error under 'Stop', and a tree with no git is allowed to fall through.
+    $ErrorActionPreference = 'Continue'
+    try {
+        $commitTime = & git -C $repositoryRoot log -1 --format=%ct 2>$null
+        if ($LASTEXITCODE -eq 0 -and "$commitTime" -match '^[0-9]+$') { $entryEpoch = [int64]"$commitTime" }
+    }
+    catch { $entryEpoch = $null }
+    finally { $ErrorActionPreference = 'Stop' }
+}
+# ZIP stores DOS times, which start at 1980; the constant is that floor.
+$zipFloor = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+$entryTime = if ($null -ne $entryEpoch) { [DateTimeOffset]::FromUnixTimeSeconds($entryEpoch) } else { $zipFloor }
+if ($entryTime -lt $zipFloor) { $entryTime = $zipFloor }
+Write-Host "Zip entry timestamp: $($entryTime.ToString('u'))"
+
 $archive = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
 try {
     foreach ($file in Get-OrdinalPackageFiles -Root $stageFull) {
         $relative = Get-RelativePackagePath -Root $stageFull -Path $file.FullName
-        $entry = "$stageName/$relative"
-        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $entry, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        $entry = $archive.CreateEntry("$stageName/$relative", [IO.Compression.CompressionLevel]::Optimal)
+        $entry.LastWriteTime = $entryTime
+        $destination = $entry.Open()
+        try {
+            $source = [IO.File]::OpenRead($file.FullName)
+            try { $source.CopyTo($destination) }
+            finally { $source.Dispose() }
+        }
+        finally { $destination.Dispose() }
     }
 }
 finally { $archive.Dispose() }

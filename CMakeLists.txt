@@ -100,6 +100,24 @@ function(dlss_video_player_harden target)
     target_link_options(${target} PRIVATE /GUARD:CF /CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)
 endfunction()
 
+# Symbols and reproducibility for the two shipped binaries. CrashDump.h writes
+# minidumps from both processes, and without a PDB that matches the build a
+# dump cannot be symbolised, so both compile with /Zi and link with /DEBUG.
+# /DEBUG turns the linker's default /OPT:REF and /OPT:ICF off, which would
+# grow and change the shipped code, so they are stated again. /PDBALTPATH
+# keeps only the PDB's file name in the executable instead of the builder's
+# absolute path - the complete package is linked on a maintainer's machine,
+# under their user folder. /Brepro replaces the link timestamp and the PDB
+# signature with hashes of the content, so the same source and toolset give
+# the same bytes and a rebuild can be checked against a published package.
+# The PDBs stay beside the binaries in the build tree; the packager copies an
+# explicit list that does not name them, and CI uploads them separately.
+function(dlss_video_player_symbols target)
+    target_compile_options(${target} PRIVATE /Zi /Brepro)
+    target_link_options(${target} PRIVATE /DEBUG /PDBALTPATH:$<TARGET_PDB_FILE_NAME:${target}>
+        "$<$<NOT:$<CONFIG:Debug>>:/OPT:REF;/OPT:ICF;/Brepro>")
+endfunction()
+
 # The packaging lock is embedded so the player and helper verify the exact
 # runtime files at run time, not only at packaging time.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/packaging/runtime-lock.json")
@@ -212,6 +230,7 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
 )
 dlss_video_player_use_nvof(DLSSVideoPlayer)
 dlss_video_player_harden(DLSSVideoPlayer)
+dlss_video_player_symbols(DLSSVideoPlayer)
 
 # Only the offline helper loads the experimental proxy/add-on. The player root
 # stays hook-free for its independent runtime Super Resolution feature.
@@ -229,6 +248,7 @@ get_target_property(player_libraries DLSSVideoPlayer LINK_LIBRARIES)
 target_link_libraries(NeuralWorker PRIVATE ${player_libraries})
 dlss_video_player_use_nvof(NeuralWorker)
 dlss_video_player_harden(NeuralWorker)
+dlss_video_player_symbols(NeuralWorker)
 set_target_properties(NeuralWorker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/neural-runtime")
 add_dependencies(DLSSVideoPlayer NeuralWorker)
 
