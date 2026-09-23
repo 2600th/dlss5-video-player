@@ -2642,6 +2642,53 @@ void offline_job_rejects_when_inline_interception_was_not_armed_before_capture_t
     CHECK_EQ(size_t{0},encoder.starts.size());
 }
 
+// Super Resolution alone runs with the neural add-on disabled, so the session
+// log never names feature 18. The job primes until the NGX carrier exists -
+// the renderer creates it on the second present whatever is watching - then
+// captures without waiting for any feature-18 evidence, and reports that
+// evidence as absent rather than leaving it for a reader to guess.
+void offline_super_resolution_only_job_waits_for_no_neural_evidence_and_says_so_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    // Upscaler speed: far under the neural floor, which this job is not held to.
+    evaluator.neuralGpuMs=0.2;
+    int evidenceCalls=0;
+    OfflineNeuralRenderer job(source,evaluator,encoder,[&]{++evidenceCalls;return std::string{};});
+    auto request=EvenOfflineRequest(fixture.Path());request.requireNeural=false;
+    const NeuralRenderResult result=job.Run(request,{},{});
+    CHECK(result.ok);CHECK_EQ(NeuralRenderFailure::None,result.failure);
+    CHECK_EQ(uint64_t{5},result.frameCount);CHECK_EQ(uint64_t{5},result.nativeEvaluations);
+    CHECK(!result.neural);CHECK_EQ(uint64_t{0},result.verifiedNeuralFrames);
+    CHECK(!result.feature18ArmedBeforeCapture);CHECK(!result.evidence.Valid());
+    // Primed exactly to the carrier's creation; no re-hook, no receipt gate.
+    CHECK_EQ(2,evaluator.primeSubmissions);CHECK_EQ(size_t{5},evaluator.captured.size());
+    CHECK_EQ(size_t{1},encoder.attempts.size());CHECK_EQ(size_t{5},encoder.attempts.back().size());
+    // One read, after capture, to prove the add-on stayed out of it.
+    CHECK_EQ(1,evidenceCalls);
+}
+
+// The claim a Super Resolution-only job makes is that the model did NOT run.
+// A session log that shows feature 18 evaluating means the add-on loaded
+// anyway, which is how the old upscale-only export came out byte-identical
+// to the neural one; that render is refused, not published under the label.
+void offline_super_resolution_only_job_refuses_a_session_where_the_add_on_ran_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+    auto request=EvenOfflineRequest(fixture.Path());request.requireNeural=false;
+    const NeuralRenderResult result=job.Run(request,{},{});
+    CHECK(!result.ok);CHECK_EQ(NeuralRenderFailure::Neural,result.failure);
+    CHECK(!result.neural);CHECK_EQ(uint64_t{0},result.verifiedNeuralFrames);
+
+    // And a carrier that skipped a captured frame is not an upscale either.
+    FakeOfflineSource secondSource;FakeNeuralEvaluator skipping;FakeFrameEncoder secondEncoder;
+    skipping.backendMissesCaptureAt=3;
+    OfflineNeuralRenderer skipped(secondSource,skipping,secondEncoder,[]{return std::string{};});
+    auto secondRequest=EvenOfflineRequest(fixture.Path());secondRequest.requireNeural=false;
+    const NeuralRenderResult refused=skipped.Run(secondRequest,{},{});
+    CHECK(!refused.ok);CHECK_EQ(NeuralRenderFailure::Neural,refused.failure);
+}
+
 void offline_job_rejects_non_monotonic_source_timestamps_test()
 {
     for(const bool byFrameNumber:{false,true}){
@@ -5265,6 +5312,8 @@ int wmain(int argc, wchar_t* argv[])
     offline_job_rejects_when_feature18_receipt_does_not_advance_after_capture_test();
     offline_job_rejects_any_frame_without_a_neural_evaluation_test();
     offline_job_rejects_when_inline_interception_was_not_armed_before_capture_test();
+    offline_super_resolution_only_job_waits_for_no_neural_evidence_and_says_so_test();
+    offline_super_resolution_only_job_refuses_a_session_where_the_add_on_ran_test();
     offline_job_rejects_non_monotonic_source_timestamps_test();
     offline_job_reports_monotonic_progress_and_smoothed_eta_test();
     offline_job_cancel_stops_before_promotion_and_marks_result_cancelled_test();

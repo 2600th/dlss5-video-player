@@ -487,16 +487,15 @@ Refusals are named rather than generic, and they appear as you tick:
 - *This GPU's runtime does not admit that frame rate* - the multiple is beyond
   what the runtime reports, said before the render rather than minutes into it.
 - *A still image has no successor frame to generate toward.*
-- *Super Resolution on its own is not available yet* - see below.
 - *Open a local video first* - a stream has to finish copying before it can be
   exported.
 
-**Super Resolution cannot currently be exported without the neural pass.** The
-helper turns the add-on on for every job it runs, so an upscale-only export was
-measurably a neural export wearing a different label: the two came back
-byte-for-byte identical. Rather than show a tick that changes nothing, the
-dialog asks you to tick Neural rendering as well. This is a limitation of how
-the helper is launched, not of DLSS.
+**Super Resolution on its own runs without the neural model.** Tick it with
+Neural rendering unticked and the helper starts with the neural add-on
+disabled, so the file is DLSS Super Resolution alone. Switching between an
+upscale-only export and one with the neural pass costs one extra helper start,
+because the add-on is chosen when the helper loads. The render is refused
+rather than written if the add-on turns out to have run anyway.
 
 While it runs, the panel over the video names the pass, the percentage, frames
 done of total, elapsed time and an ETA once enough frames have gone through for

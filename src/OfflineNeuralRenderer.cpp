@@ -908,6 +908,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
 {
     NeuralRenderResult result;
     result.jobId = request.jobId;
+    result.neural = request.requireNeural;
     // Cold-start phases run on the real clock rather than the job's progress
     // clock: the first-output boundary is only observable on the finalize
     // thread, and a caller-supplied clock is not shared across threads.
@@ -1112,8 +1113,16 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         source.Close();
         return fail(NeuralRenderFailure::Neural, L"Feature 18 was not created.");
     }
-    NeuralRuntimeEvidence armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider());
-    if (!armedEvidence.Valid() && primed > 0 && evaluator.RequestFeatureRehook()) {
+    // The priming loop above runs for a Super Resolution-only job too: what it
+    // waits for is the NGX carrier feature, which D3D12Renderer creates on the
+    // second present whether or not an add-on is watching, and a capture
+    // before that would encode the un-upscaled source. Everything from here to
+    // the capture is about feature 18 - the add-on's arming, the re-hook that
+    // coaxes it and the log baseline the receipt gate reads - and a job that
+    // runs with the add-on disabled has none of it to wait for.
+    NeuralRuntimeEvidence armedEvidence;
+    if (request.requireNeural) armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider());
+    if (request.requireNeural && !armedEvidence.Valid() && primed > 0 && evaluator.RequestFeatureRehook()) {
         // The add-on arms its NGX detours asynchronously, and a build that
         // missed the very first CreateFeature stays in a standby state until it
         // sees another one. One hook-visible re-create clears that. It belongs
@@ -1137,12 +1146,12 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             if (armedEvidence.Valid()) break;
         }
     }
-    if (!armedEvidence.Valid()) {
+    if (request.requireNeural && !armedEvidence.Valid()) {
         source.Close();
         return fail(NeuralRenderFailure::Neural,
                     L"Feature 18 inline interception was not armed before frame capture.");
     }
-    result.feature18ArmedBeforeCapture=true;
+    result.feature18ArmedBeforeCapture=request.requireNeural;
     // Priming is what creates feature 18 and what the add-on arms its detours
     // on; a retained feature skips the loop above entirely, so on that path
     // nothing this phase names happened and it reports nothing rather than a
@@ -1157,7 +1166,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // gate), so only the first capture pass of a fresh evaluator can be held
     // to it; a reused evaluator and a software-encoder retry are held to the
     // backend's own count and the timing floor instead.
-    bool holdToLogReceipt=!evaluatorReused;
+    bool holdToLogReceipt=request.requireNeural&&!evaluatorReused;
     // Set once the gate has seen that receipt. The log only grows, so a pass that
     // restarts after the gate opened has nothing left to wait for.
     bool receiptGateOpened=false;
@@ -1608,7 +1617,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         }
         const NeuralRuntimeEvidence retryEvidence=
             ParseNeuralRuntimeEvidence(evidenceProvider());
-        if(!retryEvidence.Valid()){
+        if(request.requireNeural&&!retryEvidence.Valid()){
             return fail(NeuralRenderFailure::Neural,
                         L"Feature 18 evidence was not valid before the software retry.");
         }
@@ -1646,8 +1655,18 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // Everything from here to the timing floor judges the NEURAL pass, so a job
     // that asked for Super Resolution alone is not held to any of it. Each one
     // exists to stop frames that never went through feature 18 being published
-    // as neural output; an upscale-only job makes no such claim, and its
-    // manifest records neural=false so nothing downstream can infer one.
+    // as neural output; an upscale-only job makes no such claim, and its result
+    // says neural=false with verifiedNeuralFrames=0 so nothing downstream can
+    // infer one. It is held to the opposite claim instead. With the add-on
+    // disabled the session log names no feature-18 evaluation; one that does
+    // means the add-on ran, and the frames are neural output under a label
+    // that says otherwise - exactly the byte-identical pair this job existed
+    // to end.
+    if(!request.requireNeural&&(result.evidence.feature18Created||result.evidence.feature18Evaluated)){
+        return fail(NeuralRenderFailure::Neural,
+                    L"The neural add-on ran in a job that asked for Super Resolution alone, "
+                    L"so its frames are not Super Resolution-only output.");
+    }
     if(request.requireNeural&&!result.evidence.Valid()){
         return fail(NeuralRenderFailure::Neural,
                     L"Feature 18 runtime evidence was incomplete or contained a later failure.");
@@ -1667,11 +1686,21 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         return fail(NeuralRenderFailure::Neural,
                     L"Feature 18 runtime evidence did not advance after captured rendering.");
     }
-    if(request.requireNeural&&attempt.neuralEvaluations<attempt.frames){
+    // The backend's count is NGX's own tally of Evaluate calls, which is the
+    // Super Resolution carrier whichever job this is. A job that asked for
+    // Super Resolution alone is held to it too: a captured frame NGX never
+    // evaluated is the source at its own size, not an upscale.
+    if(attempt.neuralEvaluations<attempt.frames){
         std::wostringstream detail;
-        detail<<L"The neural backend evaluated "<<attempt.neuralEvaluations
-              <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
-              <<L"are not all neural output.";
+        if(request.requireNeural){
+            detail<<L"The neural backend evaluated "<<attempt.neuralEvaluations
+                  <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
+                  <<L"are not all neural output.";
+        }else{
+            detail<<L"DLSS Super Resolution evaluated "<<attempt.neuralEvaluations
+                  <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
+                  <<L"are not all upscaled.";
+        }
         return fail(NeuralRenderFailure::Neural,detail.str());
     }
     if(request.requireNeural&&!NeuralTimingClearsFloor(result.timing,outputWidth,outputHeight)){
@@ -1686,7 +1715,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
     result.ok=true;result.encoder=selected;result.frameCount=attempt.frames;
     result.nativeEvaluations=attempt.neuralEvaluations;
-    result.verifiedNeuralFrames=attempt.frames;
+    result.verifiedNeuralFrames=request.requireNeural?attempt.frames:0;
     result.firstTimestamp100ns=attempt.firstTimestamp;
     result.duration100ns=attempt.lastTimestamp-attempt.firstTimestamp+frameDuration;
     emit(NeuralRenderPhase::Ready,attempt.frames,attempt.bytes,false);

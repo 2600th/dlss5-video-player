@@ -89,7 +89,13 @@ struct WireResult {
     uint8_t feature18Evaluated;
     uint8_t laterFailure;
     uint8_t failure;
-    uint8_t reserved[6];
+    // 1 for a job that asked for Super Resolution alone and ran with the neural
+    // add-on disabled. Zero is "neural", which is what every helper that wrote
+    // this byte as reserved produced, so an older helper still decodes as the
+    // neural job it was. It took the first reserved byte rather than a new
+    // field because the Python decoder reads this struct by offset.
+    uint8_t superResolutionOnly;
+    uint8_t reserved[5];
     uint64_t frameCount;
     int64_t duration100ns;
     uint64_t nativeEvaluations;
@@ -471,6 +477,7 @@ inline std::vector<std::byte> EncodeResult(const NeuralRenderResult& result)
     wire.feature18Evaluated = result.evidence.feature18Evaluated ? 1 : 0;
     wire.laterFailure = result.evidence.laterFailure ? 1 : 0;
     wire.failure = static_cast<uint8_t>(result.failure);
+    wire.superResolutionOnly = result.neural ? 0 : 1;
     wire.frameCount = result.frameCount;
     wire.duration100ns = result.duration100ns;
     wire.nativeEvaluations = result.nativeEvaluations;
@@ -514,6 +521,7 @@ inline std::optional<NeuralRenderResult> DecodeResult(std::span<const std::byte>
         !IsBooleanByte(wire.feature18ArmedBeforeCapture) || !IsBooleanByte(wire.nativeResolution) ||
         !IsBooleanByte(wire.inlineInterceptionContract) || !IsBooleanByte(wire.feature18Created) ||
         !IsBooleanByte(wire.feature18Evaluated) || !IsBooleanByte(wire.laterFailure) ||
+        !IsBooleanByte(wire.superResolutionOnly) ||
         !IsKnownFailure(wire.failure) || !zeroed(wire.reserved) ||
         wire.detailBytes > kMaximumDetailBytes || (wire.detailBytes % sizeof(wchar_t)) != 0 ||
         payload.size() != sizeof(WireResult) + wire.detailBytes ||
@@ -534,6 +542,7 @@ inline std::optional<NeuralRenderResult> DecodeResult(std::span<const std::byte>
         wire.feature18Created != 0, wire.feature18Evaluated != 0, wire.laterFailure != 0,
         wire.highestObservedEvaluation};
     result.failure = static_cast<NeuralRenderFailure>(wire.failure);
+    result.neural = wire.superResolutionOnly == 0;
     result.jobId = wire.jobId;
     result.historyResets = wire.historyResets;
     result.frameRetries = wire.frameRetries;
@@ -550,9 +559,19 @@ inline std::optional<NeuralRenderResult> DecodeResult(std::span<const std::byte>
         if (result.detail.find(L'\0') != std::wstring::npos) return std::nullopt;
     }
     if (result.ok && (result.cancelled || !result.frameCount || result.duration100ns <= 0 ||
-                      !result.nativeEvaluations || result.verifiedNeuralFrames < result.frameCount ||
-                      !result.feature18ArmedBeforeCapture || !result.evidence.Valid() ||
+                      !result.nativeEvaluations ||
                       result.failure != NeuralRenderFailure::None)) return std::nullopt;
+    // A neural result carries the complete feature-18 verification set. A Super
+    // Resolution-only result carries the opposite, stated rather than left
+    // blank: no frame verified as neural, nothing armed, and no feature-18
+    // evaluation in the session log - a carrier-only job whose add-on ran
+    // anyway produced neural pixels under a label that says otherwise.
+    if (result.ok && result.neural &&
+        (result.verifiedNeuralFrames < result.frameCount || !result.feature18ArmedBeforeCapture ||
+         !result.evidence.Valid())) return std::nullopt;
+    if (result.ok && !result.neural &&
+        (result.verifiedNeuralFrames || result.feature18ArmedBeforeCapture ||
+         result.evidence.feature18Evaluated)) return std::nullopt;
     if (result.cancelled && (result.ok || result.failure != NeuralRenderFailure::Cancelled)) return std::nullopt;
     if (!result.ok && !result.cancelled && result.failure == NeuralRenderFailure::None) return std::nullopt;
     return result;

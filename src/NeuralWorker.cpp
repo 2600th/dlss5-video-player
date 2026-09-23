@@ -847,9 +847,23 @@ std::optional<NeuralRenderResult> RefuseUnrunnableJob(const std::filesystem::pat
 
 // The result a job gets when the helper reported one. Shared so a resident job
 // and a single-shot job cannot disagree about whose result they accepted.
-NeuralRenderResult AcceptResult(const MetadataReader& reader, uint64_t jobId)
+NeuralRenderResult AcceptResult(const MetadataReader& reader, const NeuralRenderRequest& request)
 {
+    const uint64_t jobId = request.jobId;
     NeuralRenderResult result = reader.Result();
+    // A finished render that answers a different question than the job asked:
+    // Super Resolution-only frames for a neural job would be published as
+    // neural, and neural frames for a Super Resolution-only job are the
+    // byte-identical pair that job exists to end. Either is refused.
+    if (result.jobId == jobId && result.ok && result.neural != request.requireNeural) {
+        NeuralRenderResult mismatch;
+        mismatch.jobId = jobId;
+        mismatch.failure = NeuralRenderFailure::Identity;
+        mismatch.detail = request.requireNeural
+            ? L"The isolated neural helper returned a Super Resolution-only render for a neural job."
+            : L"The isolated neural helper returned a neural render for a Super Resolution-only job.";
+        return mismatch;
+    }
     if (result.jobId == jobId) return result;
     // A helper that refused the job it was handed has no job id to report:
     // the id lives inside the argument vector it could not parse. Only one job
@@ -935,7 +949,7 @@ NeuralRenderResult RunHelperOnce(const std::filesystem::path& executable,
                                              L"The isolated neural helper returned incomplete metadata.";
         return result;
     }
-    return AcceptResult(reader, request.jobId);
+    return AcceptResult(reader, request);
 }
 
 NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executable,
@@ -1695,7 +1709,7 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
             return finish(std::move(result));
         }
         if (pump.completed) {
-            result = AcceptResult(reader, request.jobId);
+            result = AcceptResult(reader, request);
             // A helper that could not finish a job exits by itself: its session
             // log now carries a failure every later job would be scanned
             // against, and a removed device leaves it holding an unknown one.

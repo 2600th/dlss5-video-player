@@ -4626,18 +4626,21 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
     CHECK_EQ(uint32_t{1280}, n.outputWidth); CHECK_EQ(uint32_t{720}, n.outputHeight);
     CHECK_EQ(uint32_t{1}, ExportStageCount(n));
 
-    // Super Resolution alone is REFUSED, and this is the case that matters.
-    //
-    // It was offered at first, on the reading that `requireNeural=false` made
-    // the pass skip the neural model. It does not: the helper enables the
-    // add-on for every job and the pre-capture check demands feature 18
-    // regardless, so the flag only skips the verdicts AFTER a render that was
-    // neural anyway. Measured - an upscale-only and an upscale-plus-neural
-    // export of one clip came back byte-identical at 9,548,373 bytes. A
-    // checkbox that changes nothing is worse than a missing one.
+    // Super Resolution alone: one worker pass at the target size with the
+    // neural verdicts OFF, which is what makes the helper start with the
+    // add-on disabled. It was refused while the helper enabled the add-on for
+    // every job - an upscale-only and an upscale-plus-neural export of one clip
+    // came back byte-identical at 9,548,373 bytes - and ExportMatrixSmoke now
+    // asserts the two differ.
     const ExportPlan u = plan(true, false, false);
-    CHECK(!u.valid);
-    CHECK(u.refusal == ExportRefusal::UpscaleNeedsNeural);
+    CHECK(u.valid); CHECK(u.refusal == ExportRefusal::None);
+    CHECK(u.workerStage); CHECK(!u.requireNeural); CHECK(!u.frameGenStage);
+    CHECK_EQ(uint32_t{2560}, u.outputWidth); CHECK_EQ(uint32_t{1440}, u.outputHeight);
+    CHECK_EQ(uint32_t{1}, ExportStageCount(u));
+    // And it composes with frame generation like any other first pass.
+    const ExportPlan uf = plan(true, false, true);
+    CHECK(uf.valid); CHECK(!uf.requireNeural); CHECK_EQ(uint32_t{2}, ExportStageCount(uf));
+    CHECK_EQ(60.0, uf.outputFps);
 
     // Both: still one pass. Two would run the model at source size and upscale
     // after, which is the Neural Upstream order rather than the reference one.

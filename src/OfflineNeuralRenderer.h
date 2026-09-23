@@ -80,11 +80,13 @@ struct NeuralRenderRequest {
     // has no frame budget to protect, so it takes the stock order.
     uint32_t outputWidth{};
     uint32_t outputHeight{};
-    // False renders the carrier alone - Super Resolution with no neural pass -
-    // and drops the four feature-18 verdicts with it. Those verdicts exist to
-    // stop un-denoised frames being published as neural; a job that never asked
-    // for neural has nothing to misrepresent, and holding it to them would fail
-    // every upscale-only export by design.
+    // False renders the carrier alone - Super Resolution with no neural pass.
+    // The helper starts with the neural add-on disabled in its ReShade.ini
+    // (a relaunch when that flips it, since the proxy reads the file at load),
+    // and the job skips the feature-18 arming check, the receipt gate and the
+    // four verdicts after capture. Those exist to stop un-denoised frames being
+    // published as neural; this job makes the opposite claim and is held to
+    // that instead: no feature-18 evaluation may appear in its session log.
     bool requireNeural{true};
 };
 
@@ -130,6 +132,12 @@ struct NeuralRenderResult {
     // player merges the four it owns before the receipt is written.
     NeuralColdStartTimeline coldStart{};
     std::wstring detail;
+    // False for a job that asked for Super Resolution alone: the helper ran it
+    // with the neural add-on disabled, and the result says so instead of
+    // leaving the feature-18 fields empty for a reader to guess about. It is
+    // the request's requireNeural carried back, so the parent can refuse a
+    // result that answers a different question than it asked.
+    bool neural{true};
 };
 
 NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegment);

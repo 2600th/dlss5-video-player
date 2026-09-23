@@ -4492,7 +4492,6 @@ private:
         case ExportRefusal::AlreadyAtTarget:return L"export.stages.refusal.target";
         case ExportRefusal::MultiplierUnsupported:return L"export.stages.refusal.multiplier";
         case ExportRefusal::StillImage:return L"export.stages.refusal.still";
-        case ExportRefusal::UpscaleNeedsNeural:return L"export.stages.refusal.upscale_needs_neural";
         case ExportRefusal::None:break;
         }
         return L"export.stages.refusal.nothing";

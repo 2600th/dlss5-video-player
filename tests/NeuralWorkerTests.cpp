@@ -1481,9 +1481,55 @@ void protocol_rejects_inconsistent_results_test()
     CHECK(DecodeResult(EncodeResult(cancelledWrongKind)).has_value());
     // The reserved bytes are the only growth room left in WireResult; a helper that
     // writes anything there is not speaking this version of the protocol.
+    // Byte 10 became superResolutionOnly; the five after it are still reserved.
     auto reservedInUse = EncodeResult(cancelledWrongKind);
-    reservedInUse[10] = std::byte{1};
+    reservedInUse[11] = std::byte{1};
     CHECK(!DecodeResult(reservedInUse).has_value());
+    auto notBoolean = EncodeResult(cancelledWrongKind);
+    notBoolean[10] = std::byte{2};
+    CHECK(!DecodeResult(notBoolean).has_value());
+
+    // A neural result round-trips as neural, and zero on the wire - what every
+    // helper that wrote byte 10 as reserved produced - still reads as neural.
+    NeuralRenderResult neural = okWithFailure;
+    neural.failure = NeuralRenderFailure::None;
+    const auto encodedNeural = EncodeResult(neural);
+    CHECK(encodedNeural[10] == std::byte{0});
+    const auto decodedNeural = DecodeResult(encodedNeural);
+    CHECK(decodedNeural.has_value() && decodedNeural->neural);
+
+    // Super Resolution alone: no verified neural frame, nothing armed, no
+    // feature-18 evidence, and it says so on the wire.
+    NeuralRenderResult upscaleOnly;
+    upscaleOnly.ok = true;
+    upscaleOnly.neural = false;
+    upscaleOnly.frameCount = upscaleOnly.nativeEvaluations = 5;
+    upscaleOnly.duration100ns = 1;
+    const auto encodedUpscale = EncodeResult(upscaleOnly);
+    CHECK(encodedUpscale[10] == std::byte{1});
+    const auto decodedUpscale = DecodeResult(encodedUpscale);
+    CHECK(decodedUpscale.has_value());
+    if (decodedUpscale) {
+        CHECK(!decodedUpscale->neural);
+        CHECK_EQ(uint64_t{0}, decodedUpscale->verifiedNeuralFrames);
+        CHECK(!decodedUpscale->feature18ArmedBeforeCapture);
+    }
+    // Held to the opposite claim: an upscale-only result that says a frame was
+    // verified neural, that feature 18 was armed, or whose log shows feature 18
+    // evaluating is not an upscale-only render, and cannot be accepted as one.
+    NeuralRenderResult claimsVerified = upscaleOnly;
+    claimsVerified.verifiedNeuralFrames = 5;
+    CHECK(!DecodeResult(EncodeResult(claimsVerified)).has_value());
+    NeuralRenderResult claimsArmed = upscaleOnly;
+    claimsArmed.feature18ArmedBeforeCapture = true;
+    CHECK(!DecodeResult(EncodeResult(claimsArmed)).has_value());
+    NeuralRenderResult addonRan = upscaleOnly;
+    addonRan.evidence.feature18Evaluated = true;
+    CHECK(!DecodeResult(EncodeResult(addonRan)).has_value());
+    // And a neural result is still held to the whole verification set.
+    NeuralRenderResult neuralWithoutEvidence = neural;
+    neuralWithoutEvidence.evidence = {};
+    CHECK(!DecodeResult(EncodeResult(neuralWithoutEvidence)).has_value());
     NeuralRenderProgress recoveringWithoutKind;
     recoveringWithoutKind.phase = NeuralRenderPhase::Recovering;
     const WireProgress wire = EncodeProgress(recoveringWithoutKind);

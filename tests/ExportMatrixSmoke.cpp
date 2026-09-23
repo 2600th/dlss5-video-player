@@ -35,7 +35,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -101,6 +103,11 @@ struct StageOutcome {
     bool ok{};
     uint32_t width{}, height{};
     uint64_t frames{};
+    // What the helper said it rendered, which the parent has already held to
+    // what the job asked for.
+    bool neural{};
+    uint64_t verifiedNeuralFrames{};
+    bool armedBeforeCapture{};
 };
 
 // One worker job: Super Resolution when `upscale`, the neural pass when
@@ -126,7 +133,8 @@ StageOutcome RunWorkerStage(const fs::path& worker, const fs::path& source, cons
     return {true,
             request.outputWidth ? request.outputWidth : sourceWidth,
             request.outputHeight ? request.outputHeight : sourceHeight,
-            result.frameCount};
+            result.frameCount, result.neural, result.verifiedNeuralFrames,
+            result.feature18ArmedBeforeCapture};
 }
 
 } // namespace
@@ -183,6 +191,10 @@ int wmain(int argc, wchar_t** argv)
     Check(upscaleOnly.frames == kExpectedFrames, L"upscale-only wrote every source frame");
     Check(upscaleOnly.width == target.width && upscaleOnly.height == target.height,
           L"upscale-only reached the target geometry");
+    // The evidence says what happened rather than being left blank.
+    Check(upscaleOnly.ok && !upscaleOnly.neural && upscaleOnly.verifiedNeuralFrames == 0 &&
+              !upscaleOnly.armedBeforeCapture,
+          L"upscale-only reports neural=false, verifiedNeuralFrames=0, feature 18 not armed");
 
     std::wcout << L"[U+N] super resolution then neural, one pass, stock order\n";
     const StageOutcome upscaleNeural =
@@ -191,6 +203,9 @@ int wmain(int argc, wchar_t** argv)
     Check(upscaleNeural.frames == kExpectedFrames, L"upscale+neural wrote every source frame");
     Check(upscaleNeural.width == target.width && upscaleNeural.height == target.height,
           L"upscale+neural reached the target geometry");
+    Check(upscaleNeural.ok && upscaleNeural.neural &&
+              upscaleNeural.verifiedNeuralFrames == upscaleNeural.frames && upscaleNeural.armedBeforeCapture,
+          L"upscale+neural reports every frame verified neural, feature 18 armed");
 
     // The assertion this suite was missing, and the reason it passed 21 checks
     // while the export dialog offered a checkbox that did nothing: geometry and
@@ -201,17 +216,22 @@ int wmain(int argc, wchar_t** argv)
         const uintmax_t size = fs::file_size(file, error);
         return error ? 0 : size;
     };
+    const auto fileBytes = [](const fs::path& file) {
+        std::ifstream stream(file, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    };
     if (upscaleOnly.ok && upscaleNeural.ok) {
         const uintmax_t withoutNeural = fileSize(root / L"u.mkv");
         const uintmax_t withNeural = fileSize(root / L"un.mkv");
         std::wcout << L"  u.mkv=" << withoutNeural << L"  un.mkv=" << withNeural << L'\n';
         Check(withoutNeural > 0 && withNeural > 0, L"both renders produced a file");
-        // Equal is the CURRENT truth, and it is what ExportRefusal::
-        // UpscaleNeedsNeural rests on. If this ever differs, the helper learned
-        // to run its carrier without the add-on and that refusal should be
-        // removed - so the message points at the thing to change.
-        Check(withoutNeural == withNeural,
-              L"requireNeural=false still renders neural (drop ExportRefusal::UpscaleNeedsNeural if this fails)");
+        // They were byte-identical, at 9,548,373 bytes each, while the helper
+        // enabled the add-on for every job, which is why Super Resolution alone
+        // was refused. The helper now starts an upscale-only job with the
+        // add-on disabled, so the two files must DIFFER: equal again means the
+        // neural model ran in a job that asked for Super Resolution alone.
+        Check(fileBytes(root / L"u.mkv") != fileBytes(root / L"un.mkv"),
+              L"upscale-only and upscale+neural renders differ (requireNeural=false ran without the add-on)");
     }
 
     // --- Frame generation on top of each, which is the composition claim. --

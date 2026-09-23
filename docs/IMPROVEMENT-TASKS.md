@@ -63,7 +63,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.6](#p26) | Spatial mask and feather; face protection later | S-M | Pipeline, Player | |
 | [P2.7](#p27) | Processing scale | S-M | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
-| [P2.9](#p29) | Super Resolution-only export | M | Pipeline | |
 | [P2.10](#p210) | CLI / headless invocation | S | Pipeline | |
 | [P2.11](#p211) | Quality metrics in the app | M | Player, Pipeline | |
 | [P2.12](#p212) | Scene-cut controls and duplicate-frame handling | S / M | Pipeline | |
@@ -298,23 +297,6 @@ same frame during a live render.** At 1× it also doubles as a
 compression-cleanup pre-pass.
 
 Ref: [RTX Video SDK](https://developer.nvidia.com/blog/enhancing-low-resolution-sdr-video-with-the-nvidia-rtx-video-sdk/)
-
----
-
-<a id="p29"></a>
-### P2.9 · Super Resolution-only export
-
-`M` · **Pipeline** · _old 3.0_
-
-Super Resolution on its own is the only one of the seven export combinations
-the player refuses. The helper always runs `ConfigureNeuralAddon(ini, true)`,
-and `OfflineNeuralRenderer` requires feature 18 to be armed before capture.
-
-**Do** — pass `requireNeural` into `ConfigureNeuralAddon`, which forces a
-helper relaunch because ReShade reads its ini at load. Gate the arming check
-and the priming loop on it, and report the neural evidence honestly when it
-is off. `ExportMatrixSmoke` asserts today's byte-equality, so remove that
-assertion together with `ExportRefusal::UpscaleNeedsNeural`.
 
 ---
 

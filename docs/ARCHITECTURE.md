@@ -887,13 +887,21 @@ the neural pass earlier because doing so is faster, which makes early the
 deviation rather than the reference - and an export has no frame budget to
 defend, so it takes the reference order.
 
-One combination is refused rather than offered. `requireNeural=false` drops the
-four feature-18 verdicts a neural render is held to, but it does not make the
-render non-neural: the helper enables the add-on for every job it launches and
-the pre-capture arming check is ungated. Measured, not assumed - an upscale-only
-and an upscale-plus-neural export of the same clip came back byte-identical at
-9,548,373 bytes each. `ExportRefusal::UpscaleNeedsNeural` says so. Lifting it
-means teaching the helper to render its carrier without the add-on.
+Super Resolution alone is a carrier-only job. It used to be refused: the
+helper enabled the add-on for every job, so an upscale-only and an
+upscale-plus-neural export of one clip came back byte-identical at 9,548,373
+bytes each. Now `requireNeural=false` reaches `ConfigureNeuralAddon` in the
+helper, which writes the add-on disabled and takes the same
+configuration-changed exit a repair does, so the parent relaunches it once per
+flip (ReShade reads the INI when its proxy loads). The job still primes until
+the NGX carrier exists, then skips the feature-18 arming check, the receipt gate
+and the four verdicts after capture. It is held to the opposite claim instead:
+a session log that shows feature 18 evaluating fails the job. The result says
+what ran rather than leaving the fields blank: `neural=false` in the wire
+result's first formerly reserved byte, `verifiedNeuralFrames=0`,
+`feature18ArmedBeforeCapture=false`. The parent refuses a result whose `neural`
+does not match what the job asked for. A resident helper keeps its add-on
+loaded, so it refuses carrier-only jobs and they run single-shot.
 
 `ExportMatrixSmoke` renders all seven combinations through a 3.5 s 720p30 clip
 and checks geometry, frame count and bytes. It earned that last check twice: the

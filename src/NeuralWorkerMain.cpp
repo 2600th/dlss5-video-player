@@ -404,6 +404,17 @@ public:
                 ? resident_worker::JobOutcome::Refused
                 : resident_worker::JobOutcome::WriteFailed;
         }
+        // A resident helper's proxy loaded with the neural add-on enabled and
+        // cannot unload it, so a Super Resolution-only job it served would be
+        // neural output under a label that says otherwise. Such a job runs
+        // single-shot, where the helper starts with the add-on off; one that
+        // arrives here is the parent's mistake, not this process's.
+        if (!parsed->request.requireNeural) {
+            return Refuse(L"A resident helper runs with the neural add-on loaded and cannot serve a "
+                          L"Super Resolution-only job.")
+                ? resident_worker::JobOutcome::Refused
+                : resident_worker::JobOutcome::WriteFailed;
+        }
         if (const std::wstring invalid = CheckSessionInvariants(); !invalid.empty()) {
             LOG("Resident helper cannot serve job " << parsed->request.jobId << ": "
                 << narrow_text::LossyAscii(invalid));
@@ -570,15 +581,25 @@ int wmain(int argc, wchar_t** argv)
     const std::filesystem::path moduleDirectory = ModuleDirectory();
     if (std::wstring unlocked = UnlockedRuntimeModules(moduleDirectory); !unlocked.empty())
         return fail(std::move(unlocked));
-    const ConfigUpdate config = ConfigureNeuralAddon(moduleDirectory / L"ReShade.ini", true);
-    if (!config.ok || !config.addonEnabled) {
-        return fail(config.error.empty() ? L"The helper-local neural add-on configuration was not enabled." :
-                                           config.error);
+    // A Super Resolution-only job runs with the add-on DISABLED, so the model
+    // cannot run however the job goes; everything else - the probe, a resident
+    // session, every neural job - enables it. Only a single-shot job line can
+    // ask for that: the resident launch line carries no job, and its jobs are
+    // held to requireNeural when they arrive.
+    const bool neuralAddon =
+        arguments->preflight || arguments->command != nullptr || arguments->request.requireNeural;
+    const ConfigUpdate config = ConfigureNeuralAddon(moduleDirectory / L"ReShade.ini", neuralAddon);
+    if (!config.ok || config.addonEnabled != neuralAddon) {
+        return fail(!config.error.empty() ? config.error
+            : neuralAddon ? L"The helper-local neural add-on configuration was not enabled."
+                          : L"The helper-local neural add-on configuration was not disabled.");
     }
     // ReShade reads its INI while its proxy is loaded at process startup. If
     // this invocation repaired the helper-local contract, exit and let the
     // hook-free parent launch one fresh helper. Full exit is essential: the
-    // proxy must release its log before the rendering process starts.
+    // proxy must release its log before the rendering process starts. The
+    // add-on flipping between a neural job and a Super Resolution-only one
+    // takes this same exit, once per flip.
     if (config.changed) {
         if (!arguments->configurationRestarted)
             return neural_worker_detail::kConfigurationChangedExitCode;

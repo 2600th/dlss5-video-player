@@ -48,20 +48,12 @@ enum class ExportRefusal {
     AlreadyAtTarget,
     MultiplierUnsupported,
     StillImage,
-    // Super Resolution without the neural pass. The offline renderer cannot
-    // currently produce it: the helper enables the RenoDX add-on for every job
-    // it runs (NeuralWorkerMain, ConfigureNeuralAddon(..., true)) and the
-    // pre-capture arming check demands feature 18 regardless, so the neural
-    // model runs whether or not the job asked for it. `requireNeural` only
-    // skips the four verdicts AFTER the render - it never stopped the render
-    // being neural.
-    //
-    // Measured, not assumed: an upscale-only and an upscale-plus-neural export
-    // of the same clip came out byte-identical at 9,548,373 bytes. Offering the
-    // combination would put a checkbox on screen that changes nothing, which is
-    // worse than not offering it. Refused until the helper can be told to run
-    // its carrier without the add-on.
-    UpscaleNeedsNeural,
+    // Super Resolution without the neural pass used to be refused here: the
+    // helper enabled the add-on for every job, so an upscale-only and an
+    // upscale-plus-neural export of one clip came out byte-identical at
+    // 9,548,373 bytes. The helper now starts a Super Resolution-only job with
+    // the add-on disabled (NeuralWorkerMain), and ExportMatrixSmoke asserts the
+    // two files differ, so the combination is offered.
 };
 
 struct ExportPlan {
@@ -75,8 +67,9 @@ struct ExportPlan {
     // explicitly so a caller can show the user the number.
     uint32_t outputWidth{};
     uint32_t outputHeight{};
-    // False runs Super Resolution with no neural pass, which also drops the
-    // feature-18 verdicts a neural render is held to.
+    // False runs Super Resolution with no neural pass: the helper starts with
+    // the add-on disabled and drops the feature-18 verdicts a neural render is
+    // held to.
     bool requireNeural{};
     // Stage two.
     bool frameGenStage{};
@@ -114,7 +107,6 @@ inline ExportPlan PlanExport(const ExportSelection& selection, uint32_t sourceWi
         plan.outputHeight = target.height;
     }
     // The worker runs whenever either of the first two stages was asked for.
-    if (selection.upscale && !selection.neural) return refuse(ExportRefusal::UpscaleNeedsNeural);
     plan.workerStage = selection.upscale || selection.neural;
     plan.requireNeural = selection.neural;
 
