@@ -5490,7 +5490,7 @@ private:
         auto buttons=ThumbButtonsForShell(m_thumbBar);
         const HRESULT added=m_taskbar->ThumbBarAddButtons(m_hwnd,UINT(buttons.size()),buttons.data());
         m_thumbBarCreated=SUCCEEDED(added);
-        LOG("Taskbar thumbnail buttons: ThumbBarAddButtons=0x"<<std::hex<<added<<std::dec);
+        LOG("Taskbar thumbnail buttons: ThumbBarAddButtons="<<HexText(added));
     }
     void SyncThumbBar(){
         if(!m_thumbBarCreated||!m_taskbar)return;
