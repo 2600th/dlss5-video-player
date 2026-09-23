@@ -177,6 +177,21 @@ std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion, uint32_t nven
 // name rather than by repeating the literals.
 inline constexpr uint32_t kDefaultNvencPreset = 5;
 inline constexpr bool kDefaultGpuColorConversion = false;
+
+// The capture-quality switches of this player's quality work, as one key term
+// appended after every other pipeline term (the temporal one included), in a fixed
+// order, each spelled out only when it leaves its default - so the defaults add
+// nothing and no entry published under them is retired.
+//
+// `captureDither` is the ordered dither at the 8-bit capture store
+// (DitherPolicy.h): the same picture, different bytes in every frame. The term names
+// the map as well as the switch: a different map or amplitude is a different set of
+// bytes and gets a new version, never this term.
+struct CaptureQualityTerms {
+    bool captureDither{false};
+};
+inline constexpr bool kDefaultCaptureDither = false;
+std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms);
 std::optional<std::string> BuildRuntimeDigest(
     const std::filesystem::path& moduleDirectory,
     std::span<const std::wstring_view> relativeFiles,

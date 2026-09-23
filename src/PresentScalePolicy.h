@@ -20,12 +20,13 @@ struct Target {
 
 // A renderer that does not follow its window - the offline carrier, whose hidden
 // window's size means nothing - draws at the output's size through PSPresent
-// exactly as it always did. So does a player window that is the output's size:
-// PSPresent at 1:1 is already the exact answer, and it is the program the cache
-// capture runs, byte for byte - unless `compose` says the picture needs what only
-// the compositor draws (tags, a swapped split; see ComparisonNeedsCompositor). At 1:1
-// the scaled pass takes one bilinear tap at each texel's centre, so the picture under
-// those marks is the same one PSPresent would have drawn.
+// exactly as it always did. A window that is the output's size draws through
+// PSPresent too unless `compose` asks for the compositor - and the player's
+// renderer always asks (D3D12Renderer::CurrentPresentTarget), because the
+// compositor is also what dithers the window's 8-bit store (DitherPolicy.h). So in
+// practice PSPresent draws only the offline carrier's hidden window and the cache
+// capture. At 1:1 the scaled pass takes one bilinear tap at each texel's centre, so
+// the picture under the dither and any marks is the one PSPresent would have drawn.
 inline Target Choose(bool followsWindow, bool scaledPresentAvailable,
                      uint32_t backbufferW, uint32_t backbufferH,
                      uint32_t outputW, uint32_t outputH, bool compose = false)

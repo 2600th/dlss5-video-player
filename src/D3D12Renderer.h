@@ -329,6 +329,13 @@ public:
     // must read ActiveCaptureFormat back rather than assume the request was honoured.
     void SetCaptureFormat(CaptureFormat format) { m_requestedCaptureFormat = format; }
     CaptureFormat ActiveCaptureFormat() const { return m_captureFormat; }
+    // Ordered (8x8 Bayer) dither at the 8-bit capture store (DitherPolicy.h says why
+    // not blue noise there), for whichever of the BGRA and NV12 captures is active. Selected before Initialize, which compiles
+    // the dithered capture programs in place of the plain ones; off by default, because
+    // it changes the bytes of every captured frame and is a cache-key term for exactly
+    // that reason (NeuralRenderPipelineIdentity).
+    void SetCaptureDither(bool dither) { m_requestedCaptureDither = dither; }
+    bool ActiveCaptureDither() const { return m_captureDither; }
 
     // Layout of the bytes RenderFrame/RenderFrameForCache receive. Selected before
     // Initialize like the capture format, and likewise downgraded to Bgra when the source
@@ -389,6 +396,10 @@ public:
     // bilinear filter. The offline carrier never sets it, so its hidden window,
     // its presents and its captures are exactly as they were. Selected before
     // Initialize, which compiles the scaled present only when it is asked for.
+    // The scaled present also blue-noise dithers the 8-bit backbuffer store
+    // (DitherPolicy.h), so a following renderer draws with it even at 1:1: the
+    // dither is presentation-only, costs the cache nothing, and only removes the
+    // banding round-to-nearest leaves in a dark gradient.
     void SetPresentFollowsWindow(bool follow) { m_followWindow = follow; }
 
     // HDR output (P3.1). A renderer that is allowed it compiles the HDR compositor
@@ -729,8 +740,8 @@ private:
     // which program an HDR backbuffer takes.
     ID3D12PipelineState* BackbufferProgram(bool scaled, bool hdrTarget) const;
     // What the backbuffer pass draws into: the window-sized backbuffer through the
-    // scaled present, or - when the sizes agree, or the renderer does not follow its
-    // window - the output's size through PSPresent, exactly as before.
+    // scaled present - at 1:1 too, for its dither - or, for a renderer that does not
+    // follow its window, the output's size through PSPresent, exactly as before.
     present_scale::Target CurrentPresentTarget() const;
     void FollowWindowSize();
     bool ResizeSwapchain(uint32_t width, uint32_t height);
@@ -871,6 +882,8 @@ private:
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_chromaFootprint{};
     CaptureFormat m_requestedCaptureFormat = CaptureFormat::Bgra;
     CaptureFormat m_captureFormat = CaptureFormat::Bgra;
+    bool m_requestedCaptureDither = false;
+    bool m_captureDither = false;
     // NV12 source: both planes in one upload buffer per slot, chroma at an aligned offset.
     // m_uploadFootprint keeps describing the BGRA layout, which the reference upload shares.
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_sourceLumaFootprint{};

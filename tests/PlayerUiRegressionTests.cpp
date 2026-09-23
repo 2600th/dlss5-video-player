@@ -3463,7 +3463,14 @@ struct PlayerAppTestAccess {
         // Read saves via SaveVideoSettings(), since nothing needs re-rendering.
         CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"GpuSourceConversion", 0, app.SettingsPath().c_str()), UINT{1});
         CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"NvencPreset", 1, app.SettingsPath().c_str()), UINT{7});
+        // The capture dither is a checkbox like the conversions, read back and saved.
+        CHECK(GetDlgItem(dialog, IDC_ES_CAPTURE_DITHER) != nullptr);
+        SendMessageW(GetDlgItem(dialog, IDC_ES_CAPTURE_DITHER), BM_SETCHECK, BST_CHECKED, 0);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_CAPTURE_DITHER, BN_CLICKED), 0);
+        CHECK(app.m_captureDither);
+        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"CaptureDither", 0, app.SettingsPath().c_str()), UINT{1});
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_RESET, BN_CLICKED), 0);
+        CHECK(!app.m_captureDither);
         CHECK(!app.m_gpuColorConversion);
         CHECK(!app.m_gpuSourceConversion);
         CHECK_EQ(app.m_nvencPreset, uint32_t{5});

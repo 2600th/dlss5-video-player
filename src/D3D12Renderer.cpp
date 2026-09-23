@@ -1,5 +1,6 @@
 #include "D3D12Renderer.h"
 #include "D3D12FenceWait.h"
+#include "DitherPolicy.h"
 #include "TemporalGuides.h"
 #include "HexText.h"
 #include "Utf8Text.h"
@@ -156,6 +157,9 @@ D3D12Renderer::~D3D12Renderer() {
 bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint32_t outputW,uint32_t outputH,uint32_t gridW,uint32_t gridH,NVSDK_NGX_PerfQuality_Value quality,bool preserveSource,bool captureOutput) {
     m_preserveSource=preserveSource;
     m_captureOutput=captureOutput;
+    // Resolved before CreatePipelines, which compiles the dithered capture programs in
+    // place of the plain ones. A renderer with no capture ring has nothing to dither.
+    m_captureDither=m_requestedCaptureDither&&captureOutput;
     m_hwnd=hwnd; m_sourceW=sourceW; m_sourceH=sourceH; m_outputW=outputW; m_outputH=outputH; m_gridW=gridW; m_gridH=gridH; m_quality=quality;
     if(!m_gridW||!m_gridH)return false;
     // NV12 planes need even dimensions, so an odd source keeps the BGRA upload
@@ -265,6 +269,11 @@ bool D3D12Renderer::CreateHeapsAndBackbuffers(){
     return true;
 }
 
+// Pastes a macro's expansion into the program text as a string, which is how the
+// blue-noise map in DitherPolicy.h reaches the shader without a second copy.
+#define DLSS_HLSL_TEXT_(...) #__VA_ARGS__
+#define DLSS_HLSL_TEXT(...) DLSS_HLSL_TEXT_(__VA_ARGS__)
+
 // Every pass but the optical-flow resolve, in one translation-unit-scope string so
 // that the source conversion below can be compiled from it a second time - with a
 // different set of -D constants - without a device.
@@ -282,6 +291,24 @@ struct V{float4 p:SV_Position;float2 uv:TEXCOORD0;};
 V VS(uint id:SV_VertexID){float2 uv=float2((id<<1)&2,id&2);V o;o.uv=uv;o.p=float4(uv.x*2-1,1-uv.y*2,0,1);return o;}
 float3 SRGBToLinear(float3 c){float3 lo=c/12.92;float3 hi=pow(max((c+0.055)/1.055,0),2.4);return lerp(hi,lo,step(c,0.04045));}
 float3 LinearToSRGB(float3 c){c=max(c,0);float3 lo=c*12.92;float3 hi=1.055*pow(c,1.0/2.4)-0.055;return saturate(lerp(hi,lo,step(c,0.0031308)));}
+)" "static const uint kBlueNoise[1024]={" DLSS_HLSL_TEXT(DLSS_BLUE_NOISE_64x64) "};" R"(
+// Blue-noise ordered dither ahead of an 8-bit UNORM store. DitherPolicy.h owns the map
+// and a C++ mirror of these two functions, and says why blue noise and why it is static.
+// The store rounds to nearest, so adding (t-0.5) of a code with t in (0,1) makes it
+// floor(v*255+t): the expected output is the input, and a band edge becomes a mix of its
+// two codes. SV_Position is the pixel centre, so its integer part is the pixel.
+float DitherOffset8(float2 pixel){
+    uint2 p=uint2(pixel)&63u;uint i=p.y*64u+p.x;
+    return ((float((kBlueNoise[i>>2]>>((i&3u)*8u))&255u)+0.5)/256.0-0.5)/255.0;
+}
+// The cache capture's map, an 8x8 ordered (Bayer) index built from the bits of x^y and
+// y. Blue noise does not survive the HEVC encode the capture feeds; DitherPolicy.h has
+// the measurement and the C++ mirror.
+float DitherOffsetBayer8(float2 pixel){
+    uint2 p=uint2(pixel)&7u;uint d=p.x^p.y;
+    uint r=((d&1u)<<5)|((p.y&1u)<<4)|((d&2u)<<2)|((p.y&2u)<<1)|((d&4u)>>1)|((p.y&4u)>>2);
+    return ((float(r)+0.5)/64.0-0.5)/255.0;
+}
 // A decoded video frame is an already-sampled, band-limited grid: there is no continuous
 // scene behind it to re-sample at a new sub-pixel phase. Offsetting this fetch would only
 // convolve the frame with a per-frame bilinear tent (Nyquist gain |1-2f|, so 1.0 at phase 0
@@ -467,9 +494,28 @@ float4 PSConvertPq(V i):SV_Target{return float4(PqToLinear(T.SampleLevel(S,i.uv,
 // at an HDR original's highlights. Never in PSPresent, so never in the cache
 // capture, the neural input or an export; while the window is being resized it is
 // stretched until a canvas of the new size arrives.
-float3 SubtitlesOver(float3 o,float2 uv){
-    if(Subs.x>0.5){float4 s=Subtitles.SampleLevel(S,uv,0);o=OVERLAY_LINEAR(s.rgb)+o*(1.0-s.a);}
+float3 SubtitlesOver(float3 o,float2 uv,out float cover){
+    cover=0.0;
+    if(Subs.x>0.5){float4 s=Subtitles.SampleLevel(S,uv,0);o=OVERLAY_LINEAR(s.rgb)+o*(1.0-s.a);cover=s.a;}
     return o;
+}
+// The dither of the backbuffer's store (DitherPolicy.h), added to the encoded value
+// the store rounds. An 8-bit SDR backbuffer takes a blue-noise offset of +-half a
+// code; the HDR one (R10G10B10A2, PQ) takes the same map at its own 10-bit code,
+// +-half of 1/1023, since a smooth dark gradient bands in 10-bit PQ too, only
+// finer. Scaled by (1 - the subtitles' coverage), which is exactly dithering the
+// picture before the overlay goes over it: the video under and around the text is
+// dithered, and an opaque glyph or its outline is not speckled.
+#ifdef HDR_OUTPUT
+#define DITHER_STORE(e,pixel,cover) ((e)+DitherOffset8(pixel)*(255.0/1023.0)*(1.0-(cover)))
+#else
+#define DITHER_STORE(e,pixel,cover) ((e)+DitherOffset8(pixel)*(1.0-(cover)))
+#endif
+// The last step of both compositor paths, after the picture, panes, tags and loupe:
+// subtitles over it, the backbuffer's encoding, then the store's dither.
+float3 FinishCompose(float3 o,float2 uv,float2 pixel){
+    float cover;o=SubtitlesOver(o,uv,cover);
+    return DITHER_STORE(COMPOSE_OUTPUT(o),pixel,cover);
 }
 // The spatial mask on the Mix: where it is white the neural member stays as dialled,
 // where it is black the original shows through, and grey is a blend - so a face can be
@@ -565,8 +611,7 @@ float4 PSPresentScaled(V i):SV_Target{
     if(paneMode==6||paneMode==7){
         float4 panes=ComposePanes(i.uv,paneMode,Pane.y>0.5);
         if(Loupe.w>0.0)panes.rgb=LoupeOver(panes.rgb,i.uv*Target.xy,Pane.y>0.5);
-        panes.rgb=SubtitlesOver(panes.rgb,i.uv);
-        return float4(COMPOSE_OUTPUT(panes.rgb),1);
+        return float4(FinishCompose(panes.rgb,i.uv,i.p.xy),1);
     }
     float zoom=max(Misc.y,0.01);
     float2 zc=Compare.zw;
@@ -611,10 +656,12 @@ float4 PSPresentScaled(V i):SV_Target{
         }
     }
     if(Loupe.w>0.0)o=LoupeOver(o,i.uv*Target.xy,swap);
-    o=SubtitlesOver(o,i.uv);
-    return float4(COMPOSE_OUTPUT(o),1);
+    return float4(FinishCompose(o,i.uv,i.p.xy),1);
 }
-// GPU colour conversion for the NV12 capture path. The picture is exactly what the
+)"
+// MSVC caps one string literal at 16 KB (C2026); the pieces concatenate into one
+// program text, so where it is cut changes no shader.
+R"(// GPU colour conversion for the NV12 capture path. The picture is exactly what the
 // cache-capture pass produces; only the encoding differs, from 8-bit BGRA to BT.709
 // limited-range Y and interleaved UV, so ffmpeg never converts a frame on the CPU.
 float3 CaptureRGB(float2 uv){return LinearToSRGB(ApplyVideoAdjustments(T.SampleLevel(S,uv,0).rgb));}
@@ -636,6 +683,15 @@ float2 PSCaptureChroma(V i):SV_Target{
     c+=CaptureChromaOf(CaptureRGB(i.uv+float2(o.x,o.y)));
     return c*0.25;
 }
+// The three 8-bit captures again, dithered at the store: the BGRA cache target (the
+// picture PSPresent draws there with the capture's constants) and both NV12 planes, each
+// against the ordered map in its own plane's pixels. Separate entry points rather than a
+// constant, because the undithered programs are part of every cached render on disk and
+// have to stay byte-identical. A renderer runs these only when SetCaptureDither asked for
+// them, and the dither is a cache-key term.
+float4 PSCaptureDithered(V i):SV_Target{return float4(CaptureRGB(i.uv)+DitherOffsetBayer8(i.p.xy),1);}
+float PSCaptureLumaDithered(V i):SV_Target{return PSCaptureLuma(i)+DitherOffsetBayer8(i.p.xy);}
+float2 PSCaptureChromaDithered(V i):SV_Target{return PSCaptureChroma(i)+DitherOffsetBayer8(i.p.xy);}
 // The exact inverse of the capture conversion above, for a source that arrives as NV12
 // (Y at t0, interleaved UV at t1, sampled bilinearly at half size). It writes the same
 // 8-bit sRGB-encoded BGRA the decoder used to upload, so every pass after the decoded
@@ -725,10 +781,14 @@ bool D3D12Renderer::CompileSourceNv12(SourceNv12Conversion conversion,ComPtr<ID3
 
 bool D3D12Renderer::CreatePipelines(){
     UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,depthWrite,expand,err;
-    ComPtr<ID3DBlob>captureLuma,captureChroma,sourceNv12,presentScaled;
+    ComPtr<ID3DBlob>captureLuma,captureChroma,sourceNv12,presentScaled,captureDithered;
     auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(kPresentHlsl,sizeof(kPresentHlsl)-1,nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
     if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand)||
        !C("PSCaptureLuma","ps_5_1",captureLuma)||!C("PSCaptureChroma","ps_5_1",captureChroma))return false;
+    // The dithered captures replace the plain ones outright: a renderer captures one way
+    // for its whole life, and the choice is part of the render's cache key.
+    if(m_captureDither&&(!C("PSCaptureDithered","ps_5_1",captureDithered)||
+       !C("PSCaptureLumaDithered","ps_5_1",captureLuma)||!C("PSCaptureChromaDithered","ps_5_1",captureChroma)))return false;
     // Only a renderer that presents to a window it follows ever scales the present.
     if(m_followWindow&&!C("PSPresentScaled","ps_5_1",presentScaled))return false;
     // The HDR backbuffer programs: the compositor and the two debug views with
@@ -788,6 +848,7 @@ bool D3D12Renderer::CreatePipelines(){
     p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoPresent)),"Create present PSO"))return false;
     // Cache capture runs the same present shader into a BGRA8 target, so the
     // readback rows already carry the caller's byte order and need no CPU swizzle.
+    if(captureDithered)p.PS={captureDithered->GetBufferPointer(),captureDithered->GetBufferSize()};
     p.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCacheCapture)),"Create cache-capture PSO"))return false;
     if(presentScaled){
         p.PS={presentScaled->GetBufferPointer(),presentScaled->GetBufferSize()};
@@ -1492,12 +1553,15 @@ ID3D12PipelineState* D3D12Renderer::BackbufferProgram(bool scaled,bool hdrTarget
 }
 
 present_scale::Target D3D12Renderer::CurrentPresentTarget()const{
-    // A comparison the capture's PSPresent cannot draw takes the compositor even at 1:1,
-    // and so do subtitles, which PSPresent never draws, and an HDR backbuffer, which
-    // PSPresent cannot encode for.
-    const bool compose=(m_debugView==DebugView::Final&&
-        ((m_hasReference&&ComparisonNeedsCompositor(m_comparison))||m_subtitleShown))||m_hdrOutput;
-    return present_scale::Choose(m_followWindow,m_psoPresentScaled!=nullptr,m_backbufferW,m_backbufferH,m_outputW,m_outputH,compose);
+    // The compositor is taken even at 1:1, whatever the comparison: besides what the
+    // capture's PSPresent cannot draw (ComparisonNeedsCompositor), subtitles, which
+    // PSPresent never draws, and an HDR backbuffer, which PSPresent cannot encode for,
+    // it is the program that dithers the window's store (DitherPolicy.h), and a window
+    // the output's size is exactly where a dark gradient's banding shows most. At 1:1
+    // it takes one tap at each texel's centre, so the picture is the one PSPresent
+    // would draw. Only a renderer that follows its window has the program; the offline
+    // carrier keeps PSPresent.
+    return present_scale::Choose(m_followWindow,m_psoPresentScaled!=nullptr,m_backbufferW,m_backbufferH,m_outputW,m_outputH,true);
 }
 
 bool D3D12Renderer::CompilePresentProgram(const char*entry,const char*target,ComPtr<ID3DBlob>&blob,bool hdrOutput){

@@ -358,6 +358,28 @@ void encoder_settings_that_change_the_written_pixels_change_the_render_key()
     CHECK(BuildNeuralCacheKey(identity) != shippedKey);
 }
 
+void capture_dither_changes_the_render_key_and_names_its_map()
+{
+    // The dither leaves the picture where it was and changes the bytes of every
+    // captured frame, so a dithered render must never be served for an
+    // undithered request or the other way round. The term follows every other
+    // pipeline term, and adds nothing while the capture writes what it always did.
+    CHECK_EQ(std::string{}, CaptureQualityIdentityTerm(CaptureQualityTerms{}));
+    CaptureQualityTerms dithered;
+    dithered.captureDither = true;
+    CHECK_EQ(std::string("|dither-bayer8-v1"), CaptureQualityIdentityTerm(dithered));
+    const std::string pipeline =
+        NeuralRenderPipelineIdentity(false, kDefaultNvencPreset, kDefaultGpuColorConversion) +
+        TemporalPipelineTerm(TemporalSettings{});
+    NeuralCacheIdentity identity{std::string(64, 'a'), 1920, 1080, "test", "rtx50",
+                                 std::string(64, 'b'), pipeline, false};
+    const auto shippedKey = BuildNeuralCacheKey(identity);
+    identity.quality = pipeline + CaptureQualityIdentityTerm(CaptureQualityTerms{});
+    CHECK_EQ(shippedKey, BuildNeuralCacheKey(identity));
+    identity.quality = pipeline + CaptureQualityIdentityTerm(dithered);
+    CHECK(BuildNeuralCacheKey(identity) != shippedKey);
+}
+
 void schema_three_manifests_parse_with_defaults_and_stay_reusable()
 {
     // Byte-exact schema-3 manifest as written by the previous release.
@@ -820,6 +842,7 @@ int main()
     source_conversion_changes_the_render_key_and_the_default_path_is_unchanged();
     temporal_settings_change_the_render_key_only_off_their_defaults();
     encoder_settings_that_change_the_written_pixels_change_the_render_key();
+    capture_dither_changes_the_render_key_and_names_its_map();
     schema_three_manifests_parse_with_defaults_and_stay_reusable();
     current_schema_manifest_round_trips_with_receipt_digest();
     receipt_is_authenticated_on_promotion_and_lookup();

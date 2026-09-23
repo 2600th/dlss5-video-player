@@ -503,6 +503,14 @@ key, so a default render keeps the cache entries it already has:
 - `NvencPreset` (1-7, default 5). p7 is the slowest and best; drop it if NVENC
   is the bottleneck on your card. A non-default preset adds `nvenc-p<N>` to the
   key.
+- `CaptureDither` (default off). Dithers each rendered frame against a static
+  8x8 ordered map where it is cut to 8 bits for the cache, so a smooth dark
+  gradient is written as a fine mix of two levels instead of flat bands.
+  Measured on five 1080p clips it removed 44-63 % of the Standard rung's
+  banding (CAMBI) on the three that had any, at the same size and within 0.04
+  VMAF; it stays off because those deltas are not all zero. The key carries
+  `dither-bayer8-v1` while it is on. The player window always dithers what it
+  shows (blue noise), independently of this key and at no cost to the cache.
 - `GpuColorConversion` (default off). Converts the rendered frame to NV12 on the
   GPU instead of letting ffmpeg do it on the CPU. Off because with the neural
   pass running the GPU is the scarce resource: 8.35 ms/frame against 8.66 on an

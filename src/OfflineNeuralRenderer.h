@@ -112,6 +112,10 @@ struct NeuralRenderRequest {
     // estimator forced, or the guides dumped. Only the helper's own command line
     // can set them, never the player, and only the production evaluator reads them.
     guide_files::Sources guideFiles{};
+    // Ordered dither at the 8-bit capture store (DitherPolicy.h). Off by
+    // default: it changes the captured bytes, which makes it a cache-key term
+    // (CaptureQualityIdentityTerm), and it ships on only on a measurement.
+    bool captureDither{false};
 };
 
 struct NeuralRenderProgress {

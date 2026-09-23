@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P1** | | | | |
 | **P2** | | | | |
 | [P2.1](#p21) | Supply a smoothed exposure instead of auto-exposure | S | Pipeline | ✅ |
-| [P2.2](#p22) | Dither wherever the image is cut to 8 bits | S | Pipeline, Player | ✅ |
 | [P2.3](#p23) | A quality ladder for cache and export: CQ, 10-bit, lossless | M | Pipeline | ✅ |
 | [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
@@ -116,22 +115,6 @@ Refs: [DLSS guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/Progr
 
 **Impact** — Pipeline: steadier tone across cuts and lighting changes.
 Player: less visible pumping.
-
----
-
-<a id="p22"></a>
-### P2.2 · Dither wherever the image is cut to 8 bits
-
-`S` · **Pipeline, Player** · ✅ current state
-
-The only dithering in `src/` is the GIF palette (`MediaPipeline.cpp:693`). The
-neural output goes from FP16 straight to an 8-bit capture, and the image
-adjustments go straight to an `R8G8B8A8` swapchain. Add blue-noise dithering
-(libplacebo's default, a 64×64 LUT) at both points.
-
-**Impact** — Pipeline: less banding in the dark gradients the model lifts;
-the capture-side dither is a cache-key term. Player: the same on screen,
-where it costs nothing to the cache.
 
 ---
 

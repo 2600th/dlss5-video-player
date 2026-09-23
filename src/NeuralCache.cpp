@@ -924,6 +924,13 @@ std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion, uint32_t nven
     return pipeline;
 }
 
+std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms)
+{
+    std::string term;
+    if (terms.captureDither != kDefaultCaptureDither) term += "|dither-bayer8-v1";
+    return term;
+}
+
 std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity)
 {
     std::string canonical;

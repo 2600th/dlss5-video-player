@@ -341,7 +341,8 @@ private:
             {L"encoder.settings.gpu_convert", L"GPU color conversion"},
             {L"encoder.settings.gpu_source", L"GPU source conversion"},
             {L"encoder.settings.nvenc_preset", L"NVENC preset"},
-            {L"encoder.settings.note", L"These only affect how the next neural render is decoded and encoded; the rendered image itself is unchanged. Nothing has to be re-rendered."},
+            {L"encoder.settings.capture_dither", L"Dither the cached frames"},
+            {L"encoder.settings.note", L"These apply to the next neural render. Each one that changes the written pixels is part of the render's cache key, so a range rendered under other settings is rendered again rather than reused."},
             {L"encoder.settings.reset", L"Reset"}, {L"encoder.settings.close", L"Close"},
             // Tooltips. They describe the control and, where it was measured,
             // what it demonstrably does; they never promise a direction that has
@@ -355,6 +356,7 @@ private:
             {L"neural.tip.automask", L"Lets the runtime find characters in the frame, so the Skin structure term applies to them.\nTurning it off changes the frame and switches Skin structure off with it."},
             {L"encoder.tip.gpu_convert", L"Converts each rendered frame to NV12 on the GPU instead of letting the encoder convert on the CPU. Measured with the neural pass running, the GPU is the scarce resource and the CPU path was slightly faster, so this is off by default; turn it on for a GPU with headroom."},
             {L"encoder.tip.gpu_source", L"Decodes the source to NV12 and converts it to BGRA on the GPU instead of letting ffmpeg convert on the CPU. Turn it off to compare when the GPU is the bottleneck. Applies to the next render."},
+            {L"encoder.tip.capture_dither", L"Adds a fixed ordered dither where each rendered frame is cut to 8 bits for the Standard cache, so a smooth gradient becomes a fine mix of two levels instead of a staircase of flat bands. Measured on five 1080p clips: 44-63 % less banding on the three that have any, the same size, VMAF within 0.04. Off by default; High removes the banding at its source. The player window always dithers what it shows, which costs nothing."},
             {L"encoder.tip.nvenc_preset", L"Speed/quality preset for the hevc_nvenc encoder that writes neural renders and frame-generation conversions. p5 is the default. Measured at 2560x1440 on an RTX 5090: p7 takes twice the encode time of p5 and buys 0.12 VMAF on ordinary content, 0.53 on noise-heavy content, at 95-98 VMAF. The encoder is the long pole on both paths, so whole conversions ran 8.8 s against 6.3 s. Applies to the next render."},
             {L"neural.tip.guide_mv", L"Sends this player's estimated motion to the model so it can reuse the previous frame.\nVideo carries no real motion vectors, so these are estimated per frame and rejected where the estimate is not trustworthy."},
             {L"neural.tip.guide_depth", L"Sends this player's estimated depth proxy.\nMeasured: it only changes the image while Motion vectors is on - with motion off, depth makes no difference."},

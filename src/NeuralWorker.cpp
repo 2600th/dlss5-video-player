@@ -1248,6 +1248,12 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"--temporal");
         arguments.emplace_back(temporal.begin(), temporal.end());
     }
+    // Absent means the undithered capture every earlier helper wrote, so an
+    // older parent cannot change the bytes a newer helper produces for it.
+    if (request.captureDither) {
+        arguments.emplace_back(L"--capture-dither");
+        arguments.emplace_back(L"1");
+    }
     if (pauseEvent) {
         arguments.emplace_back(L"--pause-event");
         arguments.emplace_back(HandleText(pauseEvent));
@@ -1306,7 +1312,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
-               KeyCount };
+               CaptureDither, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1318,7 +1324,9 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // that binary can actually do.
         L"--output-width", L"--output-height", L"--require-neural", L"--processing-scale",
         // Absent at the defaults, for the same reason.
-        L"--temporal", L"--sr-history"};
+        L"--temporal", L"--sr-history",
+        // Capture-side quality switches: absent is what every earlier helper did.
+        L"--capture-dither"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1465,6 +1473,11 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         uint64_t enabled = 0;
         if (!ParseUnsigned(*values[GpuSourceConversion], enabled) || enabled > 1) return std::nullopt;
         request.gpuSourceConversion = enabled != 0;
+    }
+    if (values[CaptureDither]) {
+        uint64_t enabled = 0;
+        if (!ParseUnsigned(*values[CaptureDither], enabled) || enabled > 1) return std::nullopt;
+        request.captureDither = enabled != 0;
     }
     // Absent means 7, stated here rather than left to the struct's own default.
     // The two are different numbers and different decisions: 7 is the VERSION

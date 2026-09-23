@@ -351,10 +351,11 @@ window, so captures stay at the output's size.
 beyond `PSPresent` - the ORIGINAL / DLSS 5 tags, the swapped split - comes
 from a second cbuffer (`Compose`, b1) and a texture table (t3-t4) that only it
 declares, so fxc strips them from `PSPresent` and the capture program keeps
-its bindings (a PolicyTests case reflects both programs). A comparison that
-needs the compositor takes it even when the window is exactly the output's
-size (`ComparisonNeedsCompositor`); there, one bilinear tap at each texel's
-centre is the picture `PSPresent` would have drawn. The tags are drawn by GDI
+its bindings (a PolicyTests case reflects both programs). The player's
+renderer takes the compositor even when the window is exactly the output's
+size, because it also dithers the window's 8-bit store (below); there, one
+bilinear tap at each texel's centre is the picture `PSPresent` would have
+drawn. The tags are drawn by GDI
 at the window's DPI into a premultiplied atlas and uploaded once per DPI; the
 spatial mask on the Mix is an R8 texture at t3, read through WIC, shrunk to at
 most 4096 on a side and feathered on the CPU (three box passes) before its one
@@ -388,6 +389,23 @@ a picture already up is found); a text stream inside a video is copied out
 once into a small MKS first, because the `subtitles` filter reads its whole
 input at every start. The decisions - track choice, sidecars, text encoding,
 filtergraph escaping, timing and delay - are `SubtitlePolicy.h`.
+
+`PSPresentScaled` dithers the backbuffer's store, on both return paths and
+after the tags and the loupe, against a static 64x64 blue-noise map
+(`DitherPolicy.h`), so a dark gradient reaches the screen as a fine mix of two
+codes rather than flat bands: +-half a code on the 8-bit SDR backbuffer, and
++-half a 10-bit code on the HDR one (R10G10B10A2, after the PQ encode). The
+offset is scaled by one minus the subtitles' coverage, which is dithering the
+picture before the subtitle layer goes over it, so the video around the text is
+dithered and the glyphs are not speckled. It is presentation-only and always on. The cache capture can dither its
+own 8-bit store (`SetCaptureDither`, Encoder settings > Dither the cached
+frames), but against an 8x8 ordered (Bayer) map rather than blue noise: its
+frames go on to HEVC, whose quantiser removes exactly the high frequencies blue
+noise lives in, while a period-8 tile survives it (the measurement is in
+`DitherPolicy.h`). That path compiles separate entry points
+(`PSCaptureDithered`, `PSCaptureLumaDithered`, `PSCaptureChromaDithered`) so
+the undithered programs keep their bytecode, and it is a cache-key term
+(`dither-bayer8-v1`).
 
 During neural pre-render, `RenderFrameForCache` copies the evaluated output to a
 dedicated readback resource and emits tightly packed BGRA frames to a bounded

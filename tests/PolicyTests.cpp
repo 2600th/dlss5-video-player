@@ -72,6 +72,7 @@
 #include "TemporalStabilityPolicy.h"
 #include "NeuralMotionPolicy.h"
 #include "TemporalStabilityShader.h"
+#include "DitherPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -89,6 +90,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstddef>
 #include <limits>
 #include <iterator>
@@ -8658,6 +8660,128 @@ void temporal_stability_shader_compiles_test()
     CHECK(compiles("PSTemporalStability","ps_5_1"));
 }
 
+// The blue-noise map the present and the capture dither against. Each property is
+// one the dither's correctness rests on: every threshold level equally often (so a
+// constant input comes out at its true mean), a zero-mean offset, and blue noise -
+// low spatial frequencies nearly empty - which is the reason for a map at all.
+void blue_noise_dither_map_is_balanced_and_blue_test()
+{
+    std::array<uint32_t,256> counts{};
+    double sum=0.0;
+    for(uint32_t y=0;y<64;++y)
+        for(uint32_t x=0;x<64;++x){
+            ++counts[dither::BlueNoiseRank(x,y)];
+            sum+=dither::BlueNoiseOffset(x,y);
+        }
+    for(const uint32_t count:counts)CHECK_EQ(16u,count);
+    CHECK(std::abs(sum)<1e-3);
+    // Tiled: the map repeats every 64 pixels in both axes.
+    CHECK_EQ(dither::BlueNoiseRank(3,5),dither::BlueNoiseRank(67,69));
+    // Averaged over 4x4 blocks, blue noise nearly cancels; white noise of the same
+    // range keeps a standard deviation of about 0.072 (0.289/sqrt(16)). The map
+    // measures 0.034; a map that lost its spectrum would sit near the white figure.
+    double sumSq=0.0;
+    for(uint32_t by=0;by<16;++by)
+        for(uint32_t bx=0;bx<16;++bx){
+            double block=0.0;
+            for(uint32_t y=0;y<4;++y)for(uint32_t x=0;x<4;++x)block+=dither::BlueNoiseOffset(bx*4+x,by*4+y);
+            block/=16.0;sumSq+=block*block;
+        }
+    CHECK(std::sqrt(sumSq/256.0)<0.045);
+}
+
+// What the dither buys: round-to-nearest turns every value between two codes into
+// one of them, so a smooth ramp becomes flat bands; the dithered store keeps the
+// value as the proportion of the two codes, so the tile's mean is the input.
+void blue_noise_dither_preserves_the_mean_a_rounded_store_loses_test()
+{
+    for(int step=0;step<=40;++step){
+        const float code=40.0f+float(step)/40.0f;   // 40.000 .. 41.000 in 1/40 steps
+        const float value=code/255.0f;
+        double dithered=0.0;
+        for(uint32_t y=0;y<64;++y)for(uint32_t x=0;x<64;++x)dithered+=dither::DitheredCode(value,x,y);
+        dithered/=4096.0;
+        // Exact to the map's 256 threshold levels.
+        CHECK(std::abs(dithered-double(code))<1.0/256.0+1e-4);
+        // Only the two neighbouring codes ever appear.
+        for(uint32_t y=0;y<64;++y)for(uint32_t x=0;x<64;++x){
+            const uint32_t out=dither::DitheredCode(value,x,y);
+            CHECK(out==40u||out==41u);
+        }
+    }
+    // Black and white stay exactly black and white: the offset is under half a code.
+    for(uint32_t y=0;y<64;++y)for(uint32_t x=0;x<64;++x){
+        CHECK_EQ(0u,dither::DitheredCode(0.0f,x,y));
+        CHECK_EQ(255u,dither::DitheredCode(1.0f,x,y));
+    }
+    // The HDR backbuffer (R10G10B10A2) takes the same map at its own 10-bit code, and
+    // keeps the mean in the same way between two neighbouring 10-bit codes.
+    for(int step=0;step<=8;++step){
+        const float code=512.0f+float(step)/8.0f;
+        double dithered=0.0;
+        for(uint32_t y=0;y<64;++y)for(uint32_t x=0;x<64;++x){
+            const uint32_t out=dither::DitheredCode(code/1023.0f,x,y,1023);
+            CHECK(out==512u||out==513u);
+            dithered+=out;
+        }
+        CHECK(std::abs(dithered/4096.0-double(code))<1.0/256.0+1e-3);
+    }
+}
+
+// The capture's ordered map: the classic 8x8 Bayer matrix, every level once a
+// tile, and - like the blue-noise map - a store that keeps the input's mean.
+void bayer_capture_dither_map_is_the_classic_matrix_test()
+{
+    const std::array<uint32_t,8> firstRow{0,32,8,40,2,34,10,42};
+    const std::array<uint32_t,8> secondRow{48,16,56,24,50,18,58,26};
+    for(uint32_t x=0;x<8;++x){
+        CHECK_EQ(firstRow[x],dither::Bayer8Rank(x,0));
+        CHECK_EQ(secondRow[x],dither::Bayer8Rank(x,1));
+    }
+    std::array<uint32_t,64> counts{};
+    for(uint32_t y=0;y<8;++y)for(uint32_t x=0;x<8;++x)++counts[dither::Bayer8Rank(x,y)];
+    for(const uint32_t count:counts)CHECK_EQ(1u,count);
+    CHECK_EQ(dither::Bayer8Rank(3,5),dither::Bayer8Rank(11,13));
+    for(int step=0;step<=16;++step){
+        const float code=100.0f+float(step)/16.0f;
+        double mean=0.0;
+        for(uint32_t y=0;y<8;++y)for(uint32_t x=0;x<8;++x)
+            mean+=dither::DitheredCode(code/255.0f,x,y,255,dither::DitherMap::Bayer8);
+        CHECK(std::abs(mean/64.0-double(code))<1.0/64.0+1e-4);
+    }
+}
+
+// The map reaches the shader through a macro pasted into the program text, not a
+// second copy. fxc stores a `static const uint` array as an immediate constant
+// buffer of float4 rows with the value in .x, so the compiled scaled present must
+// carry the header's 1024 words in that layout, in order - a table the paste lost or
+// truncated would not be found. The dithered captures compile, and each is a
+// different program from the plain capture it stands in for, which stays as it was.
+void blue_noise_dither_reaches_the_present_and_capture_programs_test()
+{
+    std::string rows;
+    for(const uint32_t word:dither::kBlueNoiseWords){
+        char row[16]{};std::memcpy(row,&word,sizeof(word));rows.append(row,sizeof(row));
+    }
+    // Both compositors, the SDR one and the HDR backbuffer's, carry the map.
+    for(const bool hdrOutput:{false,true}){
+        const std::string program=program_bytes("PSPresentScaled",hdrOutput);
+        CHECK(!program.empty());
+        CHECK(program.find(rows)!=std::string::npos);
+    }
+    const std::array<std::pair<const char*,const char*>,3> pairs{{
+        {"PSPresent","PSCaptureDithered"},{"PSCaptureLuma","PSCaptureLumaDithered"},
+        {"PSCaptureChroma","PSCaptureChromaDithered"}}};
+    for(const auto& [plainEntry,ditheredEntry]:pairs){
+        Microsoft::WRL::ComPtr<ID3DBlob> plain,dithered;
+        CHECK(D3D12RendererTestAccess::CompilePresentProgram(plainEntry,plain));
+        CHECK(D3D12RendererTestAccess::CompilePresentProgram(ditheredEntry,dithered));
+        if(plain&&dithered)
+            CHECK(std::string(static_cast<const char*>(plain->GetBufferPointer()),plain->GetBufferSize())!=
+                  std::string(static_cast<const char*>(dithered->GetBufferPointer()),dithered->GetBufferSize()));
+    }
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -12770,6 +12894,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_panes_locate_the_point_under_the_pointer_test),
     TEST_CASE(temporal_stability_blends_only_across_a_continuous_history_test),
     TEST_CASE(temporal_stability_shader_compiles_test),
+    TEST_CASE(blue_noise_dither_map_is_balanced_and_blue_test),
+    TEST_CASE(blue_noise_dither_preserves_the_mean_a_rounded_store_loses_test),
+    TEST_CASE(blue_noise_dither_reaches_the_present_and_capture_programs_test),
+    TEST_CASE(bayer_capture_dither_map_is_the_classic_matrix_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
     TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),

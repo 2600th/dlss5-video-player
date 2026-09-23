@@ -2033,6 +2033,10 @@ struct ProductionEvaluatorAdapter {
         if(renderer){renderer->SetTemporalStability(temporal.stability);renderer->SetZeroMotionTest(zeroMotionTest);
             renderer->SetUpscalingHistory(upscalingHistory);}
     }
+    // Dithered 8-bit capture, requested and built; compiled into the capture
+    // pipelines at bring-up, so a job that differs rebuilds the device.
+    bool captureDither{false};
+    bool builtCaptureDither{false};
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
     // Which conversion the live renderer's source pass was COMPILED for, which is
@@ -2084,7 +2088,7 @@ struct ProductionEvaluatorAdapter {
                width==w&&height==h&&outputWidth==ow&&outputHeight==oh&&fps==rate&&
                sourceLayout==layout&&sourceConversion==conversion&&
                builtGpuColorConversion==gpuColorConversion&&
-               builtSuperResolutionCarrier==superResolutionCarrier;
+               builtSuperResolutionCarrier==superResolutionCarrier&&builtCaptureDither==captureDither;
         // Answered, so spent: this job either re-arms the released feature or
         // rebuilds the device, and either way the next Initialize must judge
         // the feature on what it can see rather than on a stale promise.
@@ -2099,9 +2103,10 @@ struct ProductionEvaluatorAdapter {
         const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
         if(!renderer)return false;
-        builtGpuColorConversion=gpuColorConversion;
+        builtGpuColorConversion=gpuColorConversion;builtCaptureDither=captureDither;
         builtSuperResolutionCarrier=superResolutionCarrier;
         renderer->SetCaptureFormat(gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
+        renderer->SetCaptureDither(captureDither);
         renderer->SetSourceLayout(layout);
         renderer->SetSourceColor(color);
         // This swapchain is a hidden formality that exists so the neural add-on sees a
@@ -2894,6 +2899,7 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
             <<" dump="<<(files.dumpDirectory.empty()?std::string("none"):files.dumpDirectory.string())
             <<" zero-motion-test="<<(!files.zeroMotionTest?std::string("shipped"):*files.zeroMotionTest?std::string("on"):std::string("off")));
     }
+    state.evaluator.captureDither=request.captureDither;
     // Read before the reset, because the reset is allowed to drop the feature.
     const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();
     state.evaluator.ResetForJob(request.guides);

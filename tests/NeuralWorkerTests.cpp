@@ -1048,6 +1048,24 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
         const auto refusedView = view(refusedArguments);
         CHECK(!neural_worker_detail::ParseWorkerArguments(refusedView).has_value());
     }
+    // The capture dither changes the bytes of every captured frame, so absent must
+    // mean off: an older parent cannot get dithered frames it did not key for.
+    for (const auto& argument : normal) CHECK(argument != L"--capture-dither");
+    if (parsedNormal) CHECK(!parsedNormal->request.captureDither);
+    NeuralRenderRequest dithered = request;
+    dithered.captureDither = true;
+    const auto ditheredArguments =
+        neural_worker_detail::BuildWorkerArguments(dithered, metadata, pause, false);
+    const auto ditheredView = view(ditheredArguments);
+    const auto parsedDithered = neural_worker_detail::ParseWorkerArguments(ditheredView);
+    CHECK(parsedDithered.has_value());
+    if (parsedDithered) CHECK(parsedDithered->request.captureDither);
+    auto badDither = ditheredArguments;
+    for (size_t index = 0; index + 1 < badDither.size(); ++index) {
+        if (badDither[index] == L"--capture-dither") badDither[index + 1] = L"2";
+    }
+    const auto badDitherView = view(badDither);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badDitherView).has_value());
     auto duplicated = normal;
     duplicated.emplace_back(L"--width");
     duplicated.emplace_back(L"1920");
