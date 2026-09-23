@@ -1,6 +1,16 @@
+# Three ways in. package_release.ps1 calls it from the repository with
+# -StageDirectory or -Zip, where VERSION, packaging/*.json and the pinned SDK
+# sit beside tools/. A user runs the copy that ships inside the package, where
+# none of that exists: that is package mode. It is detected from the layout
+# rather than asked for, and it takes the version and the core/complete
+# variant from PACKAGE_MANIFEST.txt, so the user needs no switches. This file
+# used to read VERSION from its parent directory unconditionally, so the
+# command README gave users failed before it checked anything.
 [CmdletBinding(DefaultParameterSetName = 'Stage')]
 param(
-    [Parameter(Mandatory = $true, ParameterSetName = 'Stage')][string]$StageDirectory,
+    # Required in the repository. In package mode it defaults to the folder
+    # this script was unpacked into.
+    [Parameter(ParameterSetName = 'Stage')][string]$StageDirectory,
     [Parameter(Mandatory = $true, ParameterSetName = 'Zip')][string]$Zip,
     [switch]$PublicCore,
     [string]$PackageSuffix = '-upscaling'
@@ -11,46 +21,111 @@ Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
-$version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
-if ($PublicCore) {
-    $expected = @(
-        'DLSSVideoPlayer.exe', 'nvngx_dlss.dll', 'nvngx_dlssg.dll', 'README.md', 'LICENSE',
-        'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
-        'PUBLIC_RELEASE_NOTICE.txt', 'THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt',
-        'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
-        'THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt',
-        'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
-        'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
-        'docs/TROUBLESHOOTING.md', 'PACKAGE_MANIFEST.txt',
-        # This script ships inside the package it checks. README tells a user
-        # to verify what they downloaded; without the checker in the zip they
-        # would have to clone the repository to do it.
-        'verify_package.ps1'
-    )
+$repositoryMode = (Test-Path -LiteralPath (Join-Path $repositoryRoot 'VERSION') -PathType Leaf) -and
+    (Test-Path -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -PathType Leaf)
+$publicCoreGiven = $PSBoundParameters.ContainsKey('PublicCore')
+$version = $null
+if ($repositoryMode) {
+    $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
+    if ($PSCmdlet.ParameterSetName -eq 'Stage' -and -not $StageDirectory) {
+        throw 'Run from the repository, this checks a package you name: -StageDirectory <folder> or -Zip <file>.'
+    }
 }
-else {
-    $expected = @(
-        'DLSSVideoPlayer.exe', 'neural-runtime/NeuralWorker.exe', 'neural-runtime/nvngx_dlss.dll', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
-        'neural-runtime/dxgi.dll', 'neural-runtime/ReShade.ini', 'neural-runtime/ReShadePreset.ini', 'neural-runtime/renodx-dlss5.addon64',
-        'nvngx_dlss.dll', 'nvngx_dlssg.dll',
-        'neural-runtime/nvngx_dlssnr.dll', 'neural-runtime/sl.common.dll', 'neural-runtime/sl.dlss.dll',
-        'neural-runtime/sl.dlss_g.dll', 'neural-runtime/sl.dlss_nr.dll', 'neural-runtime/sl.interposer.dll', 'neural-runtime/sl.nis.dll',
-        'neural-runtime/sl.pcl.dll', 'neural-runtime/sl.reflex.dll', 'README.md', 'LICENSE', 'SECURITY.md',
-        'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
-        'THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt',
-        'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
-        'THIRD_PARTY_LICENSES/experimental-runtime.txt',
-        'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
-        'THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt',
-        'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
-        'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
-        'docs/TROUBLESHOOTING.md',
-        'EXPERIMENTAL_RUNTIME_NOTICE.txt', 'PACKAGE_MANIFEST.txt',
-        # Ships inside the package it checks, for the same reason as above.
-        'verify_package.ps1'
-    )
+elseif ($PSCmdlet.ParameterSetName -eq 'Stage' -and -not $StageDirectory) {
+    $StageDirectory = $PSScriptRoot
 }
-$expected += @('docs/USAGE.md', 'docs/EXAMPLE_VIDEOS.md')
+
+function Get-ExpectedPackageFiles {
+    param([bool]$Core)
+    if ($Core) {
+        $files = @(
+            'DLSSVideoPlayer.exe', 'nvngx_dlss.dll', 'nvngx_dlssg.dll', 'README.md', 'LICENSE',
+            'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
+            'PUBLIC_RELEASE_NOTICE.txt', 'THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt',
+            'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
+            'THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt',
+            'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
+            'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
+            'docs/TROUBLESHOOTING.md', 'PACKAGE_MANIFEST.txt',
+            # This script ships inside the package it checks. README tells a user
+            # to verify what they downloaded; without the checker in the zip they
+            # would have to clone the repository to do it.
+            'verify_package.ps1'
+        )
+    }
+    else {
+        $files = @(
+            'DLSSVideoPlayer.exe', 'neural-runtime/NeuralWorker.exe', 'neural-runtime/nvngx_dlss.dll', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
+            'neural-runtime/dxgi.dll', 'neural-runtime/ReShade.ini', 'neural-runtime/ReShadePreset.ini', 'neural-runtime/renodx-dlss5.addon64',
+            'nvngx_dlss.dll', 'nvngx_dlssg.dll',
+            'neural-runtime/nvngx_dlssnr.dll', 'neural-runtime/sl.common.dll', 'neural-runtime/sl.dlss.dll',
+            'neural-runtime/sl.dlss_g.dll', 'neural-runtime/sl.dlss_nr.dll', 'neural-runtime/sl.interposer.dll', 'neural-runtime/sl.nis.dll',
+            'neural-runtime/sl.pcl.dll', 'neural-runtime/sl.reflex.dll', 'README.md', 'LICENSE', 'SECURITY.md',
+            'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
+            'THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt',
+            'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
+            'THIRD_PARTY_LICENSES/experimental-runtime.txt',
+            'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
+            'THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt',
+            'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
+            'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
+            'docs/TROUBLESHOOTING.md',
+            'EXPERIMENTAL_RUNTIME_NOTICE.txt', 'PACKAGE_MANIFEST.txt',
+            # Ships inside the package it checks, for the same reason as above.
+            'verify_package.ps1'
+        )
+    }
+    return @($files + @('docs/USAGE.md', 'docs/EXAMPLE_VIDEOS.md'))
+}
+
+# Package mode has neither VERSION nor a -PublicCore the user would have to
+# know to pass. The manifest the packager wrote says both: its first line
+# carries the version, and each variant ships a notice the other does not.
+function Read-PackageIdentity {
+    param([string]$Root)
+    $manifestPath = Join-Path $Root 'PACKAGE_MANIFEST.txt'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "No PACKAGE_MANIFEST.txt in '$Root'. Run this from the unpacked package folder, or pass -StageDirectory <that folder>."
+    }
+    $lines = @(Get-Content -LiteralPath $manifestPath)
+    if ($lines.Count -lt 3 -or $lines[0] -notmatch '^ProductVersion=([0-9]+\.[0-9]+\.[0-9]+)$') {
+        throw 'PACKAGE_MANIFEST.txt has an invalid header.'
+    }
+    $manifestVersion = $Matches[1]
+    $paths = @($lines[2..($lines.Count - 1)] | ForEach-Object { ($_ -split '\|', 2)[0] })
+    $isCore = $paths -ccontains 'PUBLIC_RELEASE_NOTICE.txt'
+    $isComplete = $paths -ccontains 'EXPERIMENTAL_RUNTIME_NOTICE.txt'
+    if ($isCore -eq $isComplete) {
+        throw 'PACKAGE_MANIFEST.txt lists neither or both variant notices, so it describes no package this project builds.'
+    }
+    # A folder that still carries the packager's name has to agree with the
+    # manifest. A renamed folder is the user's business and is not checked.
+    $folder = Split-Path -Leaf ([IO.Path]::GetFullPath($Root).TrimEnd('\', '/'))
+    if ($folder -match '^DLSSVideoPlayer-v([0-9]+\.[0-9]+\.[0-9]+)(-.*)?-win64$' -and $Matches[1] -cne $manifestVersion) {
+        throw "Folder '$folder' names version $($Matches[1]), but PACKAGE_MANIFEST.txt says $manifestVersion."
+    }
+    return [pscustomobject]@{ Version = $manifestVersion; Core = $isCore }
+}
+
+# The allowlist depends on the variant, which package mode only knows once it
+# has found the manifest - inside the zip, for -Zip - so it is chosen per root.
+$expected = @()
+function Select-PackageVariant {
+    param([string]$Root)
+    if ($repositoryMode) {
+        $script:expected = Get-ExpectedPackageFiles -Core ([bool]$PublicCore)
+        return
+    }
+    $identity = Read-PackageIdentity -Root $Root
+    if ($publicCoreGiven -and ([bool]$PublicCore -ne $identity.Core)) {
+        throw "-PublicCore:`$$([bool]$PublicCore) disagrees with the package, which is the $(if ($identity.Core) { 'core' } else { 'complete' }) variant."
+    }
+    $script:version = $identity.Version
+    $script:PublicCore = [switch]$identity.Core
+    $script:expected = Get-ExpectedPackageFiles -Core $identity.Core
+    Write-Host "Package mode: DLSS Video Player $($identity.Version), $(if ($identity.Core) { 'core' } else { 'complete' }) package."
+}
+
 $temporaryRoot = $null
 $maxArchiveEntries = 128
 $maxArchiveEntryBytes = 512MB
@@ -153,6 +228,22 @@ function Assert-ReleaseExecutableIdentity {
 
 function Assert-LockedFiles {
     param([string]$Root)
+    if (-not $repositoryMode) {
+        # An unpacked package has no pinned SDK and no lock files to compare
+        # against; the manifest check that follows holds every byte to what
+        # the packager hashed. What can still be checked independently of the
+        # manifest is that NVIDIA's own snippets carry NVIDIA's signature, in
+        # both variants. Whether the manifest itself is the one CI built is
+        # what the zip's checksum and attestation answer, not this script.
+        foreach ($snippet in @('nvngx_dlss.dll', 'nvngx_dlssg.dll')) {
+            $signature = Get-AuthenticodeSignature -LiteralPath (Join-Path $Root $snippet)
+            $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
+            if ([string]$signature.Status -cne 'Valid' -or $subject -notlike '*NVIDIA*') {
+                throw "Packaged $snippet is not validly NVIDIA-signed: status=$($signature.Status) signer=$subject"
+            }
+        }
+        return
+    }
     if ($PublicCore) {
         # Both NGX snippets in the public core are the pinned SDK's own files -
         # the Super Resolution runtime and the Frame Generation snippet - and
@@ -224,6 +315,7 @@ function Assert-LockedFiles {
 function Assert-Stage {
     param([string]$Root)
     $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
+    Select-PackageVariant -Root $resolvedRoot
     $actualUnsorted = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File | ForEach-Object {
         Get-RelativePackagePath -Root $resolvedRoot -Path $_.FullName
     })
@@ -232,7 +324,13 @@ function Assert-Stage {
     if ([string]::Join("`n", $actual) -cne [string]::Join("`n", $expectedSorted)) {
         $missing = @($expectedSorted | Where-Object { $_ -cnotin $actual })
         $unexpected = @($actual | Where-Object { $_ -cnotin $expectedSorted })
-        throw "Package allowlist mismatch. Missing=[$([string]::Join(', ', $missing))] Unexpected=[$([string]::Join(', ', $unexpected))]"
+        $message = "Package allowlist mismatch. Missing=[$([string]::Join(', ', $missing))] Unexpected=[$([string]::Join(', ', $unexpected))]"
+        # The player writes its settings, log and caches beside itself, so a
+        # folder it has already run from is expected to fail here.
+        if (-not $repositoryMode -and $unexpected.Count -ne 0) {
+            $message += ' Check a freshly unpacked copy: once the player has run, the files it writes beside itself are extra files too.'
+        }
+        throw $message
     }
 
     $knownExecutables = if ($PublicCore) { @('DLSSVideoPlayer.exe') } else { @('DLSSVideoPlayer.exe', 'neural-runtime/NeuralWorker.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe') }
@@ -294,6 +392,7 @@ function Assert-Stage {
     if ($manifestRows.Count -ne $manifestExpected.Count) {
         throw 'PACKAGE_MANIFEST.txt row count does not match the package.'
     }
+    $signatures = New-Object Collections.Generic.List[string]
     for ($index = 0; $index -lt $manifestExpected.Count; ++$index) {
         $relative = $manifestExpected[$index]
         $path = Join-Path $resolvedRoot $relative
@@ -304,8 +403,18 @@ function Assert-Stage {
         if ($manifestRows[$index] -cne $expectedLine) {
             throw "Manifest mismatch for '$relative'."
         }
+        if ($auth.Status -cne 'N/A') {
+            $signatures.Add("  $relative  $($auth.Status)$(if ($auth.Signer) { "  $($auth.Signer)" })")
+        }
     }
 
+    # What a user downloading this cannot see from a hash: which binaries are
+    # signed, and by whom. The same state is recorded in the manifest and was
+    # just held to it; this prints it.
+    if (-not $repositoryMode) {
+        Write-Host 'Authenticode state of the packaged binaries:'
+        foreach ($line in $signatures) { Write-Host $line }
+    }
     Write-Host "Verified allowlisted package with $($actual.Count) files at '$resolvedRoot'."
 }
 
@@ -357,9 +466,13 @@ try {
         if ($roots.Count -ne 1 -or @(Get-ChildItem -LiteralPath $temporaryRoot -File).Count -ne 0) {
             throw 'ZIP must contain exactly one top-level release directory.'
         }
-        $expectedRootName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
-        if ($roots[0].Name -cne $expectedRootName) {
-            throw "ZIP release directory mismatch: expected '$expectedRootName', received '$($roots[0].Name)'."
+        # Outside the repository the version and variant come from the
+        # manifest inside, and Read-PackageIdentity holds the folder name to it.
+        if ($repositoryMode) {
+            $expectedRootName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
+            if ($roots[0].Name -cne $expectedRootName) {
+                throw "ZIP release directory mismatch: expected '$expectedRootName', received '$($roots[0].Name)'."
+            }
         }
         Assert-Stage -Root $roots[0].FullName
     }

@@ -195,6 +195,12 @@ rather than rebuilding - and verifies an explicit file allowlist and manifest:
 ./tools/verify_package.ps1 -Zip dist/DLSSVideoPlayer-v<version>-win64.zip -PackageSuffix ''
 ```
 
+Run from the repository, the verifier compares the packaged runtime and helpers
+with the pinned SDK and the locks in `packaging/`. The copy that ships in the
+package has neither, so from an unpacked folder it runs in package mode: it
+reads the version and variant from `PACKAGE_MANIFEST.txt` and holds every file
+to the manifest and the allowlist. CI runs that copy from an extracted core zip.
+
 This complete experimental package requires the locked runtime and helpers.
 The assembler refuses to replace an existing output; select a new suffix for
 another local candidate. The published download uses the

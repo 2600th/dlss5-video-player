@@ -49,11 +49,13 @@ sha256sum -c DLSSVideoPlayer-v0.25.0-core-win64.zip.sha256
 gh attestation verify DLSSVideoPlayer-v0.25.0-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
-After unpacking, `verify_package.ps1` (inside the zip) checks every file against
-an allowlist, plus its Authenticode state:
+After unpacking, and before the first run, `verify_package.ps1` (inside the
+zip) checks every file against the allowlist and the hashes in
+`PACKAGE_MANIFEST.txt`, and prints each binary's Authenticode state. It detects
+core or complete itself. From the unpacked folder:
 
 ```powershell
-.\verify_package.ps1 -StageDirectory .
+powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_package.ps1
 ```
 
 > [!NOTE]

@@ -52,7 +52,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | ID | Task | Effort | Impact | |
 | --- | --- | :---: | --- | :---: |
 | **P0** | | | | |
-| [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
 | **P1** | | | | |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
@@ -104,31 +103,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 ---
 
 # P0 — Fix now
-
-<a id="p01"></a>
-### P0.1 · The packaged `verify_package.ps1` cannot run
-
-`S` · **Release** · ✅
-
-**Where** — `tools/verify_package.ps1:13-14`, `:166`, `:199`, `:204`, `:213`;
-`README.md:52-56`
-
-The script ships inside both zips, and the README tells users to run
-`.\verify_package.ps1 -StageDirectory .` from the unpacked folder. On its
-first line it sets `$repositoryRoot` to its parent directory and reads
-`VERSION` from there. In a package that file does not exist, so the script
-fails before checking anything. It also reads `packaging/*.json` and
-`external/DLSS/...`, which are not packaged either. The README command also
-omits `-PublicCore` for the core zip.
-
-**Impact** — Release: the check the README offers users does not work, so
-nobody can verify what they downloaded.
-
-**Fix** — add a package mode that takes the version from `PACKAGE_MANIFEST.txt`
-or the folder name, and checks against the manifest's hashes. Have CI run it
-from an extracted zip with no repository around it. Correct the README command.
-
----
 
 ---
 

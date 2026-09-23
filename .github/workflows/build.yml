@@ -82,6 +82,25 @@ jobs:
           }
           .\tools\verify_package.ps1 -Zip $zip[0].FullName -PublicCore
 
+      # The check README gives users, run the way they run it: the copy inside
+      # the zip, from the unpacked folder, with no repository around it. The
+      # packaged script used to read VERSION from its parent directory and so
+      # failed on every download before checking anything, while the repository
+      # copy above kept passing.
+      - name: Verify the core package as a user would
+        shell: powershell
+        run: |
+          $zip = @(Get-ChildItem -LiteralPath dist -Filter 'DLSSVideoPlayer-v*-core-win64.zip' -File)
+          $unpacked = Join-Path $env:RUNNER_TEMP 'unpacked-core'
+          Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath $unpacked
+          $folder = Join-Path $unpacked ([IO.Path]::GetFileNameWithoutExtension($zip[0].Name))
+          Push-Location -LiteralPath $folder
+          try {
+            powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_package.ps1
+            if ($LASTEXITCODE -ne 0) { throw "The packaged verify_package.ps1 exited $LASTEXITCODE." }
+          }
+          finally { Pop-Location }
+
       # Uploaded as the file itself, not re-zipped, so what is downloaded is the
       # verified package under its own name and runs as-is.
       - name: Upload core package
