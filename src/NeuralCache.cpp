@@ -385,6 +385,39 @@ std::optional<std::filesystem::path> ResolveWritableRoot(const std::filesystem::
     return resolved;
 }
 
+// The player is not long-path aware, so a staging directory - a 64-character
+// key plus pid and nonce - and the sidecars written into it fail with error=3
+// once the root passes roughly 140 characters. The root itself was accepted,
+// so a deep portable folder or a long custom root looked usable and then
+// failed every render at staging. This creates the deepest shape the cache
+// writes (an "invalid-" name, one character longer than "render-" and reaped
+// by any sweep if this process dies here, holding a file named past the
+// longest sidecar to leave room for the nonce to grow) and refuses the root
+// when the system will not, so the default falls back to LocalAppData and an
+// explicit root is refused up front. Probing rather than counting follows
+// whatever path limit the process actually has.
+bool DeepestStagingPathFits(const std::filesystem::path& root, NeuralCacheFailure& failure)
+{
+    const auto directory = root / L"staging" /
+        (L"invalid-" + std::wstring(64, L'0') + L"-" + std::to_wstring(GetCurrentProcessId()) +
+         L"-" + std::to_wstring(++g_stagingNonce));
+    DWORD error = ERROR_SUCCESS;
+    if (!CreateDirectoryW(directory.c_str(), nullptr)) {
+        error = GetLastError();
+    } else {
+        const HANDLE file = CreateFileW((directory / L"neural-settings.ini~probe").c_str(),
+            GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+        if (file == INVALID_HANDLE_VALUE) error = GetLastError();
+        else CloseHandle(file);
+        RemoveDirectoryW(directory.c_str());
+    }
+    if (error == ERROR_SUCCESS) return true;
+    failure.error.assign(static_cast<int>(error), std::system_category());
+    failure.path = directory;
+    return false;
+}
+
 std::optional<std::filesystem::path> PrepareWritableRoot(const std::filesystem::path& root,
                                                          NeuralCacheFailure& failure)
 {
@@ -408,6 +441,7 @@ std::optional<std::filesystem::path> PrepareWritableRoot(const std::filesystem::
             return std::nullopt;
         }
     }
+    if (!DeepestStagingPathFits(*writableRoot, failure)) return std::nullopt;
     failure = {};
     return writableRoot;
 }

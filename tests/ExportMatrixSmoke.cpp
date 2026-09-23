@@ -24,6 +24,7 @@
 
 #include "FrameGenerationPass.h"
 #include "GpuTestGate.h"
+#include "TestEnvironment.h"
 #include "NeuralWorker.h"
 #include "OfflineNeuralRenderer.h"
 #include "UpscalingPolicy.h"
@@ -132,6 +133,7 @@ StageOutcome RunWorkerStage(const fs::path& worker, const fs::path& source, cons
 
 int wmain(int argc, wchar_t** argv)
 {
+    test_support::ContainChildProcesses();
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if (argc != 4) {
         std::wcerr << L"Usage: ExportMatrixSmoke <ffmpeg-directory> <NeuralWorker.exe> <output-directory>\n";

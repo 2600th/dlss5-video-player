@@ -10,6 +10,7 @@
 #include "PlatformPaths.h"
 #include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
+#include "TestEnvironment.h"
 
 #include "RuntimePolicy.h"
 #include "GpuPreference.h"
@@ -10337,6 +10338,7 @@ int wmain(int argc, wchar_t* argv[])
 {
     const std::wstring executableName=current_test_executable().filename().wstring();
     if(_wcsicmp(executableName.c_str(),L"ffprobe.exe")==0||_wcsicmp(executableName.c_str(),L"ffmpeg.exe")==0)return run_fake_media_child(argc,argv);
+    test_support::ContainChildProcesses();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--resolver-availability-tests") {
         test_support::run_cases(kResolverAvailabilityCases, std::size(kResolverAvailabilityCases), {});
         return test_support::failure_count == 0 ? 0 : 1;

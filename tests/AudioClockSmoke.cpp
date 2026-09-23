@@ -1,4 +1,5 @@
 #include "AudioTestGate.h"
+#include "TestEnvironment.h"
 // Opt-in real-device verification; registered under the `audio` CTest label,
 // which the portable suite excludes.
 //
@@ -118,6 +119,7 @@ constexpr double kFrameSeconds = 1.0 / 24.0;
 
 int wmain(int argc, wchar_t** argv)
 {
+    test_support::ContainChildProcesses();
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) {
         std::cerr << "FAIL: COM could not start.\n";
         return 2;

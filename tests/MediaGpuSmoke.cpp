@@ -1,4 +1,5 @@
 #include "GpuTestGate.h"
+#include "TestEnvironment.h"
 // Opt-in real GPU verification; registered under the `gpu` CTest label, which
 // the portable suite excludes (`ctest -LE gpu`).
 // Usage: MediaGpuSmoke <ffmpeg-directory> <NeuralWorker.exe> <output-directory>
@@ -213,6 +214,7 @@ bool VerifyInput(const fs::path& helpers, const fs::path& worker, const fs::path
 
 int wmain(int argc, wchar_t** argv)
 {
+    test_support::ContainChildProcesses();
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if (argc != 4) {
         std::wcerr << L"Usage: MediaGpuSmoke <ffmpeg-directory> <NeuralWorker.exe> <output-directory>\n";

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <vector>
 #include "TestSupport.h"
+#include "TestEnvironment.h"
 #include "GpuTestGate.h"
 
 namespace {
@@ -1903,7 +1904,9 @@ struct PlayerAppTestAccess {
     static void CheckStreamConversionUsesTheAcquiredCopy(PlayerApp& app)
     {
         std::error_code ec;
-        const auto root = std::filesystem::temp_directory_path() / L"dlss5-stream-source-test";
+        // Per process: a fixed name was removed out from under a concurrent run.
+        const auto root = test_support::FixtureTempRoot() /
+            (L"dlss5-stream-source-test-" + std::to_wstring(GetCurrentProcessId()));
         std::filesystem::remove_all(root, ec);
         NeuralCacheManager cache(root);
         CHECK(cache.Valid());
@@ -2785,6 +2788,7 @@ int main(int argc, char** argv)
     // would compile main.cpp again, and this file is already the reason the
     // build amplifies (see 2.12). Remaining arguments are ffmpeg's directory and
     // a scratch directory, which only those cases read.
+    test_support::ContainChildProcesses();
     const bool gpuOnly = argc > 1 && std::string_view(argv[1]) == "--gpu";
     if (gpuOnly) {
         if (argc > 2) PlayerAppTestAccess::gpuFfmpegDirectory = std::filesystem::path(argv[2]);

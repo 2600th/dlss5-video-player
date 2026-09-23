@@ -8,6 +8,7 @@
 #include "ResidentHelperPolicy.h"
 #include "SynchronizedPlayback.h"
 #include "TestSupport.h"
+#include "TestEnvironment.h"
 
 #include <windows.h>
 #include <knownfolders.h>
@@ -37,13 +38,12 @@ namespace {
 
 class TempDirectory {
 public:
+    static constexpr std::wstring_view kPrefix = L"DLSSVideoPlayer-NeuralCacheTests-";
+
     TempDirectory()
     {
-        std::array<wchar_t, MAX_PATH> base{};
-        const DWORD length = GetTempPathW(static_cast<DWORD>(base.size()), base.data());
-        CHECK(length > 0 && length < base.size());
-        path_ = std::filesystem::path(base.data()) /
-            (L"DLSSVideoPlayer-NeuralCacheTests-" + std::to_wstring(GetCurrentProcessId()) +
+        path_ = test_support::FixtureTempRoot() /
+            (std::wstring(kPrefix) + std::to_wstring(GetCurrentProcessId()) +
              L"-" + std::to_wstring(GetTickCount64()));
         std::error_code error;
         CHECK(std::filesystem::create_directories(path_, error));
@@ -65,19 +65,16 @@ public:
         SweepAbandoned(path_.parent_path());
     }
 
-    // Only directories from OTHER processes: several TempDirectory objects are
-    // alive at once inside one test run, and deleting a live sibling here made
-    // the suite flaky.
+    // Never this process's own: several TempDirectory objects are alive at
+    // once inside one test run, and deleting a live sibling here made the
+    // suite flaky. Nor another run's that is still going - the same flake
+    // between two concurrent runs (FixtureAbandoned).
     static void SweepAbandoned(const std::filesystem::path& parent)
     {
-        const std::wstring mine = L"DLSSVideoPlayer-NeuralCacheTests-" +
-            std::to_wstring(GetCurrentProcessId()) + L"-";
         std::error_code error;
         for (std::filesystem::directory_iterator it(parent, error), end; !error && it != end;
              it.increment(error)) {
-            const std::wstring name = it->path().filename().wstring();
-            if (name.rfind(L"DLSSVideoPlayer-NeuralCacheTests-", 0) != 0) continue;
-            if (name.rfind(mine, 0) == 0) continue;
+            if (!test_support::FixtureAbandoned(it->path(), kPrefix)) continue;
             std::error_code ignored;
             std::filesystem::remove_all(it->path(), ignored);
         }
@@ -150,9 +147,9 @@ int RunCacheRootProbe(std::wstring_view mode)
     return test_support::failure_count ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
-void RunCacheRootChild(const TempDirectory& fixture, std::wstring_view mode)
+void RunCacheRootChildIn(const std::filesystem::path& directory, std::wstring_view mode)
 {
-    const auto executable = fixture.Path() / L"cache-probe.exe";
+    const auto executable = directory / L"cache-probe.exe";
     std::filesystem::copy_file(CurrentExecutable(), executable);
     std::wstring arguments = L"\"" + executable.wstring() + L"\" --cache-root-probe " + std::wstring(mode);
     STARTUPINFOW startup{sizeof(startup)};
@@ -175,6 +172,11 @@ void RunCacheRootChild(const TempDirectory& fixture, std::wstring_view mode)
     if (exitCode != EXIT_SUCCESS)
         std::wcerr << L"Cache root probe " << mode << L" exited with " << exitCode << L'\n';
     CHECK_EQ(DWORD{EXIT_SUCCESS}, exitCode);
+}
+
+void RunCacheRootChild(const TempDirectory& fixture, std::wstring_view mode)
+{
+    RunCacheRootChildIn(fixture.Path(), mode);
 }
 
 void default_cache_is_writable_beside_executable_independent_of_working_directory_test()
@@ -215,6 +217,68 @@ void invalid_explicit_cache_root_does_not_silently_fall_back_test()
     WriteBytes(fixture.Path() / L"chosen-cache", "keep");
     RunCacheRootChild(fixture, L"invalid-custom");
     CHECK_EQ(std::string("keep"), ReadBytes(fixture.Path() / L"chosen-cache"));
+}
+
+// A directory under `fixture` whose own path is `length` characters long.
+std::filesystem::path DirectoryOfLength(const TempDirectory& fixture, size_t length)
+{
+    const size_t base = fixture.Path().native().size() + 1;
+    CHECK(length > base);
+    return fixture.Path() / std::wstring(length > base ? length - base : 1, L'd');
+}
+
+// The root was accepted whatever its length, and the staging directory under
+// it - a 64-character key plus pid and nonce - failed with error=3 once the
+// root passed about 140 characters, so every render on a deep portable
+// install or a long custom root died at staging. A manager that is valid can
+// now stage a render and write its sidecars; one that cannot is refused when
+// it is made. The test executable is not long-path aware, so the long end of
+// the sweep is refused rather than served.
+void a_valid_cache_root_can_always_stage_a_render_test()
+{
+    TempDirectory fixture;
+    size_t tried = 0;
+    size_t refused = 0;
+    for (size_t length = std::max<size_t>(100, fixture.Path().native().size() + 10);
+         length <= 240; length += 10, ++tried) {
+        const auto root = DirectoryOfLength(fixture, length);
+        NeuralCacheManager manager(root);
+        if (!manager.Valid()) {
+            ++refused;
+            CHECK(manager.LastFailure().cause == NeuralCacheFailure::Cause::NoWritableRoot);
+            CHECK(manager.LastFailure().error.value() != 0);
+            continue;
+        }
+        const auto staging = manager.BeginRenderStaging(std::string(64, '6'));
+        CHECK(staging.has_value());
+        if (!staging) continue;
+        for (const auto sidecar : {L"neural-settings.ini", L"receipt.json", L"manifest.json", L"neural.mkv"}) {
+            std::ofstream output(*staging / sidecar, std::ios::binary);
+            CHECK(output.is_open());
+        }
+        // The probe leaves nothing behind in a root it accepted.
+        size_t entries = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(manager.Root() / L"staging")) {
+            (void)entry;
+            ++entries;
+        }
+        CHECK_EQ(size_t{1}, entries);
+    }
+    CHECK(refused > 0);
+    CHECK(refused < tried);
+}
+
+// The same limit on the default root: a portable folder too deep to stage in
+// is passed over for LocalAppData, as an unwritable one already was.
+void default_cache_falls_back_when_the_portable_root_is_too_deep_to_stage_in_test()
+{
+    TempDirectory fixture;
+    const auto deep = DirectoryOfLength(fixture, 150);
+    std::error_code error;
+    std::filesystem::create_directories(deep, error);
+    CHECK(!error);
+    if (error) return;
+    RunCacheRootChildIn(deep, L"fallback");
 }
 
 // The player never promotes a render without its receipt: it builds the
@@ -1076,6 +1140,89 @@ public:
 private:
     PROCESS_INFORMATION process_{};
 };
+
+// The lead case for ContainChildProcesses: a test process that dies without
+// unwinding - a crash, a debugger kill - takes its children with it. The
+// middle process contains itself, starts a suspended child, and terminates,
+// reporting the child's pid as its exit code; an orphan would outlive it.
+int RunContainedParent()
+{
+    test_support::ContainChildProcesses();
+    const auto executable = CurrentExecutable();
+    std::wstring arguments = L"\"" + executable.wstring() + L"\" --suspended-child";
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION child{};
+    if (!CreateProcessW(executable.c_str(), arguments.data(), nullptr, nullptr, FALSE,
+                        CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child))
+        return 0;
+    CloseHandle(child.hThread);
+    CloseHandle(child.hProcess);
+    TerminateProcess(GetCurrentProcess(), child.dwProcessId);
+    return 0;
+}
+
+void a_test_process_that_dies_takes_its_children_with_it_test()
+{
+    const auto executable = CurrentExecutable();
+    std::wstring arguments = L"\"" + executable.wstring() + L"\" --contained-parent";
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION middle{};
+    CHECK(CreateProcessW(executable.c_str(), arguments.data(), nullptr, nullptr, FALSE,
+                         CREATE_NO_WINDOW, nullptr, nullptr, &startup, &middle));
+    if (!middle.hProcess) return;
+    CloseHandle(middle.hThread);
+    CHECK_EQ(DWORD{WAIT_OBJECT_0}, WaitForSingleObject(middle.hProcess, 10000));
+    DWORD orphan = 0;
+    CHECK(GetExitCodeProcess(middle.hProcess, &orphan));
+    CloseHandle(middle.hProcess);
+    CHECK(orphan != 0 && orphan != STILL_ACTIVE);
+    if (orphan == 0 || orphan == STILL_ACTIVE) return;
+    // The kernel kills the job's members when the last handle closes, which is
+    // a moment after the middle process is gone; a pid it no longer knows is
+    // as dead as a signalled handle.
+    const HANDLE child = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, orphan);
+    if (!child) {
+        CHECK_EQ(DWORD{ERROR_INVALID_PARAMETER}, GetLastError());
+        return;
+    }
+    const DWORD waited = WaitForSingleObject(child, 5000);
+    CHECK_EQ(DWORD{WAIT_OBJECT_0}, waited);
+    if (waited != WAIT_OBJECT_0) TerminateProcess(child, 0);
+    CloseHandle(child);
+}
+
+// A concurrent run's fixture is not this run's to delete: the sweep only takes
+// a directory whose owner has exited (or one no run could still be using).
+void fixture_sweep_leaves_a_live_runs_directory_alone_test()
+{
+    TempDirectory fixture;
+    const LiveChildProcess other;
+    CHECK(other.Pid() != 0);
+    const DWORD deadPid = DeadProcessId();
+    CHECK(deadPid != 0);
+    const auto parent = fixture.Path().parent_path();
+    const std::wstring prefix(TempDirectory::kPrefix);
+    const auto live = parent / (prefix + std::to_wstring(other.Pid()) + L"-1");
+    const auto dead = parent / (prefix + std::to_wstring(deadPid) + L"-1");
+    const auto unrelated = parent / (prefix + L"notapid-1");
+    for (const auto& directory : {live, dead, unrelated}) {
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        CHECK(!error);
+    }
+    TempDirectory::SweepAbandoned(parent);
+    CHECK(std::filesystem::is_directory(live));
+    CHECK(!std::filesystem::exists(dead));
+    CHECK(std::filesystem::is_directory(unrelated));
+    CHECK(std::filesystem::is_directory(fixture.Path()));
+    // Past the age no run lasts, a live pid is a reused one.
+    std::filesystem::last_write_time(
+        live, std::filesystem::file_time_type::clock::now() - std::chrono::hours(25));
+    TempDirectory::SweepAbandoned(parent);
+    CHECK(!std::filesystem::exists(live));
+    std::error_code error;
+    std::filesystem::remove_all(unrelated, error);
+}
 
 // Publishes a render under `key` with `environment` recorded (or none), and
 // the runtime digest `runtime`.
@@ -5000,15 +5147,19 @@ int wmain(int argc, wchar_t* argv[])
         return RunCacheRootProbe(argv[2]);
     // Never resumed: LiveChildProcess only needs a pid that stays alive.
     if (argc == 2 && std::wstring_view(argv[1]) == L"--suspended-child") return EXIT_SUCCESS;
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--contained-parent") return RunContainedParent();
     const std::wstring executableName = CurrentExecutable().filename().wstring();
     if (_wcsicmp(executableName.c_str(), L"ffmpeg.exe") == 0 ||
         _wcsicmp(executableName.c_str(), L"ffprobe.exe") == 0)
         return RunFakeMediaPipelineChild(argc, argv);
+    test_support::ContainChildProcesses();
     default_cache_is_writable_beside_executable_independent_of_working_directory_test();
     default_cache_falls_back_when_portable_directory_is_blocked_test();
     default_cache_falls_back_when_portable_layout_is_unusable_test();
     explicit_cache_root_remains_authoritative_test();
     invalid_explicit_cache_root_does_not_silently_fall_back_test();
+    a_valid_cache_root_can_always_stage_a_render_test();
+    default_cache_falls_back_when_the_portable_root_is_too_deep_to_stage_in_test();
     eviction_reclaims_unreachable_renders_and_keeps_the_rest_test();
     eviction_leaves_an_active_entry_alone_test();
     clearing_the_cache_frees_everything_size_bytes_counted_test();
@@ -5024,6 +5175,8 @@ int wmain(int argc, wchar_t* argv[])
     promotion_waits_out_a_transient_lock_and_names_the_failing_step_test();
     interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test();
     staging_sweep_reaps_invalid_and_orphaned_entries_but_not_live_ones_test();
+    a_test_process_that_dies_takes_its_children_with_it_test();
+    fixture_sweep_leaves_a_live_runs_directory_alone_test();
     manifest_environment_is_optional_additive_and_all_or_nothing_test();
     eviction_retires_entries_whose_recorded_environment_nothing_can_rebuild_test();
     eviction_leaves_an_open_entry_whole_test();

@@ -4,6 +4,7 @@
 #include "NeuralWorkerProtocol.h"
 #include "ResidentWorkerLoop.h"
 #include "TestSupport.h"
+#include "TestEnvironment.h"
 #include "GpuTestGate.h"
 
 #include <windows.h>
@@ -160,12 +161,23 @@ NeuralColdStartTimeline FakeHelperTimeline()
 // Which failure is injected is selected by the job's source file name, the way
 // every other case in RunFakeWorker is selected, so the hook needs no build
 // flag and no second code path in the shipped launcher.
+//
+// The name carries the pid of the test run, which every helper inherits from
+// it through DLSSVIDEOPLAYER_TEST_RUN: with one fixed name, two concurrent runs
+// of this suite (another worktree, a CI shard) reset and counted each other's
+// attempts.
+constexpr wchar_t kTestRunVariable[] = L"DLSSVIDEOPLAYER_TEST_RUN";
+
 std::filesystem::path FailureInjectionCounterPath(std::wstring_view token)
 {
     std::error_code error;
     const std::filesystem::path directory = std::filesystem::temp_directory_path(error);
+    wchar_t run[16]{};
+    const DWORD length = GetEnvironmentVariableW(kTestRunVariable, run, static_cast<DWORD>(std::size(run)));
+    const std::wstring owner = length > 0 && length < std::size(run)
+        ? std::wstring(run, length) : std::to_wstring(GetCurrentProcessId());
     return (error ? std::filesystem::path(L".") : directory) /
-           (L"dlss5-neural-worker-" + std::wstring(token) + L".attempts");
+           (L"dlss5-neural-worker-" + owner + L"-" + std::wstring(token) + L".attempts");
 }
 
 uint64_t RecordFailureInjectionAttempt(std::wstring_view token)
@@ -2419,6 +2431,8 @@ int wmain(int argc, wchar_t** argv)
     // orphan-safety mechanism. It has to be a real process handle: the wait it
     // exercises is a wait on one.
     if (argc > 1 && std::wstring_view(argv[1]) == L"--exit-now") return 0;
+    test_support::ContainChildProcesses();
+    SetEnvironmentVariableW(kTestRunVariable, std::to_wstring(GetCurrentProcessId()).c_str());
     nonexistent_helper_fails_test();
     helper_main_parser_accepts_normal_and_restarted_contracts_test();
     cancellation_of_running_child_is_bounded_test();

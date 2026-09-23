@@ -4,6 +4,7 @@
 #include "NeuralSettings.h"
 #include "OpticalFlowNvof.h"
 #include "TestSupport.h"
+#include "TestEnvironment.h"
 
 #include <windows.h>
 #include <filesystem>
@@ -14,7 +15,7 @@
 namespace {
 
 struct TempDirectory {
-    std::filesystem::path path = std::filesystem::temp_directory_path() /
+    std::filesystem::path path = test_support::FixtureTempRoot() /
         (L"DLSS-RenderSettings-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
          std::to_wstring(GetTickCount64()));
     TempDirectory() { CHECK(std::filesystem::create_directories(path)); }

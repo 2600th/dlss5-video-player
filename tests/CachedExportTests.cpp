@@ -4,6 +4,7 @@
 #include "SynchronizedPlayback.h"
 #include "VideoDecoder.h"
 #include "TestSupport.h"
+#include "TestEnvironment.h"
 
 #include <windows.h>
 
@@ -895,6 +896,7 @@ void LivePlaybackSwitchesOntoTheJoinedRunTest(const std::filesystem::path& helpe
 
 int wmain(int argc, wchar_t** argv)
 {
+    test_support::ContainChildProcesses();
     const auto helpers = std::filesystem::absolute(argc > 1 ? std::filesystem::path(argv[1]) : ExecutableDirectory());
     if (!std::filesystem::is_regular_file(helpers / L"ffmpeg.exe") ||
         !std::filesystem::is_regular_file(helpers / L"ffprobe.exe")) {

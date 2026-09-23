@@ -1,4 +1,5 @@
 #include "GpuTestGate.h"
+#include "TestEnvironment.h"
 // Opt-in real GPU verification; registered under the `gpu` CTest label, which
 // the portable suite excludes (`ctest -LE gpu`).
 //
@@ -145,6 +146,7 @@ std::wstring WorksetPoolComplaint(const fs::path& reshadeLog)
 
 int wmain(int argc, wchar_t** argv)
 {
+    test_support::ContainChildProcesses();
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if (argc != 4) {
         std::wcerr << L"Usage: NeuralRangeRenderSmoke <ffmpeg-directory> "
