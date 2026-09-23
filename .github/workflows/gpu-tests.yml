@@ -2,17 +2,19 @@ name: gpu-tests
 
 # The `gpu`- and `audio`-labelled suites, which the hosted runners cannot run.
 #
-# build-windows runs `ctest -LE "gpu|audio"`, so ten tests - and with them
+# build-windows runs `ctest -LE "gpu|audio"`, so thirteen tests - and with them
 # almost all of DLSSGBackend.cpp and FrameGenerationPass.cpp, the newest and
 # most complex feature in the tree, plus the audio clock every video frame's
 # due time is computed from - carry no CI-executed assertion. They pass in
 # about a minute; the only thing missing was a machine to run them on.
 #
 # This needs a self-hosted runner labelled `gpu` with an RTX card, a driver new
-# enough for neural rendering, an audio render endpoint, and the neural runtime
-# staged the way docs/BUILDING.md describes. Until one is registered the
-# workflow simply never runs, which is the same coverage as today and costs
-# nothing.
+# enough for neural rendering, an audio render endpoint, and network access to
+# the neural runtime's public sources, which the workflow fetches and stages
+# itself - checkout's clean wipes whatever a previous run left in the build
+# tree. Registering the runner needs the owner's credentials; until one is
+# registered the workflow simply never runs, which is the same coverage as
+# today and costs nothing.
 #
 # It is scheduled rather than run per push: a self-hosted GPU box is a shared,
 # serial resource, and these tests drive a real device. workflow_dispatch is
@@ -55,7 +57,9 @@ jobs:
           .\tools\fetch_youtube_helpers.ps1
           .\tools\fetch_ffmpeg_helpers.ps1
 
-      - name: Stage the neural runtime
+      # Fetches and checks the locked set into external/runtime. It stages
+      # nothing into the build tree; that happens after the build below.
+      - name: Fetch the neural runtime
         shell: powershell
         run: .\tools\fetch_neural_runtime.ps1
 
@@ -67,23 +71,42 @@ jobs:
         shell: cmd
         run: cmake --build build-upscaling --config Release --parallel
 
-      # A machine that has lost its GPU reports every one of these as Skipped
-      # rather than Failed, so a driver or hardware problem on the runner does
-      # not read as a code regression. That is also why this step then refuses
-      # a run in which nothing actually executed.
-      - name: Test the hardware suite
-        shell: cmd
-        run: ctest --test-dir build-upscaling -C Release -L "gpu|audio" --output-on-failure
-
-      - name: Refuse a run that skipped everything
+      # The neural smokes drive neural-runtime/NeuralWorker.exe, which loads
+      # the runtime and the ReShade configuration from its own folder. Nothing
+      # put them there: the step above only validates external/runtime, and
+      # checkout's clean removes whatever an earlier run staged, so every
+      # neural smoke failed on a fresh runner. The same two commands
+      # build_windows.bat and docs/BUILDING.md use.
+      - name: Stage the neural runtime beside the helper
         shell: powershell
         run: |
+          .\tools\stage_runtime.ps1 -InputDirectory external\runtime -Destination build-upscaling\Release\neural-runtime
+          Copy-Item -LiteralPath packaging\ReShade.ini, packaging\ReShadePreset.ini -Destination build-upscaling\Release\neural-runtime
+
+      # A machine that has lost its GPU reports every one of these as Skipped
+      # rather than Failed, so a driver or hardware problem on the runner does
+      # not read as a code regression. That is also why the next step refuses
+      # a run in which the wrong things were skipped, reading this run's own
+      # JUnit report rather than running the whole suite a second time.
+      - name: Test the hardware suite
+        shell: cmd
+        run: ctest --test-dir build-upscaling -C Release -L "gpu|audio" --output-on-failure --output-junit "%RUNNER_TEMP%\gpu-tests.xml"
+
+      - name: Refuse a run that skipped what it should have run
+        shell: powershell
+        run: |
+          # Registered count first: a label typo or a lost registration would
+          # otherwise shrink the suite without anyone noticing.
           $output = & ctest --test-dir build-upscaling -C Release -L "gpu|audio" -N
-          $total = ($output | Select-String 'Total Tests: (\d+)').Matches.Groups[1].Value
-          if ([int]$total -lt 10) { throw "Expected at least 10 gpu/audio-labelled tests, saw $total." }
+          $registered = [int]($output | Select-String 'Total Tests: (\d+)').Matches.Groups[1].Value
+          if ($registered -lt 13) { throw "Expected at least 13 gpu/audio-labelled tests, saw $registered." }
+          [xml]$report = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'gpu-tests.xml') -Raw
+          $cases = @($report.testsuite.testcase)
+          if ($cases.Count -ne $registered) {
+            throw "The JUnit report lists $($cases.Count) tests; $registered are registered."
+          }
           # A label filter with every test skipped still exits 0, which would
           # make a runner whose GPU fell out of the machine look green forever.
-          $ran = & ctest --test-dir build-upscaling -C Release -L "gpu|audio" 2>&1 | Out-String
           # A skip used to mean exactly one thing - the runner lost its adapter
           # or its audio endpoint - so refusing every skip was right. It no
           # longer is: two of these skip on hardware that is working perfectly,
@@ -101,8 +124,7 @@ jobs:
           # this guard exists for - and both tests above still FAIL, rather than
           # skip, when the hardware is there and the answer is wrong.
           $allowedSkips = @('DlssgEvaluateSmoke', 'FrameGenerationSmoke')
-          $skipped = [regex]::Matches($ran, 'Test\s+#\d+:\s+(\S+)\s+\.+\*\*\*Skipped') |
-                     ForEach-Object { $_.Groups[1].Value }
+          $skipped = @($cases | Where-Object { $_.SelectSingleNode('skipped') } | ForEach-Object { $_.name })
           $unexpected = @($skipped | Where-Object { $allowedSkips -notcontains $_ })
           if ($unexpected.Count -gt 0) {
             throw "gpu/audio-labelled tests skipped on the runner: $($unexpected -join ', '). No D3D12 adapter or no audio endpoint. Fix the runner."
@@ -110,3 +132,12 @@ jobs:
           if ($skipped.Count -gt 0) {
             Write-Host "Skipped for known hardware/asset limits: $($skipped -join ', ')"
           }
+          Write-Host "$($cases.Count - $skipped.Count) of $($cases.Count) gpu/audio-labelled tests ran."
+
+      - name: Upload the JUnit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-tests-junit
+          path: ${{ runner.temp }}/gpu-tests.xml
+          if-no-files-found: ignore

@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P1** | | | | |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
-| [P1.17](#p117) | The GPU CI workflow cannot pass on a fresh runner | S | Release | 🔍 |
 | [P1.19](#p119) | No PDBs for crash dumps; builds are not reproducible | S | Release, Player | 🔍 |
 | [P1.20](#p120) | CI hardening | M | Release | 🔍 |
 | [P1.21](#p121) | Build structure: one set of objects, one set of flags | M | Release | 🔍 |
@@ -153,29 +152,6 @@ These matter because the copies **disagree**, not because they are repeated.
 implementation.
 
 ## Release and CI
-
-<a id="p117"></a>
-### P1.17 · The GPU CI workflow cannot pass on a fresh runner
-
-`S` + owner decision · **Release** · 🔍 · _includes the open runner item of old 2.14_
-
-**Where** — `.github/workflows/gpu-tests.yml`,
-`tools/fetch_neural_runtime.ps1:160`
-
-- It never stages the runtime and the ReShade inis into
-  `build-upscaling/Release/neural-runtime`. `fetch_neural_runtime.ps1` only
-  validates, and checkout's `git clean -ffdx` wipes that folder, so the
-  neural smokes fail.
-- The "refuse skips" step runs the whole hardware suite a second time and
-  ignores that run's exit code. Its threshold says 10 tests; there are 13.
-- There is still no self-hosted runner. Registering one needs the owner's
-  credentials, so that part is the owner's decision.
-
-**Fix** — add `stage_runtime.ps1 -Destination build-upscaling/Release/neural-runtime`
-and copy the ini files. Parse `--output-junit` from the first run instead of
-running the suite again.
-
----
 
 <a id="p119"></a>
 ### P1.19 · No PDBs for crash dumps; builds are not reproducible
