@@ -323,6 +323,20 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // ---- the arrival watch that runs while there is no endpoint ------------
+    // Unplugging the last endpoint is not this harness's to do, so this
+    // proves the watch registers, latches an endpoint that is already there
+    // when asked to look, reports it exactly once, and unregisters cleanly.
+    {
+        RenderEndpointArrival arrival;
+        Check(arrival.Watch(true), "the endpoint arrival watch registers");
+        Check(arrival.Arrived(), "an endpoint already present is latched when asked to look");
+        Check(!arrival.Arrived(), "and reported once, not on every tick");
+        RenderEndpointArrival quiet;
+        Check(quiet.Watch(false), "a watch that does not look registers too");
+        Check(!quiet.Arrived(), "and reports nothing until something arrives");
+    }
+
     // ---- end of stream -----------------------------------------------------
     // The clock must never run backwards as the queue drains. Resetting the
     // device at EOF would snap the played-sample count to zero and make the

@@ -93,6 +93,10 @@ public:
 
     void SetVolume(float volume01);
 
+    // Open failed because there is no default render endpoint at all, as
+    // opposed to one that would not open.
+    bool NoEndpoint() const { return noEndpoint_; }
+
     // Set once the endpoint reports itself invalidated. The owner reopens and
     // restarts the source rather than trying to splice into a new device
     // mid-stream: the mix format may differ, so the decoder has to be told.
@@ -131,6 +135,7 @@ private:
     uint32_t bufferFrames_ = 0;
     uint64_t clockFrequency_ = 0;
     std::atomic<bool> deviceLost_{false};
+    bool noEndpoint_ = false;
     bool started_ = false;
     // De-click state. See AudioFadePolicy.h for why the ramps exist and why
     // they are raised cosines.
@@ -159,4 +164,34 @@ private:
     // every call site handles it the same way.
     bool NoteDeviceLoss(HRESULT result);
     bool WriteLocked(const void* frames, uint32_t framesToWrite, bool fadeIn);
+};
+
+// Watches for a render endpoint to come back while there is none to play to.
+//
+// A renderer watches only the endpoint it is on, so once the last one had
+// gone - or there was none when the film was opened - nothing was watching
+// at all, and audio never came back when headphones were plugged in again.
+// The owner holds one of these only while it has no renderer.
+class RenderEndpointArrival {
+public:
+    RenderEndpointArrival() = default;
+    ~RenderEndpointArrival();
+    RenderEndpointArrival(const RenderEndpointArrival&) = delete;
+    RenderEndpointArrival& operator=(const RenderEndpointArrival&) = delete;
+
+    // COM must be initialized on the calling thread. `checkNow` also latches
+    // an endpoint that is already there, for a caller whose open found none
+    // an instant ago: one that arrived in between sent its notification
+    // before anyone was listening.
+    bool Watch(bool checkNow);
+    // True once since the last call if something arrived worth a retry.
+    bool Arrived();
+
+private:
+    class Client;
+    // Raw for the same reason as WasapiRenderer::watcher_. One reference is
+    // owned here, released after Unregister has returned.
+    Client* client_ = nullptr;
+    Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator_;
+    bool registered_ = false;
 };

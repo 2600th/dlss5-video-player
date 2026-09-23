@@ -1341,7 +1341,7 @@ public:
         // one. waveOut had no equivalent - the write failed, the reader thread
         // broke, and the film played on in silence. Cheap when nothing
         // happened, which is every tick but the one.
-        Audio().ServiceDeviceChanges();
+        Audio().ServiceDeviceChanges(m_loaded&&!Audio().Active()?Position():-1.0,m_playing);
         UpdateLiveSession();
         WatchNeuralJobProgress();
         if(m_seekPending) {

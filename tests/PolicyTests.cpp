@@ -9710,6 +9710,20 @@ void audio_endpoint_notifications_fire_only_for_the_stream_we_are_on_test()
     CHECK(!DefaultChangeAffectsUs(eRender, eConsole, other, L""));
     CHECK(!StateChangeAffectsUs(ours, DEVICE_STATE_UNPLUGGED, L""));
     CHECK(!FormatChangeAffectsUs(ours, L"", true));
+
+    // With no endpoint left at all, nothing above is about anything, and audio
+    // used to stay off for good. A playback endpoint becoming the default, or
+    // any endpoint becoming active, is worth another attempt.
+    CHECK(DefaultChangeMayRestore(eRender, eConsole, other));
+    CHECK(DefaultChangeMayRestore(eRender, eMultimedia, other));
+    CHECK(!DefaultChangeMayRestore(eCapture, eConsole, other));
+    CHECK(!DefaultChangeMayRestore(eRender, eCommunications, other));
+    // "No default" is the loss itself, not a recovery.
+    CHECK(!DefaultChangeMayRestore(eRender, eConsole, L""));
+    CHECK(StateChangeMayRestore(DEVICE_STATE_ACTIVE));
+    CHECK(!StateChangeMayRestore(DEVICE_STATE_UNPLUGGED));
+    CHECK(!StateChangeMayRestore(DEVICE_STATE_NOTPRESENT));
+    CHECK(!StateChangeMayRestore(DEVICE_STATE_DISABLED));
 }
 
 // Some drivers stop signalling the render event without ever returning an

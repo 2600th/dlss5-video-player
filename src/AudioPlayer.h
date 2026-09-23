@@ -75,7 +75,11 @@ public:
     // waveOut had no equivalent: a write to a departed endpoint failed, the
     // reader thread broke, and the film played on in silence for the rest of
     // the session.
-    bool ServiceDeviceChanges();
+    //
+    // With no endpoint at all there is no audio clock to resume from, so the
+    // caller says where playback is and whether it is playing; an endpoint
+    // that appears is started there. A negative position leaves audio off.
+    bool ServiceDeviceChanges(double playerPositionSeconds = -1.0, bool playerPlaying = false);
 
     // Delivers a default-endpoint change to the running renderer through the
     // same handler the OS calls. The audio smoke uses this to exercise
@@ -134,6 +138,8 @@ private:
     void StopProcess(const std::shared_ptr<ReaderState>& state);
     static void ReaderThread(std::shared_ptr<ReaderState> state) noexcept;
     static void ThreadMain(const std::shared_ptr<ReaderState>& state);
+    // Starts watching for an endpoint after Start found none to open.
+    void AwaitEndpoint(bool noEndpoint);
 
     std::wstring m_path;
     std::wstring m_ffmpeg;
@@ -144,6 +150,9 @@ private:
     int m_selectedTrack = 0;
     std::shared_ptr<ReaderState> m_reader;
     std::thread m_thread;
+    // Held only while Start could not open an endpoint; see
+    // RenderEndpointArrival.
+    std::unique_ptr<RenderEndpointArrival> m_endpointArrival;
     double m_seekBaseSec = 0.0;
     float m_volume = 1.0f;
     Settings m_settings;

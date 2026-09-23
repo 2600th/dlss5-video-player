@@ -58,6 +58,22 @@ inline bool FormatChangeAffectsUs(std::wstring_view changedId, std::wstring_view
     return isDeviceFormatKey;
 }
 
+// With no endpoint at all - the last one unplugged, or none when the film
+// was opened - there is no stream for the functions above to be about, and
+// nothing ever tried again: audio stayed off for the rest of the session.
+// These say which notifications are worth another attempt. An attempt that
+// finds nothing just waits for the next one, so they only need to be cheap
+// and not miss the real arrival, not exact.
+inline bool DefaultChangeMayRestore(EDataFlow flow, ERole role, std::wstring_view newId)
+{
+    if (flow != eRender) return false;
+    if (role != eConsole && role != eMultimedia) return false;
+    // No default left is the loss that got us here, not a recovery.
+    return !newId.empty();
+}
+
+inline bool StateChangeMayRestore(DWORD newState) { return newState == DEVICE_STATE_ACTIVE; }
+
 // The door between the OS's notification threads and the renderer they
 // report to.
 //

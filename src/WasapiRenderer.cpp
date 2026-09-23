@@ -191,13 +191,18 @@ bool WasapiRenderer::Open()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     deviceLost_ = false;
+    noEndpoint_ = false;
 
     HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                       IID_PPV_ARGS(&enumerator_));
     if (FAILED(result)) { LOG("Audio: MMDeviceEnumerator failed hr=0x" << std::hex << result); return false; }
 
     result = enumerator_->GetDefaultAudioEndpoint(eRender, eConsole, &device_);
-    if (FAILED(result)) { LOG("Audio: no default render endpoint hr=0x" << std::hex << result); return false; }
+    if (FAILED(result)) {
+        noEndpoint_ = result == E_NOTFOUND;
+        LOG("Audio: no default render endpoint hr=0x" << std::hex << result);
+        return false;
+    }
 
     result = device_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client_);
     if (FAILED(result)) { LOG("Audio: IAudioClient activation failed hr=0x" << std::hex << result); return false; }
@@ -565,3 +570,83 @@ void WasapiRenderer::SetVolume(float volume01)
     if (FAILED(volume_->SetMasterVolume(clamped, nullptr)))
         LOG("Audio: setting the session volume failed.");
 }
+
+// Its callbacks touch nothing but its own latch, so unlike the renderer's
+// watcher there is no owner to detach: a notification delivered after the
+// RenderEndpointArrival is gone lands on an object the OS's own reference is
+// still keeping alive, and sets a flag nobody reads.
+class RenderEndpointArrival::Client final : public IMMNotificationClient {
+public:
+    std::atomic<bool> arrived{false};
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return references_.fetch_add(1) + 1; }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const ULONG remaining = references_.fetch_sub(1) - 1;
+        if (!remaining) delete this;
+        return remaining;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override
+    {
+        if (!object) return E_POINTER;
+        if (riid != __uuidof(IUnknown) && riid != __uuidof(IMMNotificationClient)) {
+            *object = nullptr;
+            return E_NOINTERFACE;
+        }
+        *object = static_cast<IMMNotificationClient*>(this);
+        AddRef();
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR deviceId) override
+    {
+        if (audio_endpoint::DefaultChangeMayRestore(flow, role, deviceId ? deviceId : L"")) arrived = true;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD newState) override
+    {
+        if (audio_endpoint::StateChangeMayRestore(newState)) arrived = true;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { arrived = true; return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+
+private:
+    ~Client() = default;
+    std::atomic<ULONG> references_{1};
+};
+
+RenderEndpointArrival::~RenderEndpointArrival()
+{
+    if (registered_ && enumerator_) enumerator_->UnregisterEndpointNotificationCallback(client_);
+    if (client_) client_->Release();
+}
+
+bool RenderEndpointArrival::Watch(bool checkNow)
+{
+    if (client_) return registered_;
+    HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                      IID_PPV_ARGS(&enumerator_));
+    if (FAILED(result)) {
+        LOG("Audio: cannot watch for a new endpoint (MMDeviceEnumerator hr=0x" << std::hex << result
+            << std::dec << "); sound will not come back on its own.");
+        return false;
+    }
+    client_ = new Client();
+    result = enumerator_->RegisterEndpointNotificationCallback(client_);
+    if (FAILED(result)) {
+        LOG("Audio: cannot watch for a new endpoint (register hr=0x" << std::hex << result << std::dec
+            << "); sound will not come back on its own.");
+        return false;
+    }
+    registered_ = true;
+    if (checkNow) {
+        ComPtr<IMMDevice> device;
+        if (SUCCEEDED(enumerator_->GetDefaultAudioEndpoint(eRender, eConsole, &device)))
+            client_->arrived = true;
+    }
+    return true;
+}
+
+bool RenderEndpointArrival::Arrived() { return client_ && client_->arrived.exchange(false); }

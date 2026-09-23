@@ -210,13 +210,13 @@ bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, Audio
     WasapiRenderer::Format format{};
     if(!reader->disableAudioDevice){
         reader->renderer=std::make_unique<WasapiRenderer>();
-        if(!reader->renderer->Open()){reader->renderer.reset();LOG("Audio: the render endpoint could not be opened.");return false;}
+        if(!reader->renderer->Open()){const bool noEndpoint=reader->renderer->NoEndpoint();reader->renderer.reset();LOG("Audio: the render endpoint could not be opened.");AwaitEndpoint(noEndpoint);return false;}
         format=reader->renderer->CurrentFormat();
         reader->sampleRate=format.sampleRate;
         reader->renderer->SetVolume(m_volume);
         // Started only when playing: a paused stream that was started would
         // run the endpoint dry and advance its clock over silence.
-        if(!reader->paused&&!reader->renderer->Start()){LOG("Audio: the endpoint refused to start.");return false;}
+        if(!reader->paused&&!reader->renderer->Start()){LOG("Audio: the endpoint refused to start.");AwaitEndpoint(false);return false;}
     }
     if (!StartProcess(seekSeconds,reader,format)) return false;
     m_reader=reader;
@@ -524,9 +524,25 @@ bool AudioPlayer::DeliverDefaultEndpointChange(const std::wstring& newDeviceId) 
     return true;
 }
 
-bool AudioPlayer::ServiceDeviceChanges() {
+void AudioPlayer::AwaitEndpoint(bool noEndpoint) {
+    m_endpointArrival = std::make_unique<RenderEndpointArrival>();
+    if (m_endpointArrival->Watch(noEndpoint))
+        LOG("Audio: waiting for a render endpoint to appear; sound resumes when one does.");
+}
+
+bool AudioPlayer::ServiceDeviceChanges(double playerPositionSeconds, bool playerPlaying) {
     const auto state = m_reader;
-    if (!state) return false;
+    if (!state) {
+        // Nothing to restart from but the player's own position: the clock
+        // went with the endpoint.
+        if (!m_endpointArrival || playerPositionSeconds < 0.0 || m_path.empty()) return false;
+        if (!m_endpointArrival->Arrived()) return false;
+        LOG("Audio: a render endpoint appeared; starting audio at " << playerPositionSeconds << " s.");
+        // A failed start watches again, so a notification that came before
+        // the endpoint was ready is followed by the one that says it is.
+        return Start(m_path, playerPositionSeconds,
+                     playerPlaying ? AudioStartState::Playing : AudioStartState::Paused);
+    }
     // Two sources, and both are needed. The reader latches a loss it ran
     // into - a call to the endpoint that failed. The renderer latches one the
     // OS reported through the endpoint notifications, and those arrive while
@@ -561,6 +577,7 @@ bool AudioPlayer::Seek(double seconds) {
 
 void AudioPlayer::Stop() {
     const auto state=m_reader;
+    m_endpointArrival.reset();
     { std::lock_guard<std::mutex> lock(m_clockMutex); audio_clock::Reset(m_clock); audio_clock::Reset(m_continuity); m_clockStalled = false; }
     if(!state){if(m_thread.joinable())m_thread.detach();return;}
     state->stop = true;
