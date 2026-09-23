@@ -113,6 +113,57 @@ multimedia roles and not communications, so a call does not move a film's
 audio. Recovery reopens and restarts the source rather than splicing into the
 new device, because its mix format may differ and the decoder has to be told.
 
+### Why there is no drift correction
+
+A player drifts A/V when two clocks each pace one half of the film. mpv
+resamples audio (`swr_set_compensation`) only in `video-sync=display-resample`,
+where the display refresh paces the pictures and the audio has to be stretched
+to follow them. This player has one clock. `Position()` in `main.cpp` returns
+`AudioPlayer::PositionSeconds()` whenever audio answers, every presentation
+decision in `Tick` - ordinary playback, cached and live neural pairs, stride
+and re-anchor in `PlaybackCadence.h`, frame generation's interleave - is taken
+against that one value, and the value is `IAudioClock`'s played-frame count
+divided by the rate FFmpeg produced the samples at. An endpoint crystal that
+runs 50 ppm fast therefore plays the whole film 50 ppm fast, pictures included:
+it is 180 ms short over an hour, and nothing comes apart. Correcting it would
+mean resampling the audio to match a wall clock nobody is watching.
+
+The paths that are not paced by audio have no audio to drift from: a silent
+source runs on the steady clock, and so does the short bridge
+`AudioClockPolicy.h` carries across a stalled clock before slewing back to the
+audio at no more than 5 %. The YouTube path is a second `AudioPlayer`, the same
+clock. Export muxes by timestamp and has no clock at all. A bitstream sent to a
+receiver could not be corrected even if it needed to be - it cannot be
+resampled - which is one more reason the audio has to stay the master. If a
+display-locked presentation mode is ever added, it is the first thing that
+will need compensation, and it will need it on this path.
+
+What that argument assumes is that the clock reports what is audible rather
+than something that slides away from it over a film. `AudioClockSmoke` checks
+the clock against wall time for five seconds, which cannot see a slow slide, so
+`tools/verification/av-drift-probe.cpp` measures it: it plays a generated clip
+through the real `AudioPlayer` whose audio is a timecode (a 20 ms burst starting
+on every whole second, FLAC so the edge is exact), records the endpoint through
+WASAPI loopback with QPC timestamps, samples the clock on the same timeline, and
+reports what the clock read as each second became audible. On the RTX 5090
+machine's default endpoint (48 kHz shared mode), a 600-second run on
+2026-09-23:
+
+| Measure | Result |
+|---|---|
+| Bursts matched | 599 of 599 |
+| Endpoint clock against QPC | -42.9 ppm (the film runs 155 ms/hour slow, sound and picture together) |
+| Clock minus audible second | mean +2.146 ms, min +2.095, max +2.194: spread 0.100 ms |
+| First minute against last minute | +2.128 ms against +2.163 ms |
+| Trend | +0.35 ms per hour of film |
+
+The offset between the clock and the sound is a constant 2 ms - the engine's
+own latency between the position it reports and the mix loopback sees - and it
+moved by a tenth of a millisecond in ten minutes, against a frame interval of
+42 ms at 24 fps. The picture follows the clock by construction, so it is within
+one frame interval of the sound for the whole run. Nothing here needs
+`swr_set_compensation`, and P3.3's drift half was closed on that measurement.
+
 ## Temporal guides
 
 A normal movie does not contain engine motion vectors or depth. Motion comes from
