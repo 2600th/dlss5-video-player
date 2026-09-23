@@ -360,7 +360,14 @@ private:
             {L"thumb.neural_on", L"Turn Neural Rendering on"},
             {L"thumb.neural_off", L"Turn Neural Rendering off"},
             {L"thumb.compare_on", L"Compare side by side"},
-            {L"thumb.compare_off", L"Back to the neural picture"}
+            {L"thumb.compare_off", L"Back to the neural picture"},
+            // The start screen (P2.20).
+            {L"start.recent", L"Recent"},
+            {L"start.trailers", L"Game trailers"},
+            {L"start.tile.youtube", L"YouTube"},
+            {L"start.tile.local", L"Local file"},
+            {L"start.safe_mode", L"Restart in DLSS SR safe mode"},
+            {L"start.hint", L"Press D while a video plays to switch between the neural render and the original"}
         };
         return strings;
     }

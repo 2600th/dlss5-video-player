@@ -56,6 +56,7 @@
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
 #include "MediaTransportPolicy.h"
+#include "StartScreenPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -1161,6 +1162,111 @@ void taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test()
     const Localizer localizer;
     for (const auto* bar : {&idle, &playing, &comparing})
         for (const auto& button : *bar) CHECK(localizer.Get(button.tipKey) != button.tipKey);
+}
+
+void start_screen_checks_say_what_passed_and_what_failed_test()
+{
+    using namespace start_screen;
+    Facts facts{};
+    facts.gpu = L"NVIDIA GeForce RTX 4080 SUPER";
+    facts.generation = GpuGeneration::Rtx40Ada;
+    facts.driverVersion = L"32.0.16.1047";   // 610.47, exactly the floor
+    facts.runtime = RuntimeState::Verified;
+    facts.runtimeVersion = L"6.5.3";
+    auto lines = CapabilityLines(facts);
+    REQUIRE(lines.size() == 3);
+    CHECK(lines[0].mark == Mark::Pass);
+    CHECK(lines[1].mark == Mark::Pass);
+    CHECK(lines[1].value == L"610.47 · meets the 610.47 minimum");
+    CHECK(lines[2].mark == Mark::Pass);
+    CHECK(lines[2].value.find(L"6.5.3") != std::wstring::npos);
+    CHECK(!OfferSafeMode(lines, false));
+    // No forecast line without a forecast: nothing is invented.
+    for (const auto& line : lines) CHECK(line.value.find(L"fps") == std::wstring::npos);
+    facts.fps1080 = 119.6;
+    facts.fps1440 = 65.2;
+    lines = CapabilityLines(facts);
+    REQUIRE(lines.size() == 4);
+    CHECK(lines[3].value == L"about 120 fps at 1080p · about 65 fps at 1440p");
+    facts.fps1080.reset();
+    CHECK(CapabilityLines(facts)[3].value == L"about 65 fps at 1440p");
+
+    // Below the floor, a drifted runtime, a GPU without DLSS: each fails, and
+    // a failure offers safe mode unless the player is already in it.
+    facts.driverVersion = L"32.0.15.6614";   // 566.14
+    lines = CapabilityLines(facts);
+    CHECK(lines[1].mark == Mark::Fail);
+    CHECK(lines[1].value == L"566.14 · neural rendering needs 610.47 or newer");
+    CHECK(OfferSafeMode(lines, false));
+    CHECK(!OfferSafeMode(lines, true));
+    facts.driverVersion.clear();
+    CHECK(CapabilityLines(facts)[1].mark == Mark::Info);
+    facts.runtime = RuntimeState::Drifted;
+    CHECK(CapabilityLines(facts)[2].mark == Mark::Fail);
+    facts.runtime = RuntimeState::Checking;
+    CHECK(CapabilityLines(facts)[2].mark == Mark::Pending);
+    facts.runtime = RuntimeState::Absent;
+    CHECK(CapabilityLines(facts)[2].mark == Mark::Info);
+    facts.generation = GpuGeneration::OtherNvidia;
+    CHECK(CapabilityLines(facts)[0].mark == Mark::Fail);
+    facts.safeMode = true;
+    lines = CapabilityLines(facts);
+    CHECK(std::any_of(lines.begin(), lines.end(), [](const Line& line) { return line.label == L"Mode"; }));
+
+    CHECK(CoverageBadge(0, 0, 900000000, std::nullopt) == L"Rendered 100%");
+    CHECK(CoverageBadge(100000000, 400000000, 300000000, int64_t{1200000000}) == L"Rendered 25%");
+    CHECK(CoverageBadge(100000000, 400000000, 300000000, std::nullopt) == L"Rendered 30 s");
+    CHECK(CoverageBadge(0, 1199000000, 1199000000, int64_t{1200000000}) == L"Rendered 99%");
+}
+
+void start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test()
+{
+    using namespace start_screen;
+    // The default window: everything, centred, in order, inside the client.
+    const Layout full = LayoutStartScreen(1440, 880, 96, 4, true, 5, 6);
+    REQUIRE(full.full);
+    CHECK_EQ(size_t{4}, full.lines.size());
+    CHECK(full.safeMode.right > full.safeMode.left);
+    CHECK_EQ(size_t{5}, full.recentTiles.size());
+    CHECK_EQ(size_t{6}, full.trailerTiles.size());
+    CHECK(full.core.actions[1].bounds.bottom <= full.lines.front().top);
+    CHECK(full.lines.back().bottom <= full.safeMode.top);
+    CHECK(full.safeMode.bottom <= full.recentHeading.top);
+    CHECK(full.recentHeading.bottom <= full.recentTiles.front().top);
+    CHECK(full.recentTiles.front().bottom <= full.trailersHeading.top);
+    CHECK(full.trailerTiles.front().bottom <= full.hint.top);
+    CHECK(full.core.title.top >= 16);
+    CHECK(full.hint.bottom <= 880 - 16);
+    CHECK_EQ(LONG(kTileWidthDip), full.recentTiles[0].right - full.recentTiles[0].left);
+    CHECK_EQ(LONG(kTileGapDip), full.recentTiles[1].left - full.recentTiles[0].right);
+    // Each row is centred.
+    CHECK(std::abs((full.trailerTiles.front().left - 0) - (1440 - full.trailerTiles.back().right)) <= 1);
+    // A narrow window holds fewer whole tiles, never a cut one.
+    const Layout narrow = LayoutStartScreen(900, 880, 96, 4, false, 5, 6);
+    REQUIRE(narrow.full);
+    CHECK_EQ(size_t{4}, narrow.trailerTiles.size());
+    for (const RECT& tile : narrow.trailerTiles) CHECK(tile.left >= 16 && tile.right <= 900 - 16);
+    // Shorter: the trailers go first, then the recent row, then the panel.
+    const Layout shorter = LayoutStartScreen(1440, 600, 96, 4, false, 5, 6);
+    REQUIRE(shorter.full);
+    CHECK(shorter.trailerTiles.empty());
+    CHECK_EQ(size_t{5}, shorter.recentTiles.size());
+    const Layout shorterStill = LayoutStartScreen(1440, 400, 96, 4, false, 5, 6);
+    REQUIRE(shorterStill.full);
+    CHECK(shorterStill.recentTiles.empty());
+    CHECK_EQ(size_t{4}, shorterStill.lines.size());
+    // Too small for any of it: exactly the idle surface the idle tests pin.
+    const Layout tiny = LayoutStartScreen(400, 300, 96, 4, false, 5, 6);
+    CHECK(!tiny.full);
+    const IdleSurfaceLayout idle = LayoutIdleSurface(400, 300, 96);
+    CHECK_EQ(idle.title.top, tiny.core.title.top);
+    CHECK_EQ(idle.actions[0].bounds.left, tiny.core.actions[0].bounds.left);
+    CHECK_EQ(idle.actions[1].bounds.top, tiny.core.actions[1].bounds.top);
+    // Scaled with dpi.
+    const Layout scaled = LayoutStartScreen(2160, 1320, 144, 4, false, 5, 6);
+    REQUIRE(scaled.full);
+    REQUIRE(!scaled.recentTiles.empty());
+    CHECK_EQ(LONG(MulDiv(kTileWidthDip, 144, 96)), scaled.recentTiles[0].right - scaled.recentTiles[0].left);
 }
 
 void status_chips_carry_the_rate_the_drops_and_the_render_test()
@@ -10677,6 +10783,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test),
     TEST_CASE(media_controls_ask_for_a_state_and_push_the_timeline_sparingly_test),
     TEST_CASE(taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test),
+    TEST_CASE(start_screen_checks_say_what_passed_and_what_failed_test),
+    TEST_CASE(start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),
     TEST_CASE(long_media_title_is_bounded_with_a_real_ellipsis_test),

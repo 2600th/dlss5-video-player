@@ -113,6 +113,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
 #include "MediaTransportPolicy.h"
+#include "StartScreenPolicy.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -365,6 +366,8 @@ static constexpr UINT WM_TIMELINE_MEDIA = WM_APP + 49;
 // their timeline (lParam: milliseconds), both posted from WinRT's thread pool.
 static constexpr UINT WM_MEDIA_BUTTON = WM_APP + 50;
 static constexpr UINT WM_MEDIA_SEEK = WM_APP + 51;
+// A start-screen fact arrived from GatherStartScreen.
+static constexpr UINT WM_START_SCREEN = WM_APP + 52;
 
 struct YouTubeUrlDialogState {
     const Localizer* localizer{};
@@ -1679,6 +1682,87 @@ private:
     std::jthread m_thread;
 };
 
+// What the start screen needs from disk, gathered off the UI thread: whether
+// the neural runtime is installed and matches its lock (hashing ~226 MB of
+// runtime, about half a second), and for each recent video with a finished
+// render, a frame of that render and how much of the video it covers. Answers
+// are published one at a time into a shared slot and announced with a bare
+// message, so the screen fills in as they come instead of waiting for all.
+struct StartScreenRequest {
+    std::filesystem::path moduleDirectory;
+    std::filesystem::path cacheRoot;
+    struct Recent{std::string renderKey,sourceKey;bool youtube{};};
+    std::vector<Recent> recent;
+    int thumbnailWidth{};
+};
+struct StartScreenAnswers {
+    std::mutex mutex;
+    uint64_t generation{};
+    start_screen::RuntimeState runtime{start_screen::RuntimeState::Checking};
+    std::wstring runtimeVersion;
+    struct Render{std::wstring badge;std::optional<TimelineMediaWorker::Thumbnail> thumbnail;};
+    std::map<std::string,Render> renders;   // by render key
+};
+
+static start_screen::RuntimeState CheckNeuralRuntime(const std::filesystem::path& moduleDirectory, std::stop_token stop)
+{
+    const std::filesystem::path runtime=moduleDirectory/L"neural-runtime";
+    const auto file=[&](const wchar_t* name){std::error_code error;return std::filesystem::is_regular_file(runtime/name,error);};
+    const NeuralRuntimeLayout layout=ClassifyNeuralRuntimeLayout(file(L"ReShade.ini"),file(L"dxgi.dll"),file(L"renodx-dlss5.addon64"),file(L"nvngx_dlssnr.dll"));
+    if(layout==NeuralRuntimeLayout::Absent)return start_screen::RuntimeState::Absent;
+    if(layout==NeuralRuntimeLayout::Incomplete||!file(L"NeuralWorker.exe"))return start_screen::RuntimeState::Incomplete;
+    const auto checks=VerifyRuntimeLock(runtime,EmbeddedRuntimeLock(),stop);
+    return RuntimeLockSatisfied(checks)?start_screen::RuntimeState::Verified:start_screen::RuntimeState::Drifted;
+}
+
+// A render's manifest read straight from the cache folder, WITHOUT the
+// authenticating lookup: this is a picture on a tile, never what plays, and
+// LookupRender would hash every recent render on every start and mark each one
+// used, which reorders eviction for videos nobody opened. Opening the tile runs
+// the real lookup.
+static std::optional<NeuralCacheManifest> PeekManifest(const std::filesystem::path& cacheRoot,const wchar_t* bucket,const std::string& key)
+{
+    if(key.size()!=64||cacheRoot.empty())return std::nullopt;
+    std::ifstream input(cacheRoot/bucket/std::wstring(key.begin(),key.end())/L"manifest.json",std::ios::binary);
+    if(!input.is_open())return std::nullopt;
+    const std::string bytes{std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
+    return ParseNeuralCacheManifest(bytes);
+}
+
+static void GatherStartScreen(StartScreenRequest request,std::shared_ptr<StartScreenAnswers> answers,uint64_t generation,
+                              HWND window,UINT message,std::stop_token stop)
+{
+    const auto publish=[&](auto&& apply){
+        {std::scoped_lock lock(answers->mutex);if(answers->generation!=generation)return false;apply(*answers);}
+        PostMessageW(window,message,0,0);return true;
+    };
+    const auto runtime=CheckNeuralRuntime(request.moduleDirectory,stop);
+    if(stop.stop_requested())return;
+    const std::wstring version=Utf8ToWide(EmbeddedRuntimeLock().runtimeVersion);
+    if(!publish([&](StartScreenAnswers& a){a.runtime=runtime;a.runtimeVersion=version;}))return;
+    const std::filesystem::path ffmpeg=request.moduleDirectory/L"ffmpeg.exe";
+    std::error_code toolError;const bool haveFfmpeg=std::filesystem::is_regular_file(ffmpeg,toolError);
+    for(const auto& recent:request.recent){
+        if(stop.stop_requested())return;
+        const auto manifest=PeekManifest(request.cacheRoot,L"renders",recent.renderKey);
+        if(!manifest||!IsReusableNeuralCacheManifest(*manifest))continue;
+        StartScreenAnswers::Render render{};
+        std::optional<int64_t> sourceDuration;
+        if(recent.youtube)if(const auto source=PeekManifest(request.cacheRoot,L"sources",recent.sourceKey))sourceDuration=source->duration100ns;
+        render.badge=start_screen::CoverageBadge(manifest->rangeStart100ns,manifest->rangeEnd100ns,manifest->duration100ns,sourceDuration);
+        const auto payload=request.cacheRoot/L"renders"/std::wstring(recent.renderKey.begin(),recent.renderKey.end())/L"neural.mkv";
+        if(haveFfmpeg&&manifest->width&&manifest->height){
+            const SIZE size=timeline::ThumbnailSize(double(manifest->width)/double(manifest->height),request.thumbnailWidth);
+            const size_t bytes=size_t(size.cx)*size_t(size.cy)*4u;
+            // A third of the way in: past a fade from black, inside the render.
+            const auto output=RunToolCapture(ffmpeg,timeline::ThumbnailArguments(payload,double(manifest->duration100ns)*1e-7/3.0,size),
+                                             stop,std::chrono::seconds(5),bytes);
+            if(output&&output->size()==bytes)render.thumbnail=TimelineMediaWorker::Thumbnail{generation,0,size,std::vector<uint8_t>(output->begin(),output->end())};
+        }
+        if(!publish([&](StartScreenAnswers& a){a.renders[recent.renderKey]=std::move(render);}))return;
+    }
+}
+
 class PlayerApp {
 #ifdef PLAYER_APP_TESTING
     friend struct PlayerAppTestAccess;
@@ -1755,6 +1839,7 @@ public:
         DragAcceptFiles(m_hwnd,TRUE); DragAcceptFiles(m_renderWnd,TRUE); ShowWindow(m_viewport,SW_HIDE); Layout(); UpdateTitle();
         StartCacheEviction();
         if(!m_opt.file.empty()){if(IsSupportedYouTubeUrl(m_opt.file))StartYouTubeResolution(m_opt.file,L"",m_youtubeSourceQuality);else Load(m_opt.file);} // No startup file picker: the player opens idle by default.
+        SyncStartScreen();
         return true;
     }
 
@@ -5458,6 +5543,175 @@ private:
         if(HDC dc=GetWindowDC(h)){FillRect(dc,&line,DarkDialogBrush());ReleaseDC(h,dc);}
     }
 
+    // ---- The start screen -------------------------------------------------
+    //
+    // The idle window's capability check and tiles (StartScreenPolicy.h). The
+    // facts that need the disk come from GatherStartScreen on its own thread,
+    // asked for whenever the idle screen is up with a recent list it has not
+    // asked about; everything else is already in memory.
+    start_screen::Facts StartScreenFacts()const{
+        start_screen::Facts facts{};
+        facts.gpu=m_opt.detectedGpu.description;facts.generation=m_opt.detectedGpu.generation;
+        facts.driverVersion=m_opt.detectedGpu.driverVersion;facts.safeMode=m_opt.safeMode;
+        {std::scoped_lock lock(m_startAnswers->mutex);facts.runtime=m_startAnswers->runtime;facts.runtimeVersion=m_startAnswers->runtimeVersion;}
+        // The live-session forecast, which is measured on this machine once a
+        // session has run and otherwise a measured prior for the generation;
+        // with neither it says nothing and neither does this.
+        const double prior=RenderPacePrior(m_opt.detectedGpu.generation);
+        const auto at=[&](uint32_t width,uint32_t height)->std::optional<double>{
+            const auto forecast=playback_timing::ForecastLiveRender(width,height,30.0,m_renderPace,prior);
+            return forecast.measured?std::optional<double>(forecast.renderFps):std::nullopt;
+        };
+        if(facts.runtime!=start_screen::RuntimeState::Absent&&facts.runtime!=start_screen::RuntimeState::Incomplete){
+            facts.fps1080=at(1920,1080);facts.fps1440=at(2560,1440);
+        }
+        return facts;
+    }
+    struct StartTile{bool trailer{};size_t index{};std::wstring title,detail,badge;std::string renderKey;};
+    // Recent videos first, as the File menu lists them; then every trailer
+    // that is not already one of them. A trailer that was opened before is a
+    // recent video, with its render and its badge.
+    std::vector<StartTile> StartTiles(bool trailers)const{
+        std::vector<StartTile> tiles;
+        const auto recent=m_recent?m_recent->Entries():std::vector<RecentMediaEntry>{};
+        if(!trailers){
+            for(size_t index=0;index<recent.size()&&index<5;++index){
+                const auto& entry=recent[index];
+                StartTile tile{false,index,entry.title.empty()?entry.source:entry.title,T(entry.youtube?L"start.tile.youtube":L"start.tile.local"),{},entry.renderKey};
+                if(!entry.renderKey.empty()){std::scoped_lock lock(m_startAnswers->mutex);const auto found=m_startAnswers->renders.find(entry.renderKey);if(found!=m_startAnswers->renders.end())tile.badge=found->second.badge;}
+                tiles.push_back(std::move(tile));
+            }
+            return tiles;
+        }
+        for(size_t index=0;index<kExampleVideos.size();++index){
+            const auto& example=kExampleVideos[index];
+            if(std::any_of(recent.begin(),recent.end(),[&](const RecentMediaEntry& entry){return entry.youtube&&entry.source==example.url;}))continue;
+            tiles.push_back(StartTile{true,index,std::wstring(example.title),std::wstring(example.channel),{},{}});
+        }
+        return tiles;
+    }
+    start_screen::Layout StartLayout()const{
+        RECT c{};if(m_hwnd)GetClientRect(m_hwnd,&c);
+        const auto lines=start_screen::CapabilityLines(StartScreenFacts());
+        return start_screen::LayoutStartScreen(int(c.right-c.left),int(c.bottom-c.top),ActiveWindowDpi(m_hwnd),lines.size(),
+                                               start_screen::OfferSafeMode(lines,m_opt.safeMode),StartTiles(false).size(),StartTiles(true).size());
+    }
+    void SyncStartScreen(){
+        if(m_loaded||!m_hwnd)return;
+        std::vector<std::string> keys;
+        if(m_recent)for(const auto& entry:m_recent->Entries())keys.push_back(entry.renderKey);
+        if(m_startRequested&&keys==m_startRequestedKeys)return;
+        m_startRequested=true;m_startRequestedKeys=keys;
+        if(m_startWorker.joinable()){m_startWorker.request_stop();m_startWorker.join();}
+        StartScreenRequest request{ExecutableDirectory(),m_cacheRoot,{},Dip(start_screen::kTileWidthDip)};
+        if(m_recent)for(const auto& entry:m_recent->Entries())if(!entry.renderKey.empty())request.recent.push_back({entry.renderKey,entry.sourceKey,entry.youtube});
+        uint64_t generation=0;
+        {std::scoped_lock lock(m_startAnswers->mutex);generation=++m_startAnswers->generation;m_startAnswers->renders.clear();}
+        try{m_startWorker=std::jthread([request=std::move(request),answers=m_startAnswers,generation,window=m_hwnd](std::stop_token stop){
+                GatherStartScreen(request,answers,generation,window,WM_START_SCREEN,stop);});}
+        catch(const std::system_error&){LOG("Start screen check could not start a thread; the screen shows what it knows.");}
+    }
+    void PaintStartScreenExtras(HDC dc,const start_screen::Layout& layout){
+        if(!layout.full)return;
+        const auto lines=start_screen::CapabilityLines(StartScreenFacts());
+        SetBkMode(dc,TRANSPARENT);
+        const HGDIOBJ oldFont=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
+        for(size_t index=0;index<lines.size()&&index<layout.lines.size();++index){
+            const RECT line=layout.lines[index];
+            // A drawn mark, not a coloured row: the state is a glyph in the
+            // label column, as the toolbar's working state is its own colour.
+            const wchar_t* mark=lines[index].mark==start_screen::Mark::Pass?L"✓ ":lines[index].mark==start_screen::Mark::Fail?L"✕ ":L"• ";
+            const COLORREF markColor=lines[index].mark==start_screen::Mark::Pass?ui_palette::NeuralCoverage:lines[index].mark==start_screen::Mark::Fail?ui_palette::Attention:ui_palette::SecondaryText;
+            RECT label{line.left,line.top,line.left+layout.labelWidth,line.bottom};
+            SetTextColor(dc,markColor);DrawTextW(dc,mark,-1,&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+            SIZE markSize{};GetTextExtentPoint32W(dc,mark,int(wcslen(mark)),&markSize);label.left+=markSize.cx;
+            SetTextColor(dc,ui_palette::SecondaryText);DrawTextW(dc,lines[index].label.c_str(),-1,&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+            RECT value{line.left+layout.labelWidth,line.top,line.right,line.bottom};
+            SetTextColor(dc,ui_palette::PrimaryText);DrawTextW(dc,lines[index].value.c_str(),-1,&value,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        }
+        if(layout.safeMode.right>layout.safeMode.left){
+            const std::wstring link=T(L"start.safe_mode");
+            SetTextColor(dc,m_startHover==StartHover::SafeMode?RGB(103,179,245):ui_palette::PrimaryBlue);
+            RECT text=layout.safeMode;DrawTextW(dc,link.c_str(),-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        }
+        const auto headings=[&](const RECT& rect,const wchar_t* key){
+            if(rect.right<=rect.left)return;
+            RECT text=rect;SetTextColor(dc,ui_palette::SecondaryText);const std::wstring heading=T(key);
+            DrawTextW(dc,heading.c_str(),-1,&text,DT_LEFT|DT_TOP|DT_SINGLELINE|DT_NOPREFIX);
+        };
+        headings(layout.recentHeading,L"start.recent");headings(layout.trailersHeading,L"start.trailers");
+        const auto recent=StartTiles(false),trailers=StartTiles(true);
+        for(size_t index=0;index<layout.recentTiles.size()&&index<recent.size();++index)DrawStartTile(dc,layout.recentTiles[index],recent[index],m_startHover==StartHover::Recent&&m_startHoverIndex==index);
+        for(size_t index=0;index<layout.trailerTiles.size()&&index<trailers.size();++index)DrawStartTile(dc,layout.trailerTiles[index],trailers[index],m_startHover==StartHover::Trailer&&m_startHoverIndex==index);
+        SetTextColor(dc,ui_palette::SecondaryText);RECT hint=layout.hint;const std::wstring hintText=T(L"start.hint");
+        DrawTextW(dc,hintText.c_str(),-1,&hint,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        SelectObject(dc,oldFont);
+    }
+    void DrawStartTile(HDC dc,const RECT& tile,const StartTile& content,bool hover){
+        const UINT dpi=ActiveWindowDpi(m_hwnd);
+        const RECT thumb=start_screen::TileThumbnail(tile,dpi);
+        HBRUSH surface=CreateSolidBrush(ui_palette::Inactive);FillRect(dc,&thumb,surface);DeleteObject(surface);
+        std::optional<TimelineMediaWorker::Thumbnail> picture;
+        if(!content.renderKey.empty()){std::scoped_lock lock(m_startAnswers->mutex);const auto found=m_startAnswers->renders.find(content.renderKey);if(found!=m_startAnswers->renders.end())picture=found->second.thumbnail;}
+        if(picture&&picture->size.cx>0&&picture->size.cy>0){
+            // Fitted, not stretched: a render keeps its own aspect on the tile.
+            const double scale=std::min(double(thumb.right-thumb.left)/picture->size.cx,double(thumb.bottom-thumb.top)/picture->size.cy);
+            const int w=int(picture->size.cx*scale),h=int(picture->size.cy*scale);
+            const int x=thumb.left+(int(thumb.right-thumb.left)-w)/2,y=thumb.top+(int(thumb.bottom-thumb.top)-h)/2;
+            BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=picture->size.cx;info.bmiHeader.biHeight=-picture->size.cy;
+            info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+            SetStretchBltMode(dc,HALFTONE);
+            StretchDIBits(dc,x,y,w,h,0,0,picture->size.cx,picture->size.cy,picture->bgra.data(),&info,DIB_RGB_COLORS,SRCCOPY);
+        }else if(m_iconFont){
+            const wchar_t glyph=GlyphForIcon(content.trailer?UiIcon::YouTube:UiIcon::Open);
+            const HGDIOBJ old=SelectObject(dc,m_iconFont);SetTextColor(dc,ui_palette::SecondaryText);RECT box=thumb;
+            DrawTextW(dc,&glyph,1,&box,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);SelectObject(dc,old);
+        }
+        if(!content.badge.empty()){
+            SIZE size{};GetTextExtentPoint32W(dc,content.badge.c_str(),int(content.badge.size()),&size);
+            const int pad=Dip(5);RECT badge{thumb.left+pad,thumb.bottom-pad-size.cy-Dip(4),thumb.left+pad+size.cx+2*Dip(6),thumb.bottom-pad};
+            HBRUSH teal=CreateSolidBrush(ui_palette::NeuralCoverage);FillRect(dc,&badge,teal);DeleteObject(teal);
+            SetTextColor(dc,ui_palette::Window);DrawTextW(dc,content.badge.c_str(),-1,&badge,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        }
+        if(hover){HBRUSH edge=CreateSolidBrush(ui_palette::PrimaryBlue);FrameRect(dc,&thumb,edge);DeleteObject(edge);}
+        const int line=Dip(start_screen::kTileTextDip)/2;
+        RECT title{tile.left,thumb.bottom+Dip(3),tile.right,thumb.bottom+Dip(3)+line};
+        SetTextColor(dc,ui_palette::PrimaryText);DrawTextW(dc,content.title.c_str(),-1,&title,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        RECT detail{tile.left,title.bottom,tile.right,title.bottom+line};
+        SetTextColor(dc,ui_palette::SecondaryText);DrawTextW(dc,content.detail.c_str(),-1,&detail,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+    }
+    enum class StartHover{None,SafeMode,Recent,Trailer};
+    // The start screen is what the idle window paints unless a job or a
+    // resolve has put the progress panel over it; a click on a tile that is
+    // not on screen must not open anything.
+    bool StartScreenShown()const{
+        return !m_loaded&&!m_stageExport.running&&!(NeuralJobActive()&&!JobBehindPlayback())&&!m_youtubeLifecycle.IsResolving();
+    }
+    std::pair<StartHover,size_t> StartScreenHit(int x,int y)const{
+        if(!StartScreenShown())return {StartHover::None,0};
+        const auto layout=StartLayout();if(!layout.full)return {StartHover::None,0};
+        if(PtIn(layout.safeMode,x,y))return {StartHover::SafeMode,0};
+        for(size_t index=0;index<layout.recentTiles.size();++index)if(PtIn(layout.recentTiles[index],x,y))return {StartHover::Recent,index};
+        for(size_t index=0;index<layout.trailerTiles.size();++index)if(PtIn(layout.trailerTiles[index],x,y))return {StartHover::Trailer,index};
+        return {StartHover::None,0};
+    }
+    void UpdateStartHover(int x,int y){
+        const auto [hover,index]=StartScreenHit(x,y);
+        if(hover==m_startHover&&index==m_startHoverIndex)return;
+        m_startHover=hover;m_startHoverIndex=index;if(!m_loaded&&m_hwnd)InvalidateRect(m_hwnd,nullptr,FALSE);
+    }
+    // A tile opens what it shows, by the same path as the File menu.
+    bool ActivateStartScreen(int x,int y){
+        const auto [hit,index]=StartScreenHit(x,y);
+        switch(hit){
+        case StartHover::SafeMode:RestartInSafeMode();return true;
+        case StartHover::Recent:{const auto tiles=StartTiles(false);if(index<tiles.size())OpenRecent(tiles[index].index);return true;}
+        case StartHover::Trailer:{const auto tiles=StartTiles(true);if(index<tiles.size()&&IsToolbarActionEnabled(ToolbarAction::OpenYouTube,ToolbarState()))ActivateExampleVideo(kExampleVideos[tiles[index].index]);return true;}
+        case StartHover::None:break;
+        }
+        return false;
+    }
+
     // ---- The keyboard cheat sheet (? / F1) -------------------------------
     //
     // Every row comes from the live menu bar (app_menu::CollectShortcuts),
@@ -5710,7 +5964,9 @@ private:
         for(LONG x=left-height-period+phase;x<right+period;x+=period){MoveToEx(dc,x,lane.bottom,nullptr);LineTo(dc,x+height,lane.top);}
         RestoreDC(dc,saved);DeleteObject(pen);
     }
-    IdleSurfaceLayout IdleLayout()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutIdleSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
+    // The start screen's core: where the title and the two buttons are once
+    // the capability panel and the tiles have been placed around them.
+    IdleSurfaceLayout IdleLayout()const{return StartLayout().core;}
     std::vector<ToolbarItem> ToolbarItems()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
     ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable()||StillImageRenderAvailable(),UpscalingAvailable(),FrameGenerationAvailable(),m_frameGenWorker.joinable()&&!m_frameGenCancelling};}
@@ -5743,7 +5999,7 @@ private:
         for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);return;}
     }
     void UpdateCachedStatus(){
-        UpdateStatusChips();SyncTimelineMedia();SyncMediaTransport();
+        UpdateStatusChips();SyncTimelineMedia();SyncMediaTransport();SyncStartScreen();
         const std::wstring status=BuildStatusText();if(status==m_cachedStatus)return;
         m_cachedStatus=status;if(m_hwnd){if(m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}else InvalidateRect(m_hwnd,nullptr,FALSE);}
     }
@@ -6051,7 +6307,9 @@ private:
             SelectObject(dc,oldFont);DrawButton(dc,ToolbarAction::None,UiIcon::Stop,T(L"neural.cancel"),surface.cancelButton,true,false,PtIn(surface.cancelButton,m_mouseX,m_mouseY),false,false,false);return;
         }
         if(!m_loaded){
-            const IdleSurfaceLayout idle=IdleLayout();
+            const start_screen::Layout start=StartLayout();
+            const IdleSurfaceLayout& idle=start.core;
+            PaintStartScreenExtras(dc,start);
             SetBkMode(dc,TRANSPARENT);
             SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_font);std::wstring tt=T(L"idle.title");RECT title=idle.title;DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
             SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=m_youtubeLifecycle.IsResolving()?m_cachedStatus:(m_cacheNotice.empty()?T(L"idle.subtitle"):m_cacheNotice);RECT subtitle=idle.subtitle;DrawTextW(dc,ss.c_str(),-1,&subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);
@@ -8574,7 +8832,7 @@ private:
         m_fullscreenKeyboardFocus=false;
         if(ActivityBusy()&&PtIn(m_neuralCancelBounds,x,y)){if(m_liveSession)StopLiveNeuralSession(true);else if(NeuralJobActive())CancelNeuralJob();else CancelYouTubeResolution();return;}
         if(!ControlsVisible())return;
-        if(!m_loaded){const auto items=FocusableItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);break;}}return;}
+        if(!m_loaded){const auto items=FocusableItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action==ToolbarAction::None&&ActivateStartScreen(x,y))return;if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);break;}}return;}
         // A source with no length has no position to map a click to - every
         // click would seek to the start - so its bar is greyed and inert;
         // Left and Right still seek, which is what the hover says.
@@ -8755,6 +9013,7 @@ private:
         case WM_TIMELINE_MEDIA:CompleteTimelineMedia();return 0;
         case WM_MEDIA_BUTTON:HandleMediaButton(int(w));return 0;
         case WM_MEDIA_SEEK:if(m_loaded)RequestSeek(double(l)/1000.0);return 0;
+        case WM_START_SCREEN:if(!m_loaded)InvalidateRect(h,nullptr,FALSE);return 0;
         case dark_mode::WM_UAHDRAWMENU:if(DrawDarkMenuBar(h,reinterpret_cast<const dark_mode::UAHMENU*>(l)))return TRUE;break;
         case dark_mode::WM_UAHDRAWMENUITEM:if(DrawDarkMenuBarItem(h,reinterpret_cast<const dark_mode::UAHDRAWMENUITEM*>(l)))return TRUE;break;
         case WM_NCPAINT:case WM_NCACTIVATE:{const LRESULT result=DefWindowProcW(h,m,w,l);PaintMenuBarSeparator(h);return result;}
@@ -8799,7 +9058,7 @@ private:
             if(ScreenToClient(h,&point))FullscreenPointerMoved(h,MAKELPARAM(point.x,point.y));
             break;
         }
-        case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();ScrubToPreview();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));UpdateTimelineHover(m_mouseX,m_mouseY);return 0;}
+        case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();ScrubToPreview();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));UpdateTimelineHover(m_mouseX,m_mouseY);if(!m_loaded)UpdateStartHover(m_mouseX,m_mouseY);return 0;}
         case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);if(!m_dragSeek)ClearTimelineHover();return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
@@ -9082,6 +9341,13 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     MediaTransportControls m_mediaTransport;media_transport::Status m_smtcStatus{media_transport::Status::Closed};
     std::wstring m_smtcTitle;media_transport::TimelinePush m_smtcTimeline{};
     media_transport::ThumbBar m_thumbBar{};bool m_thumbBarCreated=false;std::map<UiIcon,HICON> m_thumbIcons;
+    // The start screen: the facts its worker has gathered (shared with the
+    // worker, so neither outlives the other's data), the recent list they were
+    // gathered for, what the pointer is over, and the worker itself.
+    std::shared_ptr<StartScreenAnswers> m_startAnswers=std::make_shared<StartScreenAnswers>();
+    bool m_startRequested=false;std::vector<std::string> m_startRequestedKeys;
+    StartHover m_startHover=StartHover::None;size_t m_startHoverIndex=0;
+    std::jthread m_startWorker;
     bool m_shortcutSheetOpen=false;HWND m_shortcutWnd=nullptr;std::vector<ShortcutGroup> m_shortcutGroups;
     shortcut_sheet::Metrics m_shortcutMetrics{};shortcut_sheet::Layout m_shortcutLayout{};
     // Drives Tick while a modal loop owns the thread; see StartModalTick.

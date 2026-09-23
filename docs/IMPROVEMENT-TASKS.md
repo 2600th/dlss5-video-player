@@ -72,7 +72,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.15](#p215) | An on-screen compare bar with press-and-hold A/B | S | Player | |
 | [P2.16](#p216) | Zoom, pan and a synced magnifier | M | Player | |
 | [P2.17](#p217) | A difference view | S-M | Player | |
-| [P2.20](#p220) | A start screen with a capability check and tiles | M | Player | |
 | [P2.21](#p221) | Export the comparison itself | S / M | Player | |
 | [P2.25](#p225) | Synced multi-pane comparison | M-L | Player | |
 | **P3** | | | | |
@@ -432,24 +431,6 @@ on P0.10 for a true 1:1.
 existing compare shader, optionally with an SSIM map. It answers *where did
 the model change the picture*, which is the question visitors ask, and it is
 the natural authoring view for P2.6's masks.
-
----
-
-<a id="p220"></a>
-### P2.20 · A start screen with a capability check and tiles
-
-`M` · **Player**
-
-The idle screen offers only Open file and Open YouTube URL
-(`player-start.jpg`).
-
-**Do** — show the GPU, the driver against the 610.47 minimum, whether the
-runtime is present and its lock state, and a predicted render speed at 1080p
-and 1440p; offer safe mode when a check fails. Below that, tiles for game
-trailers and recent videos, each with a cached neural frame and a coverage
-badge, plus the `D` hint. The preset strip previews its four presets on the
-paused frame; they all measured the same cost (6.3 s). This answers issue #1
-("what resolution do I have to give to this?").
 
 ---
 

@@ -1304,6 +1304,130 @@ struct PlayerAppTestAccess {
         DestroyIcon(icon);
     }
 
+    // The start screen end to end: a real render published into a scratch
+    // cache, the worker's facts about it (a frame from the staged ffmpeg and a
+    // coverage badge), the panel and the tiles painted from them, and tiles
+    // that hit-test to what they show.
+    static void start_screen_test()
+    {
+        PlayerApp& app = fixture->app;
+        REQUIRE(!app.m_loaded);
+        const auto directory = app.SettingsPath().parent_path() / L"start-screen";
+        std::filesystem::remove_all(directory);
+        std::filesystem::create_directories(directory);
+        const auto avi = directory / L"clip.avi";
+        // 96x64: the cache refuses a render under 64 pixels on a side.
+        WriteTinyAvi(avi, 96, 64, 30);
+        const std::string renderKey(64, 'c'), sourceKey(64, 'd');
+        {
+            NeuralCacheManager cache(directory / L"cache");
+            REQUIRE(cache.Valid());
+            const auto staging = cache.BeginRenderStaging(renderKey);
+            REQUIRE(staging.has_value());
+            std::filesystem::copy_file(avi, *staging / L"neural.mkv");
+            const std::string receipt = "{\"receipt\":1}";
+            { std::ofstream out(*staging / L"receipt.json", std::ios::binary); out << receipt; }
+            NeuralCacheManifest manifest{};
+            manifest.kind = NeuralCacheEntryKind::Render; manifest.state = NeuralCacheState::Staging;
+            manifest.sourceDigest = std::string(64, 'a'); manifest.runtimeDigest = std::string(64, 'b');
+            manifest.encoder = "hevc_nvenc"; manifest.width = 96; manifest.height = 64;
+            manifest.frameCount = 3; manifest.duration100ns = 1000000;
+            manifest.nativeEvaluations = 3; manifest.verifiedNeuralFrames = 3; manifest.observedFeature18Evaluations = 1;
+            manifest.feature18Created = true; manifest.feature18ArmedBeforeCapture = true;
+            manifest.receiptDigest = Sha256Bytes(receipt).value_or("");
+            REQUIRE(cache.PromoteRender(renderKey, *staging, manifest));
+        }
+
+        // The worker, run here on this thread: the runtime verdict, then the
+        // render's badge and frame.
+        auto answers = std::make_shared<StartScreenAnswers>();
+        answers->generation = 1;
+        StartScreenRequest request{PlayerApp::ExecutableDirectory(), directory / L"cache", {{renderKey, sourceKey, false}}, 96};
+        GatherStartScreen(request, answers, 1, app.m_hwnd, WM_START_SCREEN, {});
+        CHECK(answers->runtime != start_screen::RuntimeState::Checking);
+        REQUIRE(answers->renders.count(renderKey) == 1);
+        CHECK(answers->renders[renderKey].badge == L"Rendered 100%");
+        if (std::filesystem::exists(PlayerApp::ExecutableDirectory() / L"ffmpeg.exe")) {
+            REQUIRE(answers->renders[renderKey].thumbnail.has_value());
+            CHECK_EQ(LONG{96}, answers->renders[renderKey].thumbnail->size.cx);
+            CHECK_EQ(LONG{64}, answers->renders[renderKey].thumbnail->size.cy);
+        }
+        MSG message{};
+        while (PeekMessageW(&message, app.m_hwnd, WM_START_SCREEN, WM_START_SCREEN, PM_REMOVE)) {}
+        // A newer request retires the older one's answers mid-flight.
+        answers->generation = 2;
+        GatherStartScreen(request, answers, 1, app.m_hwnd, WM_START_SCREEN, {});
+        CHECK(!PeekMessageW(&message, app.m_hwnd, WM_START_SCREEN, WM_START_SCREEN, PM_REMOVE));
+
+        // The screen, at the default window size, painted from those answers.
+        auto recent = std::move(app.m_recent);
+        const auto previousAnswers = app.m_startAnswers;
+        app.m_recent = std::make_unique<RecentMediaHistory>(directory / L"recent.dat");
+        RecentMediaEntry entry{};
+        entry.title = L"Start screen clip"; entry.source = avi.wstring();
+        // A local entry carries no source key: the file itself is the source.
+        entry.renderKey = renderKey;
+        app.m_recent->Remember(entry);
+        answers->generation = 1;
+        app.m_startAnswers = answers;
+        RECT window{};
+        GetWindowRect(app.m_hwnd, &window);
+        SetWindowPos(app.m_hwnd, nullptr, 0, 0, 1460, 1000, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+        const auto layout = app.StartLayout();
+        REQUIRE(layout.full);
+        REQUIRE(layout.recentTiles.size() == 1);
+        CHECK(!layout.trailerTiles.empty());
+        // The default fixture has no GPU, so the panel fails that check and
+        // offers safe mode.
+        CHECK(layout.safeMode.right > layout.safeMode.left);
+        // An earlier case leaves a job's lifecycle running, which would put
+        // the whole-window progress panel up instead of the idle screen.
+        const NeuralPlaybackLifecycle lifecycle = app.m_neuralLifecycle;
+        app.m_neuralLifecycle.state = NeuralPlaybackState::Idle;
+        HDC dc = CreateCompatibleDC(nullptr);
+        REQUIRE(dc != nullptr);
+        RECT client{};
+        GetClientRect(app.m_hwnd, &client);
+        drawnText.clear();
+        app.RenderUi(dc, client);
+        app.m_neuralLifecycle = lifecycle;
+        CHECK(Contains(L"GPU"));
+        CHECK(Contains(L"Neural runtime"));
+        CHECK(Contains(L"Start screen clip"));
+        CHECK(Contains(L"Rendered 100%"));
+        CHECK(Contains(app.T(L"start.recent").c_str()));
+        CHECK(Contains(app.T(L"start.trailers").c_str()));
+        CHECK(Contains(app.T(L"start.hint").c_str()));
+        CHECK(Contains(app.T(L"start.safe_mode").c_str()));
+        CHECK(Contains(std::wstring(kExampleVideos[0].title).c_str()));
+        DeleteDC(dc);
+        // Tiles and the link hit-test to what they show - and to nothing
+        // while a job's progress panel covers them.
+        const RECT tile = layout.recentTiles[0];
+        const NeuralPlaybackLifecycle busy = app.m_neuralLifecycle;
+        app.m_neuralLifecycle.state = NeuralPlaybackState::Rendering;
+        CHECK(app.StartScreenHit((tile.left + tile.right) / 2, (tile.top + tile.bottom) / 2).first == PlayerApp::StartHover::None);
+        app.m_neuralLifecycle.state = NeuralPlaybackState::Idle;
+        const auto recentHit = app.StartScreenHit((tile.left + tile.right) / 2, (tile.top + tile.bottom) / 2);
+        CHECK(recentHit.first == PlayerApp::StartHover::Recent);
+        CHECK_EQ(size_t{0}, recentHit.second);
+        const RECT trailer = layout.trailerTiles.back();
+        const auto trailerHit = app.StartScreenHit((trailer.left + trailer.right) / 2, trailer.top + 2);
+        CHECK(trailerHit.first == PlayerApp::StartHover::Trailer);
+        CHECK(app.StartScreenHit(layout.hint.left + 1, layout.hint.top + 1).first == PlayerApp::StartHover::None);
+        // The safe-mode link asks first; this suite answers no.
+        const int boxes = messageBoxes;
+        CHECK(app.ActivateStartScreen(layout.safeMode.left + 2, (layout.safeMode.top + layout.safeMode.bottom) / 2));
+        CHECK_EQ(boxes + 1, messageBoxes);
+        app.m_neuralLifecycle = busy;
+
+        SetWindowPos(app.m_hwnd, nullptr, 0, 0, window.right - window.left, window.bottom - window.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+        app.m_startAnswers = previousAnswers;
+        app.m_recent = std::move(recent);
+        std::filesystem::remove_all(directory);
+    }
+
     static void source_menus_are_disabled_without_media_test()
     {
         PlayerApp& app = fixture->app;
@@ -1738,6 +1862,7 @@ struct PlayerAppTestAccess {
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
         UI_CASE(dark_menu_bar_test),
         UI_CASE(media_controls_and_thumbnail_buttons_test),
+        UI_CASE(start_screen_test),
         UI_CASE(source_menus_are_disabled_without_media_test),
         UI_CASE(source_menus_return_after_a_cancelled_job_test),
         UI_CASE(loading_feedback_test),

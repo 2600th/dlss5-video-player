@@ -11,6 +11,18 @@ legacy language settings in the INI are ignored.
 
 ## Open, render and compare
 
+With nothing open, the window is a start screen. Under the two open buttons it
+checks the machine: the GPU, the driver against the 610.47 minimum that
+neural rendering needs, whether the neural runtime is installed and matches
+its lock, and - once this machine has measured a render, or for a GPU with a
+measured prior - the frame rate the live neural render is expected to manage
+at 1080p and 1440p. A failed check is marked and offers **Restart in DLSS SR
+safe mode**. Below that are your recent videos, each with a frame of its
+neural render and a badge for how much of it is rendered, and the game
+trailers; a click opens one, exactly as the File menu does. The checks that
+touch the disk run in the background, so the screen fills in a moment after
+the window appears.
+
 Open a local photo, GIF or video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
 select a trailer under **File > Game trailers**. Opening media never starts a
 whole-video render. A YouTube URL plays from its stream as soon as it resolves;
