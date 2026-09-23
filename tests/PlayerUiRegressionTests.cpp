@@ -1473,6 +1473,18 @@ struct PlayerAppTestAccess {
         CHECK(Contains(app.T(L"start.safe_mode").c_str()));
         CHECK(Contains(std::wstring(kExampleVideos[0].title).c_str()));
         DeleteDC(dc);
+        // An untitled local file is named by its file name, never its full path.
+        {
+            auto titled = std::move(app.m_recent);
+            app.m_recent = std::make_unique<RecentMediaHistory>(directory / L"untitled.dat");
+            RecentMediaEntry untitled{};
+            untitled.source = (directory / L"untitled.avi").wstring();
+            app.m_recent->Remember(untitled);
+            const auto tiles = app.StartTiles(false);
+            REQUIRE(tiles.size() == 1);
+            CHECK(tiles[0].title == L"untitled.avi");
+            app.m_recent = std::move(titled);
+        }
         // Tiles and the link hit-test to what they show - and to nothing
         // while a job's progress panel covers them.
         const RECT tile = layout.recentTiles[0];

@@ -6305,7 +6305,12 @@ private:
         if(!trailers){
             for(size_t index=0;index<recent.size()&&index<5;++index){
                 const auto& entry=recent[index];
-                StartTile tile{false,index,entry.title.empty()?entry.source:entry.title,T(entry.youtube?L"start.tile.youtube":L"start.tile.local"),{},entry.renderKey};
+                // An untitled local file is named by its file name, as its window title is:
+                // the full path is unreadable in a tile's width and put a user's folders on
+                // the screen anyone might be sharing.
+                std::wstring name=entry.title;
+                if(name.empty())name=entry.youtube?entry.source:std::filesystem::path(entry.source).filename().wstring();
+                StartTile tile{false,index,name,T(entry.youtube?L"start.tile.youtube":L"start.tile.local"),{},entry.renderKey};
                 if(!entry.renderKey.empty()){std::scoped_lock lock(m_startAnswers->mutex);const auto found=m_startAnswers->renders.find(entry.renderKey);if(found!=m_startAnswers->renders.end())tile.badge=found->second.badge;}
                 tiles.push_back(std::move(tile));
             }
