@@ -154,11 +154,11 @@ trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
 
 ## Screenshots
 
-Real captures of the app. The two paused pairs are v0.25.0 on an RTX 4080
-SUPER; the menu, neural-strength and start-screen shots are older captures of
-screens that haven't changed. Click any image for full size.
+Real captures of the app, all on an RTX 4080 SUPER: the two paused pairs are
+v0.25.0, and the menu, DLSS 5 mix and start-screen shots are this branch's UI.
+Click any image for full size.
 
-![File menu with Recent videos and the cached-video export command](docs/screenshots/current/recent-videos.jpg)
+![File menu with Game trailers, Recent videos and Save comparison image, over a paused neural frame with the compare bar](docs/screenshots/current/recent-videos.jpg)
 
 ### Same frame, original and neural
 
@@ -176,9 +176,9 @@ promise that every source gains detail.
 
 ![GTA VI Trailer 2, one frame of Lucia: the source on the left, the same frame from the player's render on the right, identical unscaled 700x880 crops](docs/screenshots/current/face-comparison-gta6.png)
 
-### Neural strength dial
+### DLSS 5 mix
 
-![The image adjustments window with the Neural strength slider over a paused neural frame](docs/screenshots/current/neural-strength.jpg)
+![The image adjustments window with the DLSS 5 mix slider over a paused neural frame](docs/screenshots/current/neural-strength.jpg)
 
 `Ctrl+E`, last slider. 0 % is the original, 100 % the model's result, and
 200 % pushes the change further. It blends the frame already on screen, so it
@@ -186,7 +186,7 @@ never triggers a new render.
 
 ### Start screen
 
-![Start screen with local file and YouTube URL actions](docs/screenshots/current/player-start.jpg)
+![Start screen: the capability check, the Open file and Open YouTube URL actions, and a row of game trailers](docs/screenshots/current/player-start.jpg)
 
 [Capture details and footage attribution](docs/screenshots/README.md).
 

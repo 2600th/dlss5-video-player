@@ -123,7 +123,7 @@ function Select-PackageVariant {
     $script:version = $identity.Version
     $script:PublicCore = [switch]$identity.Core
     $script:expected = Get-ExpectedPackageFiles -Core $identity.Core
-    Write-Host "Package mode: DLSS Video Player $($identity.Version), $(if ($identity.Core) { 'core' } else { 'complete' }) package."
+    Write-Host "Package mode: DLSS 5 Video Player $($identity.Version), $(if ($identity.Core) { 'core' } else { 'complete' }) package."
 }
 
 $temporaryRoot = $null
@@ -214,7 +214,7 @@ function Assert-ReleaseExecutableIdentity {
     param([string]$Root)
     $identity = (Get-Item -LiteralPath (Join-Path $Root 'DLSSVideoPlayer.exe')).VersionInfo
     $expectedIdentity = @{
-        ProductName = 'DLSS Video Player'
+        ProductName = 'DLSS 5 Video Player'
         FileVersion = "$version.0"
         ProductVersion = "$version.0"
         OriginalFilename = 'DLSSVideoPlayer.exe'

@@ -91,7 +91,7 @@ $intro = @(
 )
 $tail = @(
     '',
-    ('Every detail, including what was measured: [CHANGELOG.md for {0}](https://github.com/{1}/blob/{2}/CHANGELOG.md).' -f $version, $Repository, $tag)
+    ('What changed: [CHANGELOG.md for {0}](https://github.com/{1}/blob/{2}/CHANGELOG.md). What was measured, and the decisions it settled: [Decisions and the measurements behind them](https://github.com/{1}/blob/{2}/docs/ARCHITECTURE.md#decisions-and-the-measurements-behind-them).' -f $version, $Repository, $tag)
 )
 $body = (($intro + $summary + $tail) -join "`n").TrimEnd() + "`n"
 [IO.File]::WriteAllText($OutFile, $body)

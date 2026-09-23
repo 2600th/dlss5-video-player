@@ -23,12 +23,12 @@ BEGIN
     BEGIN
         BLOCK "040904B0"
         BEGIN
-            VALUE "FileDescription", "DLSS Video Player\0"
+            VALUE "FileDescription", "DLSS 5 Video Player\0"
             VALUE "FileVersion", DLSS_VIDEO_PLAYER_VERSION_RESOURCE
             VALUE "InternalName", "DLSSVideoPlayer\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 DLSS Video Player contributors\0"
             VALUE "OriginalFilename", "DLSSVideoPlayer.exe\0"
-            VALUE "ProductName", "DLSS Video Player\0"
+            VALUE "ProductName", "DLSS 5 Video Player\0"
             VALUE "ProductVersion", DLSS_VIDEO_PLAYER_VERSION_RESOURCE
         END
     END

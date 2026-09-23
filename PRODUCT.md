@@ -98,7 +98,8 @@ Real, in the repository, usable without fabrication:
   and the player's render of it; `gta6-lucia-original.jpg` / `-neural.jpg`, the
   full frames behind the site hero.
 - `docs/screenshots/current/neural-strength.jpg`, `recent-videos.jpg`,
-  `player-start.jpg` (older UI captures).
+  `player-start.jpg` (the current UI: the image adjustments window, the File
+  menu and the start screen).
 - `docs/media/neural-comparison-demo.mp4` (19.7 s, 1080p) with poster and WebP
   preview; `site/src/assets/hero/social-card.jpg` (1200x630 link preview).
 - Release telemetry, read live on 2026-09-18: 4,959 zip downloads across 17
@@ -108,7 +109,8 @@ Real, in the repository, usable without fabrication:
 
 Absent, and not to be invented: testimonials, named users, press coverage,
 pricing, benchmark claims beyond the measured numbers already published in
-CHANGELOG.md and the verification documents.
+`docs/ARCHITECTURE.md` ("Decisions and the measurements behind them") and the
+verification documents.
 
 The screenshots are frames of official trailers (The Matrix, GTA VI Trailer 2;
 older UI shots show The Godfather and The Witcher IV). Provenance is documented; the usage matches what the

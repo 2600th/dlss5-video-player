@@ -13,9 +13,9 @@ for images that have since been replaced are in the git history of this file.
 | `current/gta6-lucia-original.jpg`, `gta6-lucia-neural.jpg` | That GTA VI frame, whole (2560x1440). The site hero and link card are cut from these | 22 Sep 2026, v0.25.0 |
 | `current/matrix-neural.jpg`, `matrix-original.jpg` | The player paused on Trinity at 1:28, neural view on, then off | 22 Sep 2026, v0.25.0 |
 | `current/neural-playback.jpg`, `original-comparison.jpg` | The player paused on GTA VI at 1:04, neural view on, then off | 22 Sep 2026, v0.25.0 |
-| `current/neural-strength.jpg` | The image adjustments window with the Neural strength dial at 1.00, over a paused Godfather frame | 12 Sep 2026, v0.21.0 |
-| `current/recent-videos.jpg` | The File menu with Recent videos. The history submenu is closed, which keeps local paths out of frame | 3 Sep 2026, v0.13.0 |
-| `current/player-start.jpg` | The start screen | 3 Sep 2026, v0.13.0 |
+| `current/neural-strength.jpg` | The image adjustments window with the DLSS 5 mix slider at 1.00, over a paused neural frame of the Mafia: The Old Country trailer | 24 Sep 2026, v0.25.0+ |
+| `current/recent-videos.jpg` | The File menu (Game trailers, Recent videos, Save comparison image) over the same trailer, paused on a neural frame with the compare bar. The history submenu is closed, which keeps local paths out of frame | 24 Sep 2026, v0.25.0+ |
+| `current/player-start.jpg` | The start screen on a fresh profile: the capability check and the game trailers | 24 Sep 2026, v0.25.0+ |
 | `2026-09-03/face-comparison.png` | The Witcher IV, frame 3375, source beside render. Kept because the 2 September verification report shows it | 3 Sep 2026, v0.13.0 |
 
 ## 22 September 2026 images
@@ -74,17 +74,45 @@ differs by a mean of 9.5 levels and the Matrix pair by 5.2. A wipe taken in the
 same session matched the original left of its divider (0.16) and the render to
 the right (0.0).
 
+## 24 September 2026 images
+
+**Hardware and runtime.** The 22 September machine and runtime (RTX 4080
+SUPER, driver 610.47, RenoDX 6.5.3, DLSS-NR 310.8.0), at 175% display scaling.
+The build is the w3-ui branch after v0.25.0: Common Controls 6, dark popup
+menus, the compare bar and the start screen as they ship next.
+
+**Source.** *Mafia: The Old Country - Family Takes Sacrifice* (Mafia Game), the
+official upload in the player's trailer list, 2560x1440 at 30 fps, opened as a
+local copy of the player's cached source. Neural rendering was turned on at
+0:00, the video played and was paused at 0:21 (the menu) and 0:41 (the
+adjustments window), both inside the rendered range with the neural view on.
+Default neural settings.
+
+**Captures.** Every window was captured by handle with `PrintWindow` and cut to
+its visible frame (DWM's extended frame bounds), as
+`tools/verification/capture-window.ps1` does, because the workstation was
+locked and the screen itself could not be read. A popup is its own window, so
+`recent-videos.jpg` and `neural-strength.jpg` are each two such captures - the
+player, and the open File menu or the adjustments window - with the second
+placed at its real on-screen offset from the first. Nothing else is added or
+changed. Saved once as JPEG at quality 95 with no chroma subsampling.
+
+**Size.** 1493x932 (`recent-videos.jpg`, `player-start.jpg`) and 1493x1100
+(`neural-strength.jpg`). The older shots were 1442x932 at 100%; at 175% the
+player's minimum width is 1493 visible pixels, and the adjustments window
+(933 pixels tall at that scale) needed a taller player to sit over.
+
 ## Earlier images
 
-**12 September 2026** (`neural-strength.jpg`). v0.21.0 on an RTX 5090, driver
-616.64, RenoDX 4.7. The frame is *The Godfather 50th Anniversary Trailer*
-(Paramount Pictures) paused at 73.98 s, from a live session that verified
-2,875 of 2,875 frames. The window's visible frame (1442x932), JPEG quality 95,
-no chroma subsampling.
+**12 September 2026** (the previous `neural-strength.jpg`, in this file's
+history). v0.21.0 on an RTX 5090, driver 616.64, RenoDX 4.7. The frame is
+*The Godfather 50th Anniversary Trailer* (Paramount Pictures) paused at
+73.98 s, from a live session that verified 2,875 of 2,875 frames. The window's
+visible frame (1442x932), JPEG quality 95, no chroma subsampling.
 
-**3 September 2026** (`recent-videos.jpg`, `player-start.jpg`,
-`2026-09-03/face-comparison.png`). v0.13.0 on an RTX 5090, full 1442x932
-windows captured with FFmpeg. The face comparison uses *The Witcher IV* Cinematic
+**3 September 2026** (`2026-09-03/face-comparison.png`, and the previous
+`recent-videos.jpg` and `player-start.jpg`). v0.13.0 on an RTX 5090, full
+1442x932 windows captured with FFmpeg. The face comparison uses *The Witcher IV* Cinematic
 Reveal Trailer (CD PROJEKT RED), 1920x1080 at 30000/1001 fps, zero-based frame
 3375 (112.6 s). Both 700x880 crops are at x=670, y=0 from the source and its
 fully verified render (10,868 of 10,868 frames).
@@ -94,6 +122,6 @@ fully verified render (10,868 of 10,868 frames).
 These images document the software. They are not an image-quality benchmark,
 an official NVIDIA integration, or an endorsement by anyone shown. Footage
 belongs to its owners: The Matrix to Warner Bros., Grand Theft Auto VI to
-Rockstar Games, The Godfather to Paramount Pictures and The Witcher IV to CD
-PROJEKT RED. NVIDIA components belong to NVIDIA. The source-code licence
+Rockstar Games, The Godfather to Paramount Pictures, The Witcher IV to CD
+PROJEKT RED and Mafia: The Old Country to 2K and Hangar 13. NVIDIA components belong to NVIDIA. The source-code licence
 doesn't relicense any of it.

@@ -53,7 +53,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | --- | --- | :---: | --- | :---: |
 | **P0** | | | | |
 | **P1** | | | | |
-| [P1.23](#p123) | Screenshots and the last product-name drift | S | Docs, Release | 🔍 |
 | **P2** | | | | |
 | [P2.1](#p21) | Supply a smoothed exposure instead of auto-exposure | S | Pipeline | ✅ |
 | [P2.2](#p22) | Dither wherever the image is cut to 8 bits | S | Pipeline, Player | ✅ |
@@ -88,45 +87,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 
 ## Docs and site
 
-<a id="p123"></a>
-### P1.23 · Screenshots and the last product-name drift
-
-`S` · **Docs, Release** · 🔍
-
-The positioning, titles, related-projects page and changelog were fixed.
-What is left:
-
-| Item | Where | Fix |
-| --- | --- | --- |
-| Screenshots show the old menus ("Upcoming games", File > Export cached video) and a v0.21.0 capture | `docs/screenshots/current/recent-videos.jpg`, `neural-strength.jpg`; site "How it works" | Re-shoot with the current UI (needs the GUI) |
-| The version resource still names "DLSS Video Player", and two packaging scripts check for that exact name | `src/resources.rc`, `tools/package_release.ps1`, `tools/verify_package.ps1` | Rename all three together |
-| Readers are sent to the changelog for measurements it no longer carries | `tools/release_notes.ps1:94`, `PRODUCT.md` | Point them at `docs/ARCHITECTURE.md` ("Decisions and the measurements behind them") |
-
---- | --- | --- |
-| Says `NvencPreset` defaults to 7; the player's default is 5 (`NeuralCache.h:139`). The helper's fallback of 7 is a deliberate wire contract | `docs/USAGE.md:281` | Say 5 |
-| Screenshots show the old menus ("Upcoming games", File > Export cached video) and a v0.21.0 capture, while the README says they show "screens that haven't changed" | `docs/screenshots/current/recent-videos.jpg`, `neural-strength.jpg`; site "How it works" | Re-shoot |
-| The site's `<title>`, `og:title` and `twitter:title` lead with "AI video upscaling", which is commoditised and not what the product does by default | `site/src/index.html:16`, `:24` | Lead with neural rendering and the same-frame comparison |
-| The window title and error boxes read "DLSS Video Player" | `Localization.h:20` (`app.title`), `main.cpp:948`, `:7818` | "DLSS 5 Video Player" |
-| The related-projects page is three weeks stale and says so. It also ships in both packages while pointing at this file, which is not packaged | `docs/RELATED_PROJECTS.md` | Rewrite it against the landscape below. Narrow the claim to: *the only one that renders the whole video progressively, keeps every frame, and shows the original and the render on the same frame while it is still rendering*. Lead with verifiability. Stop implying frame generation is part of live playback |
-| The changelog is 189 KB (0.24.0 alone is 50 KB) and ships in the zips | `CHANGELOG.md` | Keep user-visible bullets; move the rationale into commits or `ARCHITECTURE.md` |
-| Stale counts: "ten tests" (there are 13), "twenty executables" | `gpu-tests.yml:5`, `CMakeLists.txt:46` | Update them |
-
-**Landscape since 2026-09-01, for the rewrite.**
-- **NVIDIA:** DLSS 5 shipped officially on 2026-09-03 (driver 616.64, RTX 50
-  only, one game), with RTX 40 support promised "later this fall" and no
-  public SDK yet.
-- **Merserk Visual Enhancer:** v2.1 → v11. It now has frame generation,
-  10-bit HDR, RTX VSR, a Live mode, masks, shimmer suppression, a 2-Up view,
-  and ProRes and FFV1 export.
-- **NeuralScreen:** about 944★.
-- **video2dlssnr:** GPU-resident pipeline.
-- **dlss5-nr-player and its forks:** split and wipe views plus VSR.
-- **A fork of this project:** ctype-lab.
-- **ComfyUI packs:** new ones, including one with an automatic skin mask.
-- **OptiScaler-DLSSNR:** issue #100 shows it failing on an offscreen DLAA
-  harness like this one. RenoDX is still the only runtime known to work here.
-
----
 ---
 
 # P2 — High-value features

@@ -99,7 +99,7 @@ function Assert-ReleaseBuild {
 
     $identity = (Get-Item -LiteralPath $executable).VersionInfo
     $expectedIdentity = @{
-        ProductName = 'DLSS Video Player'
+        ProductName = 'DLSS 5 Video Player'
         FileVersion = "$version.0"
         ProductVersion = "$version.0"
         OriginalFilename = 'DLSSVideoPlayer.exe'
