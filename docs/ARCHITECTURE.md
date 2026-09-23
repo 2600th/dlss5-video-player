@@ -625,6 +625,28 @@ receipt rather than degrading silently. The manifest schema moved 4 → 5 in the
 same change, which retires every entry written under the old identity through the
 schema gate rather than incidentally through a missing field.
 
+**A read of the store is trusted only once it has been quiet.** NGX rewrites
+`config/versions/<n>/files` (the server config, the mapping and the deny list)
+in place on every initialisation, the player's own included. It truncates each
+file to 0 bytes and writes it back between 35 ms and 1.2 s later, depending on
+load. A digest taken inside that window hashes an empty file. The file count,
+the hashed count and the unreadable count all stay the same, so the read passed
+as settled. On the development machine the render key then carried `a69cdc79…`,
+which is the store with `nvngx_server_config.txt` empty, instead of `59792fa7…`.
+A render keyed that way could never be looked up again, and the next start's
+eviction deleted it as "retired by a changed model store". Now a file written
+within `kModelStoreQuietPeriod` (2 s) of the read makes the read unsettled.
+`ResolveNeuralModelStore` sleeps the rest of that period and reads again, for up
+to `kModelStoreSettlePatience` (10 s), before it hands the render key a digest.
+The preflight receipt takes a single read, and its `settled` field says which
+kind it got. Eviction judges by the model-store term only when two resolves
+`kEvictionModelStoreGap` (5 s) apart are both settled and agree
+(`NeuralModelStoresAgree`). The two ways of being wrong cost very different
+amounts. If eviction trusts a wrong digest, it deletes renders that still work,
+which can mean hours of GPU time or a stream that has since gone away. If it
+passes on a correct one, the orphans stay until the next start or the
+free-space floor.
+
 **Two runtime file sets exist, and they are deliberately different sizes.**
 `LockedRuntimeFileNames()` is the thirteen files hashed into `runtimeDigest` - the
 twelve vendor modules plus `NeuralWorker.exe` - and it is the set a preflight

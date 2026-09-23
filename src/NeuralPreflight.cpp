@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cwctype>
 #include <fstream>
@@ -16,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #pragma comment(lib, "advapi32.lib")
@@ -145,6 +147,10 @@ struct ModelStoreFile {
     int64_t writeTime{};
     std::string digest;  // empty above kModelContentHashLimit or when unreadable
     bool unreadable{};   // size, write time or (within the bound) content missing
+    // Written inside the quiet period before the read, and how much of it is
+    // left. See NeuralModelStore::recentlyWrittenFiles.
+    bool recent{};
+    std::chrono::milliseconds settlesIn{};
 };
 
 // Which NGX features the neural pass evaluates, as the model store names them.
@@ -235,7 +241,8 @@ std::optional<std::string> HashNeuralPassSelector(const std::filesystem::path& p
 // One root's listing, or nothing when the root cannot be walked whole: a
 // partial listing would digest as though the files it missed did not exist.
 std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoot& root,
-                                                            std::stop_token stop)
+                                                            std::stop_token stop,
+                                                            std::chrono::milliseconds quietPeriod)
 {
     namespace fs = std::filesystem;
     std::error_code error;
@@ -254,8 +261,22 @@ std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoo
         else file.unreadable = true;
         local.clear();
         const auto written = entry.last_write_time(local);
-        if (!local) file.writeTime = written.time_since_epoch().count();
-        else file.unreadable = true;
+        if (!local) {
+            file.writeTime = written.time_since_epoch().count();
+            // Read the clock per file: hashing the ones before it takes time,
+            // and a write that lands meanwhile is the one this is looking for.
+            // A time more than a second ahead of the clock is not a write in
+            // progress but a skewed stamp, which would otherwise hold the
+            // store unsettled for good.
+            const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::filesystem::file_time_type::clock::now() - written);
+            if (age > -std::chrono::seconds(1) && age < quietPeriod) {
+                file.recent = true;
+                file.settlesIn = quietPeriod - std::max(age, std::chrono::milliseconds{0});
+            }
+        } else {
+            file.unreadable = true;
+        }
         if (sized && size <= kModelContentHashLimit) {
             // Uncached on purpose. Sha256FileCached keys on (path, size, write
             // time), and Windows write times move in ~15 ms ticks, so a small
@@ -335,7 +356,8 @@ std::vector<NeuralModelRoot> RegisteredNeuralModelRoots()
 
 NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
                                         std::wstring_view driverVersion,
-                                        std::stop_token stop)
+                                        std::stop_token stop,
+                                        std::chrono::milliseconds quietPeriod)
 {
     NeuralModelStore store;
     // Canonical form 2: form 1 listed every feature, and the size and write
@@ -347,7 +369,7 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
     std::string canonical = "model-store=2\n";
     for (const NeuralModelRoot& root : roots) {
         const std::wstring spelling = LowerWide(root.directory.generic_wstring());
-        const auto files = CollectModelRoot(root, stop);
+        const auto files = CollectModelRoot(root, stop, quietPeriod);
         canonical += "root=" + utf8_text::FromWide(spelling);
         if (!files) {
             // An unreadable root still belongs in the digest: a machine that
@@ -385,6 +407,10 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
             ++store.files;
             if (!file.digest.empty()) ++store.contentHashedFiles;
             if (file.unreadable) ++store.unreadableFiles;
+            if (file.recent) {
+                ++store.recentlyWrittenFiles;
+                store.settlesIn = std::max(store.settlesIn, file.settlesIn);
+            }
             store.bytes += file.size;
         }
     }
@@ -404,13 +430,54 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
 
 bool NeuralModelStoreSettled(const NeuralModelStore& store)
 {
-    return store.digest.size() == 64 && store.unavailableRoots == 0 && store.unreadableFiles == 0;
+    return store.digest.size() == 64 && store.unavailableRoots == 0 && store.unreadableFiles == 0 &&
+           store.recentlyWrittenFiles == 0;
 }
 
-NeuralModelStore ResolveNeuralModelStore(std::wstring_view driverVersion, std::stop_token stop)
+bool NeuralModelStoresAgree(const NeuralModelStore& first, const NeuralModelStore& second)
+{
+    return NeuralModelStoreSettled(first) && NeuralModelStoreSettled(second) && first.digest == second.digest;
+}
+
+// A read that catches NGX mid-rewrite is not an error to report but a moment to
+// wait out: the rewrite ends within a second or two, and the digest the render
+// is keyed under must be the store's, not the moment's. Measured on the
+// development machine: the player's own NGX initialisation truncated
+// config/versions/2/files/nvngx_server_config.txt 0.7 s before its render key
+// was digested, and the key carried a69cdc79... - exactly the store with that
+// one file empty - instead of 59792fa7... A render made under it could never
+// be looked up again, and the next start's eviction deleted it.
+NeuralModelStore DigestSettledNeuralModelStore(std::span<const NeuralModelRoot> roots,
+                                               std::wstring_view driverVersion,
+                                               std::stop_token stop,
+                                               std::chrono::milliseconds quietPeriod,
+                                               std::chrono::milliseconds patience)
+{
+    const auto deadline = std::chrono::steady_clock::now() + patience;
+    for (;;) {
+        NeuralModelStore store = DigestNeuralModelStore(roots, driverVersion, stop, quietPeriod);
+        if (store.recentlyWrittenFiles == 0 || stop.stop_requested()) return store;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return store;
+        // A little past the youngest file's quiet period, so the next read
+        // does not land on its last millisecond; never past the deadline.
+        auto wait = std::min<std::chrono::steady_clock::duration>(
+            store.settlesIn + std::chrono::milliseconds(50), deadline - now);
+        while (wait > std::chrono::steady_clock::duration::zero() && !stop.stop_requested()) {
+            const auto slice = std::min<std::chrono::steady_clock::duration>(wait, std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(slice);
+            wait -= slice;
+        }
+        if (stop.stop_requested()) return store;
+    }
+}
+
+NeuralModelStore ResolveNeuralModelStore(std::wstring_view driverVersion, std::stop_token stop,
+                                         std::chrono::milliseconds patience)
 {
     const std::vector<NeuralModelRoot> roots = RegisteredNeuralModelRoots();
-    return DigestNeuralModelStore(roots, driverVersion, std::move(stop));
+    return DigestSettledNeuralModelStore(roots, driverVersion, std::move(stop), kModelStoreQuietPeriod,
+                                         patience);
 }
 
 NeuralRuntimeBanner ParseNeuralRuntimeBanner(std::string_view reshadeLog)
@@ -629,7 +696,8 @@ std::string NeuralModelStoreJson(const NeuralModelStore& store)
         if (index) json += ',';
         json += "\"" + JsonEscapeWide(store.enumeratedRoots[index]) + "\"";
     }
-    json += "],\"fallback\":\"" + JsonEscapeWide(store.fallbackDetail) + "\"}";
+    json += "],\"fallback\":\"" + JsonEscapeWide(store.fallbackDetail) + "\",\"settled\":" +
+            std::string(NeuralModelStoreSettled(store) ? "true" : "false") + "}";
     return json;
 }
 

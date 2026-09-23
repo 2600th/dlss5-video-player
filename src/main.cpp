@@ -2177,11 +2177,27 @@ public:
             std::optional<cache_eviction::Identity> current;
             if(!driverVersion.empty()){
                 const auto runtime=BuildRuntimeDigest(moduleDirectory/L"neural-runtime",LockedRuntimeFileNames());
+                // The model-store term is judged by two settled reads taken
+                // kEvictionModelStoreGap apart that agree (NeuralModelStoresAgree).
+                // One read is one sample of a directory NGX rewrites on every
+                // initialisation, the player's own included: a read that caught
+                // nvngx_server_config.txt truncated keyed a render under a digest
+                // no later read reproduced, and this pass then deleted renders as
+                // "retired by a changed model store" when nothing had changed. A
+                // wrong current deletes renders that still work; a missed one
+                // leaves orphans for the next start or the free-space floor.
                 const NeuralModelStore models=ResolveNeuralModelStore(driverVersion);
-                if(runtime&&NeuralModelStoreSettled(models))
+                NeuralModelStore confirm;
+                if(runtime&&NeuralModelStoreSettled(models)){
+                    std::this_thread::sleep_for(kEvictionModelStoreGap);
+                    confirm=ResolveNeuralModelStore(driverVersion);
+                }
+                if(runtime&&NeuralModelStoresAgree(models,confirm))
                     current=cache_eviction::Identity{DLSS_VIDEO_PLAYER_VERSION,NeuralCacheInstallation(),*runtime,WideToUtf8(driverVersion),models.digest};
                 else LOG("Cache eviction is not judging entries by identity: runtime="<<(runtime?"resolved":"unavailable")
-                         <<" modelStore="<<(NeuralModelStoreSettled(models)?"settled":"unsettled")<<".");
+                         <<" modelStore="<<(!NeuralModelStoreSettled(models)?"unsettled":
+                                            !NeuralModelStoreSettled(confirm)?"unsettled on the second read":"changed between reads")
+                         <<" first="<<models.digest<<" second="<<confirm.digest<<".");
             }
             cache.Evict({},cache_eviction::kDefaultFreeFloorBytes,current?&*current:nullptr);
         }).detach();
@@ -9291,7 +9307,9 @@ private:
                     // switch that does belong in the key, because it changes what the
                     // model is shown rather than how the result is encoded.
                     const auto modelStore=ResolveNeuralModelStore(driverVersion,stop);
-                    LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest);
+                    LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest
+                        <<(NeuralModelStoreSettled(modelStore)?"":" (unsettled: the key may not match a later read)")
+                        <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{}));
                     NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion)+ProcessingScaleIdentityTerm(processingScale)+UntaggedColorIdentityTerm(untaggedBt709)+toneMapTerm+TemporalPipelineTerm(temporal),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;completion->temporal=temporal;
                     LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
                     if(const auto cached=cache.LookupRender(renderKey,stop)){

@@ -165,7 +165,12 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     // so the receipt records what the render identity's model-store term
     // covered, and names the driver-version fallback instead of taking it
     // silently.
-    const NeuralModelStore modelStore = ResolveNeuralModelStore(gpu.driverVersion);
+    // One read, no waiting: this runs right after the probe's own NGX
+    // initialisation, which rewrites the store's config files, so waiting for
+    // them to go quiet would add the quiet period to every cold start. The
+    // receipt says whether the read was settled; the render key waits for one.
+    const NeuralModelStore modelStore =
+        ResolveNeuralModelStore(gpu.driverVersion, {}, std::chrono::milliseconds{0});
     json += ",\"modelStore\":" + NeuralModelStoreJson(modelStore);
     json += ",\"modules\":[";
     for (size_t index = 0; index < modules.size(); ++index) {

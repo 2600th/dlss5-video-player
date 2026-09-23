@@ -20,6 +20,7 @@
 #include <windows.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -183,13 +184,40 @@ struct NeuralModelStore {
     // eviction, which would read every entry as retired by it.
     uint32_t unavailableRoots{};
     uint32_t unreadableFiles{};
+    // Files written less than the quiet period before they were read. NGX
+    // rewrites its three config files (config/versions/<n>/files: the server
+    // config, the mapping and the deny list) in place on every initialisation,
+    // truncating each to 0 bytes and writing it back 35 ms to 1.2 s later, and
+    // a file caught empty hashes as a different store with the same file
+    // count. `settlesIn` is how much longer the youngest of them needs.
+    uint32_t recentlyWrittenFiles{};
+    std::chrono::milliseconds settlesIn{};
 };
 
-// True when `store` describes the store rather than a failed read of it, so
-// eviction may compare recorded digests against it. A machine with no NGX
-// root registered at all is settled: its driver-version fallback is
+// How long a file in the store must have gone unwritten before its bytes are
+// trusted as the store's rather than as a rewrite in progress. Measured: NGX
+// left a truncated config empty for 35-160 ms, and for up to 1.2 s while other
+// GPU jobs loaded the machine.
+inline constexpr std::chrono::milliseconds kModelStoreQuietPeriod{2000};
+// How long ResolveNeuralModelStore waits for a store that is being written to
+// go quiet before it returns an unsettled read.
+inline constexpr std::chrono::milliseconds kModelStoreSettlePatience{10000};
+// How far apart eviction's two reads of the store are (NeuralModelStoresAgree):
+// longer than any rewrite measured, so both cannot land inside one.
+inline constexpr std::chrono::seconds kEvictionModelStoreGap{5};
+
+// True when `store` describes the store rather than a failed or mid-rewrite
+// read of it, so eviction may compare recorded digests against it. A machine
+// with no NGX root registered at all is settled: its driver-version fallback is
 // deterministic.
 bool NeuralModelStoreSettled(const NeuralModelStore& store);
+
+// What eviction judges the model-store term by: two reads, taken apart in
+// time, that are both settled and agree. One read, even a settled one, is a
+// single sample of a directory another process rewrites; a render deleted on
+// the strength of a wrong sample is gone, while one kept on a missed sample
+// only waits for the next start (or the free-space floor).
+bool NeuralModelStoresAgree(const NeuralModelStore& first, const NeuralModelStore& second);
 
 // Digests the given roots: every file's relative name, and its content hash
 // when it is small enough to afford one or its size and write time when it is
@@ -198,11 +226,23 @@ bool NeuralModelStoreSettled(const NeuralModelStore& store);
 // cannot enumerate leave the root out of the listing and named in
 // fallbackDetail; when no root can be read at all the digest covers
 // `driverVersion` instead and the source says so.
+// Files written within `quietPeriod` of the read are counted in
+// recentlyWrittenFiles; the digest itself does not depend on it.
 NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
                                         std::wstring_view driverVersion,
-                                        std::stop_token stop = {});
+                                        std::stop_token stop = {},
+                                        std::chrono::milliseconds quietPeriod = kModelStoreQuietPeriod);
+// Digests `roots` until a read is settled, sleeping out each read's
+// `settlesIn`, for at most `patience`; returns the last read, settled or not.
+// A stop returns at once.
+NeuralModelStore DigestSettledNeuralModelStore(std::span<const NeuralModelRoot> roots,
+                                               std::wstring_view driverVersion,
+                                               std::stop_token stop = {},
+                                               std::chrono::milliseconds quietPeriod = kModelStoreQuietPeriod,
+                                               std::chrono::milliseconds patience = kModelStoreSettlePatience);
 // The same over RegisteredNeuralModelRoots(): what the render identity carries.
 NeuralModelStore ResolveNeuralModelStore(std::wstring_view driverVersion,
-                                         std::stop_token stop = {});
+                                         std::stop_token stop = {},
+                                         std::chrono::milliseconds patience = kModelStoreSettlePatience);
 // The receipt's modelStore object.
 std::string NeuralModelStoreJson(const NeuralModelStore& store);

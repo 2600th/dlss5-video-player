@@ -673,7 +673,12 @@ void model_store_digest_ignores_features_outside_the_neural_pass_test()
     const auto server = serverConfig / L"nvngx_server_config.txt";
     WriteBytes(server, "[dlssd]\napp_0000000 = 0.0.0\n[driver]\nversion = 1\n");
     const std::array<NeuralModelRoot, 1> roots{NeuralModelRoot{models, true, {}}};
-    const auto digest = [&] { return DigestNeuralModelStore(roots, L"32.0.16.1047"); };
+    // No quiet period: every file here was written a moment ago, and what this
+    // test pins is which files the term covers, not when a read may be trusted
+    // (model_store_read_mid_rewrite_is_unsettled_and_waited_out_test).
+    const auto digest = [&] {
+        return DigestNeuralModelStore(roots, L"32.0.16.1047", {}, std::chrono::milliseconds{0});
+    };
 
     const auto first = digest();
     CHECK(NeuralModelStoreSettled(first));
@@ -735,6 +740,107 @@ void model_store_digest_ignores_features_outside_the_neural_pass_test()
     const std::array<NeuralModelRoot, 1> unreadable{
         NeuralModelRoot{fixture.Path() / L"not-a-directory", true, {}}};
     CHECK(!NeuralModelStoreSettled(DigestNeuralModelStore(unreadable, L"32.0.16.1047")));
+}
+
+// NGX rewrites config/versions/<n>/files/{nvngx_server_config.txt,
+// nvngx_mapping.json,nvngx_deny_list.txt} in place on every initialisation:
+// truncated to 0 bytes, written back 35 ms to 1.2 s later (measured by polling
+// the directory while GPU jobs ran). A read inside that window hashed the store
+// with one file empty - same file count, same hashed count, nothing unreadable,
+// so it passed as settled. On the development machine that read was
+// a69cdc79..., the store with nvngx_server_config.txt empty, against 59792fa7...
+// for the same store whole; renders were keyed under it and then evicted as
+// "retired by a changed model store". A file written inside the quiet period
+// now makes the read unsettled, the resolve waits it out, and eviction wants
+// two settled reads that agree.
+void model_store_read_mid_rewrite_is_unsettled_and_waited_out_test()
+{
+    using namespace std::chrono_literals;
+    TempDirectory fixture;
+    const auto models = fixture.Path() / L"models";
+    const auto configFiles = models / L"config" / L"versions" / L"2" / L"files";
+    std::error_code error;
+    CHECK(std::filesystem::create_directories(configFiles, error));
+    const auto server = configFiles / L"nvngx_server_config.txt";
+    const std::string serverBytes = "[dlss]\napp_E658700 = 310.9.0\n[driver]\nversion = 1\n";
+    WriteBytes(server, serverBytes);
+    WriteBytes(configFiles / L"nvngx_mapping.json", "{\"mapping\":[]}");
+    WriteBytes(models / L"nvngx_config.txt", "[dlss]\napp_E658700 = 310.9.0\n");
+    const auto age = [&](std::chrono::hours by) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(models))
+            if (entry.is_regular_file())
+                std::filesystem::last_write_time(entry.path(), std::filesystem::file_time_type::clock::now() - by);
+    };
+    age(1h);
+    const std::array<NeuralModelRoot, 1> roots{NeuralModelRoot{models, true, {}}};
+    const auto read = [&] { return DigestNeuralModelStore(roots, L"32.0.16.1047"); };
+
+    const auto whole = read();
+    CHECK(NeuralModelStoreSettled(whole));
+    CHECK_EQ(uint32_t{0}, whole.recentlyWrittenFiles);
+    CHECK(NeuralModelStoresAgree(whole, read()));
+
+    // NGX's truncation, caught: a different digest from the same file count,
+    // which is exactly what went into render keys.
+    WriteBytes(server, "");
+    const auto torn = read();
+    CHECK(torn.digest != whole.digest);
+    CHECK_EQ(whole.files, torn.files);
+    CHECK_EQ(whole.contentHashedFiles, torn.contentHashedFiles);
+    CHECK_EQ(uint32_t{0}, torn.unreadableFiles);
+    CHECK_EQ(uint32_t{1}, torn.recentlyWrittenFiles);
+    CHECK(!NeuralModelStoreSettled(torn));
+    CHECK(torn.settlesIn > 0ms && torn.settlesIn <= kModelStoreQuietPeriod);
+    CHECK(!NeuralModelStoresAgree(whole, torn));
+    CHECK(!NeuralModelStoresAgree(torn, torn));
+    CHECK(NeuralModelStoreJson(torn).find("\"settled\":false") != std::string::npos);
+    CHECK(NeuralModelStoreJson(whole).find("\"settled\":true") != std::string::npos);
+
+    // Written back with the bytes it had: the digest is the store's again, but
+    // it is not trusted until the file has been quiet for the period.
+    WriteBytes(server, serverBytes);
+    const auto rewritten = read();
+    CHECK_EQ(whole.digest, rewritten.digest);
+    CHECK(!NeuralModelStoreSettled(rewritten));
+
+    // The resolve waits a rewrite out: truncate, then write back 150 ms later
+    // on another thread, as NGX does, while the settled read runs.
+    WriteBytes(server, "");
+    std::thread ngx([&] {
+        std::this_thread::sleep_for(150ms);
+        WriteBytes(server, serverBytes);
+    });
+    const auto started = std::chrono::steady_clock::now();
+    const auto settled = DigestSettledNeuralModelStore(roots, L"32.0.16.1047", {}, 300ms, 5s);
+    const auto waited = std::chrono::steady_clock::now() - started;
+    ngx.join();
+    CHECK(NeuralModelStoreSettled(settled));
+    CHECK_EQ(whole.digest, settled.digest);
+    // At least the quiet period after the write-back, and nowhere near the patience.
+    CHECK(waited >= 300ms);
+    CHECK(waited < 4s);
+
+    // No patience: one read, returned as it is.
+    WriteBytes(server, "");
+    const auto impatient = DigestSettledNeuralModelStore(roots, L"32.0.16.1047", {}, 300ms, 0ms);
+    CHECK(!NeuralModelStoreSettled(impatient));
+    CHECK(impatient.digest != whole.digest);
+    // A stop ends the wait at once instead of sitting out the patience.
+    std::stop_source stop;
+    stop.request_stop();
+    const auto stopStarted = std::chrono::steady_clock::now();
+    const auto stopped = DigestSettledNeuralModelStore(roots, L"32.0.16.1047", stop.get_token(), 10s, 60s);
+    CHECK(std::chrono::steady_clock::now() - stopStarted < 2s);
+    CHECK(!NeuralModelStoreSettled(stopped));
+
+    // A stamp far in the future is a skewed clock, not a write in progress;
+    // counting it as recent would hold the store unsettled for good.
+    WriteBytes(server, serverBytes);
+    age(1h);
+    std::filesystem::last_write_time(server, std::filesystem::file_time_type::clock::now() + 24h);
+    const auto skewed = read();
+    CHECK(NeuralModelStoreSettled(skewed));
+    CHECK_EQ(whole.digest, skewed.digest);
 }
 
 void hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test()
@@ -5352,6 +5458,7 @@ int wmain(int argc, wchar_t* argv[])
     schema_four_entries_are_retired_by_the_schema_gate_test();
     model_store_digest_tracks_root_contents_and_names_its_fallback_test();
     model_store_digest_ignores_features_outside_the_neural_pass_test();
+    model_store_read_mid_rewrite_is_unsettled_and_waited_out_test();
     hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test();
     runtime_digest_is_order_independent_byte_sensitive_and_rejects_duplicates_test();
     manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test();
