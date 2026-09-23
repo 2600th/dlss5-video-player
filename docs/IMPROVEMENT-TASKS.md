@@ -56,7 +56,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
 | [P1.17](#p117) | The GPU CI workflow cannot pass on a fresh runner | S | Release | 🔍 |
-| [P1.18](#p118) | The attestation workflow signs a digest someone typed | S | Release | ✅ |
 | [P1.19](#p119) | No PDBs for crash dumps; builds are not reproducible | S | Release, Player | 🔍 |
 | [P1.20](#p120) | CI hardening | M | Release | 🔍 |
 | [P1.21](#p121) | Build structure: one set of objects, one set of flags | M | Release | 🔍 |
@@ -175,23 +174,6 @@ implementation.
 **Fix** — add `stage_runtime.ps1 -Destination build-upscaling/Release/neural-runtime`
 and copy the ini files. Parse `--output-junit` from the first run instead of
 running the suite again.
-
----
-
-<a id="p118"></a>
-### P1.18 · The attestation workflow signs a digest someone typed
-
-`S` · **Release** · ✅
-
-**Where** — `.github/workflows/attest-release-asset.yml:50-69`
-
-The workflow attests whatever digest the operator enters, and never downloads
-the published asset to confirm it. Its inputs are also interpolated straight
-into bash (`digest='${{ inputs.asset-digest }}'`). Only people with write
-access can trigger it, but that is the classic script-injection shape.
-
-**Fix** — `gh release download` the asset, compute its SHA-256 inside the
-job, and attest that. Pass inputs through `env:`.
 
 ---
 
