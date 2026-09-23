@@ -519,6 +519,19 @@ bool DLSSGBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
     return true;
 }
 
+void DLSSGBackend::Abandon()
+{
+    if (m_handle || m_params || m_sessionLeaseAcquired) {
+        LOG("DLSS-G feature abandoned without release: the GPU never retired the work it was recorded "
+            "into, so the feature, its parameters and the NGX session are deliberately leaked.");
+    }
+    m_handle = nullptr;
+    m_params = nullptr;
+    m_sessionLeaseAcquired = false;
+    m_sessionKey = nullptr;
+    Shutdown();   // with nothing left to release, this only resets the fields
+}
+
 void DLSSGBackend::Shutdown()
 {
     if (m_handle) {

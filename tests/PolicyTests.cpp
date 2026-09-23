@@ -23,6 +23,7 @@
 #include "AudioPlayer.h"
 #include "NetworkMediaTransaction.h"
 #include "D3D12FenceWait.h"
+#include "FrameGenerationPass.h"
 #include "NgxSession.h"
 #include "D3D12Renderer.h"
 #include "PlaybackTiming.h"
@@ -2773,6 +2774,37 @@ void gpu_teardown_fence_stale_wakes_share_one_absolute_timeout_budget_test()
     CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::TimedOut,result);
     CHECK_EQ(size_t{2},timeouts.size());
     if(timeouts.size()==2){CHECK(timeouts[0]<=DWORD{2000});CHECK(timeouts[1]<timeouts[0]);}
+}
+
+// P1.12: a frame-generation submission whose wait timed out is classified
+// before anything is freed. Only a removed device may be torn down at once; a
+// live one gets a longer wait, and one still busy after it is stuck - its
+// resources are leaked, never released under work the GPU may be executing.
+void frame_generation_stalled_submission_frees_only_what_the_gpu_cannot_touch_test()
+{
+    using frame_generation_detail::StalledSubmission;
+    int asked=0,waited=0;
+    CHECK_EQ(StalledSubmission::DeviceRemoved,frame_generation_detail::ResolveStalledSubmission(
+        [&]{++asked;return true;},[&]{++waited;return true;}));
+    CHECK_EQ(1,asked);
+    CHECK_EQ(0,waited);  // a removed device's fence never advances: no second wait
+
+    asked=waited=0;
+    CHECK_EQ(StalledSubmission::Retired,frame_generation_detail::ResolveStalledSubmission(
+        [&]{++asked;return false;},[&]{++waited;return true;}));
+    CHECK_EQ(1,asked);
+    CHECK_EQ(1,waited);
+
+    asked=waited=0;
+    CHECK_EQ(StalledSubmission::Stuck,frame_generation_detail::ResolveStalledSubmission(
+        [&]{++asked;return false;},[&]{++waited;return false;}));
+    CHECK_EQ(2,asked);   // asked again after the wait
+    CHECK_EQ(1,waited);
+
+    // Lost during the longer wait: nothing executes any more, so not stuck.
+    asked=0;
+    CHECK_EQ(StalledSubmission::DeviceRemoved,frame_generation_detail::ResolveStalledSubmission(
+        [&]{return ++asked>1;},[]{return false;}));
 }
 
 void renderer_non_teardown_wait_failure_is_propagated_test()
@@ -9213,6 +9245,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(gpu_teardown_fence_consecutive_timeout_does_not_let_old_registration_complete_new_target_test),
     TEST_CASE(gpu_teardown_fence_device_removed_sentinel_is_not_completion_test),
     TEST_CASE(gpu_teardown_fence_stale_wakes_share_one_absolute_timeout_budget_test),
+    TEST_CASE(frame_generation_stalled_submission_frees_only_what_the_gpu_cannot_touch_test),
     TEST_CASE(renderer_non_teardown_wait_failure_is_propagated_test),
     TEST_CASE(renderer_safe_owner_releases_owned_resources_only_after_completed_or_removed_drain_test),
     TEST_CASE(renderer_safe_owner_retains_resources_after_live_device_drain_failure_test),

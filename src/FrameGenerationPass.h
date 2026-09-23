@@ -179,3 +179,30 @@ struct FrameGenerationCapability {
 // driver or GPU change, so a caller is expected to ask once and cache it for
 // the process lifetime; each call costs an NGX init and a feature create.
 FrameGenerationCapability QueryFrameGenerationCapability() noexcept;
+
+namespace frame_generation_detail {
+
+// What a submission whose bounded wait did not see its fence turned out to be.
+// The pass used to return straight away, and every resource the submission
+// referenced - textures, readbacks, upload heaps, the DLSS-G feature - was
+// released on the way out while the GPU could still be executing it.
+enum class StalledSubmission {
+    Retired,        // slow, not stuck: it finished inside the longer wait
+    DeviceRemoved,  // nothing is executing any more, so freeing is safe
+    Stuck,          // alive and still busy: leak everything, free nothing
+};
+
+// `deviceRemoved` asks the device (GetDeviceRemovedReason); `waitLonger`
+// waits again under a longer bound and says whether the fence was reached.
+// Removal is asked first, because a removed device's fence never advances and
+// a second wait on it would only delay the answer, and again after the wait,
+// because a device lost during it is not a stuck one.
+template <class DeviceRemoved, class WaitLonger>
+StalledSubmission ResolveStalledSubmission(DeviceRemoved&& deviceRemoved, WaitLonger&& waitLonger)
+{
+    if (deviceRemoved()) return StalledSubmission::DeviceRemoved;
+    if (waitLonger()) return StalledSubmission::Retired;
+    return deviceRemoved() ? StalledSubmission::DeviceRemoved : StalledSubmission::Stuck;
+}
+
+} // namespace frame_generation_detail

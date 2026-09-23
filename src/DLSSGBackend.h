@@ -132,6 +132,11 @@ public:
     void SetMotionVectorUnits(MotionVectorUnits units) { m_mvecUnits = units; }
 
     void Shutdown();
+    // For a GPU that never retired the work this feature was recorded into:
+    // forgets the feature, its parameters and the NGX session lease WITHOUT
+    // releasing any of them, because releasing them under work that may still
+    // be executing is the one thing worse than leaking them. Logged.
+    void Abandon();
 
     // Whether the runtime admitted the feature: set by a Probe whose create and
     // release both succeeded, and by an Initialize that is holding a live

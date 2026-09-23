@@ -108,6 +108,18 @@ struct GpuContext {
     GpuContext& operator=(const GpuContext&) = delete;
     ~GpuContext()
     {
+        if (stuck) {
+            // Deliberately leaked, not released: the GPU never retired work that
+            // references every one of these, and the event is still registered
+            // with the fence, so closing it could hand its value to a stranger.
+            for (ComPtr<IUnknown>& object : inFlight) object.Detach();
+            cmd.Detach();
+            allocator.Detach();
+            fence.Detach();
+            queue.Detach();
+            device.Detach();
+            return;
+        }
         if (idle) CloseHandle(idle);
     }
 
@@ -118,6 +130,19 @@ struct GpuContext {
     ComPtr<ID3D12Fence> fence;
     HANDLE idle = nullptr;
     uint64_t signalled = 0;
+    // Set when a submission neither retired nor lost its device. From then on
+    // nothing a submission may reference is released (see the destructor), and
+    // the caller must abandon the DLSS-G feature rather than shut it down.
+    bool stuck = false;
+    // Every resource a submission can reference, held here as well as by its
+    // owner, so a stuck context can keep them alive after their owners go -
+    // which they do first, being declared after this.
+    std::vector<ComPtr<IUnknown>> inFlight;
+
+    void Retain(IUnknown* object)
+    {
+        if (object) inFlight.emplace_back(object);
+    }
 
     bool Flush()
     {
@@ -128,8 +153,66 @@ struct GpuContext {
         if (FAILED(fence->SetEventOnCompletion(signalled, idle))) return false;
         // A 1080p evaluate chain is milliseconds of GPU work; thirty seconds is
         // a hung or removed device, not a busy one.
-        if (WaitForSingleObject(idle, 30000) != WAIT_OBJECT_0) return false;
+        if (!WaitForRetire(kSubmissionWaitMilliseconds) && !ResolveStall()) return false;
         return SUCCEEDED(allocator->Reset()) && SUCCEEDED(cmd->Reset(allocator.Get(), nullptr));
+    }
+
+private:
+    static constexpr DWORD kSubmissionWaitMilliseconds = 30000;
+    // The second chance a live device gets before its work is declared stuck.
+    static constexpr DWORD kStalledSubmissionWaitMilliseconds = 60000;
+
+    // True when the submission did retire after all. Otherwise the failure is
+    // classified before anything is freed: a removed device executes nothing
+    // and may be torn down, a live one that is still busy is left holding
+    // everything it references.
+    bool Retired() const
+    {
+        const uint64_t completed = fence->GetCompletedValue();
+        return completed != UINT64_MAX && completed >= signalled;
+    }
+
+    // The fence has the last word, not the event: a submission judged retired
+    // by its completed value can leave the auto-reset event signalled, and the
+    // next wait must not take that stale signal for its own.
+    bool WaitForRetire(DWORD budgetMilliseconds)
+    {
+        const ULONGLONG started = GetTickCount64();
+        for (;;) {
+            if (Retired()) return true;
+            const ULONGLONG elapsed = GetTickCount64() - started;
+            if (elapsed >= budgetMilliseconds) return false;
+            const DWORD waited = WaitForSingleObject(idle, static_cast<DWORD>(budgetMilliseconds - elapsed));
+            if (waited != WAIT_OBJECT_0 && waited != WAIT_TIMEOUT) return false;
+        }
+    }
+
+    bool ResolveStall()
+    {
+        using frame_generation_detail::StalledSubmission;
+        const StalledSubmission verdict = frame_generation_detail::ResolveStalledSubmission(
+            [&] { return FAILED(device->GetDeviceRemovedReason()); },
+            [&] { return WaitForRetire(kStalledSubmissionWaitMilliseconds); });
+        switch (verdict) {
+            case StalledSubmission::Retired:
+                LOG("Frame generation: a submission took over " << kSubmissionWaitMilliseconds / 1000
+                    << " s to retire; continuing.");
+                return true;
+            case StalledSubmission::DeviceRemoved:
+                LOG("Frame generation: the device was removed under a submission (reason=0x" << std::hex
+                    << static_cast<uint32_t>(device->GetDeviceRemovedReason()) << std::dec
+                    << "); its resources are released.");
+                return false;
+            case StalledSubmission::Stuck:
+                stuck = true;
+                LOG("Frame generation: a submission has not retired after "
+                    << (kSubmissionWaitMilliseconds + kStalledSubmissionWaitMilliseconds) / 1000
+                    << " s on a live device; its " << inFlight.size()
+                    << " resources, the device and the DLSS-G feature are deliberately leaked rather than "
+                       "freed under work the GPU may still be executing.");
+                return false;
+        }
+        return false;
     }
 };
 
@@ -494,6 +577,14 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
                         HexResult(backend.LastResult()) +
                         (session ? L". nvngx_dlssg.dll must be resolvable beside the executable." : L"."));
     }
+    // Every submission below goes through here, so a GPU that never retires one
+    // takes the feature into the leak with everything else instead of having it
+    // released under work it may still be executing.
+    const auto flush = [&] {
+        if (gpu.Flush()) return true;
+        if (gpu.stuck) backend.Abandon();
+        return false;
+    };
 
     // The runtime's own ceiling, never a constant: MultiFrameCountMax is how
     // many frames it will generate between one source pair, so the largest
@@ -534,6 +625,8 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     if (!backbuffer || !motion || !depth || !interpolated) {
         return fail(FrameGenerationError::Device, L"The conversion's textures could not be created.");
     }
+    for (ID3D12Resource* texture : {backbuffer.Get(), motion.Get(), depth.Get(), interpolated.Get()})
+        gpu.Retain(texture);
 
     const Footprint outputFootprint = DescribeCopy(gpu.device.Get(), interpolated.Get());
     const size_t outputRowPitch = outputFootprint.placed.Footprint.RowPitch;
@@ -546,12 +639,14 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         if (!readback) {
             return fail(FrameGenerationError::Device, L"The generated-frame readback buffers could not be created.");
         }
+        gpu.Retain(readback.Get());
     }
 
     StagingUpload frameUpload;
     if (!frameUpload.Create(gpu.device.Get(), backbuffer.Get())) {
         return fail(FrameGenerationError::Device, L"The frame upload buffer could not be created.");
     }
+    gpu.Retain(frameUpload.buffer.Get());
 
     EncoderSpec spec;
     spec.width = width;
@@ -633,6 +728,8 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
             !depthUpload.Create(gpu.device.Get(), depth.Get())) {
             return fail(FrameGenerationError::Device, L"The guide upload buffers could not be created.");
         }
+        gpu.Retain(motionUpload.buffer.Get());
+        gpu.Retain(depthUpload.buffer.Get());
         std::memset(motionUpload.mapped, 0, size_t(motionUpload.footprint.totalBytes));
         for (UINT row = 0; row < depthUpload.footprint.rows; ++row) {
             float* texels = reinterpret_cast<float*>(depthUpload.mapped +
@@ -656,7 +753,7 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         // The create and the uploads share this submission, and the wait is
         // what retires the create before the first evaluate reads it.
-        if (!gpu.Flush()) {
+        if (!flush()) {
             return fail(FrameGenerationError::Device,
                         L"The GPU did not retire the feature create and the first upload.");
         }
@@ -685,7 +782,7 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         return backend.Evaluate(gpu.cmd.Get(), backbuffer.Get(), motion.Get(), depth.Get(), interpolated.Get(),
                                 /*multiFrameCount=*/1, /*multiFrameIndex=*/1, /*reset=*/true,
                                 backbufferFrameId) &&
-               gpu.Flush();
+               flush();
     };
     if (!establishHistory()) {
         result.evaluations = backend.EvaluationCount();
@@ -787,7 +884,7 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
                 Barrier(gpu.cmd.Get(), interpolated.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
-            if (!gpu.Flush()) {
+            if (!flush()) {
                 result.evaluations = backend.EvaluationCount();
                 return fail(FrameGenerationError::Device,
                             L"The GPU did not retire the generated frames for source frame " +
@@ -952,7 +1049,8 @@ FrameGenerationCapability QueryFrameGenerationCapability() noexcept
         // accepted but the GPU could not execute has to surface here rather
         // than be reported as an admission.
         const bool flushed = gpu.Flush();
-        backend.Shutdown();
+        if (gpu.stuck) backend.Abandon();
+        else backend.Shutdown();
 
         capability.available = probed.available && flushed;
         capability.multiFrameCountMax = capability.available ? probed.multiFrameCountMax : 0;
