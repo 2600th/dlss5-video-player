@@ -65,7 +65,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.12](#p212) | Scene-cut controls and duplicate-frame handling | S / M | Pipeline | |
 | [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
-| [P2.25](#p225) | Synced multi-pane comparison | M-L | Player | |
 | **P3** | | | | |
 | [P3.1](#p31) | HDR end to end | L | Pipeline, Player | |
 | [P3.2](#p32) | Subtitles via libass, composited after the network | M-L | Player | |
@@ -322,17 +321,6 @@ RTX VSR at 1× as a cleanup step. Measure first whether the neural pass
 amplifies banding; P2.11's metrics are the tool.
 
 ## Player UX
-
-<a id="p225"></a>
-### P2.25 · Synced multi-pane comparison
-
-`M-L` · **Player** · _pays off with P2.8_
-
-Side-by-side and 2×2 layouts, for example Original | NR | NR at another
-strength | RTX VSR, all on one timestamp. NVIDIA ICAT supports four synced
-inputs. This is the view that turns P2.8 into something no other tool offers.
-
----
 
 ---
 

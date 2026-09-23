@@ -1976,6 +1976,8 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(has_menu_entry(compareEntries, L"Split", app_menu::IDM_COMPARE_SPLIT));
     CHECK(has_menu_entry(compareEntries, L"Wipe", app_menu::IDM_COMPARE_WIPE));
     CHECK(has_menu_entry(compareEntries, L"Difference", app_menu::IDM_COMPARE_DIFFERENCE));
+    CHECK(has_menu_entry(compareEntries, L"Side by side", app_menu::IDM_COMPARE_SIDE_BY_SIDE));
+    CHECK(has_menu_entry(compareEntries, L"2 \u00d7 2", app_menu::IDM_COMPARE_QUAD));
     CHECK(has_menu_entry(compareEntries, L"More difference gain\tShift+]", app_menu::IDM_COMPARE_DIFFERENCE_MORE));
     CHECK(has_menu_entry(compareEntries, L"Less difference gain\tShift+[", app_menu::IDM_COMPARE_DIFFERENCE_LESS));
     // Blend was the Mix under another name; its row is gone and [ and ] step the Mix.
@@ -2031,9 +2033,16 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_WIPE, false, false));
     CHECK(checked(app_menu::IDM_COMPARE_WIPE));CHECK(!checked(app_menu::IDM_COMPARE_ORIGINAL));
     CHECK(!checked(app_menu::IDM_COMPARE_SWAP));
-    // Difference ends the group.
     CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_DIFFERENCE, false, false, false, false));
     CHECK(checked(app_menu::IDM_COMPARE_DIFFERENCE));CHECK(!checked(app_menu::IDM_COMPARE_WIPE));
+    // 2x2 ends the group.
+    CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_QUAD, false, false, false, false));
+    CHECK(checked(app_menu::IDM_COMPARE_QUAD));CHECK(!checked(app_menu::IDM_COMPARE_DIFFERENCE));
+    CHECK(app_menu::UpdateSecondMixMenu(menu, true, 3));
+    CHECK(checked(app_menu::IDM_COMPARE_SECOND_MIX_FIRST + 3));CHECK(!checked(app_menu::IDM_COMPARE_SECOND_MIX_FIRST + 1));
+    CHECK(app_menu::UpdateSecondMixMenu(menu, false, 1));
+    CHECK(grayed(app_menu::IDM_COMPARE_SECOND_MIX_FIRST));
+    CHECK_EQ(size_t(app_menu::IDM_COMPARE_SECOND_MIX_COUNT), compare_settings::kSecondMixes.size());
     CHECK(!checked(app_menu::IDM_COMPARE_DIFFERENCE_LUMA));
     // The mask rows: Load needs a source, the rest a mask; the feather is a radio block.
     CHECK(app_menu::UpdateMaskMenu(menu, false, false, false, 0));
@@ -7921,6 +7930,59 @@ void compare_saved_image_carries_its_provenance_test()
     CHECK(app_menu::CommandForPlayerKey('S',true,true)==app_menu::IDM_SAVE_COMPARISON_IMAGE);
 }
 
+// Side by side and 2x2 put one frame of the pair in every pane; zoom, pan and the loupe
+// work in the pane under the pointer.
+void compare_panes_locate_the_point_under_the_pointer_test()
+{
+    using compare_view::Layout;
+    auto at=compare_view::Locate(Layout::SideBySide,0.25f,0.5f);
+    CHECK_EQ(0,at.pane);CHECK(at.inside);CHECK(std::abs(at.x-0.5f)<1e-6f);CHECK(std::abs(at.y-0.5f)<1e-6f);
+    at=compare_view::Locate(Layout::SideBySide,0.75f,0.3f);
+    CHECK_EQ(1,at.pane);CHECK(at.inside);CHECK(std::abs(at.y-0.1f)<1e-6f);
+    // Side by side's pictures are letterboxed: the bars are in no picture.
+    CHECK(!compare_view::Locate(Layout::SideBySide,0.25f,0.1f).inside);
+    CHECK(!compare_view::Locate(Layout::SideBySide,0.75f,0.9f).inside);
+    at=compare_view::Locate(Layout::Quad,0.75f,0.75f);
+    CHECK_EQ(3,at.pane);CHECK(std::abs(at.x-0.5f)<1e-6f);CHECK(std::abs(at.y-0.5f)<1e-6f);
+    CHECK_EQ(2,compare_view::Locate(Layout::Quad,0.1f,0.9f).pane);
+    at=compare_view::Locate(Layout::Single,0.3f,0.7f);
+    CHECK_EQ(0,at.pane);CHECK_EQ(0.3f,at.x);CHECK_EQ(0.7f,at.y);CHECK(at.inside);
+    CHECK_EQ(1.0f,compare_view::PaneWidthShare(Layout::Single));
+    CHECK_EQ(0.5f,compare_view::PaneWidthShare(Layout::Quad));
+    // The fourth pane's Mix is one of the offered values.
+    CHECK_EQ(0.5f,compare_settings::LoadSecondMix(0.55f));
+    CHECK_EQ(2.0f,compare_settings::LoadSecondMix(9.0f));
+    CHECK_EQ(compare_settings::kDefaultSecondMix,compare_settings::LoadSecondMix(std::numeric_limits<float>::quiet_NaN()));
+    // Every command in the menu bar has an id of its own. The second-Mix block once sat
+    // at 449-453, over Safe mode, Clear cache and the receipt at 450-452, and the block
+    // is routed first, so those three rows would have set the fourth pane's Mix.
+    {
+        const Localizer localizer;
+        const HMENU bar=app_menu::CreateMenuBar(localizer,true);
+        std::vector<UINT> ids;
+        const std::function<void(HMENU)> walk=[&](HMENU menu){
+            for(int index=0;index<GetMenuItemCount(menu);++index){
+                MENUITEMINFOW item{sizeof(item)};item.fMask=MIIM_ID|MIIM_SUBMENU|MIIM_FTYPE;
+                if(!GetMenuItemInfoW(menu,UINT(index),TRUE,&item))continue;
+                if(item.hSubMenu){walk(item.hSubMenu);continue;}
+                if(!(item.fType&MFT_SEPARATOR)&&item.wID)ids.push_back(item.wID);
+            }
+        };
+        if(bar)walk(bar);
+        std::sort(ids.begin(),ids.end());
+        CHECK(!ids.empty());
+        CHECK(std::adjacent_find(ids.begin(),ids.end())==ids.end());
+        for(UINT index=0;index<app_menu::IDM_COMPARE_SECOND_MIX_COUNT;++index)
+            for(const UINT other:{app_menu::IDM_ADVANCED_SAFE_MODE,app_menu::IDM_CLEAR_NEURAL_CACHE,app_menu::IDM_OPEN_RENDER_RECEIPT,app_menu::IDM_CHECK_FOR_UPDATES})
+                CHECK(app_menu::IDM_COMPARE_SECOND_MIX_FIRST+index!=other);
+        if(bar)DestroyMenu(bar);
+    }
+    ComparisonSettings comparison;
+    for(const ComparisonMode mode:{ComparisonMode::SideBySide,ComparisonMode::Quad}){
+        comparison.mode=mode;CHECK(ComparisonNeedsCompositor(comparison));CHECK(ComparisonReadsReference(comparison));
+    }
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -11575,6 +11637,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_loupe_and_one_to_one_placement_test),
     TEST_CASE(compare_mask_shrinks_feathers_and_is_remembered_per_source_test),
     TEST_CASE(compare_saved_image_carries_its_provenance_test),
+    TEST_CASE(compare_panes_locate_the_point_under_the_pointer_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
     TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),

@@ -100,10 +100,17 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
     // The modes, in the compare bar's order, then the Mix and the view. One radio
     // group from IDM_COMPARE_NEURAL to kLastComparisonModeCommand, by position.
-    add(compare, IDM_COMPARE_NEURAL, L"menu.compare_neural"); add(compare, IDM_COMPARE_ORIGINAL, L"menu.compare_original"); add(compare, IDM_COMPARE_SPLIT, L"menu.compare_split"); add(compare, IDM_COMPARE_WIPE, L"menu.compare_wipe"); add(compare, IDM_COMPARE_DIFFERENCE, L"menu.compare_difference"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
+    add(compare, IDM_COMPARE_NEURAL, L"menu.compare_neural"); add(compare, IDM_COMPARE_ORIGINAL, L"menu.compare_original"); add(compare, IDM_COMPARE_SPLIT, L"menu.compare_split"); add(compare, IDM_COMPARE_WIPE, L"menu.compare_wipe"); add(compare, IDM_COMPARE_DIFFERENCE, L"menu.compare_difference"); add(compare, IDM_COMPARE_SIDE_BY_SIDE, L"menu.compare_side_by_side"); add(compare, IDM_COMPARE_QUAD, L"menu.compare_quad"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
     // C and Shift+C walk the modes; listed so the keys reach the shortcut sheet.
     add(compare, IDM_COMPARE_NEXT_MODE, L"menu.compare_next_mode"); add(compare, IDM_COMPARE_PREVIOUS_MODE, L"menu.compare_previous_mode");
-    add(compare, IDM_COMPARE_BLEND_LESS, L"menu.compare_blend_less"); add(compare, IDM_COMPARE_BLEND_MORE, L"menu.compare_blend_more"); add(compare, IDM_COMPARE_SWAP, L"menu.compare_swap"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
+    add(compare, IDM_COMPARE_BLEND_LESS, L"menu.compare_blend_less"); add(compare, IDM_COMPARE_BLEND_MORE, L"menu.compare_blend_more"); add(compare, IDM_COMPARE_SWAP, L"menu.compare_swap");
+    HMENU secondMix = CreatePopupMenu();
+    for (UINT index = 0; index < IDM_COMPARE_SECOND_MIX_COUNT; ++index) {
+        const std::wstring key = L"menu.compare_second_mix_" + std::to_wstring(index);
+        add(secondMix, IDM_COMPARE_SECOND_MIX_FIRST + index, key.c_str());
+    }
+    AppendMenuW(compare, MF_POPUP, reinterpret_cast<UINT_PTR>(secondMix), localizer.Get(L"menu.compare_second_mix").c_str());
+    AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
     // The spatial mask on the Mix: load, how soft its edge is, which way round, gone.
     add(compare, IDM_COMPARE_MASK_LOAD, L"menu.compare_mask_load");
     HMENU feather = CreatePopupMenu();
@@ -512,7 +519,8 @@ bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable
 {
     const HMENU menu = find_menu_containing_command(menuBar, IDM_COMPARE_NEURAL);
     if (!menu) return false;
-    constexpr UINT modes[] = {IDM_COMPARE_NEURAL, IDM_COMPARE_ORIGINAL, IDM_COMPARE_SPLIT, IDM_COMPARE_WIPE, IDM_COMPARE_DIFFERENCE};
+    constexpr UINT modes[] = {IDM_COMPARE_NEURAL, IDM_COMPARE_ORIGINAL, IDM_COMPARE_SPLIT, IDM_COMPARE_WIPE, IDM_COMPARE_DIFFERENCE,
+                              IDM_COMPARE_SIDE_BY_SIDE, IDM_COMPARE_QUAD};
     if (std::find(std::begin(modes), std::end(modes), selectedMode) == std::end(modes)) selectedMode = IDM_COMPARE_NEURAL;
     bool ok = true;
     for (const UINT command : modes)
@@ -543,6 +551,16 @@ bool UpdateMaskMenu(HMENU menuBar, bool loadAvailable, bool maskLoaded, bool inv
         ok = EnableMenuItem(menuBar, command, MF_BYCOMMAND | (maskLoaded ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
     return CheckRadioCommand(menuBar, IDM_COMPARE_MASK_FEATHER_FIRST, last,
                              IDM_COMPARE_MASK_FEATHER_FIRST + std::min(featherIndex, IDM_COMPARE_MASK_FEATHER_COUNT - 1)) && ok;
+}
+
+bool UpdateSecondMixMenu(HMENU menuBar, bool available, UINT index)
+{
+    const UINT last = IDM_COMPARE_SECOND_MIX_FIRST + IDM_COMPARE_SECOND_MIX_COUNT - 1;
+    bool ok = true;
+    for (UINT command = IDM_COMPARE_SECOND_MIX_FIRST; command <= last; ++command)
+        ok = EnableMenuItem(menuBar, command, MF_BYCOMMAND | (available ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
+    return CheckRadioCommand(menuBar, IDM_COMPARE_SECOND_MIX_FIRST, last,
+                             IDM_COMPARE_SECOND_MIX_FIRST + std::min(index, IDM_COMPARE_SECOND_MIX_COUNT - 1)) && ok;
 }
 
 bool CheckRadioCommand(HMENU menuBar, UINT first, UINT last, UINT chosen)

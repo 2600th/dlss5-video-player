@@ -142,7 +142,7 @@ struct CapturedVideoFrame {
 // Which member of an original/neural pair the presentation shader shows. The values
 // are persisted ([Comparison] Mode) and are the shader's mode numbers, so new ones
 // only ever go on the end.
-enum class ComparisonMode { Neural, Original, Blend, SplitVertical, Wipe, Difference };
+enum class ComparisonMode { Neural, Original, Blend, SplitVertical, Wipe, Difference, SideBySide, Quad };
 
 struct ComparisonSettings {
     ComparisonMode mode = ComparisonMode::Neural;
@@ -179,6 +179,8 @@ struct ComparisonSettings {
     // original, in every view of the neural member. Drawn only once a mask is uploaded.
     bool mask = false;
     bool maskInvert = false;
+    // Quad's fourth pane: DLSS 5 at a second Mix, beside the first.
+    float secondMix = 0.5f;
 };
 
 // Whether a comparison needs the window compositor (PSPresentScaled) even when the
@@ -430,7 +432,8 @@ public:
     // A reference has been uploaded, or is queued behind the next submission.
     bool HasReference() const { return m_hasReference || m_referencePending; }
     // The tags the compositor draws on the picture: premultiplied BGRA, one row of
-    // `rowHeight` pixels per tag, in the order Original, DLSS 5, Difference, then a spare row,
+    // `rowHeight` pixels per tag, in the order Original, DLSS 5, Difference, DLSS 5 at
+    // the second Mix,
     // each `rowWidths[i]` pixels wide from the left edge. Drawn by the caller at the
     // window's DPI; uploaded synchronously, so it drains the queue - call it when the
     // text or the DPI changes, not per frame. False leaves the previous atlas in use.

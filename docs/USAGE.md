@@ -185,6 +185,12 @@ also under **Video > Compare**:
   Difference as brightness only** switches between one grey value and a
   difference per color channel. The image adjustments do not apply to it, and
   its tag names the amplification and the channels, e.g. `DIFFERENCE x4 · LUMA`.
+- **Side by side** shows the original and DLSS 5 as two panes of the same
+  frame - one pair, so always one timestamp - each fitted whole into its half.
+  **2 × 2** adds Difference and DLSS 5 at a second Mix below them; pick that
+  Mix under **Video > Compare > 2 × 2 fourth pane Mix** (25% to 200%, 50% by
+  default). Zoom, pan and the loupe move every pane together, each pane is
+  tagged, and Swap swaps the first two.
 - **Mix** is how much of the neural result you see: 100% is the render
   untouched, lower mixes back toward the original, higher extends the model's
   own change. Drag the slider or press `[` and `]` (a tenth per press). It
@@ -234,8 +240,8 @@ neural settings, the neural runtime's version and when it was saved. It is
 meant as evidence you can share: the footer travels with the pixels.
 
 Pause and step with `.` to judge a single frame; `D` still switches the whole
-view between original and neural. The mode, Mix, split position, swap, zoom step and difference settings
-are remembered in `[Comparison]`.
+view between original and neural. The mode, Mix, split position, swap, zoom step, difference settings and
+the fourth pane's Mix are remembered in `[Comparison]`.
 
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
 local structure, local tone, skin structure, style and automatic mask, the
@@ -302,8 +308,8 @@ The player also answers Windows' own media controls: the player card in the
 volume flyout and on the lock screen shows the video's title and position and
 its play, pause, stop and seek work, as do a headset's buttons. Hovering the
 taskbar button shows three buttons under the thumbnail - play/pause, Neural
-Rendering on/off and side-by-side compare (Split, and back to the neural
-picture) - which do exactly what the matching menu commands do.
+Rendering on/off and side-by-side compare (**Side by side**, and back to the
+neural picture) - which do exactly what the matching menu commands do.
 
 **DLSS Upscaling** is independent and starts off on a fresh installation. Its
 output is **Auto** by default: the player takes the largest rung the monitor's

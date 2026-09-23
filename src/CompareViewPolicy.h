@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <iterator>
 #include <optional>
 #include <span>
 
@@ -114,7 +115,8 @@ inline Step Release(State& state)
 namespace compare_settings {
 
 // Modes as persisted in [Comparison] Mode; the numbers are ComparisonMode's.
-inline constexpr int kNeural = 0, kOriginal = 1, kBlend = 2, kSplit = 3, kWipe = 4, kDifference = 5;
+inline constexpr int kNeural = 0, kOriginal = 1, kBlend = 2, kSplit = 3, kWipe = 4, kDifference = 5,
+                     kSideBySide = 6, kQuad = 7;
 
 struct Loaded {
     float mix = 1.0f;
@@ -165,18 +167,31 @@ inline constexpr float kDefaultDifferenceGain = 4.0f;
 
 inline float StepDifferenceGain(float gain, int direction)
 {
-    size_t index = 0;
-    for (size_t candidate = 0; candidate < kDifferenceGains.size(); ++candidate)
-        if (std::abs(kDifferenceGains[candidate] - gain) < std::abs(kDifferenceGains[index] - gain)) index = candidate;
-    if (direction > 0 && index + 1 < kDifferenceGains.size()) ++index;
-    if (direction < 0 && index > 0) --index;
-    return kDifferenceGains[index];
+    auto at = std::min_element(kDifferenceGains.begin(), kDifferenceGains.end(),
+                               [gain](float a, float b) { return std::abs(a - gain) < std::abs(b - gain); });
+    if (direction > 0 && std::next(at) != kDifferenceGains.end()) ++at;
+    if (direction < 0 && at != kDifferenceGains.begin()) --at;
+    return *at;
 }
 
 // A saved gain is snapped onto the ladder, so a hand-edited 5 reads as 4.
 inline float LoadDifferenceGain(float saved)
 {
     return std::isfinite(saved) && saved > 0.0f ? StepDifferenceGain(saved, 0) : kDefaultDifferenceGain;
+}
+
+// Quad's fourth pane shows DLSS 5 at this second Mix, one of these; half strength is
+// where it starts, the other obvious question beside "all of it".
+inline constexpr std::array<float, 5> kSecondMixes{0.25f, 0.5f, 0.75f, 1.5f, 2.0f};
+inline constexpr float kDefaultSecondMix = 0.5f;
+
+inline float LoadSecondMix(float saved)
+{
+    if (!std::isfinite(saved)) return kDefaultSecondMix;
+    float nearest = kSecondMixes.front();
+    for (const float candidate : kSecondMixes)
+        if (std::abs(candidate - saved) < std::abs(nearest - saved)) nearest = candidate;
+    return nearest;
 }
 
 } // namespace compare_settings
@@ -287,6 +302,46 @@ inline float Magnification(float viewPixelsPerTexel)
 namespace compare_view {
 
 enum class Fit { Fit, Fill, Pixels };
+
+// The panes of Side by side and 2x2, in window UV. Side by side fits the whole picture
+// into each half, so its pictures are half the window's height, centred; 2x2's
+// quarters already have the picture's aspect. Mirrors ComposePanes in the shader.
+enum class Layout { Single, SideBySide, Quad };
+
+struct PanePoint {
+    int pane = 0;
+    float x = 0.0f, y = 0.0f;  // where in that pane's picture, [0,1] when inside
+    bool inside = false;       // false on side by side's letterbox bars
+};
+
+inline PanePoint Locate(Layout layout, float u, float v)
+{
+    PanePoint point;
+    float originX = 0.0f, originY = 0.0f, size = 1.0f;
+    if (layout == Layout::SideBySide) {
+        point.pane = u < 0.5f ? 0 : 1;
+        originX = 0.5f * float(point.pane);
+        originY = 0.25f;
+        size = 0.5f;
+    } else if (layout == Layout::Quad) {
+        const int column = u >= 0.5f ? 1 : 0, row = v >= 0.5f ? 1 : 0;
+        point.pane = column + 2 * row;
+        originX = 0.5f * float(column);
+        originY = 0.5f * float(row);
+        size = 0.5f;
+    }
+    point.x = (u - originX) / size;
+    point.y = (v - originY) / size;
+    point.inside = point.x >= 0.0f && point.x <= 1.0f && point.y >= 0.0f && point.y <= 1.0f;
+    return point;
+}
+
+// How wide one pane's picture is, as a share of the window: what the zoom ladder's
+// "pixels per rendered pixel" is measured against.
+inline float PaneWidthShare(Layout layout)
+{
+    return layout == Layout::Single ? 1.0f : 0.5f;
+}
 
 // Where the render window goes in the video area. Fit and Fill keep the picture's
 // aspect inside or over the area; Pixels makes the window exactly the renderer's

@@ -3735,6 +3735,7 @@ private:
         m_comparison.swap=GetPrivateProfileIntW(L"Comparison",L"Swap",0,SettingsPath().c_str())!=0;
         m_comparison.differenceGain=compare_settings::LoadDifferenceGain(ReadIniFloat(L"Comparison",L"DifferenceGain",compare_settings::kDefaultDifferenceGain));
         m_comparison.differenceLuma=GetPrivateProfileIntW(L"Comparison",L"DifferenceLuma",1,SettingsPath().c_str())!=0;
+        m_comparison.secondMix=compare_settings::LoadSecondMix(ReadIniFloat(L"Comparison",L"SecondMix",compare_settings::kDefaultSecondMix));
         ++m_labelTextRevision;
         LoadRenderPace();
     }
@@ -3887,6 +3888,7 @@ private:
         WritePrivateProfileStringW(L"Comparison",L"Swap",m_comparison.swap?L"1":L"0",SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"DifferenceGain",m_comparison.differenceGain);
         WritePrivateProfileStringW(L"Comparison",L"DifferenceLuma",m_comparison.differenceLuma?L"1":L"0",SettingsPath().c_str());
+        WriteIniFloat(L"Comparison",L"SecondMix",m_comparison.secondMix);
         WriteIniFloat(L"Comparison",L"SplitX",m_comparison.splitX);
         WritePrivateProfileStringW(L"Comparison",L"ZoomStep",std::to_wstring(m_zoomStep).c_str(),SettingsPath().c_str());
     }
@@ -3922,13 +3924,16 @@ private:
            PtIn(client,m_renderMouse.x,m_renderMouse.y)){
             const int radius=Dip(kLoupeRadiusDip);
             const auto placement=compare_loupe::Place(m_renderMouse,client.right,client.bottom,radius,Dip(8));
-            effective.loupe=true;
-            effective.loupeU=compare_zoom::ImageAt(effective.zoomCenterX,effective.zoomScale,(float(m_renderMouse.x)+0.5f)/float(client.right));
-            effective.loupeV=compare_zoom::ImageAt(effective.zoomCenterY,effective.zoomScale,(float(m_renderMouse.y)+0.5f)/float(client.bottom));
+            // In the panes the point is the one under the pointer in its own pane; on
+            // side by side's letterbox bars there is none.
+            const auto at=compare_view::Locate(PaneLayout(effective.mode),(float(m_renderMouse.x)+0.5f)/float(client.right),(float(m_renderMouse.y)+0.5f)/float(client.bottom));
+            effective.loupe=at.inside;
+            effective.loupeU=compare_zoom::ImageAt(effective.zoomCenterX,effective.zoomScale,at.x);
+            effective.loupeV=compare_zoom::ImageAt(effective.zoomCenterY,effective.zoomScale,at.y);
             effective.loupeLeftX=float(placement.left.x);effective.loupeLeftY=float(placement.left.y);
             effective.loupeRightX=float(placement.right.x);effective.loupeRightY=float(placement.right.y);
             effective.loupeRadius=float(radius);
-            const float viewPerTexel=outputW?effective.zoomScale*float(client.right)/float(outputW):effective.zoomScale;
+            const float viewPerTexel=outputW?effective.zoomScale*float(viewW)/float(outputW):effective.zoomScale;
             effective.loupeMagnification=compare_loupe::Magnification(viewPerTexel);
         }
         return effective;
@@ -3937,7 +3942,10 @@ private:
     // What the zoom ladder measures against: the width the picture is drawn at, and the
     // renderer's output width (0 until there is one, when the ladder falls back to
     // multiples of Fit).
-    int ZoomViewWidth()const{RECT client{};return m_renderWnd&&GetClientRect(m_renderWnd,&client)?int(client.right):0;}
+    int ZoomViewWidth()const{
+        RECT client{};if(!m_renderWnd||!GetClientRect(m_renderWnd,&client))return 0;
+        return int(std::lround(float(client.right)*compare_view::PaneWidthShare(CurrentPaneLayout())));
+    }
     uint32_t ZoomOutputWidth()const{return m_renderer?m_renderer->OutputW():0u;}
     std::optional<POINT> PointerOverPicture()const{
         RECT client{};
@@ -3950,13 +3958,25 @@ private:
     // The modes the compare bar offers, in its order, which is also the order C steps
     // through. Blend is not one of them: it was the Mix under another name.
     static std::span<const ComparisonMode> CompareBarModes(){
-        static constexpr std::array modes{ComparisonMode::Neural,ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe,ComparisonMode::Difference};
+        static constexpr std::array modes{ComparisonMode::Neural,ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe,
+                                          ComparisonMode::Difference,ComparisonMode::SideBySide,ComparisonMode::Quad};
         return modes;
     }
     static const wchar_t* CompareModeLabelKey(ComparisonMode mode){
-        switch(mode){case ComparisonMode::Original:return L"compare.mode.original";case ComparisonMode::SplitVertical:return L"compare.mode.split";case ComparisonMode::Wipe:return L"compare.mode.wipe";case ComparisonMode::Difference:return L"compare.mode.difference";default:return L"compare.mode.neural";}
+        switch(mode){case ComparisonMode::Original:return L"compare.mode.original";case ComparisonMode::SplitVertical:return L"compare.mode.split";case ComparisonMode::Wipe:return L"compare.mode.wipe";case ComparisonMode::Difference:return L"compare.mode.difference";case ComparisonMode::SideBySide:return L"compare.mode.side_by_side";case ComparisonMode::Quad:return L"compare.mode.quad";default:return L"compare.mode.neural";}
     }
-    static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Original:return IDM_COMPARE_ORIGINAL;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;case ComparisonMode::Difference:return IDM_COMPARE_DIFFERENCE;default:return IDM_COMPARE_NEURAL;}}
+    static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Original:return IDM_COMPARE_ORIGINAL;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;case ComparisonMode::Difference:return IDM_COMPARE_DIFFERENCE;case ComparisonMode::SideBySide:return IDM_COMPARE_SIDE_BY_SIDE;case ComparisonMode::Quad:return IDM_COMPARE_QUAD;default:return IDM_COMPARE_NEURAL;}}
+    // The pane layout a mode draws; zoom, pan and the loupe work in pane coordinates.
+    static compare_view::Layout PaneLayout(ComparisonMode mode){
+        return mode==ComparisonMode::SideBySide?compare_view::Layout::SideBySide:mode==ComparisonMode::Quad?compare_view::Layout::Quad:compare_view::Layout::Single;
+    }
+    compare_view::Layout CurrentPaneLayout()const{return ComparisonModesAvailable()&&!m_peekOriginal?PaneLayout(m_comparison.mode):compare_view::Layout::Single;}
+    // A point in the render window as the pane under it and where in that pane's picture.
+    compare_view::PanePoint PanePointAt(POINT point)const{
+        RECT client{};
+        if(!m_renderWnd||!GetClientRect(m_renderWnd,&client)||client.right<=0||client.bottom<=0)return{};
+        return compare_view::Locate(CurrentPaneLayout(),(float(point.x)+0.5f)/float(client.right),(float(point.y)+0.5f)/float(client.bottom));
+    }
     // Uploads the original member the presentation shader compares against.
     // Only modes that read the reference pay for the source-size copy, plus a strength
     // dial off its default, which composites against that same original.
@@ -4041,6 +4061,16 @@ private:
         if(gain==m_comparison.differenceGain)return;
         m_comparison.differenceGain=gain;++m_labelTextRevision;ApplyComparison();
     }
+    // The fourth pane's Mix is named in its tag, so a change redraws the atlas.
+    void SetSecondMix(float mix){
+        if(!ComparisonModesAvailable())return;
+        const float snapped=compare_settings::LoadSecondMix(mix);if(snapped==m_comparison.secondMix)return;
+        m_comparison.secondMix=snapped;++m_labelTextRevision;ApplyComparison();
+    }
+    UINT SecondMixIndex()const{
+        for(size_t index=0;index<compare_settings::kSecondMixes.size();++index)if(compare_settings::kSecondMixes[index]==m_comparison.secondMix)return UINT(index);
+        return 1;
+    }
     void ToggleDifferenceLuma(){if(!ComparisonModesAvailable())return;m_comparison.differenceLuma=!m_comparison.differenceLuma;++m_labelTextRevision;ApplyComparison();}
     void CycleComparisonMode(bool reverse){
         if(!ComparisonModesAvailable())return;
@@ -4067,9 +4097,10 @@ private:
         const int next=compare_zoom::Step(m_zoomStep,direction,outputW,viewW,wrap);
         if(next==m_zoomStep)return;
         const float from=compare_zoom::ScaleForStep(m_zoomStep,outputW,viewW),to=compare_zoom::ScaleForStep(next,outputW,viewW);
-        float anchorX=0.5f,anchorY=0.5f;RECT client{};
-        if(anchor&&m_renderWnd&&GetClientRect(m_renderWnd,&client)&&client.right>0&&client.bottom>0){
-            anchorX=std::clamp(float(anchor->x)/float(client.right),0.0f,1.0f);anchorY=std::clamp(float(anchor->y)/float(client.bottom),0.0f,1.0f);
+        float anchorX=0.5f,anchorY=0.5f;
+        if(anchor){
+            const auto at=PanePointAt(*anchor);
+            if(at.inside){anchorX=std::clamp(at.x,0.0f,1.0f);anchorY=std::clamp(at.y,0.0f,1.0f);}
         }
         const auto centre=compare_zoom::ZoomAt({m_comparison.zoomCenterX,m_comparison.zoomCenterY},from,to,anchorX,anchorY);
         m_zoomStep=next;m_comparison.zoomCenterX=centre.x;m_comparison.zoomCenterY=centre.y;
@@ -4083,7 +4114,10 @@ private:
     void PanBy(int dx,int dy){
         RECT client{};if(!m_renderWnd||!GetClientRect(m_renderWnd,&client)||client.right<=0||client.bottom<=0)return;
         const float scale=EffectiveComparison().zoomScale;if(scale<=1.0f||(!dx&&!dy))return;
-        const auto centre=compare_zoom::Pan({m_comparison.zoomCenterX,m_comparison.zoomCenterY},scale,float(dx)/float(client.right),float(dy)/float(client.bottom));
+        // A pane's picture is a share of the window, so the same drag is a larger
+        // share of the picture there.
+        const float share=compare_view::PaneWidthShare(CurrentPaneLayout());
+        const auto centre=compare_zoom::Pan({m_comparison.zoomCenterX,m_comparison.zoomCenterY},scale,float(dx)/(float(client.right)*share),float(dy)/(float(client.bottom)*share));
         m_comparison.zoomCenterX=centre.x;m_comparison.zoomCenterY=centre.y;
         ApplyComparisonView();
     }
@@ -4102,6 +4136,7 @@ private:
         const ComparisonSettings shown=EffectiveComparison();
         std::wstring view=T(CompareModeLabelKey(shown.mode));
         if(shown.mode==ComparisonMode::SplitVertical||shown.mode==ComparisonMode::Wipe)view+=L" "+PercentText(shown.splitX)+(shown.swap?L" swapped":L"");
+        if(shown.mode==ComparisonMode::Quad)view+=L" (fourth pane Mix "+PercentText(shown.secondMix)+L")";
         if(shown.mode==ComparisonMode::Difference){wchar_t gain[16]{};swprintf_s(gain,L"%g",double(shown.differenceGain));view+=std::wstring(L" \u00d7")+gain+(shown.differenceLuma?L" luma":L" color");}
         view+=L" \u00b7 Mix "+PercentText(shown.strength)+L" \u00b7 Zoom "+(m_zoomStep>0?ZoomStepText(m_zoomStep):T(L"compare.zoom.fit"));
         if(shown.mask)view+=L" \u00b7 Mask "+m_maskPath.filename().wstring()+(shown.maskInvert?L" inverted":L"");
@@ -4410,6 +4445,7 @@ private:
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
             app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_zoomStep>0,m_comparison.swap,m_loupe,m_comparison.differenceLuma);
             app_menu::UpdateMaskMenu(menu,m_loaded,!m_maskSource.pixels.empty(),m_maskInvert,MaskFeatherIndex());
+            app_menu::UpdateSecondMixMenu(menu,ComparisonModesAvailable(),SecondMixIndex());
             EnableMenuItem(menu,IDM_SAVE_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
             DrawMenuBar(m_hwnd);
         }
@@ -5971,11 +6007,12 @@ private:
         return media_transport::ThumbButtonsFor(state,IDM_PLAY,IDM_NEURAL_RENDERING,IDM_COMPARE_TOGGLE);
     }
     // One side-by-side switch for the thumbnail, over the Compare menu's own
-    // modes: split when showing the neural picture alone, the neural picture
-    // again from any comparison.
+    // modes: its tooltip says "Compare side by side", which is now a mode of its
+    // own (two panes of one frame), and the neural picture again from any
+    // comparison.
     void ToggleSideBySide(){
         if(!ComparisonModesAvailable())return;
-        SetComparisonMode(m_comparison.mode==ComparisonMode::Neural?ComparisonMode::SplitVertical:ComparisonMode::Neural);
+        SetComparisonMode(m_comparison.mode==ComparisonMode::Neural?ComparisonMode::SideBySide:ComparisonMode::Neural);
         SyncFeatureMenuState();UpdateCachedStatus();
     }
     HICON ThumbIcon(UiIcon icon){
@@ -6867,7 +6904,8 @@ private:
         // channels, because a difference image without its gain cannot be read.
         wchar_t gain[16]{};swprintf_s(gain,L"%g",double(m_comparison.differenceGain));
         const std::wstring difference=T(L"compare.tag.difference")+L" \u00d7"+gain+L" \u00b7 "+T(m_comparison.differenceLuma?L"compare.tag.luma":L"compare.tag.color");
-        return{T(L"compare.tag.original"),T(L"compare.tag.dlss"),difference,std::wstring{}};
+        return{T(L"compare.tag.original"),T(L"compare.tag.dlss"),difference,
+               T(L"compare.tag.dlss")+L" \u00b7 "+T(L"compare.tag.mix")+L" "+PercentText(m_comparison.secondMix)};
     }
     LabelAtlasPixels BuildLabelAtlas(UINT dpi)const{
         LabelAtlasPixels atlas;
@@ -9831,6 +9869,7 @@ private:
         if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::NativeMenu,id,false)){ActivateYouTube();return;}
         if(const ExampleVideo* example=app_menu::ExampleVideoForCommand(id)){ActivateExampleVideo(*example);return;}
         if(id>=IDM_COMPARE_MASK_FEATHER_FIRST&&id<IDM_COMPARE_MASK_FEATHER_FIRST+IDM_COMPARE_MASK_FEATHER_COUNT){SetMaskFeather(size_t(id-IDM_COMPARE_MASK_FEATHER_FIRST));return;}
+        if(id>=IDM_COMPARE_SECOND_MIX_FIRST&&id<IDM_COMPARE_SECOND_MIX_FIRST+IDM_COMPARE_SECOND_MIX_COUNT){SetSecondMix(compare_settings::kSecondMixes[size_t(id-IDM_COMPARE_SECOND_MIX_FIRST)]);return;}
         if(const auto quality=app_menu::YouTubeQualityForCommand(id)){SetYouTubeSourceQuality(*quality);return;}
         if(id>=IDM_AUDIO_TRACK_FIRST&&id<IDM_AUDIO_TRACK_FIRST+IDM_AUDIO_TRACK_COUNT){
             ChooseAudioTrack(int(id-IDM_AUDIO_TRACK_FIRST));return;}
@@ -9873,6 +9912,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         case IDM_SAVE_COMPARISON_IMAGE:SaveComparisonImage();break;
         case IDM_COMPARE_MASK_LOAD:LoadMaskFromDialog();break;case IDM_COMPARE_MASK_INVERT:ToggleMaskInvert();break;case IDM_COMPARE_MASK_CLEAR:ClearMaskForSource();break;
         case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_DIFFERENCE:SetComparisonMode(ComparisonMode::Difference);break;
+        case IDM_COMPARE_SIDE_BY_SIDE:SetComparisonMode(ComparisonMode::SideBySide);break;case IDM_COMPARE_QUAD:SetComparisonMode(ComparisonMode::Quad);break;
         case IDM_COMPARE_DIFFERENCE_LESS:StepDifferenceGain(-1);break;case IDM_COMPARE_DIFFERENCE_MORE:StepDifferenceGain(+1);break;case IDM_COMPARE_DIFFERENCE_LUMA:ToggleDifferenceLuma();break;case IDM_COMPARE_ZOOM_OUT:ZoomBy(-1,false,PointerOverPicture());break;case IDM_COMPARE_ZOOM_FIT:ZoomToFit();break;case IDM_COMPARE_LOUPE:ToggleLoupe();break;
         case IDM_ASPECT_ONE_TO_ONE:SetAspect(false,true);break;case IDM_COMPARE_NEXT_MODE:CycleComparisonMode(false);break;case IDM_COMPARE_PREVIOUS_MODE:CycleComparisonMode(true);break;
         }

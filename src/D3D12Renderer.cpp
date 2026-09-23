@@ -390,9 +390,9 @@ R"(// Parameters only the window compositor below reads. A second cbuffer rather
 // and the cache capture's bytecode stays byte for byte what every cached render on disk
 // was made with. The label atlas at t4 is the compositor's alone for the same reason.
 cbuffer Compose:register(b1){
-    float4 Pane;    // y = original on the right of the divider (swap), w = labels on
+    float4 Pane;    // y = original on the right (swap), z = Quad's second Mix, w = labels on
     float4 Label;   // x = atlas row height px, y = inset from the picture's corner px, zw = atlas size px
-    float4 LabelW;  // atlas row widths px: Original, DLSS 5, Difference, and a spare row
+    float4 LabelW;  // atlas row widths px: Original, DLSS 5, Difference, DLSS 5 at the second Mix
     float4 Target;  // xy = backbuffer size px
     float4 Loupe;   // xy = image UV under the pointer, z = circle radius px, w = px per output texel (0 = off)
     float4 LoupeAt; // xy = centre of the left circle, zw = of the right one, px
@@ -457,7 +457,44 @@ float3 DifferenceOf(float3 c,float3 ref){
     float3 d=abs(c-ref)*max(Diff.x,0.0);
     return Diff.y>0.5?Luma709(d).xxx:d;
 }
+// Side by side (mode 6) and 2x2 (mode 7): one frame of the pair in every pane, so the
+// panes are on one timestamp by construction, each with the same zoom and pan. Side by
+// side fits the whole picture into each half, letterboxed; 2x2 quarters the window,
+// which has the picture's aspect already. Panes: Original | DLSS 5 over Difference |
+// DLSS 5 at the second Mix, the first two swapped by Swap. Mirrors compare_view::Locate.
+float4 ComposePanes(float2 wuv,int mode,bool swap){
+    int pane=0;float2 origin=0.0,size=1.0;
+    if(mode==6){pane=wuv.x<0.5?0:1;origin=float2(0.5*float(pane),0.25);size=float2(0.5,0.5);}
+    else{int2 q=int2(wuv.x>=0.5?1:0,wuv.y>=0.5?1:0);pane=q.x+2*q.y;origin=float2(q)*0.5;size=float2(0.5,0.5);}
+    float2 s=(wuv-origin)/size;
+    float zoom=max(Misc.y,0.01);
+    float2 zc=Compare.zw;
+    float2 zoomed=(s-zc)/zoom+zc;
+    float2 footprint=abs(ddx(zoomed))+abs(ddy(zoomed));
+    float2 uv=saturate(zoomed);
+    float3 n=SampleFootprint(T,uv,footprint,false);
+    float3 ref=SampleFootprint(Ref,uv,footprint,true);
+    int kind=pane==0?(swap?1:0):pane==1?(swap?0:1):pane==2?2:3;
+    float mixS=kind==3?Pane.z:ColorB.z;
+    if(mixS!=1.0)n=ApplyNeuralStrength(n,ref,mixS,max(ColorB.w,1.0));
+    n=MaskedNeural(n,ref,uv);
+    float3 c=kind==0?ApplyVideoAdjustments(ref):kind==2?DifferenceOf(n,ref):ApplyVideoAdjustments(n);
+    float2 px=wuv*Target.xy;
+    bool inside=all(s>=0.0)&&all(s<=1.0);
+    float3 o=inside?LinearToSRGB(c):0.0;
+    // A dark two-pixel gutter where panes meet, so four pictures read as four.
+    float2 fromMiddle=abs(px-0.5*Target.xy);
+    if(fromMiddle.x<1.0||(mode==7&&fromMiddle.y<1.0))o=0.0;
+    if(inside&&Pane.w>0.5)o=LabelOver(o,px,origin*Target.xy+Label.y,kind);
+    return float4(o,1);
+}
 float4 PSPresentScaled(V i):SV_Target{
+    int paneMode=int(Compare.x+0.5);
+    if(paneMode==6||paneMode==7){
+        float4 panes=ComposePanes(i.uv,paneMode,Pane.y>0.5);
+        if(Loupe.w>0.0)panes.rgb=LoupeOver(panes.rgb,i.uv*Target.xy,Pane.y>0.5);
+        return panes;
+    }
     float zoom=max(Misc.y,0.01);
     float2 zc=Compare.zw;
     float2 zoomed=(i.uv-zc)/zoom+zc;
@@ -1423,7 +1460,7 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     const bool mask=useReference&&cmp.mask&&m_mask;
     const float inset=float(m_labelRowHeight/2u);
     const float compose[ComposeConstantCount]={
-        0,useReference&&cmp.swap?1.0f:0.0f,0,labels?1.0f:0.0f,
+        0,useReference&&cmp.swap?1.0f:0.0f,std::clamp(cmp.secondMix,0.0f,2.0f),labels?1.0f:0.0f,
         labels?float(m_labelRowHeight):0.0f,inset,float(m_labelAtlasW),float(m_labelAtlasH),
         float(m_labelWidths[0]),float(m_labelWidths[1]),float(m_labelWidths[2]),float(m_labelWidths[3]),
         float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),0,0,

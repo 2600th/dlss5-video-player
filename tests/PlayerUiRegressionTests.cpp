@@ -1278,7 +1278,7 @@ struct PlayerAppTestAccess {
         app.m_comparison.mode = ComparisonMode::Neural;
         REQUIRE(app.ComparisonModesAvailable());
         app.WndProc(app.m_hwnd, WM_COMMAND, MAKEWPARAM(IDM_COMPARE_TOGGLE, THBN_CLICKED), 0);
-        CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
+        CHECK(app.m_comparison.mode == ComparisonMode::SideBySide);
         CHECK(app.CurrentThumbBar()[2].enabled);
         CHECK(std::wstring_view(app.CurrentThumbBar()[2].tipKey) == L"thumb.compare_off");
         app.HandleCommand(IDM_COMPARE_TOGGLE);
@@ -1983,9 +1983,14 @@ struct PlayerAppTestAccess {
         app.HandleCommand(IDM_COMPARE_NEXT_MODE); app.HandleCommand(IDM_COMPARE_NEXT_MODE);
         CHECK(app.m_comparison.mode == ComparisonMode::Difference);
         app.HandleCommand(IDM_COMPARE_NEXT_MODE);
+        CHECK(app.m_comparison.mode == ComparisonMode::SideBySide);
+        app.HandleCommand(IDM_COMPARE_NEXT_MODE);
+        CHECK(app.m_comparison.mode == ComparisonMode::Quad);
+        app.HandleCommand(IDM_COMPARE_NEXT_MODE);
         CHECK(app.m_comparison.mode == ComparisonMode::Neural);
         app.HandleCommand(IDM_COMPARE_PREVIOUS_MODE);
-        CHECK(app.m_comparison.mode == ComparisonMode::Difference);
+        CHECK(app.m_comparison.mode == ComparisonMode::Quad);
+        app.HandleCommand(IDM_COMPARE_DIFFERENCE);
         // The Difference view: its gain walks the ladder and its tag names the gain and
         // the channels, so the atlas is redrawn when either changes.
         CHECK(app.m_renderer->GetComparison().mode == ComparisonMode::Difference);
@@ -2069,7 +2074,7 @@ struct PlayerAppTestAccess {
         CHECK(app.m_zoomStep > 0);
         CHECK_EQ(volumeBefore, int(app.m_volume * 100.0f));
         const ComparisonSettings zoomed = app.EffectiveComparison();
-        CHECK(std::abs(compare_zoom::ImageAt(zoomed.zoomCenterX, zoomed.zoomScale, 100.0f / 400.0f) - 0.25f) < 1e-4f);
+        CHECK(std::abs(compare_zoom::ImageAt(zoomed.zoomCenterX, zoomed.zoomScale, 100.5f / 400.0f) - 100.5f / 400.0f) < 1e-4f);
         // Middle-drag pans the zoomed picture with the pointer.
         const float centreBefore = app.m_comparison.zoomCenterX;
         app.RenderMiddleDown(app.m_renderWnd, MAKELPARAM(100, 50));
@@ -2079,6 +2084,34 @@ struct PlayerAppTestAccess {
         app.WndProc(app.m_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(MK_CONTROL, WORD(-WHEEL_DELTA)), MAKELPARAM(screen.left + 100, screen.top + 50));
         app.WndProc(app.m_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(MK_CONTROL, WORD(-WHEEL_DELTA)), MAKELPARAM(screen.left + 100, screen.top + 50));
         CHECK_EQ(0, app.m_zoomStep);
+        // 2x2: the zoom ladder measures the pane, the loupe finds the point in the pane
+        // under the pointer, and the fourth pane's Mix is named in its tag.
+        app.HandleCommand(IDM_COMPARE_QUAD);
+        CHECK(app.m_renderer->GetComparison().mode == ComparisonMode::Quad);
+        CHECK_EQ(200, app.ZoomViewWidth());
+        app.HandleCommand(IDM_COMPARE_LOUPE);
+        app.RenderMouseMove(app.m_renderWnd, MAKELPARAM(299, 149));
+        shown = app.EffectiveComparison();
+        CHECK(shown.loupe);
+        CHECK(std::abs(shown.loupeU - 0.5f) < 0.01f && std::abs(shown.loupeV - 0.5f) < 0.01f);
+        app.HandleCommand(IDM_COMPARE_LOUPE);
+        const uint64_t before = app.m_labelTextRevision;
+        app.HandleCommand(IDM_COMPARE_SECOND_MIX_FIRST + 2);
+        CHECK_EQ(0.75f, app.m_renderer->GetComparison().secondMix);
+        CHECK(app.m_labelTextRevision != before);
+        CHECK(app.LabelAtlasTexts()[3].find(L"75%") != std::wstring::npos);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_COMPARE_SECOND_MIX_FIRST + 2, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        app.HandleCommand(IDM_COMPARE_SECOND_MIX_FIRST + 1);
+        // Side by side: letterboxed halves, so the bars under the pointer have no loupe.
+        app.HandleCommand(IDM_COMPARE_SIDE_BY_SIDE);
+        app.HandleCommand(IDM_COMPARE_LOUPE);
+        app.RenderMouseMove(app.m_renderWnd, MAKELPARAM(100, 10));
+        CHECK(!app.EffectiveComparison().loupe);
+        app.RenderMouseMove(app.m_renderWnd, MAKELPARAM(100, 100));
+        CHECK(app.EffectiveComparison().loupe);
+        app.HandleCommand(IDM_COMPARE_LOUPE);
+        app.HandleCommand(IDM_COMPARE_NEURAL);
+        CHECK_EQ(400, app.ZoomViewWidth());
         DestroyWindow(app.m_renderWnd); app.m_renderWnd = fixtureRender;
 
         // View > 1:1 pixels is a third answer beside Fit and Fill, and A leaves it.
@@ -2115,11 +2148,11 @@ struct PlayerAppTestAccess {
         CHECK(!app.m_dragMix);
         // A press on the row that hits nothing is still the row's.
         CHECK(app.CompareBarMouseDown(1, layout.bar.top + 1));
-        // The tags the compositor draws: three non-empty rows, flag rule opaque at the left
+        // The tags the compositor draws: four non-empty rows, flag rule opaque at the left
         // edge, plate translucent beside it, nothing past each tag's width.
         const auto atlas = app.BuildLabelAtlas(96);
         CHECK(!atlas.pixels.empty());
-        CHECK(atlas.widths[0] > 0 && atlas.widths[1] > 0 && atlas.widths[2] > 0 && atlas.widths[3] == 0);
+        CHECK(atlas.widths[0] > 0 && atlas.widths[1] > 0 && atlas.widths[2] > 0 && atlas.widths[3] > 0);
         CHECK_EQ(size_t(atlas.width) * atlas.height * 4, atlas.pixels.size());
         if (!atlas.pixels.empty() && atlas.widths[1] + 1 < atlas.width) {
             const auto alpha = [&](uint32_t x, uint32_t y) { return atlas.pixels[(size_t(y) * atlas.width + x) * 4 + 3]; };

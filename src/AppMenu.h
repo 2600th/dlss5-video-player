@@ -113,7 +113,15 @@ inline constexpr UINT IDM_COMPARE_DIFFERENCE = 434;
 inline constexpr UINT IDM_COMPARE_DIFFERENCE_LESS = 435;
 inline constexpr UINT IDM_COMPARE_DIFFERENCE_MORE = 436;
 inline constexpr UINT IDM_COMPARE_DIFFERENCE_LUMA = 437;
-inline constexpr UINT kLastComparisonModeCommand = IDM_COMPARE_DIFFERENCE;
+inline constexpr UINT IDM_COMPARE_SIDE_BY_SIDE = 447;
+inline constexpr UINT IDM_COMPARE_QUAD = 448;
+inline constexpr UINT kLastComparisonModeCommand = IDM_COMPARE_QUAD;
+// Quad's second Mix, one command per compare_settings::kSecondMixes entry, in order.
+// A block of its own past every other command (500-599 stay unused, see the menu
+// tests): 449 would have run into the Advanced items at 450-452, and HandleCommand
+// routes the block before its switch.
+inline constexpr UINT IDM_COMPARE_SECOND_MIX_FIRST = 610;
+inline constexpr UINT IDM_COMPARE_SECOND_MIX_COUNT = 5;
 // The spatial mask on the Mix. The feather choices are their own radio block, one
 // command per compare_mask::kFeathers entry, in its order.
 inline constexpr UINT IDM_COMPARE_MASK_LOAD = 438;
@@ -200,6 +208,8 @@ bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable
 // Video > Compare's mask rows: Load needs a source; Invert, Clear and the feather need
 // a mask. featherIndex is the checked position in the feather block.
 bool UpdateMaskMenu(HMENU menuBar, bool loadAvailable, bool maskLoaded, bool inverted, UINT featherIndex);
+// The second-Mix block: enabled while comparing, `index` checked.
+bool UpdateSecondMixMenu(HMENU menuBar, bool available, UINT index);
 // CheckMenuRadioItem over the popup that holds `first`, by the POSITIONS of `first`
 // and `last`: with MF_BYCOMMAND Windows wants the checked id numerically between
 // them, which a group that grew an item past its original ids cannot promise.
