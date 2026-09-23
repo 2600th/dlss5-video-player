@@ -97,6 +97,17 @@ player, and the open File menu or the adjustments window - with the second
 placed at its real on-screen offset from the first. Nothing else is added or
 changed. Saved once as JPEG at quality 95 with no chroma subsampling.
 
+**One correction.** Those captures drew into a GDI+ bitmap's HDC, and GDI+ turns
+every pixel of exactly RGB(13,11,12) in that HDC into (0,0,0) with alpha 0. The
+neural frame at 0:21 has a flat shadow that decodes to exactly that colour, so
+the first `recent-videos.jpg` showed 798 pixels of black patches on the vest and
+trousers that the player never drew. The window capture was the same, except for
+those pixels. `recent-videos.jpg` was rebuilt from it with them set back to
+(13,11,12): a pixel with alpha 0 inside a `PrintWindow` capture can only be that
+colour. Everywhere else it matches the first JPEG to a mean of 0.01 levels.
+`neural-strength.jpg` had no such pixel. `capture-window.ps1` now captures into
+a GDI bitmap of its own, and `-SelfTest` checks that colour.
+
 **Size.** 1493x932 (`recent-videos.jpg`, `player-start.jpg`) and 1493x1100
 (`neural-strength.jpg`). The older shots were 1442x932 at 100%; at 175% the
 player's minimum width is 1493 visible pixels, and the adjustments window
