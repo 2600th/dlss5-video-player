@@ -55,6 +55,7 @@
 #include "Nv12Convert.h"
 #include "FrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
+#include "StatusNotePolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
 #include "SourceDigestMemo.h"
@@ -1421,7 +1422,7 @@ public:
             if(read==VideoReadResult::FrameReady)return true;
             if(read==VideoReadResult::Error||read==VideoReadResult::Stalled){
                 LOG("Playback stopped: decoding failed after "<<m_currentSec<<" s (result="<<static_cast<int>(read)<<").");
-                m_sourceNotice=L"Playback stopped: the video could not be decoded past "+
+                m_decodeNotice=L"Playback stopped: the video could not be decoded past "+
                     FormatTimecode(static_cast<int64_t>(m_currentSec*1e7),m_decoder.FrameRate(),false)+L" (see the log)";
             }
             return false;
@@ -4180,6 +4181,9 @@ private:
     }
 
     bool Load(const std::wstring& source,const std::wstring& displayTitle=L"",MediaSourceKind sourceKind=MediaSourceKind::LocalFile) {
+        // Every open by name ends what a previous drop said; a drop sets its
+        // note again once this returns.
+        m_dropNote.Clear();
         // Preview first: identify the source and replay a validated cache entry
         // when one exists, otherwise open the original and let the user choose
         // what to render. Opening a file never starts a whole-video render.
@@ -4232,7 +4236,7 @@ private:
         // a settings preview still settling, or a neural toggle pressed during
         // a seek, would otherwise fire on the next file's first seek.
         CancelPausedSettingsPreview();m_previewShown=false;m_neuralToggleDeferred=false;m_livePaceConfirmedKey.clear();
-        m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
+        m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_decodeNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_nextPairFrame.reset();m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
         m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();m_sourceCache.reset();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
@@ -4640,7 +4644,11 @@ private:
         // one exists - the same frames, locally, and no session torn down around
         // it. Without a copy this returns false in a few microseconds and the
         // network path runs as before.
-        if(!m_loaded)return;sec=ClampSeek(sec);m_lastSeekTick=GetTickCount64();if(NetworkPlayback()&&!AdoptAcquiredSourceCopyForPlayback()){StartYouTubeSeek(sec,resumeAfter);return;}
+        if(!m_loaded)return;sec=ClampSeek(sec);m_lastSeekTick=GetTickCount64();
+        // Playback moves again, so "playback stopped" is no longer true; a
+        // decode that fails again says so again.
+        m_decodeNotice.clear();
+        if(NetworkPlayback()&&!AdoptAcquiredSourceCopyForPlayback()){StartYouTubeSeek(sec,resumeAfter);return;}
         if(!m_seekPending) m_currentSec=Position();
         m_pendingSeekSec=sec;m_seekResumePlaying=resumeAfter;m_seekPending=true;m_playing=false;Audio().Pause(true);m_seekPreview=sec;InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();
     }
@@ -4730,7 +4738,7 @@ private:
         m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter&&m_haveNext;m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();LOG("Seek complete actual="<<m_currentSec);return true;
     }
 
-    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=playback_timing::PausePosition(m_currentSec);m_playing=false;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);}else{if(!m_cachedPlayback&&!NetworkPlayback()&&!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;ResumeAudio();if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}InvalidateControls();InvalidatePlaybackProgress();}
+    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=playback_timing::PausePosition(m_currentSec);m_playing=false;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);}else{if(!m_cachedPlayback&&!NetworkPlayback()&&!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(status_note::PlayRestartSeconds(!m_decodeNotice.empty(),m_currentSec),true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;ResumeAudio();if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}InvalidateControls();InvalidatePlaybackProgress();}
     // Frame steps stop audio rather than respawning it per step. Anything that
     // started it since (a seek, a scrub) leaves it active, and then a resume
     // is only a resume.
@@ -7401,6 +7409,7 @@ private:
             text+=L" \u00b7 "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);
             if(m_liveSession)text=LiveSessionStatusText()+L" \u00b7 "+text;
             if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;
+            if(const std::wstring dropped=m_dropNote.Visible(m_loaded,m_path);!dropped.empty())text=dropped+L" \u00b7 "+text;
             return text;
         }
         const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
@@ -7418,6 +7427,10 @@ private:
         // A source the resolver had to settle for outranks everything except the
         // neural notice: no render can put back what the stream never carried.
         if(!m_sourceNotice.empty())text=m_sourceNotice+L" \u00b7 "+text;
+        // Why the picture stopped, for as long as it is stopped (RequestSeek
+        // clears it), and which file of a drop is playing, for as long as it is.
+        if(!m_decodeNotice.empty())text=m_decodeNotice+L" \u00b7 "+text;
+        if(const std::wstring dropped=m_dropNote.Visible(m_loaded,m_path);!dropped.empty())text=dropped+L" \u00b7 "+text;
         // Ahead of even that: nothing this player can do about the picture is
         // worth reading while its cache cannot be written to.
         if(!m_cacheNotice.empty())text=m_cacheNotice+L" \u00b7 "+text;
@@ -7749,7 +7762,7 @@ private:
             if(!choice.open){LOG("Dropped "<<count<<" item(s), none of them a file; nothing opened.");return 0;}
             if(choice.ignored)LOG("Dropped "<<count<<" items; opening item "<<(*choice.open+1)<<" and ignoring "<<choice.ignored<<".");
             if(Load(dropped[*choice.open])&&choice.ignored){
-                m_sourceNotice=L"Opened one dropped file; "+std::to_wstring(choice.ignored)+(choice.ignored==1?L" other was":L" others were")+L" ignored";
+                m_dropNote.Set(L"Opened one dropped file; "+std::to_wstring(choice.ignored)+(choice.ignored==1?L" other was":L" others were")+L" ignored",dropped[*choice.open]);
                 UpdateCachedStatus();
             }
             return 0;}
@@ -7915,6 +7928,11 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // What the resolver had to settle for on this source. Not a render failure,
     // so it survives a successful render and is cleared only by Unload.
     std::wstring m_sourceNotice;
+    // Kept apart from m_sourceNotice because each ends on its own condition:
+    // the decode note when playback moves again, the drop note when another
+    // file is opened - not on the Unload an asynchronous load does on the way.
+    std::wstring m_decodeNotice;
+    status_note::DropNote m_dropNote;
     // Why the cache root could not be created, read once at startup. An
     // installation condition rather than a playback one, so Unload leaves it.
     std::wstring m_cacheNotice;

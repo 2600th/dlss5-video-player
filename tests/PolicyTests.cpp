@@ -1,6 +1,7 @@
 #include "CacheEvictionPolicy.h"
 #include "VariableFrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
+#include "StatusNotePolicy.h"
 #include "Log.h"
 #include "AudioFadePolicy.h"
 #include "AudioTrackPolicy.h"
@@ -6364,6 +6365,36 @@ void video_decoder_seeks_a_source_with_an_unknown_duration_test()
 
 // A drop of several files opened whatever Explorer listed first - a folder, a
 // subtitle - and silently discarded the rest.
+// The drop note is true of the file the drop opened while that file is on
+// screen: not before the asynchronous load finishes, across the Unload that
+// load does on the way in (nothing here is cleared by it), under the other
+// spelling the render job hands the path back as, and never for another file.
+// The decode note's Play retries where decoding stopped instead of replaying
+// the whole clip to reach the same failure; a clip that ended starts over.
+void status_notes_last_exactly_as_long_as_they_are_true_test()
+{
+    using namespace status_note;
+    CHECK(SameSource(L"C:\\Clips\\Film.mkv",L"c:/clips/./film.MKV"));
+    CHECK(!SameSource(L"C:\\Clips\\Film.mkv",L"C:\\Clips\\Film2.mkv"));
+    CHECK(!SameSource(L"",L""));
+
+    DropNote note;
+    CHECK(note.Visible(true,L"C:\\Clips\\Film.mkv").empty());
+    note.Set(L"Opened one dropped file; 2 others were ignored",L"C:\\Clips\\Film.mkv");
+    // Still loading: nothing is on screen for the note to describe.
+    CHECK(note.Visible(false,L"").empty());
+    CHECK(note.Visible(true,L"c:\\clips\\film.mkv")==L"Opened one dropped file; 2 others were ignored");
+    // Another file on screen - a derived carrier, say - is not what it is about.
+    CHECK(note.Visible(true,L"C:\\Cache\\carrier.mkv").empty());
+    // An open by name ends it; the same file opened again later is a new open.
+    note.Clear();
+    CHECK(note.Visible(true,L"C:\\Clips\\Film.mkv").empty());
+
+    CHECK_EQ(0.0,PlayRestartSeconds(false,12.5));
+    CHECK_EQ(12.5,PlayRestartSeconds(true,12.5));
+    CHECK_EQ(0.0,PlayRestartSeconds(true,0.0));
+}
+
 void dropped_files_open_the_first_supported_file_and_count_the_rest_test()
 {
     using namespace dropped_files;
@@ -10084,6 +10115,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_open_metadata_decides_the_playback_layout_without_a_decoder_test),
     TEST_CASE(video_decoder_bounds_declared_geometry_and_known_rates_test),
     TEST_CASE(dropped_files_open_the_first_supported_file_and_count_the_rest_test),
+    TEST_CASE(status_notes_last_exactly_as_long_as_they_are_true_test),
     TEST_CASE(child_stderr_tail_keeps_the_last_bytes_as_log_lines_test),
     TEST_CASE(video_decoder_reports_child_stderr_and_a_mid_file_failure_is_not_the_end_test),
     TEST_CASE(video_decoder_seeks_a_source_with_an_unknown_duration_test),
