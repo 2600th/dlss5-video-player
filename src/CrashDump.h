@@ -75,24 +75,28 @@ struct Text {
     }
     void Decimal(uint64_t value, int width = 1)
     {
+        // Filled from the back, as Hex below is.
         Char digits[20];
-        int count = 0;
+        int first = 20;
         do {
-            digits[count++] = static_cast<Char>('0' + value % 10);
+            digits[--first] = static_cast<Char>('0' + value % 10);
             value /= 10;
-        } while (value && count < 20);
-        for (int pad = count; pad < width; ++pad) Put(static_cast<Char>('0'));
-        while (count) Put(digits[--count]);
+        } while (value && first > 0);
+        for (int pad = 20 - first; pad < width; ++pad) Put(static_cast<Char>('0'));
+        for (int index = first; index < 20; ++index) Put(digits[index]);
     }
     void Hex(uint64_t value)
     {
+        // Filled from the back, so the digits come out most significant first
+        // with no reverse pass (and nothing for /analyze to misread as an
+        // index of -1).
         Char digits[16];
-        int count = 0;
+        int first = 16;
         do {
-            digits[count++] = static_cast<Char>("0123456789abcdef"[value & 0xF]);
+            digits[--first] = static_cast<Char>("0123456789abcdef"[value & 0xF]);
             value >>= 4;
-        } while (value && count < 16);
-        while (count) Put(digits[--count]);
+        } while (value && first > 0);
+        for (int index = first; index < 16; ++index) Put(digits[index]);
     }
 };
 
