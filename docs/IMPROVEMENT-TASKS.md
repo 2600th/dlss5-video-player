@@ -75,7 +75,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.20](#p220) | A start screen with a capability check and tiles | M | Player | |
 | [P2.21](#p221) | Export the comparison itself | S / M | Player | |
 | [P2.22](#p222) | Dark, DPI-aware menus and dialogs | M | Player | |
-| [P2.23](#p223) | Keyboard discoverability | S-M | Player | |
 | [P2.24](#p224) | Media controls and taskbar buttons | S-M | Player | |
 | [P2.25](#p225) | Synced multi-pane comparison | M-L | Player | |
 | **P3** | | | | |
@@ -479,16 +478,6 @@ are light Win32 classics. The dialogs use raw pixel positions, the 96-dpi
 they are tiny at 200%. Scale the dialogs to DPI first; that is a correctness
 fix. Then darken them, and draw the menu bar via `WM_UAHDRAWMENU` (an
 undocumented API; guard it).
-
----
-
-<a id="p223"></a>
-### P2.23 · Keyboard discoverability
-
-`S-M` · **Player**
-
-About 25 shortcuts are spread across 5 menus. Add a `?` cheat-sheet overlay
-first, and a searchable command palette later (as uosc and Improve-ImgSLI do).
 
 ---
 

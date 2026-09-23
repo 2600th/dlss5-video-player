@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "ExampleVideos.h"
 #include "UiLayout.h"
@@ -102,6 +103,8 @@ inline constexpr UINT IDM_NEURAL_PRESET_FIRST = 470;
 inline constexpr UINT IDM_NEURAL_PRESET_CUSTOM = 479;
 // Right-justified affordance appended to the menu bar itself, not a submenu.
 inline constexpr UINT IDM_UPDATE_AVAILABLE = 461;
+// Help > Keyboard shortcuts, the menu route to the ? / F1 cheat sheet.
+inline constexpr UINT IDM_KEYBOARD_SHORTCUTS = 490;
 
 enum class PlayerCommandRoute {
     KeyDown,
@@ -155,5 +158,19 @@ bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable
 // settings and comparison items (I, O, Shift+I/O, Ctrl+G, F, Shift+F, Ctrl+R,
 // Ctrl+N, Z, [ and ]); nullopt when the key is not one of them.
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown);
+
+// One row of the keyboard cheat sheet: the menu it lives in (or "Keyboard"
+// for a key no menu names), what it does and the keys, as the menu prints them.
+struct ShortcutRow {
+    std::wstring group;
+    std::wstring action;
+    std::wstring keys;
+
+    friend bool operator==(const ShortcutRow&, const ShortcutRow&) = default;
+};
+// Read from the menu bar itself - every command whose text carries a tab and
+// an accelerator - so the sheet cannot say something the menus do not; then
+// the keys no menu command names (Tab, Enter, '.', Esc, the wheel...).
+std::vector<ShortcutRow> CollectShortcuts(HMENU menuBar, const Localizer& localizer);
 
 } // namespace app_menu

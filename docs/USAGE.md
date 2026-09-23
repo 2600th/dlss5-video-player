@@ -204,6 +204,12 @@ seconds idle. Dragging, an open menu/dialog or keyboard control focus keeps
 them visible. `Tab` reveals controls for keyboard access; `Esc`/`F11` restores
 the window (an active render or download consumes `Esc` to cancel first).
 
+Press `?` or `F1` (or **Help > Keyboard shortcuts**) for a sheet of every
+shortcut, grouped by the menu it belongs to, plus the keys no menu names
+(`Tab`, `Enter`, `.`, `Esc`, the wheel and the `Ctrl+Alt` overlay keys). It is
+read from the menus themselves, so it always matches them. The keys keep
+working while it is up; `?`, `F1`, `Esc` or a click on it closes it.
+
 **DLSS Upscaling** is independent and starts off on a fresh installation. Its
 output is **Auto** by default: the player takes the largest rung the monitor's
 current mode can scan out - 1080p, 1440p or 2160p - and never one above it,

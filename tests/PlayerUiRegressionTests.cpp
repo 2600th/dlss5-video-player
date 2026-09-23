@@ -1022,6 +1022,34 @@ struct PlayerAppTestAccess {
         app.SyncTimelineMedia();
     }
 
+    // ? and F1 open the cheat sheet from anywhere, Esc and the same keys put
+    // it away, and Help > Keyboard shortcuts is the menu route to it.
+    static void keyboard_cheat_sheet_test()
+    {
+        PlayerApp& app = fixture->app;
+        REQUIRE(!app.m_shortcutSheetOpen);
+        app.WndProc(app.m_hwnd, WM_KEYDOWN, VK_F1, 0);
+        CHECK(app.m_shortcutSheetOpen);
+        CHECK(!app.m_shortcutGroups.empty());
+        size_t rows = 0;
+        for (const auto& group : app.m_shortcutGroups) rows += group.rows.size();
+        CHECK(rows >= 30);
+        app.WndProc(app.m_hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+        CHECK(!app.m_shortcutSheetOpen);
+        app.WndProc(app.m_hwnd, WM_CHAR, L'?', 0);
+        CHECK(app.m_shortcutSheetOpen);
+        app.WndProc(app.m_hwnd, WM_CHAR, L'?', 0);
+        CHECK(!app.m_shortcutSheetOpen);
+        app.HandleCommand(IDM_KEYBOARD_SHORTCUTS);
+        CHECK(app.m_shortcutSheetOpen);
+        // Esc closes the sheet and does nothing else: no fullscreen to leave,
+        // no job to cancel, even if one were running.
+        const bool fullscreen = app.m_fullscreen;
+        app.WndProc(app.m_hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+        CHECK(!app.m_shortcutSheetOpen);
+        CHECK_EQ(fullscreen, app.m_fullscreen);
+    }
+
     static void source_menus_are_disabled_without_media_test()
     {
         PlayerApp& app = fixture->app;
@@ -1451,6 +1479,7 @@ struct PlayerAppTestAccess {
         UI_CASE(toolbar_pills_and_progress_panel_test),
         UI_CASE(status_chips_and_narrow_pills_fit_test),
         UI_CASE(timeline_render_map_test),
+        UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(source_menus_are_disabled_without_media_test),
         UI_CASE(source_menus_return_after_a_cancelled_job_test),
         UI_CASE(loading_feedback_test),

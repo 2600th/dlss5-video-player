@@ -53,6 +53,7 @@
 #include "Utf8Text.h"
 #include "StatusChipPolicy.h"
 #include "TimelinePolicy.h"
+#include "ShortcutSheetPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -981,6 +982,85 @@ void timeline_thumbnails_are_bucketed_cached_and_cheap_to_ask_for_test()
     CHECK_EQ(5L, edge.text.top);
     const auto right = timeline::LayoutPreview(POINT{1918, 1000}, SIZE{}, SIZE{300, 18}, 5, 10, work);
     CHECK_EQ(1920L, right.window.right);
+}
+
+void keyboard_cheat_sheet_is_read_from_the_menus_test()
+{
+    const Localizer localizer;
+    const HMENU bar = app_menu::CreateMenuBar(localizer, true);
+    REQUIRE(bar != nullptr);
+    const auto rows = app_menu::CollectShortcuts(bar, localizer);
+    const auto has = [&](std::wstring_view group, std::wstring_view action, std::wstring_view keys) {
+        return std::any_of(rows.begin(), rows.end(), [&](const app_menu::ShortcutRow& row) {
+            return row.group == group && row.action == action && row.keys == keys;
+        });
+    };
+    CHECK(has(L"File", L"Open file", L"Ctrl+O"));
+    CHECK(has(L"Playback", L"Stop", L"S"));
+    CHECK(has(L"Playback", L"Mark In", L"I"));
+    // Runs of spaces in a menu's accelerator column close up on the sheet.
+    CHECK(has(L"Playback", L"Play / Pause", L"Space (Overlay: Ctrl+Alt+Space)"));
+    // A submenu's commands are found, under the top-level menu they live in.
+    CHECK(has(L"Video", L"Blend less", L"["));
+    CHECK(has(L"DLSS", L"Convert marked clip to neural video", L"Ctrl+R"));
+    CHECK(has(L"Advanced", L"Recreate NGX / re-hook DLSS 5", L"F6"));
+    CHECK(has(L"Help", L"Keyboard shortcuts", L"? / F1"));
+    CHECK(has(localizer.Get(L"shortcuts.group.keyboard"), localizer.Get(L"shortcuts.step"), L"."));
+    // Groups come in menu-bar order, each one contiguous, and nothing without
+    // a key is listed.
+    std::vector<std::wstring> order;
+    for (const auto& row : rows) {
+        CHECK(!row.keys.empty());
+        CHECK(!row.action.empty());
+        CHECK(row.action.find(L'&') == std::wstring::npos || row.action.find(L"&&") == std::wstring::npos);
+        if (order.empty() || order.back() != row.group) order.push_back(row.group);
+    }
+    const std::vector<std::wstring> expected{L"File", L"Playback", L"Video", L"DLSS", L"Advanced", L"Help",
+                                             localizer.Get(L"shortcuts.group.keyboard")};
+    CHECK(order == expected);
+    // The drift check: every key the player maps to a menu command is printed
+    // by that command's menu item, so it reaches the sheet.
+    for (const bool control : {false, true}) {
+        for (const bool shift : {false, true}) {
+            for (UINT key = 0x08; key <= 0xFE; ++key) {
+                const auto command = app_menu::CommandForPlayerKey(key, control, shift);
+                if (!command) continue;
+                wchar_t text[256]{};
+                CHECK(GetMenuStringW(bar, *command, text, static_cast<int>(std::size(text)), MF_BYCOMMAND) > 0);
+                CHECK(std::wstring_view(text).find(L'\t') != std::wstring_view::npos);
+            }
+        }
+    }
+    DestroyMenu(bar);
+}
+
+void keyboard_cheat_sheet_flows_whole_groups_into_columns_test()
+{
+    const shortcut_sheet::Metrics metrics{20, 30, 10, 300, 24, 16, 36, 20};
+    // Tall enough: one column, groups stacked with a gap.
+    const std::array<size_t, 3> rows{2, 4, 3};
+    const auto tall = shortcut_sheet::LayoutSheet(rows, metrics, 2000, 2000);
+    CHECK_EQ(1, tall.columns);
+    CHECK_EQ(0, tall.groups[0].top);
+    CHECK_EQ(70 + 10, tall.groups[1].top);
+    CHECK_EQ(80 + 110 + 10, tall.groups[2].top);
+    CHECK_EQ(2 * 16 + 300, tall.width);
+    CHECK_EQ(16 + 36 + (200 + 90) + 20 + 16, tall.height);
+    // Shorter: a group that does not fit starts the next column, whole.
+    const auto shorter = shortcut_sheet::LayoutSheet(rows, metrics, 2000, 16 + 36 + 200 + 20 + 16);
+    CHECK_EQ(2, shorter.columns);
+    CHECK_EQ(0, shorter.groups[1].column);
+    CHECK_EQ(1, shorter.groups[2].column);
+    CHECK_EQ(0, shorter.groups[2].top);
+    CHECK_EQ(2 * 16 + 2 * 300 + 24, shorter.width);
+    for (const auto& group : shorter.groups) CHECK(group.visible);
+    // Narrower than two columns: what does not fit is hidden, not drawn off
+    // the sheet.
+    const auto narrow = shortcut_sheet::LayoutSheet(rows, metrics, 400, 16 + 36 + 200 + 20 + 16);
+    CHECK_EQ(1, narrow.columns);
+    CHECK(narrow.groups[0].visible);
+    CHECK(narrow.groups[1].visible);
+    CHECK(!narrow.groups[2].visible);
 }
 
 void status_chips_carry_the_rate_the_drops_and_the_render_test()
@@ -10491,6 +10571,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(timeline_reads_chapters_the_way_ffprobe_prints_them_test),
     TEST_CASE(timeline_hover_says_where_and_what_the_render_map_says_there_test),
     TEST_CASE(timeline_thumbnails_are_bucketed_cached_and_cheap_to_ask_for_test),
+    TEST_CASE(keyboard_cheat_sheet_is_read_from_the_menus_test),
+    TEST_CASE(keyboard_cheat_sheet_flows_whole_groups_into_columns_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),
     TEST_CASE(long_media_title_is_bounded_with_a_real_ellipsis_test),

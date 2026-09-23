@@ -107,6 +107,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "SynchronizedPlayback.h"
 #include "StatusChipPolicy.h"
 #include "TimelinePolicy.h"
+#include "ShortcutSheetPolicy.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -4937,6 +4938,104 @@ private:
     // instead of 3: that lane is the render map, the one thing on this bar no
     // other player has, and at 3 dip it read as a hairline.
     RECT TimelineRect()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(30),c.right-Dip(18),c.bottom-Dip(12)};}
+    // ---- The keyboard cheat sheet (? / F1) -------------------------------
+    //
+    // Every row comes from the live menu bar (app_menu::CollectShortcuts),
+    // so a shortcut added to a menu appears here and a relabelled one cannot
+    // disagree; only the keys no menu names come from a table of their own.
+    struct ShortcutGroup{std::wstring name;std::vector<app_menu::ShortcutRow> rows;};
+    std::vector<ShortcutGroup> ShortcutGroups()const{
+        // Fullscreen detaches the menu bar while the controls are hidden; the
+        // sheet still reads the one that comes back.
+        HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr;if(!menu)menu=m_fullscreenMenu;
+        std::vector<ShortcutGroup> groups;
+        for(auto& row:app_menu::CollectShortcuts(menu,m_loc)){
+            if(groups.empty()||groups.back().name!=row.group)groups.push_back(ShortcutGroup{row.group,{}});
+            groups.back().rows.push_back(std::move(row));
+        }
+        return groups;
+    }
+    void ToggleShortcutSheet(){if(m_shortcutSheetOpen)HideShortcutSheet();else ShowShortcutSheet();}
+    void HideShortcutSheet(){m_shortcutSheetOpen=false;if(m_shortcutWnd&&IsWindowVisible(m_shortcutWnd))ShowWindow(m_shortcutWnd,SW_HIDE);}
+    void ShowShortcutSheet(){
+        m_shortcutSheetOpen=true;m_shortcutGroups=ShortcutGroups();
+        // Laid out and shown only for a window someone can see; the
+        // regression suite drives the state against hidden windows.
+        if(!m_hwnd||!IsWindowVisible(m_hwnd))return;
+        if(!m_shortcutWnd){
+            static constexpr const wchar_t* kClassName=L"DLSSVideoShortcutSheetV1";
+            WNDCLASSW sheet{};sheet.lpfnWndProc=ShortcutSheetWndProcStatic;sheet.hInstance=GetModuleHandleW(nullptr);sheet.lpszClassName=kClassName;sheet.hCursor=LoadCursor(nullptr,IDC_ARROW);
+            if(!RegisterClassW(&sheet)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
+            m_shortcutWnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,kClassName,nullptr,WS_POPUP,0,0,1,1,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
+            if(!m_shortcutWnd)return;
+        }
+        // Columns are as wide as the widest action and the widest keys, as
+        // measured in the font they are drawn in.
+        int actionWidth=0,keysWidth=0;
+        if(HDC dc=GetDC(m_shortcutWnd)){
+            const HGDIOBJ old=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
+            for(const auto& group:m_shortcutGroups)for(const auto& row:group.rows){
+                SIZE size{};GetTextExtentPoint32W(dc,row.action.c_str(),int(row.action.size()),&size);actionWidth=std::max<int>(actionWidth,size.cx);
+                GetTextExtentPoint32W(dc,row.keys.c_str(),int(row.keys.size()),&size);keysWidth=std::max<int>(keysWidth,size.cx);
+            }
+            SelectObject(dc,old);ReleaseDC(m_shortcutWnd,dc);
+        }
+        m_shortcutMetrics=shortcut_sheet::Metrics{Dip(22),Dip(30),Dip(12),actionWidth+Dip(20)+keysWidth,Dip(28),Dip(20),Dip(36),Dip(26)};
+        RECT client{};GetClientRect(m_hwnd,&client);
+        std::vector<size_t> rows;for(const auto& group:m_shortcutGroups)rows.push_back(group.rows.size());
+        m_shortcutLayout=shortcut_sheet::LayoutSheet(rows,m_shortcutMetrics,int(client.right-client.left),int(client.bottom-client.top));
+        POINT origin{(client.right-client.left-m_shortcutLayout.width)/2,std::max<LONG>(0,(client.bottom-client.top-m_shortcutLayout.height)/2)};
+        ClientToScreen(m_hwnd,&origin);
+        SetWindowPos(m_shortcutWnd,HWND_TOP,origin.x,origin.y,m_shortcutLayout.width,m_shortcutLayout.height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+        InvalidateRect(m_shortcutWnd,nullptr,FALSE);
+    }
+    void PaintShortcutSheet(HWND window){
+        PAINTSTRUCT paint{};HDC dc=BeginPaint(window,&paint);if(!dc)return;
+        RECT client{};GetClientRect(window,&client);
+        HBRUSH background=CreateSolidBrush(ui_palette::Window);FillRect(dc,&client,background);DeleteObject(background);
+        HBRUSH border=CreateSolidBrush(RGB(62,65,70));FrameRect(dc,&client,border);DeleteObject(border);
+        SetBkMode(dc,TRANSPARENT);
+        const auto& metrics=m_shortcutMetrics;
+        const HGDIOBJ old=SelectObject(dc,m_font);SetTextColor(dc,ui_palette::PrimaryText);
+        RECT title{metrics.padding,metrics.padding,client.right-metrics.padding,metrics.padding+metrics.titleHeight};
+        const std::wstring titleText=T(L"shortcuts.title");DrawTextW(dc,titleText.c_str(),-1,&title,DT_LEFT|DT_TOP|DT_SINGLELINE|DT_NOPREFIX);
+        HBRUSH rule=CreateSolidBrush(RGB(54,56,61));
+        for(size_t index=0;index<m_shortcutGroups.size()&&index<m_shortcutLayout.groups.size();++index){
+            const auto& placement=m_shortcutLayout.groups[index];if(!placement.visible)continue;
+            const auto& group=m_shortcutGroups[index];
+            const int left=metrics.padding+placement.column*(metrics.columnWidth+metrics.columnGap);
+            int y=m_shortcutLayout.columnTop+placement.top;
+            SelectObject(dc,m_font);SetTextColor(dc,ui_palette::PrimaryText);
+            RECT header{left,y,left+metrics.columnWidth,y+metrics.headerHeight-Dip(6)};DrawTextW(dc,group.name.c_str(),-1,&header,DT_LEFT|DT_BOTTOM|DT_SINGLELINE|DT_NOPREFIX);
+            RECT line{left,y+metrics.headerHeight-Dip(3),left+metrics.columnWidth,y+metrics.headerHeight-Dip(2)};FillRect(dc,&line,rule);
+            y+=metrics.headerHeight;SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
+            for(const auto& row:group.rows){
+                RECT cell{left,y,left+metrics.columnWidth,y+metrics.rowHeight};
+                SetTextColor(dc,ui_palette::SecondaryText);DrawTextW(dc,row.action.c_str(),-1,&cell,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+                SetTextColor(dc,ui_palette::PrimaryText);DrawTextW(dc,row.keys.c_str(),-1,&cell,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+                y+=metrics.rowHeight;
+            }
+        }
+        DeleteObject(rule);
+        SelectObject(dc,m_fontSmall?m_fontSmall:m_font);SetTextColor(dc,ui_palette::SecondaryText);
+        RECT footer{metrics.padding,client.bottom-metrics.padding-metrics.footerHeight,client.right-metrics.padding,client.bottom-metrics.padding};
+        const std::wstring hint=T(L"shortcuts.close_hint");DrawTextW(dc,hint.c_str(),-1,&footer,DT_LEFT|DT_BOTTOM|DT_SINGLELINE|DT_NOPREFIX);
+        SelectObject(dc,old);EndPaint(window,&paint);
+    }
+    static LRESULT CALLBACK ShortcutSheetWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(m==WM_NCCREATE){SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));return DefWindowProcW(h,m,w,l);}
+        auto* self=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+        switch(m){
+        // Never takes focus - the keys it lists keep working while it is up -
+        // and a click anywhere on it puts it away.
+        case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
+        case WM_LBUTTONDOWN:case WM_RBUTTONDOWN:if(self)self->HideShortcutSheet();return 0;
+        case WM_ERASEBKGND:return 1;
+        case WM_PAINT:if(self){self->PaintShortcutSheet(h);return 0;}break;
+        case WM_NCDESTROY:if(self&&self->m_shortcutWnd==h)self->m_shortcutWnd=nullptr;break;
+        }
+        return DefWindowProcW(h,m,w,l);
+    }
     // ---- The timeline's render map: chapters, the hover preview ----------
     //
     // The file the timeline asks about: the loaded local file, or the local
@@ -8166,7 +8265,8 @@ private:
         // has to be dropped here. Switching a 4K panel to 1080p is exactly this
         // case, and it moves the Auto rung.
         case WM_DISPLAYCHANGE:InvalidateMonitorMode();ReportUpscaleRungDrift();Layout();InvalidateRect(h,nullptr,FALSE);return 0;
-        case WM_SIZE:Layout();SyncActivityFeedback();RefreshToolbarTips();return 0;
+        case WM_SIZE:Layout();SyncActivityFeedback();RefreshToolbarTips();if(m_shortcutSheetOpen)ShowShortcutSheet();ClearTimelineHover();return 0;
+        case WM_MOVE:if(m_shortcutSheetOpen)ShowShortcutSheet();ClearTimelineHover();break;
         case WM_PAINT:Paint();return 0;
         case WM_NCMOUSEMOVE:{
             POINT point{GET_X_LPARAM(l),GET_Y_LPARAM(l)};
@@ -8203,7 +8303,13 @@ private:
         case WM_MOUSEWHEEL:{if(m_loaded){const float step=(GET_WHEEL_DELTA_WPARAM(w)>0)?0.05f:-0.05f;const float volume=std::clamp(m_volume+step,0.0f,1.0f);const bool changed=m_muted||volume!=m_volume;if(changed){m_muted=false;m_volume=volume;Audio().SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}}return 0;}
         case WM_COMMAND:HandleCommand(LOWORD(w));return 0;
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
+        // ? is a character, not a key: it is Shift+/ on a US layout and
+        // somewhere else on most others, so it is matched after translation.
+        case WM_CHAR:if(w==L'?'){ToggleShortcutSheet();return 0;}break;
         case WM_KEYDOWN:
+            // F1 is Windows' help key; nothing else in the player used it.
+            if(w==VK_F1){ToggleShortcutSheet();return 0;}
+            if(w==VK_ESCAPE&&m_shortcutSheetOpen){HideShortcutSheet();return 0;}
             if(w==VK_F10)RevealFullscreenControls();
             // Esc stops every other long-running activity in this player - a
             // live session, a neural job, a YouTube resolve - and a conversion
@@ -8250,6 +8356,7 @@ private:
         case IDM_NEURAL_PRESET_CUSTOM:break;// reports state; not selectable
 case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExportStages();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
         case IDM_CHECK_FOR_UPDATES:MaybeStartUpdateCheck(true);break;
+        case IDM_KEYBOARD_SHORTCUTS:ToggleShortcutSheet();break;
         case IDM_UPDATE_AVAILABLE:ActivateUpdateBadge();break;
         case IDM_COMPARE_NEURAL:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Blend);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustBlendAmount(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustBlendAmount(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
@@ -8440,6 +8547,10 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     std::vector<timeline::Chapter> m_chapters;timeline::LruCache<TimelineMediaWorker::Thumbnail> m_thumbnails{24};
     std::optional<int> m_timelineHoverX;std::optional<int64_t> m_previewKey;std::wstring m_previewText;
     timeline::PreviewLayout m_previewLayout{};HWND m_previewWnd=nullptr;
+    // The keyboard cheat sheet: whether it is up, its popup, and the rows and
+    // layout it was last shown with.
+    bool m_shortcutSheetOpen=false;HWND m_shortcutWnd=nullptr;std::vector<ShortcutGroup> m_shortcutGroups;
+    shortcut_sheet::Metrics m_shortcutMetrics{};shortcut_sheet::Layout m_shortcutLayout{};
     // Drives Tick while a modal loop owns the thread; see StartModalTick.
     UINT_PTR m_modalTickTimer=0;bool m_inTick=false;
     // The paused frame needs presenting again: the window under it was resized

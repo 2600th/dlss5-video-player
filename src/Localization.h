@@ -335,7 +335,24 @@ private:
             {L"status.muted", L"Muted"}, {L"status.volume", L"Vol"}, {L"status.seeking", L"Seeking\u2026"},
             {L"status.render_hint", L"Mark I/O, then Ctrl+R renders the marked range"},
             {L"status.preparing_source", L"Downloading this source for rendering\u2026"},
-            {L"recent.missing", L"This local video has moved or is no longer available."}
+            {L"recent.missing", L"This local video has moved or is no longer available."},
+            // Keyboard discoverability (P2.23). The cheat sheet lists every
+            // menu command that names a key by reading the menus themselves;
+            // these are only the rows no menu command carries, and the sheet's
+            // own chrome.
+            {L"menu.help", L"Help"},
+            {L"menu.keyboard_shortcuts", L"Keyboard shortcuts\t? / F1"},
+            {L"shortcuts.title", L"Keyboard shortcuts"},
+            {L"shortcuts.close_hint", L"? , F1 or Esc closes this"},
+            {L"shortcuts.group.keyboard", L"Keyboard and mouse"},
+            {L"shortcuts.focus", L"Move between the bar's buttons"},
+            {L"shortcuts.activate", L"Press the focused button"},
+            {L"shortcuts.step", L"Step one cached frame"},
+            {L"shortcuts.escape", L"Stop live rendering, cancel a job, leave fullscreen"},
+            {L"shortcuts.reveal", L"Show the menu and bar in fullscreen"},
+            {L"shortcuts.volume", L"Volume"},
+            {L"shortcuts.overlay", L"Seek, mute and neural rendering over ReShade"},
+            {L"shortcuts.media_key", L"Play or pause from the keyboard's media key"}
         };
         return strings;
     }

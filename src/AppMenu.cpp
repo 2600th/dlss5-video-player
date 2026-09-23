@@ -230,6 +230,11 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(advanced, IDM_CHECK_FOR_UPDATES, L"menu.check_updates");
     const std::wstring fileName = localizer.Get(L"menu.file"), playName = localizer.Get(L"menu.playback"), videoName = localizer.Get(L"menu.video"), dlssName = localizer.Get(L"menu.dlss"), advancedName = localizer.Get(L"menu.advanced");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(play), playName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(video), videoName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(dlss), dlssName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(advanced), advancedName.c_str());
+    // Where a viewer looks for "what are the keys". About 30 shortcuts over
+    // five menus were findable only by opening each menu in turn.
+    HMENU help = CreatePopupMenu();
+    add(help, IDM_KEYBOARD_SHORTCUTS, L"menu.keyboard_shortcuts");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), localizer.Get(L"menu.help").c_str());
     UpdateFeatureAvailability(bar, true, false, false, false, false, false, false);
     UpdateRenderActionAvailability(bar, false, false, false, false, false);
     UpdateComparisonMenu(bar, false, false, IDM_COMPARE_NEURAL, false);
@@ -461,6 +466,92 @@ bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable
     ok = CheckMenuRadioItem(menu, IDM_COMPARE_NEURAL, IDM_COMPARE_WIPE, selectedMode, MF_BYCOMMAND) && ok;
     ok = EnableMenuItem(menu, IDM_COMPARE_ZOOM, MF_BYCOMMAND | (zoomAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
     return CheckMenuItem(menu, IDM_COMPARE_ZOOM, MF_BYCOMMAND | (zoomed ? MF_CHECKED : MF_UNCHECKED)) != static_cast<DWORD>(-1) && ok;
+}
+
+namespace {
+
+// A menu item's text without its mnemonic ampersands ("Convert && export" is
+// "Convert & export"), and an accelerator with its runs of spaces closed up.
+std::wstring PlainMenuText(std::wstring_view text)
+{
+    std::wstring plain;
+    for (size_t index = 0; index < text.size(); ++index) {
+        if (text[index] == L'&') {
+            if (index + 1 < text.size() && text[index + 1] == L'&') { plain.push_back(L'&'); ++index; }
+            continue;
+        }
+        plain.push_back(text[index]);
+    }
+    return plain;
+}
+
+std::wstring CollapsedSpaces(std::wstring_view text)
+{
+    std::wstring collapsed;
+    for (const wchar_t character : text) {
+        if (character == L' ' && (collapsed.empty() || collapsed.back() == L' ')) continue;
+        collapsed.push_back(character);
+    }
+    while (!collapsed.empty() && collapsed.back() == L' ') collapsed.pop_back();
+    return collapsed;
+}
+
+void CollectMenuShortcuts(HMENU menu, const std::wstring& group, std::vector<ShortcutRow>& rows)
+{
+    const int count = GetMenuItemCount(menu);
+    for (int index = 0; index < count; ++index) {
+        wchar_t text[256]{};
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_FTYPE | MIIM_SUBMENU | MIIM_STRING;
+        item.dwTypeData = text;
+        item.cch = static_cast<UINT>(std::size(text));
+        if (!GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item)) continue;
+        if (item.fType & MFT_SEPARATOR) continue;
+        if (item.hSubMenu) { CollectMenuShortcuts(item.hSubMenu, group, rows); continue; }
+        const std::wstring_view label(text);
+        const size_t tab = label.find(L'\t');
+        if (tab == std::wstring_view::npos) continue;
+        rows.push_back(ShortcutRow{group, PlainMenuText(label.substr(0, tab)),
+                                   CollapsedSpaces(label.substr(tab + 1))});
+    }
+}
+
+// The keys no menu command names. Every one is handled in main.cpp's
+// WM_KEYDOWN (or the wheel, or a registered hotkey) and nowhere else, which
+// is exactly why they were the ones nobody found.
+struct KeyboardOnlyShortcut {
+    const wchar_t* labelKey;
+    const wchar_t* keys;
+};
+constexpr KeyboardOnlyShortcut kKeyboardOnlyShortcuts[] = {
+    {L"shortcuts.focus", L"Tab / Shift+Tab"},
+    {L"shortcuts.activate", L"Enter"},
+    {L"shortcuts.step", L"."},
+    {L"shortcuts.escape", L"Esc"},
+    {L"shortcuts.reveal", L"F10 / Alt"},
+    {L"shortcuts.volume", L"Mouse wheel"},
+    {L"shortcuts.overlay", L"Ctrl+Alt+Left / Right / M / D"},
+    {L"shortcuts.media_key", L"Media Play/Pause"},
+};
+
+} // namespace
+
+std::vector<ShortcutRow> CollectShortcuts(HMENU menuBar, const Localizer& localizer)
+{
+    std::vector<ShortcutRow> rows;
+    const int count = menuBar ? GetMenuItemCount(menuBar) : 0;
+    for (int index = 0; index < count; ++index) {
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_SUBMENU;
+        if (!GetMenuItemInfoW(menuBar, static_cast<UINT>(index), TRUE, &item) || !item.hSubMenu) continue;
+        wchar_t name[128]{};
+        GetMenuStringW(menuBar, static_cast<UINT>(index), name, static_cast<int>(std::size(name)), MF_BYPOSITION);
+        CollectMenuShortcuts(item.hSubMenu, PlainMenuText(name), rows);
+    }
+    const std::wstring keyboard = localizer.Get(L"shortcuts.group.keyboard");
+    for (const auto& shortcut : kKeyboardOnlyShortcuts)
+        rows.push_back(ShortcutRow{keyboard, localizer.Get(shortcut.labelKey), shortcut.keys});
+    return rows;
 }
 
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown)
