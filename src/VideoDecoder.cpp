@@ -2,6 +2,7 @@
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 #include "KillOnCloseJob.h"
+#include "MediaTools.h"
 #include "FrameRatePolicy.h"
 #include "VariableFrameRatePolicy.h"
 #include "HexText.h"
@@ -282,37 +283,7 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
 }
 
 std::wstring VideoDecoder::FindTool(const wchar_t* exeName) const {
-    if(!m_helperDirectory.empty()){
-        const fs::path candidate=fs::path(m_helperDirectory)/exeName;std::error_code ec;
-        if(fs::is_regular_file(candidate,ec))return candidate.wstring();
-        return L"";
-    }
-    if (const auto moduleDirectory = platform_paths::ModuleDirectory()) {
-        const fs::path base = *moduleDirectory;
-        // neural-runtime is a contained helper package: use only the explicit
-        // parent copy shared with the player, never an unrelated PATH tool.
-        if (base.filename() == L"neural-runtime") {
-            const fs::path shared = base.parent_path() / exeName;
-            std::error_code ec;
-            return fs::is_regular_file(shared, ec) ? shared.wstring() : L"";
-        }
-        const fs::path candidates[] = {
-            base / exeName,
-            base / L"ffmpeg" / exeName,
-            base / L"ffmpeg" / L"bin" / exeName,
-            base.parent_path() / L"ffmpeg" / L"bin" / exeName
-        };
-        for (const auto& c : candidates) {
-            std::error_code ec;
-            if (fs::is_regular_file(c, ec)) return c.wstring();
-        }
-    }
-
-    wchar_t found[32768]{};
-    const DWORD n = SearchPathW(nullptr, exeName, nullptr,
-                                static_cast<DWORD>(std::size(found)), found, nullptr);
-    if (n && n < std::size(found)) return found;
-    return L"";
+    return media_tools::FindTool(m_helperDirectory, exeName, media_tools::Fallback::SearchPath).wstring();
 }
 
 bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& arguments,

@@ -2,6 +2,7 @@
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 #include "KillOnCloseJob.h"
+#include "MediaTools.h"
 
 #include <windows.h>
 
@@ -54,30 +55,12 @@ std::chrono::milliseconds MediaDeadline(double mediaSeconds, std::chrono::minute
     return floor + std::chrono::milliseconds(std::llround(bounded * slowdown * 1000.0));
 }
 
-std::filesystem::path ModuleDirectory()
-{
-    // platform_paths distinguishes "could not be determined" from a truncated
-    // path; these callers have always treated an empty path as the former.
-    return platform_paths::ModuleDirectory().value_or(std::filesystem::path{});
-}
-
 std::filesystem::path FindHelper(const std::filesystem::path& directory,
                                  std::wstring_view name)
 {
-    const std::filesystem::path base = directory.empty() ? ModuleDirectory() : directory;
-    // The neural helper is deliberately packaged below the hook-free player.
-    // Its FFmpeg tools remain the single shared copies beside that parent,
-    // never an arbitrary executable found through PATH.
-    if (base.filename() == L"neural-runtime") {
-        const auto shared = base.parent_path() / name;
-        std::error_code error;
-        if (std::filesystem::is_regular_file(shared, error) && !error) return shared;
-        return {};
-    }
-    const auto candidate = base / name;
-    std::error_code error;
-    if (!std::filesystem::is_regular_file(candidate, error) || error) return {};
-    return candidate;
+    // What the pipeline writes goes into the cache and the user's files, so
+    // it only ever runs the packaged tools, never an arbitrary one from PATH.
+    return media_tools::FindTool(directory, name, media_tools::Fallback::None);
 }
 
 std::wstring QuoteArgument(std::wstring_view value)

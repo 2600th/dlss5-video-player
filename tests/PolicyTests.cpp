@@ -49,6 +49,7 @@
 #include "NeuralPresets.h"
 #include "HexText.h"
 #include "AtomicFile.h"
+#include "MediaTools.h"
 #ifdef small
 #undef small
 #endif
@@ -10111,6 +10112,66 @@ void atomic_file_replace_publishes_whole_files_and_cleans_up_only_its_own_test()
     std::filesystem::remove_all(directory, error);
 }
 
+// P1.16: one lookup for ffmpeg and ffprobe. The audio player searched three
+// places where the video decoder searched four and then PATH, so with the
+// tools only in <app>\ffmpeg a video's frames came from the packaged build and
+// its audio from whatever PATH offered. The neural-runtime package takes only
+// its parent's copy, and the export pipeline never searches PATH.
+void media_tools_are_found_the_same_way_by_every_caller_test()
+{
+    namespace fs = std::filesystem;
+    const fs::path root = test_support::FixtureTempRoot() /
+        (L"PolicyTests-MediaTools-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code error;
+    fs::remove_all(root, error);
+    // A name nothing real carries, so PATH holds exactly the copy put there.
+    const std::wstring tool = L"dlss5-media-tools-probe.exe";
+    const auto plant = [&](const fs::path& directory) {
+        fs::create_directories(directory, error);
+        std::ofstream(directory / tool, std::ios::binary) << "tool";
+        return directory / tool;
+    };
+    using media_tools::Fallback;
+    using media_tools::FindToolIn;
+    const fs::path app = root / L"app";
+    const fs::path onPath = plant(root / L"on-path");
+    std::wstring savedPath(32768, L'\0');
+    savedPath.resize(GetEnvironmentVariableW(L"PATH", savedPath.data(), static_cast<DWORD>(savedPath.size())));
+    REQUIRE(SetEnvironmentVariableW(L"PATH", (onPath.parent_path().wstring() + L';' + savedPath).c_str()) != FALSE);
+
+    // Nothing packaged: playback falls back to PATH, the pipeline does not.
+    fs::create_directories(app, error);
+    CHECK(fs::equivalent(onPath, FindToolIn({}, app, tool, Fallback::SearchPath), error));
+    CHECK(FindToolIn({}, app, tool, Fallback::None).empty());
+
+    // Packaged under <app>\ffmpeg only: every caller takes it over PATH.
+    const fs::path nested = plant(app / L"ffmpeg");
+    CHECK_EQ(nested, FindToolIn({}, app, tool, Fallback::SearchPath));
+    CHECK_EQ(nested, FindToolIn({}, app, tool, Fallback::None));
+    // Beside the executable wins over the development layouts.
+    const fs::path beside = plant(app);
+    CHECK_EQ(beside, FindToolIn({}, app, tool, Fallback::SearchPath));
+
+    // The helper package, as its module directory or passed explicitly, uses
+    // its parent's copy and nothing else - not one inside it, not PATH's.
+    const fs::path runtime = app / L"neural-runtime";
+    plant(runtime);
+    CHECK_EQ(beside, FindToolIn({}, runtime, tool, Fallback::SearchPath));
+    CHECK_EQ(beside, FindToolIn(runtime, app, tool, Fallback::SearchPath));
+    fs::remove(beside, error);
+    CHECK(FindToolIn({}, runtime, tool, Fallback::SearchPath).empty());
+
+    // An explicit directory is the only place looked.
+    const fs::path chosen = root / L"chosen";
+    fs::create_directories(chosen, error);
+    CHECK(FindToolIn(chosen, app, tool, Fallback::SearchPath).empty());
+    const fs::path chosenTool = plant(chosen);
+    CHECK_EQ(chosenTool, FindToolIn(chosen, app, tool, Fallback::SearchPath));
+
+    CHECK(SetEnvironmentVariableW(L"PATH", savedPath.c_str()) != FALSE);
+    fs::remove_all(root, error);
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -10401,6 +10462,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_sink_is_declared_dead_only_after_a_playing_stream_goes_quiet_test),
     TEST_CASE(hex_text_is_zero_padded_to_the_width_of_its_type_test),
     TEST_CASE(atomic_file_replace_publishes_whole_files_and_cleans_up_only_its_own_test),
+    TEST_CASE(media_tools_are_found_the_same_way_by_every_caller_test),
 };
 
 

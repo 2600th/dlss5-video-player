@@ -2,6 +2,7 @@
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 #include "KillOnCloseJob.h"
+#include "MediaTools.h"
 #include "Log.h"
 #include <filesystem>
 #include <vector>
@@ -29,19 +30,7 @@ AudioPlayer::ReaderState::~ReaderState()
 }
 
 std::wstring AudioPlayer::FindTool(const wchar_t* name) const {
-    if(!m_settings.helperDirectory.empty()){
-        const fs::path candidate=fs::path(m_settings.helperDirectory)/name;std::error_code error;
-        return fs::is_regular_file(candidate,error)?candidate.wstring():std::wstring{};
-    }
-    if (const auto moduleDirectory = platform_paths::ModuleDirectory()) {
-        fs::path base = *moduleDirectory;
-        const fs::path cands[] = { base / name, base / L"ffmpeg" / L"bin" / name,
-                                   base.parent_path() / L"ffmpeg" / L"bin" / name };
-        for (const auto& p : cands) { std::error_code ec; if (fs::is_regular_file(p, ec)) return p.wstring(); }
-    }
-    wchar_t found[32768]{};
-    DWORD n = SearchPathW(nullptr, name, nullptr, static_cast<DWORD>(std::size(found)), found, nullptr);
-    return (n && n < std::size(found)) ? std::wstring(found) : std::wstring();
+    return media_tools::FindTool(m_settings.helperDirectory, name, media_tools::Fallback::SearchPath).wstring();
 }
 
 namespace {
