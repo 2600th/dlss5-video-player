@@ -6525,24 +6525,45 @@ private:
             m_shortcutWnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,kClassName,nullptr,WS_POPUP,0,0,1,1,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
             if(!m_shortcutWnd)return;
         }
-        // Columns are as wide as the widest action and the widest keys, as
-        // measured in the font they are drawn in.
-        int actionWidth=0,keysWidth=0;
+        // Columns are as wide as the widest row - its action, a gap and its keys -
+        // as measured in the font they are drawn in. The widest action and the
+        // widest keys are different rows, and adding them made every column
+        // wider than any row needed.
+        int rowWidth=0;
         if(HDC dc=GetDC(m_shortcutWnd)){
             const HGDIOBJ old=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
             for(const auto& group:m_shortcutGroups)for(const auto& row:group.rows){
-                SIZE size{};GetTextExtentPoint32W(dc,row.action.c_str(),int(row.action.size()),&size);actionWidth=std::max<int>(actionWidth,size.cx);
-                GetTextExtentPoint32W(dc,row.keys.c_str(),int(row.keys.size()),&size);keysWidth=std::max<int>(keysWidth,size.cx);
+                SIZE action{},keys{};
+                GetTextExtentPoint32W(dc,row.action.c_str(),int(row.action.size()),&action);
+                GetTextExtentPoint32W(dc,row.keys.c_str(),int(row.keys.size()),&keys);
+                rowWidth=std::max<int>(rowWidth,int(action.cx+keys.cx));
             }
             SelectObject(dc,old);ReleaseDC(m_shortcutWnd,dc);
         }
-        m_shortcutMetrics=shortcut_sheet::Metrics{Dip(22),Dip(30),Dip(12),actionWidth+Dip(20)+keysWidth,Dip(28),Dip(20),Dip(36),Dip(26)};
+        m_shortcutMetrics=shortcut_sheet::Metrics{Dip(22),Dip(30),Dip(12),rowWidth+Dip(20),Dip(28),Dip(20),Dip(36),Dip(26)};
+        // Laid out against the monitor's work area, centred on the player and kept
+        // on that monitor. Sized to the player's client, the default window at
+        // 175% held one column - the "Space (Overlay: Ctrl+Alt+Space)" row makes
+        // a column wide - and the sheet showed File and Playback and silently
+        // dropped the other five groups.
         RECT client{};GetClientRect(m_hwnd,&client);
+        POINT centre{(client.right-client.left)/2,(client.bottom-client.top)/2};ClientToScreen(m_hwnd,&centre);
+        MONITORINFO monitor{sizeof(monitor)};
+        RECT area{centre.x-(client.right-client.left)/2,centre.y-(client.bottom-client.top)/2,0,0};
+        area.right=area.left+(client.right-client.left);area.bottom=area.top+(client.bottom-client.top);
+        if(GetMonitorInfoW(MonitorFromWindow(m_hwnd,MONITOR_DEFAULTTONEAREST),&monitor)){area=monitor.rcWork;InflateRect(&area,-Dip(24),-Dip(24));}
         std::vector<size_t> rows;for(const auto& group:m_shortcutGroups)rows.push_back(group.rows.size());
-        m_shortcutLayout=shortcut_sheet::LayoutSheet(rows,m_shortcutMetrics,int(client.right-client.left),int(client.bottom-client.top));
-        POINT origin{(client.right-client.left-m_shortcutLayout.width)/2,std::max<LONG>(0,(client.bottom-client.top-m_shortcutLayout.height)/2)};
-        ClientToScreen(m_hwnd,&origin);
-        SetWindowPos(m_shortcutWnd,HWND_TOP,origin.x,origin.y,m_shortcutLayout.width,m_shortcutLayout.height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+        // As tall as the player first, wider if it needs to be; the monitor's
+        // height only when the groups still do not all fit.
+        const auto everyGroup=[](const shortcut_sheet::Layout& layout){
+            return std::all_of(layout.groups.begin(),layout.groups.end(),[](const shortcut_sheet::GroupPlacement& group){return group.visible;});};
+        m_shortcutLayout=shortcut_sheet::LayoutSheet(rows,m_shortcutMetrics,int(area.right-area.left),
+                                                     std::min<int>(int(client.bottom-client.top),int(area.bottom-area.top)));
+        if(!everyGroup(m_shortcutLayout))
+            m_shortcutLayout=shortcut_sheet::LayoutSheet(rows,m_shortcutMetrics,int(area.right-area.left),int(area.bottom-area.top));
+        const LONG x=std::clamp<LONG>(centre.x-m_shortcutLayout.width/2,area.left,std::max<LONG>(area.left,area.right-m_shortcutLayout.width));
+        const LONG y=std::clamp<LONG>(centre.y-m_shortcutLayout.height/2,area.top,std::max<LONG>(area.top,area.bottom-m_shortcutLayout.height));
+        SetWindowPos(m_shortcutWnd,HWND_TOP,x,y,m_shortcutLayout.width,m_shortcutLayout.height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
         InvalidateRect(m_shortcutWnd,nullptr,FALSE);
     }
     void PaintShortcutSheet(HWND window){
