@@ -353,7 +353,7 @@ private:
             {L"timecode.go", L"Go"}, {L"timecode.set_in", L"Set In"}, {L"timecode.set_out", L"Set Out"}, {L"timecode.cancel", L"Cancel"},
             {L"timecode.invalid", L"Enter a timecode such as 00:01:23:04, 1:23.500 or f2000."},
             {L"range.invalid", L"Mark In (I) and Out (O) with In before Out, then render the marked range."},
-            {L"idle.title", L"Play a video with DLSS"}, {L"idle.subtitle", L"Drop a file here or choose a source"}, {L"idle.open", L"Open file"},
+            {L"idle.title", L"DLSS 5"}, {L"idle.subtitle", L"Drop a file here or choose a source"}, {L"idle.open", L"Open file"},
             {L"idle.youtube", L"Open YouTube URL"}, {L"idle.youtube_unavailable", L"Unavailable in this build; YouTube support is not installed yet."},
             {L"idle.youtube_unavailable_compact", L"YouTube unavailable in this build."},
             {L"dialog.title", L"Open photo, GIF or video"}, {L"dialog.all_ffmpeg", L"All files (FFmpeg auto-detect)"}, {L"dialog.supported", L"Photos, GIFs and videos"}, {L"dialog.all", L"All files"},

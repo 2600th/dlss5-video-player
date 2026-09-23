@@ -533,6 +533,20 @@ static void RemoveChildProperties(HWND parent, std::initializer_list<const wchar
         return TRUE;
     },reinterpret_cast<LPARAM>(&context));
 }
+// Keyboard focus on a rounded button: a ring that follows the button's corners,
+// in the button's own text colour so it reads on every fill, blue and teal
+// included. DrawFocusRect drew a dotted square inside the rounded shape.
+static void DrawRoundedFocusRing(HDC dc,RECT bounds,int radius,COLORREF color,UINT dpi)
+{
+    const int inset=MulDiv(3,static_cast<int>(dpi?dpi:USER_DEFAULT_SCREEN_DPI),USER_DEFAULT_SCREEN_DPI);
+    const int width=std::max(1,MulDiv(2,static_cast<int>(dpi?dpi:USER_DEFAULT_SCREEN_DPI),USER_DEFAULT_SCREEN_DPI));
+    InflateRect(&bounds,-inset,-inset);
+    const int corner=std::max(1,radius-inset);
+    HPEN pen=CreatePen(PS_INSIDEFRAME,width,color);if(!pen)return;
+    const HGDIOBJ oldPen=SelectObject(dc,pen),oldBrush=SelectObject(dc,GetStockObject(NULL_BRUSH));
+    RoundRect(dc,bounds.left,bounds.top,bounds.right,bounds.bottom,corner*2,corner*2);
+    SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(pen);
+}
 static void DrawDarkPushButton(const DRAWITEMSTRUCT& item)
 {
     const bool enabled=(item.itemState&ODS_DISABLED)==0,pressed=(item.itemState&ODS_SELECTED)!=0;
@@ -552,7 +566,7 @@ static void DrawDarkPushButton(const DRAWITEMSTRUCT& item)
     RECT label=item.rcItem;DrawTextW(item.hDC,text,-1,&label,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|
                                      ((item.itemState&ODS_NOACCEL)?DT_HIDEPREFIX:0u));
     if(oldFont)SelectObject(item.hDC,oldFont);
-    if(visual.drawFocus){RECT focus=item.rcItem;const int inset=MulDiv(3,static_cast<int>(dpi),USER_DEFAULT_SCREEN_DPI);InflateRect(&focus,-inset,-inset);DrawFocusRect(item.hDC,&focus);}
+    if(visual.drawFocus)DrawRoundedFocusRing(item.hDC,item.rcItem,radius,visual.text,dpi);
 }
 
 // The two modal prompts' share of the dark chrome and the dpi handling: the
@@ -1985,7 +1999,7 @@ class PlayerApp {
 #endif
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){}
-    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
+    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_fontTitle)DeleteObject(m_fontTitle); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
 
     bool Create(HINSTANCE hi) {
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
@@ -3663,6 +3677,10 @@ private:
         const UINT activeDpi=dpi==0?USER_DEFAULT_SCREEN_DPI:dpi;
         HFONT regular=CreateUiFont(16,activeDpi);
         HFONT smallFont=CreateUiFont(14,activeDpi);
+        // The start screen's "DLSS 5": a heading, not a sentence in the body size.
+        HFONT titleFont=CreateFontW(-MulDiv(24,static_cast<int>(activeDpi),USER_DEFAULT_SCREEN_DPI),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
+                                    OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
+        if(titleFont){if(m_fontTitle)DeleteObject(m_fontTitle);m_fontTitle=titleFont;}
         HFONT icons=m_uiResources.CreateIconFont(activeDpi);
         if(regular){if(m_font)DeleteObject(m_font);m_font=regular;}
         if(smallFont){if(m_fontSmall)DeleteObject(m_fontSmall);m_fontSmall=smallFont;}
@@ -6260,6 +6278,8 @@ private:
             }
             return tiles;
         }
+        // A trailer is a YouTube link: with no way to play one, none is offered.
+        if(!YouTubePlaybackAvailable())return tiles;
         for(size_t index=0;index<kExampleVideos.size();++index){
             const auto& example=kExampleVideos[index];
             if(std::any_of(recent.begin(),recent.end(),[&](const RecentMediaEntry& entry){return entry.youtube&&entry.source==example.url;}))continue;
@@ -6267,11 +6287,31 @@ private:
         }
         return tiles;
     }
+    static const wchar_t* StartMarkText(start_screen::Mark mark){return mark==start_screen::Mark::Pass?L"✓ ":mark==start_screen::Mark::Fail?L"✕ ":L"• ";}
+    // The panel's two columns measured in the font they are painted in, so the
+    // block is centred as a whole instead of hanging off a fixed-width box.
+    start_screen::PanelText StartPanelText(const std::vector<start_screen::Line>& lines,bool safeModeLink)const{
+        start_screen::PanelText text{};
+        const HFONT font=m_fontSmall?m_fontSmall:m_font;
+        HDC dc=m_hwnd?GetDC(m_hwnd):nullptr;if(!dc||!font){if(dc)ReleaseDC(m_hwnd,dc);return text;}
+        const HGDIOBJ old=SelectObject(dc,font);
+        const auto measure=[&](const std::wstring& value){SIZE size{};GetTextExtentPoint32W(dc,value.c_str(),int(value.size()),&size);return int(size.cx);};
+        for(const auto& line:lines){
+            text.labelColumn=std::max(text.labelColumn,measure(StartMarkText(line.mark)+line.label));
+            text.valueColumn=std::max(text.valueColumn,measure(line.value));
+        }
+        if(safeModeLink)text.valueColumn=std::max(text.valueColumn,measure(T(L"start.safe_mode")));
+        SelectObject(dc,old);ReleaseDC(m_hwnd,dc);
+        if(text.labelColumn>0)text.labelColumn+=Dip(20);   // the gutter between the columns
+        return text;
+    }
     start_screen::Layout StartLayout()const{
         RECT c{};if(m_hwnd)GetClientRect(m_hwnd,&c);
         const auto lines=start_screen::CapabilityLines(StartScreenFacts());
+        const bool safeModeLink=start_screen::OfferSafeMode(lines,m_opt.safeMode);
         return start_screen::LayoutStartScreen(int(c.right-c.left),int(c.bottom-c.top),ActiveWindowDpi(m_hwnd),lines.size(),
-                                               start_screen::OfferSafeMode(lines,m_opt.safeMode),StartTiles(false).size(),StartTiles(true).size());
+                                               safeModeLink,StartTiles(false).size(),StartTiles(true).size(),
+                                               StartPanelText(lines,safeModeLink),!YouTubePlaybackAvailable());
     }
     void SyncStartScreen(){
         if(m_loaded||!m_hwnd)return;
@@ -6297,7 +6337,7 @@ private:
             const RECT line=layout.lines[index];
             // A drawn mark, not a coloured row: the state is a glyph in the
             // label column, as the toolbar's working state is its own colour.
-            const wchar_t* mark=lines[index].mark==start_screen::Mark::Pass?L"✓ ":lines[index].mark==start_screen::Mark::Fail?L"✕ ":L"• ";
+            const wchar_t* mark=StartMarkText(lines[index].mark);
             const COLORREF markColor=lines[index].mark==start_screen::Mark::Pass?ui_palette::NeuralCoverage:lines[index].mark==start_screen::Mark::Fail?ui_palette::Attention:ui_palette::SecondaryText;
             RECT label{line.left,line.top,line.left+layout.labelWidth,line.bottom};
             SetTextColor(dc,markColor);DrawTextW(dc,mark,-1,&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
@@ -6876,7 +6916,7 @@ private:
         if(showText){const HGDIOBJ oldFont=SelectObject(dc,textFont);RECT textRect=content.text;
             DrawTextW(dc,shown.c_str(),-1,&textRect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
             SelectObject(dc,oldFont);}
-        if(visual.drawFocus&&action!=ToolbarAction::None){RECT focusRect=r;InflateRect(&focusRect,-Dip(3),-Dip(3));DrawFocusRect(dc,&focusRect);}
+        if(visual.drawFocus&&action!=ToolbarAction::None)DrawRoundedFocusRing(dc,r,radius,visual.text,ActiveWindowDpi(m_hwnd));
     }
 
     void DrawSolidEllipse(HDC dc,const RECT& bounds,COLORREF color,const char* stage){
@@ -7219,7 +7259,7 @@ private:
             const IdleSurfaceLayout& idle=start.core;
             PaintStartScreenExtras(dc,start);
             SetBkMode(dc,TRANSPARENT);
-            SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_font);std::wstring tt=T(L"idle.title");RECT title=idle.title;DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+            SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_fontTitle?m_fontTitle:m_font);std::wstring tt=T(L"idle.title");RECT title=idle.title;DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
             SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=m_youtubeLifecycle.IsResolving()?m_cachedStatus:(m_cacheNotice.empty()?T(L"idle.subtitle"):m_cacheNotice);RECT subtitle=idle.subtitle;DrawTextW(dc,ss.c_str(),-1,&subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);
             for(const auto& item:idle.actions){const auto content=ButtonContent(item.action,true);DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,false,content.enabled&&m_hoverAction==item.action,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,false);}
             if(!YouTubePlaybackAvailable()){SetBkMode(dc,TRANSPARENT);SetTextColor(dc,ui_palette::SecondaryText);of=SelectObject(dc,m_fontSmall);const bool compactReason=idle.subtitle.top==idle.subtitle.bottom;std::wstring reason=T(compactReason?L"idle.youtube_unavailable_compact":L"idle.youtube_unavailable");RECT reasonRect=idle.youtubeReason;DrawTextW(dc,reason.c_str(),-1,&reasonRect,DT_CENTER|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS|DT_NOPREFIX);SelectObject(dc,of);}return;
@@ -10241,7 +10281,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // over whatever is left; a player that dies without running it is covered
     // by the kill-on-close job object instead.
     ResidentNeuralHelper m_residentHelper;
-    AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr;
+    AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr,m_fontTitle=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_waitingForNetworkFrame=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false,m_neuralRequested=true;
     // Timeline scrubbing: what playback was doing before the drag, and when the
     // last preview seek went out so a drag cannot queue one per mouse move.

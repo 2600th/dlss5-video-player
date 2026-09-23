@@ -1280,6 +1280,34 @@ void start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test
     REQUIRE(scaled.full);
     REQUIRE(!scaled.recentTiles.empty());
     CHECK_EQ(LONG(MulDiv(kTileWidthDip, 144, 96)), scaled.recentTiles[0].right - scaled.recentTiles[0].left);
+
+    // A fresh profile in the default window at 175% (1440 x 880 client): no
+    // recent videos, six trailers. The first start screen showed the panel and
+    // no tiles at all, because a 192 dip row did not fit beside it; the row now
+    // takes smaller tiles and the empty YouTube-reason line gives its space up.
+    const Layout fresh = LayoutStartScreen(1440, 880, 168, 4, false, 0, 6, PanelText{}, false);
+    REQUIRE(fresh.full);
+    CHECK_EQ(size_t{4}, fresh.lines.size());
+    CHECK(fresh.recentTiles.empty());
+    REQUIRE(!fresh.trailerTiles.empty());
+    CHECK(fresh.trailerTiles.front().right - fresh.trailerTiles.front().left < MulDiv(kTileWidthDip, 168, 96));
+    for (const RECT& tile : fresh.trailerTiles) {
+        CHECK(tile.left >= 28 && tile.right <= 1440 - 28);
+        // The thumbnail keeps 16:9 at the smaller width.
+        const RECT thumb = TileThumbnail(tile, 168);
+        CHECK(std::abs((thumb.right - thumb.left) * 9 - (thumb.bottom - thumb.top) * 16) <= 16);
+    }
+    CHECK(fresh.hint.bottom <= 880 - 28);
+    // With a reason under the buttons (YouTube unavailable, so main.cpp offers
+    // no trailers anyway) the panel still shows.
+    CHECK_EQ(size_t{4}, LayoutStartScreen(1440, 880, 168, 4, false, 0, 0, PanelText{}, true).lines.size());
+    // Measured columns: the panel is as wide as its text and centred as one block.
+    const Layout measured = LayoutStartScreen(1440, 880, 96, 4, true, 5, 6, PanelText{150, 330});
+    REQUIRE(measured.full);
+    CHECK_EQ(LONG{480}, measured.lines.front().right - measured.lines.front().left);
+    CHECK(std::abs((measured.lines.front().left - 0) - (1440 - measured.lines.front().right)) <= 1);
+    CHECK_EQ(150, measured.labelWidth);
+    CHECK_EQ(measured.lines.front().left + 150, measured.safeMode.left);
 }
 
 void status_chips_carry_the_rate_the_drops_and_the_render_test()
