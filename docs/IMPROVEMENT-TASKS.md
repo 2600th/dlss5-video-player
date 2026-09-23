@@ -62,7 +62,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
 | **P3** | | | | |
-| [P3.1](#p31) | HDR end to end | L | Pipeline, Player | |
 | [P3.4](#p34) | Extract testable units from `main.cpp` | M | Player | |
 | [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | |
 | [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | |
@@ -225,36 +224,6 @@ amplifies banding; P2.11's metrics are the tool.
 ---
 
 # P3 — Strategic or large
-
-<a id="p31"></a>
-### P3.1 · HDR end to end
-
-`L` · **Pipeline, Player** · _old 3.13_
-
-**Blocked today:**
-- the swapchain is `R8G8B8A8_UNORM` (`D3D12Renderer.cpp:229`), with no
-  `SetColorSpace1`;
-- `colorBuffersHDR = false` is hardcoded (`DLSSGBackend.cpp:410`);
-- the cache is 8-bit.
-
-**The traps specific to neural processing:**
-1. **Auto-exposure over PQ is meaningless.** Do P2.1 first.
-2. **Per-frame peak detection flickers once frame generation is added.**
-   Smooth the peak, as libplacebo does with `peak_smoothing_period`.
-3. **A tone-mapped cache is tied to one display.** Cache scene-referred
-   output, or key the cache on the display's parameters.
-4. **NVIDIA's own video path took several driver generations to reach HDR.**
-
-**Approach:**
-- Detect HDR with `IDXGIOutput6::GetDesc1`.
-- Output `R10G10B10A2` with `SetColorSpace1(RGB_FULL_G2084_NONE_P2020)`.
-- Match SDR white via `DISPLAYCONFIG_SDR_WHITE_LEVEL` (203 nits per BT.2408).
-- Do not call `SetHDRMetaData`.
-- **Never toggle the OS HDR setting.**
-
-P2.3's Main10 export is the first half of this task.
-
----
 
 <a id="p34"></a>
 ### P3.4 · Extract testable units from `main.cpp`

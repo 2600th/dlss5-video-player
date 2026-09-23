@@ -262,7 +262,7 @@ to SDR BT.709 as it is decoded, for playback, for rendering and for export
 alike. The curve is Hable, mapped to the brightest the file says it gets: its
 MaxCLL, else its mastering display's peak, else 1000 nits. That peak is read
 once per video, never measured frame by frame, which would make the picture
-pump. The status line says **HDR source tone-mapped to SDR** while one is
+pump. The status line says **HDR tone-mapped to SDR** while one is
 loaded. Renders of HDR sources made before this saw the untone-mapped picture,
 flat and grey, and are not served again: the tone map and its peak are part of
 the render's identity.

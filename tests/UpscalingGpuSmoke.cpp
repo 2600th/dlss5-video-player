@@ -6,6 +6,7 @@
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "UpscalingPolicy.h"
+#include "Utf8Text.h"
 #include <d3d12sdklayers.h>
 #include <mfapi.h>
 #include <chrono>
@@ -28,6 +29,14 @@ int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControl
 // command lists are already on the queue, and a device removed between frames.
 int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight);
 
+// `hdr-output` as the second argument drives HDR output (P3.1) on whatever display
+// this machine has: the swapchain is switched to R10G10B10A2 / ST 2084 whether or
+// not the output is in HDR mode, then PQ source frames, a PQ comparison reference,
+// every comparison mode, both debug views and the composed-view capture are run on
+// it, and the swapchain is switched back. Under the debug layer, when it is
+// installed, every step must leave no error. Source: an HDR10 clip.
+int RunHdrOutputProbe(const wchar_t* source);
+
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if(argc==6){
@@ -38,6 +47,7 @@ int wmain(int argc,wchar_t** argv) {
         return RunGuideProbe(argv[1],std::wcstoul(argv[2],nullptr,10),*controls,argv[3],std::wcstoul(argv[5],nullptr,10));
     }
     if(argc==4&&std::wstring_view(argv[3])==L"device-loss")return RunDeviceLossProbe(argv[1],std::wcstoul(argv[2],nullptr,10));
+    if(argc==3&&std::wstring_view(argv[2])==L"hdr-output")return RunHdrOutputProbe(argv[1]);
     if(argc!=3)return 2; // source path, target height (1440 or 2160)
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
     int code=1;
@@ -312,6 +322,116 @@ int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight)
         code=presentRefused&&framePublished&&staticRefused&&staticPublished&&wrapped==Access::FrameCount+2&&stillUsable&&
              afterRefusal.errors==0&&removable&&FAILED(reason)&&lossRefused&&latched&&refusedUpFront&&logged&&
              SUCCEEDED(dredHr)&&dredLogged&&afterLoss.syncErrors==0?0:6;
+    }
+    MFShutdown();CoUninitialize();return code;
+}
+
+int RunHdrOutputProbe(const wchar_t* source)
+{
+    Microsoft::WRL::ComPtr<ID3D12Debug> debug;
+    const bool debugLayer=SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)));
+    if(debugLayer)debug->EnableDebugLayer();
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    using Access=D3D12RendererTestAccess;
+    int code=1;
+    {
+        // The same source twice: as the model sees it and as an HDR display shows it.
+        VideoDecoder sdr,pq;
+        pq.SetHdrPresentation(true);
+        if(!sdr.Open(source,MediaSourceKind::LocalFile)||!pq.Open(source,MediaSourceKind::LocalFile))return 3;
+        if(sdr.SourceHdrSignal()==hdr_policy::HdrSignal::Sdr){std::cout<<"not an HDR source\n";return 4;}
+        const uint32_t w=sdr.Width(),h=sdr.Height();
+        const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(w,h,sdr.FrameRate());
+        HWND window=CreateWindowExW(0,L"STATIC",L"hdr output probe",WS_POPUP,0,0,640,360,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        auto renderer=MakeD3D12Renderer();
+        renderer->SetPresentFollowsWindow(true);
+        renderer->SetHdrOutputAllowed(true);
+        bool ok=renderer->Initialize(window,w,h,w,h,gw,gh,DefaultNeuralCarrierQuality());
+        if(ok)renderer->SetDLSS(false);
+        const D3D12Renderer::DisplayHdrState display=ok?renderer->QueryDisplayHdr():D3D12Renderer::DisplayHdrState{};
+        // Forced, whatever the display is: the path has to hold up on any output.
+        const bool hdrOn=ok&&renderer->SetHdrOutput(true,203.0f)&&renderer->HdrOutputActive();
+        VideoFrame sdrFrame,pqFrame;uint32_t frames=0;
+        const float frameMs=float(1000.0/sdr.FrameRate());
+        const auto render=[&](const VideoFrame& frame){
+            renderer->SetNextSourcePq(frame.pq);
+            return renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),nullptr,0,gw,gh,frames==0,false,frameMs);
+        };
+        // The original as HDR through the frame path, and as the reference beside the
+        // tone-mapped frame the model would see.
+        for(uint32_t i=0;ok&&hdrOn&&i<8;++i){
+            ok=sdr.ReadNext(sdrFrame)&&pq.ReadNext(pqFrame)&&pqFrame.pq&&!sdrFrame.pq&&
+               renderer->UploadReferenceFrame(pqFrame.bgra.data(),pqFrame.bgra.size(),true)&&
+               render(i%2?pqFrame:sdrFrame);
+            if(ok)++frames;
+        }
+        // A subtitle canvas over every mode below: on the HDR backbuffer it is the
+        // last layer, at SDR white. Half-transparent white text-sized band.
+        bool subtitles=false;
+        if(ok&&hdrOn){
+            const uint32_t sw=640,sh=360;std::vector<uint8_t> canvas(size_t(sw)*sh*4u,0);
+            for(uint32_t y=300;y<330;++y)for(uint32_t x=100;x<540;++x){uint8_t* p=&canvas[(size_t(y)*sw+x)*4u];p[0]=p[1]=p[2]=p[3]=200;}
+            subtitles=renderer->SetSubtitleOverlay(canvas.data(),sw,sh);
+            ok=subtitles;
+        }
+        static constexpr ComparisonMode modes[]={ComparisonMode::Neural,ComparisonMode::Original,ComparisonMode::SplitVertical,
+            ComparisonMode::Wipe,ComparisonMode::Difference,ComparisonMode::SideBySide,ComparisonMode::Quad};
+        uint32_t presented=0;
+        for(const ComparisonMode mode:modes){
+            if(!ok||!hdrOn)break;
+            ComparisonSettings cmp;cmp.mode=mode;cmp.splitX=0.5f;cmp.loupe=mode==ComparisonMode::SplitVertical;
+            cmp.loupeRadius=40.0f;cmp.loupeLeftX=100.0f;cmp.loupeLeftY=100.0f;cmp.loupeRightX=300.0f;cmp.loupeRightY=100.0f;
+            renderer->SetComparison(cmp);
+            ok=renderer->PresentCurrent()&&!renderer->GpuUnusable();
+            if(ok)++presented;
+        }
+        renderer->SetComparison({});
+        // The debug views draw guides, so each is shown on a frame rendered with one:
+        // presenting a guide view before any guided frame reads textures that were
+        // never drawn, which the debug layer reports whatever the swapchain is.
+        uint32_t debugViews=0;TemporalGuideGenerator guides;
+        for(const auto view:{D3D12Renderer::DebugView::MotionVectors,D3D12Renderer::DebugView::Depth,D3D12Renderer::DebugView::Final}){
+            if(!ok||!hdrOn)break;
+            renderer->SetDebugView(view);
+            if(view!=D3D12Renderer::DebugView::Final){
+                GuideFrame guide;
+                const FrameIdentity id=IdentityOf(sdrFrame,guides.HistoryGeneration(),0,HistoryReset::FirstFrame);
+                ok=guides.Generate(sdrFrame.bgra.data(),sdrFrame.bgra.size(),w,h,w,h,sdr.FrameRate(),id,guide)&&
+                   renderer->RenderFrame(sdrFrame.bgra.data(),sdrFrame.bgra.size(),id,guide,frameMs);
+            }
+            ok=ok&&renderer->PresentCurrent()&&!renderer->GpuUnusable();
+            if(ok)++debugViews;
+        }
+        // The saved comparison stays 8-bit sRGB on an HDR display: an HDR original in
+        // it is the Original view, read back through the SDR compositor.
+        std::vector<uint8_t> composed;uint32_t cw=0,ch=0;uint64_t brightness=0;
+        if(ok&&hdrOn){
+            ComparisonSettings original;original.mode=ComparisonMode::Original;renderer->SetComparison(original);
+            ok=renderer->PresentCurrent()&&renderer->CaptureComposedView(composed,cw,ch);
+            for(size_t i=0;i+3<composed.size();i+=4)brightness+=composed[i];
+            renderer->SetComparison({});
+        }
+        const DebugLayerReport afterHdr=ReadDebugLayer(Access::Device(*renderer),"hdr-output");
+        // And back: the SDR swapchain presents as it did before any of this.
+        const bool hdrOff=ok&&renderer->SetHdrOutput(false,203.0f)&&!renderer->HdrOutputActive();
+        const bool sdrAgain=hdrOff&&sdr.ReadNext(sdrFrame)&&render(sdrFrame)&&renderer->PresentCurrent()&&!renderer->GpuUnusable();
+        const DebugLayerReport afterSdr=ReadDebugLayer(Access::Device(*renderer),"sdr-again");
+        std::cout<<"display: known="<<display.known<<" hdr="<<display.hdr<<" sdrWhite="<<display.sdrWhiteNits
+            <<" peak="<<display.maxLuminanceNits<<" device="<<utf8_text::FromWide(display.device)<<"\n"
+            <<"hdr-output: forcedOn="<<hdrOn<<" frames="<<frames<<" subtitles="<<subtitles<<" comparisonModes="<<presented<<" debugViews="<<debugViews
+            <<" composed="<<cw<<"x"<<ch<<" meanBlue="<<(composed.empty()?0:brightness/(composed.size()/4))
+            <<" backToSdr="<<hdrOff<<" sdrAgain="<<sdrAgain
+            <<" debugLayer="<<(debugLayer?"on":"off")<<" errors="<<afterHdr.errors+afterSdr.errors<<"\n";
+        // A display that refuses the ST 2084 colour space is an answer, not a failure,
+        // as long as the renderer stayed in SDR and still presents.
+        if(ok&&!hdrOn){
+            std::cout<<"This output refused the ST 2084 colour space; checking that SDR still presents.\n";
+            code=!renderer->HdrOutputActive()&&sdr.ReadNext(sdrFrame)&&render(sdrFrame)&&renderer->PresentCurrent()?0:7;
+        }else{
+            code=ok&&hdrOn&&frames==8&&subtitles&&presented==std::size(modes)&&debugViews==3&&cw>0&&ch>0&&brightness>0&&
+                 hdrOff&&sdrAgain&&afterHdr.errors==0&&afterSdr.errors==0?0:6;
+        }
+        renderer.reset();DestroyWindow(window);
     }
     MFShutdown();CoUninitialize();return code;
 }

@@ -10087,13 +10087,13 @@ private:
         // window should lose the counters before it loses why the receiver is
         // getting PCM.
         if(const std::wstring passthrough=AudioPassthroughNote();!passthrough.empty())text=passthrough+L" \u00b7 "+text;
-        // Ahead of the runtime detail: it says why the picture is not the HDR
-        // one the file carries, and what the model will be shown.
-        if(const std::wstring hdr=HdrStatusText();!hdr.empty())text=hdr+L" \u00b7 "+text;
         // Lead with what was marked, or with how to mark, because the runtime
         // detail behind it is what a narrow window truncates.
         if(const std::wstring markers=MarkerStatusText();!markers.empty())text=markers+L" \u00b7 "+text;
         else if(!m_liveSession&&RangeRenderAvailable())text=T(L"status.render_hint")+L" \u00b7 "+text;
+        // Ahead of the hint and the runtime detail: it says why the picture is not
+        // the HDR one the file carries, and what the model will be shown.
+        if(const std::wstring hdr=HdrStatusText();!hdr.empty())text=hdr+L" \u00b7 "+text;
         if(m_liveSession)text=LiveSessionStatusText()+L" \u00b7 "+text;
         if(SourcePrefetchActive())text=T(L"status.preparing_source")+L" \u00b7 "+text;
         if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;
