@@ -28,8 +28,12 @@
   if (compare && range) {
     var draggedOnce = false;
 
+    // The range's own number is a seam position, which says nothing to a
+    // screen reader; the text says how much of the frame each plate holds.
     var apply = function (value) {
       compare.style.setProperty('--seam', value + '%');
+      var left = Math.round(value);
+      range.setAttribute('aria-valuetext', left + '% original, ' + (100 - left) + '% neural render');
     };
 
     apply(parseFloat(range.value));
@@ -68,6 +72,104 @@
       window.setTimeout(function () { window.requestAnimationFrame(step); }, 550);
     }
   }
+
+  /* --- the gallery -------------------------------------------------------- *
+   * Flip shows one plate or the other, never a mix: the change is instant and
+   * the tag says which is on screen. 1:1 lays the captured files themselves
+   * over the frame at one image pixel per device pixel, in a box you scroll or
+   * drag, opened on the part of the frame the scene is about. Neither control
+   * exists without scripting; the full-size links beside them always do.
+   * ----------------------------------------------------------------------- */
+
+  function openLoupe(scene, frame) {
+    var plate = scene.querySelector('.scene__plate--neural');
+    var width = parseInt(plate.getAttribute('width'), 10);
+    var height = parseInt(plate.getAttribute('height'), 10);
+    // Rounded: a browser can report 1.0000000447, which would resample by a hair.
+    var ratio = Math.round((window.devicePixelRatio || 1) * 100) / 100;
+
+    var loupe = document.createElement('div');
+    loupe.className = 'scene__loupe';
+    loupe.tabIndex = 0;
+    loupe.setAttribute('role', 'region');
+    loupe.setAttribute('aria-label', 'The captured frame at one image pixel per screen pixel. Scroll or drag to move around it.');
+
+    var canvas = document.createElement('div');
+    canvas.className = 'scene__canvas';
+    canvas.style.width = (width / ratio) + 'px';
+    canvas.style.height = (height / ratio) + 'px';
+
+    ['neural', 'original'].forEach(function (kind) {
+      var image = document.createElement('img');
+      image.className = 'scene__plate scene__plate--' + kind;
+      image.src = scene.getAttribute('data-full-' + kind);
+      image.width = width;
+      image.height = height;
+      image.alt = '';
+      image.decoding = 'async';
+      canvas.appendChild(image);
+    });
+
+    loupe.appendChild(canvas);
+    frame.appendChild(loupe);
+
+    var focus = (scene.getAttribute('data-focus') || '0.5,0.5').split(',');
+    loupe.scrollLeft = (width / ratio) * parseFloat(focus[0]) - loupe.clientWidth / 2;
+    loupe.scrollTop = (height / ratio) * parseFloat(focus[1]) - loupe.clientHeight / 2;
+
+    var drag = null;
+    loupe.addEventListener('pointerdown', function (event) {
+      if (event.pointerType !== 'mouse' || event.button !== 0) { return; }
+      drag = { x: event.clientX, y: event.clientY, left: loupe.scrollLeft, top: loupe.scrollTop };
+      loupe.setPointerCapture(event.pointerId);
+      loupe.setAttribute('data-dragging', '1');
+      event.preventDefault();
+    });
+    loupe.addEventListener('pointermove', function (event) {
+      if (!drag) { return; }
+      loupe.scrollLeft = drag.left - (event.clientX - drag.x);
+      loupe.scrollTop = drag.top - (event.clientY - drag.y);
+    });
+    var release = function () { drag = null; loupe.removeAttribute('data-dragging'); };
+    loupe.addEventListener('pointerup', release);
+    loupe.addEventListener('pointercancel', release);
+
+    loupe.focus({ preventScroll: true });
+    return loupe;
+  }
+
+  document.querySelectorAll('.scene').forEach(function (scene) {
+    var frame = scene.querySelector('.scene__frame');
+    var tag = scene.querySelector('.scene__tag');
+    var flip = scene.querySelector('.scene__flip');
+    var lens = scene.querySelector('.scene__zoom');
+    if (!frame || !flip || !lens) { return; }
+
+    var loupe = null;
+
+    flip.hidden = false;
+    lens.hidden = false;
+
+    flip.addEventListener('click', function () {
+      var showing = scene.getAttribute('data-view') === 'neural' ? 'original' : 'neural';
+      scene.setAttribute('data-view', showing);
+      if (tag) { tag.textContent = showing === 'neural' ? 'Neural' : 'Original'; }
+      flip.textContent = showing === 'neural' ? 'Flip to the original' : 'Flip to the neural render';
+      track('gallery_flip', { scene: scene.id });
+    });
+
+    lens.addEventListener('click', function () {
+      if (loupe) {
+        frame.removeChild(loupe);
+        loupe = null;
+        lens.setAttribute('aria-pressed', 'false');
+        return;
+      }
+      loupe = openLoupe(scene, frame);
+      lens.setAttribute('aria-pressed', 'true');
+      track('gallery_loupe', { scene: scene.id });
+    });
+  });
 
   /* --- the demonstration -------------------------------------------------- */
 

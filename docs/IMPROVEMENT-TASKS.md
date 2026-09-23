@@ -82,7 +82,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.23](#p223) | Keyboard discoverability | S-M | Player | |
 | [P2.24](#p224) | Media controls and taskbar buttons | S-M | Player | |
 | [P2.25](#p225) | Synced multi-pane comparison | M-L | Player | |
-| [P2.26](#p226) | A comparison gallery on the site, plus site fixes | M | Site | |
 | **P3** | | | | |
 | [P3.1](#p31) | HDR end to end | L | Pipeline, Player | |
 | [P3.2](#p32) | Subtitles via libass, composited after the network | M-L | Player | |
@@ -595,25 +594,6 @@ inputs. This is the view that turns P2.8 into something no other tool offers.
 
 ---
 
-<a id="p226"></a>
-### P2.26 · A comparison gallery on the site, plus site fixes
-
-`M` · **Site**
-
-- **Gallery** — several scenes (a face, a photo, a low-bitrate clip, and one
-  honest failure case), each with an A/B flip, a 1:1 loupe, and its own link
-  and social card. The site shows one hero slider and one video today. A flip
-  is a state change, so it stays within the design system's One Moment rule.
-- **Fixes**
-  - The two 1920×1080 hero JPEGs (295 KB and 255 KB) are preloaded on every
-    viewport, with no `srcset` or AVIF/WebP (`site/src/index.html:30-31`,
-    `:133-137`).
-  - The fixed full-viewport SVG noise layer sits at z-index 60
-    (`styles.css:107-114`).
-  - The comparison slider has no `aria-valuetext` (`index.html:149`).
-  - The skip link targets `#download` instead of the main content.
-
----
 ---
 
 # P3 — Strategic or large

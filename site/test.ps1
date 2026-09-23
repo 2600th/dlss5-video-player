@@ -391,6 +391,141 @@ Test-Case 'the comparison is operable without a pointer' {
     Assert-Contains $htmlFull 'type="range"' 'the seam is a real range input'
 }
 
+Test-Case 'the comparison slider says its position in words' {
+    # The range's value is a seam position, which a screen reader would read out
+    # as a bare number. The text says how much of the frame each plate holds,
+    # in the markup for the first read and from the script on every move.
+    $range = [regex]::Match($htmlFull, '<input[^>]*id="seam"[^>]*>').Value
+    Assert-Contains $range 'aria-valuetext="55% original, 45% neural render"' 'the authored position is described'
+    $js = Read-TextFile -Path (Join-Path $distFull 'main.js')
+    Assert-Contains $js "setAttribute('aria-valuetext'" 'the description follows the seam'
+}
+
+Test-Case 'the skip link lands on the main content' {
+    $skip = [regex]::Match($htmlFull, '<a class="skip" href="#([^"]+)"')
+    Assert-True $skip.Success 'a skip link is the first thing a keyboard reaches'
+    Assert-Equal 'main' $skip.Groups[1].Value 'it skips the masthead, not to the download'
+    Assert-True ($htmlFull -match '<main id="main" tabindex="-1"') 'the target exists and can take focus'
+}
+
+Test-Case 'the grain stays on its own layer and never takes the pointer' {
+    # Fixed over the whole viewport, above everything: without a layer of its
+    # own every scroll repaints it, SVG noise included.
+    $css = Read-TextFile -Path (Join-Path $distFull 'styles.css')
+    $m = [regex]::Match($css, '(?s)\n\.grain \{(.*?)\}')
+    Assert-True $m.Success 'the grain rule is present'
+    Assert-Contains $m.Groups[1].Value 'will-change: transform' 'the grain is promoted to its own compositor layer'
+    Assert-Contains $m.Groups[1].Value 'contain: strict' 'the grain is fully contained'
+    Assert-Contains $m.Groups[1].Value 'pointer-events: none' 'the grain never intercepts a click'
+}
+
+Test-Case 'every srcset and imagesrcset candidate resolves to a real file' {
+    # The href/src test above cannot see these: a responsive image names its
+    # files in a comma-separated list, and a missing variant fails silently -
+    # the browser just picks another, or shows nothing.
+    $lists = [regex]::Matches($htmlFull, '(?:imagesrcset|srcset)="([^"]+)"')
+    Assert-True ($lists.Count -ge 10) "expected the hero, the gallery and the beats to carry srcsets, found $($lists.Count)"
+    $missing = @()
+    foreach ($list in $lists) {
+        foreach ($candidate in $list.Groups[1].Value.Split(',')) {
+            $rel = ($candidate.Trim() -split '\s+')[0]
+            if (-not (Test-Path (Join-Path $distFull $rel))) { $missing += $rel }
+        }
+    }
+    Assert-True ($missing.Count -eq 0) "unresolved srcset candidates: $($missing -join ', ')"
+}
+
+Test-Case 'the hero is offered small to a phone, and preloaded as a set' {
+    # Both 1920x1080 JPEGs used to be preloaded on every viewport. The preload
+    # now names the AVIF set and its sizes, so a phone fetches the width it
+    # shows, and the JPEGs are only the fallback inside <picture>.
+    Assert-NotContains $htmlFull 'rel="preload" as="image" href="assets/hero/hero-neural.jpg"' 'the full-size JPEG is not preloaded'
+    $preloads = [regex]::Matches($htmlFull, '(?s)<link rel="preload" as="image"[^>]*>')
+    Assert-Equal 2 $preloads.Count 'one preload per plate'
+    foreach ($p in $preloads) {
+        Assert-Contains $p.Value 'type="image/avif"' 'the preload is skipped by a browser that cannot use it'
+        Assert-Contains $p.Value 'imagesrcset=' 'the preload is a responsive set'
+        Assert-Contains $p.Value 'imagesizes=' 'the preload says how wide the plate is drawn'
+        Assert-Contains $p.Value ' 960w' 'a phone-sized candidate is offered'
+    }
+    foreach ($kind in @('neural', 'original')) {
+        foreach ($format in @('avif', 'webp')) {
+            Assert-Contains $htmlFull "assets/hero/hero-$kind-960.$format 960w" "the $kind plate offers a 960 px $format"
+        }
+    }
+}
+
+Test-Case 'every encoded variant stays a matched pair' {
+    # An encode that made the two plates more alike than their sources would
+    # have the page flatter the render. make-responsive-images.ps1 refuses to
+    # write such a pair; this refuses to ship one that was edited by hand.
+    $checked = 0
+    foreach ($dir in @('hero', 'gallery')) {
+        $manifestPath = [IO.Path]::Combine($distFull, 'assets', $dir, 'variants.json')
+        Assert-True (Test-Path $manifestPath) "$dir/variants.json ships beside the files it describes"
+        $manifest = (Read-TextFile -Path $manifestPath).TrimStart([char]0xFEFF) | ConvertFrom-Json
+        foreach ($set in $manifest.sets.PSObject.Properties) {
+            foreach ($v in $set.Value.variants) {
+                $a = [IO.Path]::Combine($distFull, 'assets', $dir, $v.original.file)
+                $b = [IO.Path]::Combine($distFull, 'assets', $dir, $v.neural.file)
+                Assert-True ((Test-Path $a) -and (Test-Path $b)) "both plates of $($set.Name) $($v.format) $($v.width) ship"
+                Assert-True ((Get-Item $a).Length -ne (Get-Item $b).Length -or
+                    [Convert]::ToBase64String([IO.File]::ReadAllBytes($a)) -ne [Convert]::ToBase64String([IO.File]::ReadAllBytes($b))) `
+                    "the $($set.Name) $($v.format) $($v.width) plates are not the same file"
+                Assert-True ([double]$v.pairPsnr -le [double]$v.sourcePairPsnr + 0.5) `
+                    "$($set.Name) $($v.format) $($v.width): the encoded pair ($($v.pairPsnr) dB) is more alike than its sources ($($v.sourcePairPsnr) dB)"
+                $checked++
+            }
+        }
+    }
+    Assert-True ($checked -ge 18) "expected the hero and three scenes in two formats, checked $checked"
+}
+
+Test-Case 'every gallery scene has its pair, a flip, a 1:1 view, a link and provenance' {
+    $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
+    $scenes = [regex]::Matches($htmlFull, '<figure class="scene" id="([^"]+)"(.*?)</figure>', $options)
+    # Asserted first so a pattern that matches nothing cannot pass the loop.
+    Assert-True ($scenes.Count -ge 3) "expected at least three scenes, matched $($scenes.Count)"
+    $ids = @{}
+    foreach ($s in $scenes) {
+        $id = $s.Groups[1].Value
+        $body = $s.Groups[2].Value
+        Assert-True (-not $ids.ContainsKey($id)) "scene id $id is unique"
+        $ids[$id] = $true
+
+        $original = [regex]::Match($body, 'data-full-original="([^"]+)"').Groups[1].Value
+        $neural = [regex]::Match($body, 'data-full-neural="([^"]+)"').Groups[1].Value
+        Assert-True ($original -and $neural) "$id names both full-size plates"
+        $a = Join-Path $distFull $original
+        $b = Join-Path $distFull $neural
+        Assert-True ((Test-Path $a) -and (Test-Path $b)) "$id ships both full-size plates for its 1:1 view"
+        Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($a)) -ne [Convert]::ToBase64String([IO.File]::ReadAllBytes($b))) "$id is not the same image twice"
+
+        Assert-Contains $body 'scene__plate--neural' "$id stacks the neural plate"
+        Assert-Contains $body 'scene__plate--original' "$id stacks the original plate"
+        Assert-True ($body -match '<button class="scene__button scene__flip" type="button" hidden>') "$id has a flip button, hidden until the script can drive it"
+        Assert-True ($body -match '<button class="scene__button scene__zoom" type="button" aria-pressed="false" hidden>') "$id has a 1:1 toggle that states whether it is on"
+        Assert-Contains $body "href=`"#$id`"" "$id links to itself"
+        Assert-Contains $body "href=`"$original`"" "$id links its full-size original without scripting"
+        Assert-Contains $body "href=`"$neural`"" "$id links its full-size render without scripting"
+        $data = [regex]::Match($body, '<span class="scene__data">([^<]+)</span>').Groups[1].Value
+        Assert-True ($data.Length -gt 40) "$id carries its provenance line"
+    }
+}
+
+Test-Case 'the flip is a state change, not a transition' {
+    # A cross-fade would put a blend of the two plates on screen and call it
+    # one of them, and it would take the page's one authored moment besides.
+    $css = Read-TextFile -Path (Join-Path $distFull 'styles.css')
+    foreach ($m in [regex]::Matches($css, '(?m)^[^\r\n{}]*\.scene__plate[^{}]*\{([^}]*)\}')) {
+        if ($m.Groups[1].Value -match 'transition|animation|opacity') {
+            throw "a plate rule animates or blends: $($m.Value.Trim())"
+        }
+    }
+    # .Contains rather than Assert-Contains: -like reads the brackets as a set.
+    Assert-True ($css.Contains("[data-view='neural'] .scene__plate--original { visibility: hidden; }")) 'the top plate is shown or hidden outright'
+}
+
 $distGa = Invoke-Build -Fixture 'release-full.json' -MeasurementId 'G-TEST1234567' -Name 'ga'
 
 Test-Case 'a configured measurement id reaches the page exactly once' {

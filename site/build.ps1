@@ -265,6 +265,11 @@ $mediaFiles = @(
     'docs/screenshots/current/neural-strength.jpg'
     'docs/screenshots/current/recent-videos.jpg'
     'docs/screenshots/current/original-comparison.jpg'
+    # The gallery's full-size plates: what its 1:1 view and its links open.
+    'docs/screenshots/current/gta6-lucia-original.jpg'
+    'docs/screenshots/current/gta6-lucia-neural.jpg'
+    'docs/screenshots/current/matrix-original.jpg'
+    'docs/screenshots/current/matrix-neural.jpg'
 )
 if (-not $SkipMedia) { $mediaFiles += 'docs/media/neural-comparison-demo.mp4' }
 

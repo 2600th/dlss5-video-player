@@ -11,7 +11,7 @@ and copies screenshots out of `docs/`.
 
 ```powershell
 .\site\build.ps1          # writes site/dist
-.\site\test.ps1           # 31 assertions, no network needed
+.\site\test.ps1           # 39 assertions, no network needed
 ```
 
 Then serve `site/dist` over HTTP - opening `index.html` from the filesystem
@@ -74,7 +74,7 @@ repository variable, and only when it is set:
   analytics silently collect nothing.
 
 Events: `download_click` (with package and version), `demo_play`,
-`compare_drag`.
+`compare_drag`, `gallery_flip` and `gallery_loupe` (with the scene).
 
 Because the id is baked into the HTML, setting the variable does not change a
 deployed page. Set it and then rerun the workflow:
@@ -107,6 +107,21 @@ between the two captures was averaged over a grid, which put the renderer's
 effect on the face. The script re-measures after encoding and **fails if the
 two crops have become too similar**, because an encode that smoothed the
 difference away would make the hero overstate the product.
+
+The hero plates are also served as AVIF and WebP at 960, 1280 and 1920 px, and
+the gallery's plates at 960 and 1440 px, from `src/assets/hero/` and
+`src/assets/gallery/`. `tools/make-responsive-images.ps1` (needs ffmpeg with
+libaom-av1 and libwebp) writes them with one area downscale and one encode,
+identical for both plates of a pair, and **refuses a pair the encode has made
+more alike than its sources** - the same guard as the crops, for the same
+reason. What each file cost is in `variants.json` beside it, and `test.ps1`
+re-checks every pair; rerun it with `-Force` after `make-hero-crops.ps1`
+changes the crops. The full-size JPEGs stay as the fallback, and the
+gallery's 1:1 view opens the committed captures themselves, which the build
+copies into `media/`.
+
+The gallery's 1:1 view is drawn above the film grain, the one exception to the
+grain covering everything: it exists to show a file's pixels exactly.
 
 Fonts in `src/assets/fonts/` are self-hosted Archivo and JetBrains Mono, so the
 page makes no request to Google Fonts.

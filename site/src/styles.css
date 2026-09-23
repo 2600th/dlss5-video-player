@@ -102,14 +102,23 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   transition: transform 0.15s ease;
 }
 .skip:focus { transform: translateY(0); }
+/* The skip link lands here. Focus is moved, not shown: an outline round the
+   whole page would say nothing the next Tab does not. */
+#main:focus { outline: none; }
 
-/* Film grain: a material from the subject's world, not decoration. */
+/* Film grain: a material from the subject's world, not decoration.
+   It sits over everything, fixed, so it has to be cheap to keep there: its own
+   compositor layer (will-change) and full containment mean a scroll moves the
+   content under it without repainting the grain, and the SVG noise is
+   rasterised once per tile rather than with every frame of the page. */
 .grain {
   position: fixed;
   inset: 0;
   z-index: 60;
   pointer-events: none;
   opacity: 0.06;
+  will-change: transform;
+  contain: strict;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
@@ -481,6 +490,104 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   color: var(--text-meta);
   font-size: 0.78rem;
   max-width: var(--measure);
+}
+
+/* --- gallery --------------------------------------------------------------
+   One frame per scene, two plates stacked exactly: the neural plate sets the
+   box and the original lies over it. Flip is a state change - the top plate is
+   shown or hidden, instantly, because a cross-fade would put a blend of the
+   two on screen and call it one of them. The 1:1 view is the captured file
+   itself at one image pixel per device pixel, above the grain: it is the one
+   place on the page where pixels have to be exactly the file's.
+   -------------------------------------------------------------------------- */
+
+.scene { margin: 0; padding-block: clamp(1.75rem, 4vw, 3rem); border-top: 1px solid var(--line-soft); }
+.scene:first-of-type { border-top-color: var(--line); }
+
+.scene__frame { position: relative; border: 1px solid var(--line-soft); background: var(--ground); }
+.scene__canvas { position: relative; }
+.scene__plate { display: block; width: 100%; height: auto; }
+.scene__plate--original { position: absolute; inset: 0; height: 100%; }
+.scene[data-view='neural'] .scene__plate--original { visibility: hidden; }
+
+/* Which plate is on screen, said beside the frame rather than over it: two of
+   the scenes are window captures whose own title bar would sit under a tag. */
+.scene__tag {
+  min-width: 6.5em;
+  color: var(--flag);
+  font-size: 0.7rem;
+  font-weight: 650;
+  font-variation-settings: 'wdth' 78;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+.scene[data-view='original'] .scene__tag { color: var(--text); }
+
+.scene__loupe {
+  position: absolute;
+  inset: 0;
+  z-index: 61;
+  overflow: auto;
+  background: var(--ground);
+  cursor: grab;
+  overscroll-behavior: contain;
+  scrollbar-color: #2b2b30 var(--ground);
+}
+.scene__loupe[data-dragging] { cursor: grabbing; }
+.scene__loupe .scene__plate { width: 100%; height: 100%; }
+.scene__loupe:focus-visible { outline-offset: -2px; }
+
+.scene__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6rem 1.25rem;
+  margin-top: 0.85rem;
+}
+
+.scene__button {
+  padding: 0.55rem 1rem;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 650;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 0.16s ease, color 0.16s ease;
+}
+.scene__button[hidden] { display: none; }
+.scene__button:hover { border-color: var(--flag); color: var(--flag); }
+/* Pressed is a mark on the control, not a fill: the flag edge and ink. */
+.scene__button[aria-pressed='true'] { border-color: var(--flag); color: var(--flag); }
+
+.scene__files, .scene__link {
+  font-size: 0.7rem;
+  font-weight: 650;
+  font-variation-settings: 'wdth' 78;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--text-meta);
+}
+.scene__files a { margin-left: 0.6rem; color: var(--text-dim); }
+.scene__link { text-decoration: none; }
+.scene__link:hover, .scene__files a:hover { color: var(--text); }
+
+.scene__caption {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.85rem;
+  border-left: 1px solid var(--flag);
+  padding-left: 0.85rem;
+}
+.scene__title { color: var(--text-dim); font-size: 0.82rem; }
+.scene__data {
+  color: var(--text-meta);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
 
 /* --- matrix --------------------------------------------------------------- */

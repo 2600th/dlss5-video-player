@@ -27,8 +27,14 @@
 
 <link rel="icon" href="assets/favicon.ico" sizes="any">
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/archivo-latin.woff2" crossorigin>
-<link rel="preload" as="image" href="assets/hero/hero-neural.jpg" fetchpriority="high">
-<link rel="preload" as="image" href="assets/hero/hero-original.jpg" fetchpriority="high">
+<!-- AVIF only: a browser that cannot decode it skips the preload and the
+     <picture> below falls through to WebP, then to the full-size JPEG. -->
+<link rel="preload" as="image" type="image/avif" href="assets/hero/hero-neural-1920.avif"
+      imagesrcset="assets/hero/hero-neural-960.avif 960w, assets/hero/hero-neural-1280.avif 1280w, assets/hero/hero-neural-1920.avif 1920w"
+      imagesizes="(max-width: 60rem) 119vw, max(100vw, 177.8vh)" fetchpriority="high">
+<link rel="preload" as="image" type="image/avif" href="assets/hero/hero-original-1920.avif"
+      imagesrcset="assets/hero/hero-original-960.avif 960w, assets/hero/hero-original-1280.avif 1280w, assets/hero/hero-original-1920.avif 1920w"
+      imagesizes="(max-width: 60rem) 119vw, max(100vw, 177.8vh)" fetchpriority="high">
 <link rel="stylesheet" href="styles.css">
 
 <script type="application/ld+json">
@@ -108,7 +114,7 @@
 </head>
 <body>
 <div class="grain" aria-hidden="true"></div>
-<a class="skip" href="#download">Skip to download</a>
+<a class="skip" href="#main">Skip to content</a>
 
 <header class="masthead">
   <a class="wordmark" href="{{SITE_URL}}">
@@ -124,18 +130,29 @@
 </header>
 
 <!-- ============================== hero ============================== -->
-<main id="main">
+<main id="main" tabindex="-1">
 <section class="hero">
   <figure class="compare" id="compare">
     <!-- The frame is its own box so the caption can sit over it on desktop and
          below it on a phone, without either overlapping the other. -->
     <div class="compare__frame">
-      <img class="compare__plate compare__plate--neural" src="assets/hero/hero-neural.jpg"
-           width="1920" height="1080" alt="One frame of Grand Theft Auto VI Trailer 2 rendered through the DLSS 5 neural renderer."
-           fetchpriority="high" decoding="async">
-      <img class="compare__plate compare__plate--original" src="assets/hero/hero-original.jpg"
-           width="1920" height="1080" alt="The same frame as the source file decodes it."
-           fetchpriority="high" decoding="async">
+      <!-- The full-size JPEG is the fallback; a phone takes a 960 or 1280 px
+           AVIF instead. Both plates share one srcset shape so they always load
+           at the same width and the comparison stays like for like. -->
+      <picture>
+        <source type="image/avif" srcset="assets/hero/hero-neural-960.avif 960w, assets/hero/hero-neural-1280.avif 1280w, assets/hero/hero-neural-1920.avif 1920w" sizes="(max-width: 60rem) 119vw, max(100vw, 177.8vh)">
+        <source type="image/webp" srcset="assets/hero/hero-neural-960.webp 960w, assets/hero/hero-neural-1280.webp 1280w, assets/hero/hero-neural-1920.webp 1920w" sizes="(max-width: 60rem) 119vw, max(100vw, 177.8vh)">
+        <img class="compare__plate compare__plate--neural" src="assets/hero/hero-neural.jpg"
+             width="1920" height="1080" alt="One frame of Grand Theft Auto VI Trailer 2 rendered through the DLSS 5 neural renderer."
+             fetchpriority="high" decoding="async">
+      </picture>
+      <picture>
+        <source type="image/avif" srcset="assets/hero/hero-original-960.avif 960w, assets/hero/hero-original-1280.avif 1280w, assets/hero/hero-original-1920.avif 1920w" sizes="(max-width: 60rem) 119vw, max(100vw, 177.8vh)">
+        <source type="image/webp" srcset="assets/hero/hero-original-960.webp 960w, assets/hero/hero-original-1280.webp 1280w, assets/hero/hero-original-1920.webp 1920w" sizes="(max-width: 60rem) 119vw, max(100vw, 177.8vh)">
+        <img class="compare__plate compare__plate--original" src="assets/hero/hero-original.jpg"
+             width="1920" height="1080" alt="The same frame as the source file decodes it."
+             fetchpriority="high" decoding="async">
+      </picture>
 
       <span class="compare__tag compare__tag--left" aria-hidden="true">Original</span>
       <span class="compare__tag compare__tag--right" aria-hidden="true">Neural</span>
@@ -146,7 +163,7 @@
 
       <label class="compare__label" for="seam">Reveal the neural render</label>
       <input class="compare__range" id="seam" type="range" min="0" max="100" value="55" step="0.1"
-             aria-describedby="compare-caption">
+             aria-valuetext="55% original, 45% neural render" aria-describedby="compare-caption">
     </div>
 
     <figcaption class="compare__caption" id="compare-caption">
@@ -199,6 +216,114 @@
   </div>
 </section>
 
+<!-- ============================= gallery ============================ -->
+<section class="section" id="gallery">
+  <div class="section__head">
+    <h2 class="section__title">Three more frames, both ways</h2>
+    <p class="section__note">
+      Each pair is one frame: the source, and the same frame from the player's
+      render of it. <strong>Flip</strong> swaps the whole picture between the
+      two; <strong>1:1</strong> opens the captured file itself, one image pixel
+      to one screen pixel, so nothing on this page is doing the resizing. Not
+      every source moves as much: The Matrix pair differs by 5.2 levels on
+      average, GTA&nbsp;VI's by 9.5.
+    </p>
+  </div>
+
+  <figure class="scene" id="scene-lucia" data-view="neural" data-focus="0.43,0.41"
+          data-full-original="media/gta6-lucia-original.jpg" data-full-neural="media/gta6-lucia-neural.jpg">
+    <div class="scene__frame">
+      <div class="scene__canvas">
+        <picture>
+          <source type="image/avif" srcset="assets/gallery/lucia-neural-960.avif 960w, assets/gallery/lucia-neural-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <source type="image/webp" srcset="assets/gallery/lucia-neural-960.webp 960w, assets/gallery/lucia-neural-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <img class="scene__plate scene__plate--neural" src="media/gta6-lucia-neural.jpg" width="2560" height="1440"
+               loading="lazy" decoding="async" alt="Grand Theft Auto VI Trailer 2, source frame 1940, from the DLSS 5 neural render.">
+        </picture>
+        <picture>
+          <source type="image/avif" srcset="assets/gallery/lucia-original-960.avif 960w, assets/gallery/lucia-original-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <source type="image/webp" srcset="assets/gallery/lucia-original-960.webp 960w, assets/gallery/lucia-original-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <img class="scene__plate scene__plate--original" src="media/gta6-lucia-original.jpg" width="2560" height="1440"
+               loading="lazy" decoding="async" alt="The same frame as the source file decodes it.">
+        </picture>
+      </div>
+    </div>
+    <div class="scene__controls">
+      <span class="scene__tag" aria-hidden="true">Neural</span>
+      <button class="scene__button scene__flip" type="button" hidden>Flip to the original</button>
+      <button class="scene__button scene__zoom" type="button" aria-pressed="false" hidden>1:1 pixels</button>
+      <span class="scene__files">Full size <a href="media/gta6-lucia-original.jpg">original</a> <a href="media/gta6-lucia-neural.jpg">neural</a></span>
+      <a class="scene__link" href="#scene-lucia">Link to this frame</a>
+    </div>
+    <figcaption class="scene__caption">
+      <span class="scene__title">Grand Theft Auto VI Trailer 2, the whole frame · Rockstar Games</span>
+      <span class="scene__data">2560×1440 VP9 source · frame 1940 (64.67&nbsp;s) · RTX 4080 SUPER · v0.25.0 · Intensity, Local tone and Local structure 2.0 · the hero is a 1920×1080 crop of this frame</span>
+    </figcaption>
+  </figure>
+
+  <figure class="scene" id="scene-matrix" data-view="neural" data-focus="0.51,0.45"
+          data-full-original="media/matrix-original.jpg" data-full-neural="media/matrix-neural.jpg">
+    <div class="scene__frame">
+      <div class="scene__canvas">
+        <picture>
+          <source type="image/avif" srcset="assets/gallery/matrix-neural-960.avif 960w, assets/gallery/matrix-neural-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <source type="image/webp" srcset="assets/gallery/matrix-neural-960.webp 960w, assets/gallery/matrix-neural-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <img class="scene__plate scene__plate--neural" src="media/matrix-neural.jpg" width="1440" height="930"
+               loading="lazy" decoding="async" alt="The player paused on Trinity in The Matrix at 1:28 with the neural view on.">
+        </picture>
+        <picture>
+          <source type="image/avif" srcset="assets/gallery/matrix-original-960.avif 960w, assets/gallery/matrix-original-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <source type="image/webp" srcset="assets/gallery/matrix-original-960.webp 960w, assets/gallery/matrix-original-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <img class="scene__plate scene__plate--original" src="media/matrix-original.jpg" width="1440" height="930"
+               loading="lazy" decoding="async" alt="The same paused frame with the neural view off.">
+        </picture>
+      </div>
+    </div>
+    <div class="scene__controls">
+      <span class="scene__tag" aria-hidden="true">Neural</span>
+      <button class="scene__button scene__flip" type="button" hidden>Flip to the original</button>
+      <button class="scene__button scene__zoom" type="button" aria-pressed="false" hidden>1:1 pixels</button>
+      <span class="scene__files">Full size <a href="media/matrix-original.jpg">original</a> <a href="media/matrix-neural.jpg">neural</a></span>
+      <a class="scene__link" href="#scene-matrix">Link to this frame</a>
+    </div>
+    <figcaption class="scene__caption">
+      <span class="scene__title">The Matrix, paused at 1:28 in the player · Warner Bros.</span>
+      <span class="scene__data">1440×930 window · 2560×1440 VP9 source at 23.976&nbsp;fps · neural view on, then off, no seek between · v0.25.0 on an RTX 4080 SUPER · mean difference 5.2 levels over the picture</span>
+    </figcaption>
+  </figure>
+
+  <figure class="scene" id="scene-gta-player" data-view="neural" data-focus="0.5,0.45"
+          data-full-original="media/original-comparison.jpg" data-full-neural="media/neural-playback.jpg">
+    <div class="scene__frame">
+      <div class="scene__canvas">
+        <picture>
+          <source type="image/avif" srcset="assets/gallery/gta-player-neural-960.avif 960w, assets/gallery/gta-player-neural-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <source type="image/webp" srcset="assets/gallery/gta-player-neural-960.webp 960w, assets/gallery/gta-player-neural-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <img class="scene__plate scene__plate--neural" src="media/neural-playback.jpg" width="1440" height="930"
+               loading="lazy" decoding="async" alt="The player paused on Grand Theft Auto VI at 1:04 with the neural view on.">
+        </picture>
+        <picture>
+          <source type="image/avif" srcset="assets/gallery/gta-player-original-960.avif 960w, assets/gallery/gta-player-original-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <source type="image/webp" srcset="assets/gallery/gta-player-original-960.webp 960w, assets/gallery/gta-player-original-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
+          <img class="scene__plate scene__plate--original" src="media/original-comparison.jpg" width="1440" height="930"
+               loading="lazy" decoding="async" alt="The same paused frame with the neural view off.">
+        </picture>
+      </div>
+    </div>
+    <div class="scene__controls">
+      <span class="scene__tag" aria-hidden="true">Neural</span>
+      <button class="scene__button scene__flip" type="button" hidden>Flip to the original</button>
+      <button class="scene__button scene__zoom" type="button" aria-pressed="false" hidden>1:1 pixels</button>
+      <span class="scene__files">Full size <a href="media/original-comparison.jpg">original</a> <a href="media/neural-playback.jpg">neural</a></span>
+      <a class="scene__link" href="#scene-gta-player">Link to this frame</a>
+    </div>
+    <figcaption class="scene__caption">
+      <span class="scene__title">Grand Theft Auto VI, paused at 1:04 in the player · Rockstar Games</span>
+      <span class="scene__data">1440×930 window · 2560×1440 VP9 source at 30&nbsp;fps · neural view on, then off, no seek between · v0.25.0 on an RTX 4080 SUPER · mean difference 9.5 levels over the picture</span>
+    </figcaption>
+  </figure>
+</section>
+
 <!-- ============================== how =============================== -->
 <section class="section section--wide" id="how">
   <h2 class="section__title">How it works</h2>
@@ -214,8 +339,12 @@
       </p>
     </div>
     <figure class="beat__figure">
-      <img src="media/neural-playback.jpg" width="1440" height="930" loading="lazy" decoding="async"
-           alt="The player paused on Grand Theft Auto VI with neural rendering on, the status line reporting the live render running ahead.">
+      <picture>
+        <source type="image/avif" srcset="assets/gallery/gta-player-neural-960.avif 960w, assets/gallery/gta-player-neural-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <source type="image/webp" srcset="assets/gallery/gta-player-neural-960.webp 960w, assets/gallery/gta-player-neural-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <img src="media/neural-playback.jpg" width="1440" height="930" loading="lazy" decoding="async"
+             alt="The player paused on Grand Theft Auto VI with neural rendering on, the status line reporting the live render running ahead.">
+      </picture>
       <figcaption>Grand Theft Auto VI, paused at 1:04 in a live session<span class="beat__tick">neural rendering from here · 22.6&nbsp;s buffered · v0.25.0 on an RTX 4080 SUPER</span></figcaption>
     </figure>
   </article>
@@ -231,8 +360,12 @@
       </p>
     </div>
     <figure class="beat__figure">
-      <img src="media/original-comparison.jpg" width="1440" height="930" loading="lazy" decoding="async"
-           alt="The same paused frame with neural rendering switched off, for comparison.">
+      <picture>
+        <source type="image/avif" srcset="assets/gallery/gta-player-original-960.avif 960w, assets/gallery/gta-player-original-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <source type="image/webp" srcset="assets/gallery/gta-player-original-960.webp 960w, assets/gallery/gta-player-original-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <img src="media/original-comparison.jpg" width="1440" height="930" loading="lazy" decoding="async"
+             alt="The same paused frame with neural rendering switched off, for comparison.">
+      </picture>
       <figcaption>The same frame, Neural Rendering off<span class="beat__tick">no seek between the two captures · 1440×930 window · JPEG q95, no chroma subsampling</span></figcaption>
     </figure>
   </article>
