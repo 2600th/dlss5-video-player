@@ -1622,9 +1622,13 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
     const auto stageOne=job.scratch/(L"stage1-"+std::to_wstring(tag)+L".mkv");
     const auto stageTwo=job.scratch/(L"stage2-"+std::to_wstring(tag)+L".mkv");
     std::filesystem::path produced=job.source;
+    // Both intermediates, always: the last step writes the destination from
+    // them rather than renaming one into place, so the one it read is as
+    // spent as the other. The guard that used to keep `produced` also kept
+    // the first pass's carrier when frame generation failed after it.
     const auto sweep=[&]{std::error_code ec;
-        if(stageOne!=produced)std::filesystem::remove(stageOne,ec);
-        if(stageTwo!=produced)std::filesystem::remove(stageTwo,ec);};
+        std::filesystem::remove(stageOne,ec);
+        std::filesystem::remove(stageTwo,ec);};
     const auto report=[&](StageExportUpdate update){if(progress)progress(update);};
     // Asked before the passes rather than by the last step after them: the
     // file is replaced, and a source replaced by its own export is gone.
