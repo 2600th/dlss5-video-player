@@ -1723,6 +1723,7 @@ struct PlayerAppTestAccess {
         // What playback is actually reading: a signed URL, not a file.
         app.m_path = L"https://rr3---sn-4g5e6nz6.googlevideo.com/videoplayback?expire=1758200000&ei=x";
         app.InvalidateFrameGenerationCopy();
+        const uint64_t cacheBuilds = app.m_sourceCacheBuilds;
 
         CHECK(app.CachedYouTubeSourceKey() == std::optional<std::string>(key));
         CHECK_EQ(payload->wstring(), app.FrameGenerationStreamSource());
@@ -1753,6 +1754,20 @@ struct PlayerAppTestAccess {
         // memo keyed on a size and write time that never changed again.
         CHECK(app.CachedYouTubeSourceKey() == std::optional<std::string>(key));
         CHECK_EQ(payload->wstring(), app.FrameGenerationStreamSource());
+
+        // Every question above, and a burst of the per-paint ones below, went
+        // through ONE cache manager. Each lookup used to build its own before
+        // the memo check: six directory creations, a probe file and a staging
+        // sweep per toolbar button per paint.
+        for (int paint = 0; paint < 32; ++paint) {
+            CHECK(app.CachedYouTubeSourceKey() == std::optional<std::string>(key));
+            CHECK(app.AcquiredSourceCopyPath() == std::optional<std::filesystem::path>(*payload));
+        }
+        CHECK_EQ(cacheBuilds + 1, app.m_sourceCacheBuilds);
+        // It is the loaded source's, and goes with it.
+        app.Unload();
+        CHECK(!app.m_sourceCache);
+        app.m_renderer = MakeD3D12Renderer();
 
         app.m_loaded = false; app.m_sourceKind = MediaSourceKind::LocalFile;
         app.m_path.clear(); app.m_youtubePageUrl.clear(); app.m_recent.reset();

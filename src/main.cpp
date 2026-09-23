@@ -4150,7 +4150,7 @@ private:
         CancelPausedSettingsPreview();m_previewShown=false;m_neuralToggleDeferred=false;m_livePaceConfirmedKey.clear();
         m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
-        m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();
+        m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();m_sourceCache.reset();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
@@ -5128,9 +5128,9 @@ private:
         // cache, or an acquisition that never finished, leaves an entry naming a
         // copy that is not there. Handing that key to a job made it fail on a
         // missing source instead of acquiring one, and a live session ended on it.
-        NeuralCacheManager cache(m_cacheRoot);
         for(const auto& entry:m_recent->Entries()){
             if(!entry.youtube||entry.id!=id||entry.sourceQuality!=static_cast<int>(m_youtubeSourceQuality)||entry.sourceKey.empty())continue;
+            const NeuralCacheManager& cache=SourceCache();
             if(!cache.Valid())return std::nullopt;
             // `LookupSource` authenticates the copy by hashing the whole payload -
             // 60.5 MiB for a 1440p trailer, measured at 63-86 ms - and this question
@@ -5182,6 +5182,21 @@ private:
         return std::nullopt;
     }
     bool SourcePrefetchActive()const{return m_prefetchState&&!m_prefetchState->finished.load(std::memory_order_acquire);}
+    // The cache manager the two lookups above read through. Constructing one is
+    // not free: PrepareWritableRoot creates six directories and writes a probe
+    // file, and SweepStaging walks - and may delete from - the staging folder.
+    // Both lookups built a fresh one per call, BEFORE the memo check, and the
+    // toolbar asks once per button on every paint while the status text asks on
+    // every presented frame. Built on the first question about a loaded source,
+    // released with it in Unload, and rebuilt only when the cache root moves.
+    const NeuralCacheManager& SourceCache()const{
+        if(!m_sourceCache||m_sourceCacheRequestedRoot!=m_cacheRoot){
+            m_sourceCache=std::make_unique<NeuralCacheManager>(m_cacheRoot);
+            m_sourceCacheRequestedRoot=m_cacheRoot;
+            ++m_sourceCacheBuilds;
+        }
+        return *m_sourceCache;
+    }
     // Where the acquired copy of this stream is, when the cache still holds a
     // complete one. The hash this pays for is the memoised one above.
     std::optional<std::filesystem::path> AcquiredSourceCopyPath()const{
@@ -5194,7 +5209,7 @@ private:
         }
         const auto key=CachedYouTubeSourceKey();
         if(!key)return std::nullopt;
-        NeuralCacheManager cache(m_cacheRoot);
+        const NeuralCacheManager& cache=SourceCache();
         if(!cache.Valid())return std::nullopt;
         // `SourcePayloadPath`, not `LookupSource`: the latter authenticates the
         // copy by hashing all 60-odd MiB of it, which is not a price a seek
@@ -7733,6 +7748,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         std::optional<std::string> verdict;
     };
     mutable SourceKeyMemo m_sourceKeyMemo;
+    // The loaded source's cache manager; see SourceCache(). The build count is
+    // what the regression suite reads to prove a paint builds none.
+    mutable std::unique_ptr<NeuralCacheManager> m_sourceCache;mutable std::filesystem::path m_sourceCacheRequestedRoot;mutable uint64_t m_sourceCacheBuilds=0;
     Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_youtubeAudioUrl,m_youtubePageUrl,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle,m_pendingNeuralTitle;YouTubeSourceQuality m_youtubeSourceQuality=YouTubeSourceQuality::P1080;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;D3D12RendererOwner m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;std::unique_ptr<AudioPlayer>m_networkAudio;NetworkReadState m_networkReadState;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;CompletionRegistry<YouTubeCompletion>m_youtubeCompletions;std::jthread m_youtubeWorker;
     // The loaded source's digest, so a second job against the same file does
     // not pay for a second full hash. Read from job threads.

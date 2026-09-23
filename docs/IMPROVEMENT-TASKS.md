@@ -53,7 +53,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | --- | --- | :---: | --- | :---: |
 | **P0** | | | | |
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
-| [P0.4](#p04) | YouTube: the cache manager is still built on every paint | S | Player | ✅ |
 | [P0.5](#p05) | The software-encoder retry cannot pass the receipt gate | S | Pipeline | ✅ |
 | [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
 | [P0.9](#p09) | Video freezes while a menu, drag or message box is open | S | Player | 🔍 |
@@ -137,30 +136,6 @@ nobody can verify what they downloaded.
 **Fix** — add a package mode that takes the version from `PACKAGE_MANIFEST.txt`
 or the folder name, and checks against the manifest's hashes. Have CI run it
 from an extracted zip with no repository around it. Correct the README command.
-
----
-
-<a id="p04"></a>
-### P0.4 · YouTube: the cache manager is still built on every paint
-
-`S` · **Player** · ✅ · _the old 2.2(c) fix was incomplete_
-
-**Where** — `main.cpp:5086` (`CachedYouTubeSourceKey`), `:5152`
-(`AcquiredSourceCopyPath`)
-
-Both construct `NeuralCacheManager cache(m_cacheRoot)` **before** the memo
-check. The call chain runs `ToolbarState` → `LiveSessionAvailable` →
-`RangeRenderAvailable`, once per toolbar button on every paint, and
-`BuildStatusText` runs on every presented frame. Each construction runs
-`PrepareWritableRoot` (six directory creations and a probe file) and
-`SweepStaging` (`NeuralCache.cpp:842-866`).
-
-**Impact** — Player: stalls on the UI thread for any YouTube source with a
-recent-history entry. Pipeline: the staging sweep runs, and may remove files,
-on the UI thread.
-
-**Fix** — keep one manager per loaded source, built when the source loads.
-Check the memo before touching the disk.
 
 ---
 
