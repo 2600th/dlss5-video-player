@@ -668,7 +668,15 @@ std::string NeuralModelStoreJson(const NeuralModelStore& store)
 
 std::string BuildPreflightFailureJson(std::wstring_view detail)
 {
-    return "{\"schema\":3,\"ok\":false,\"error\":\"" + JsonEscapeWide(detail) + "\"}";
+    // The diagnosis is what the parent reads its message from
+    // (ScanReceiptDiagnosis). Without one, a helper that refused to start -
+    // an add-on the runtime lock does not name, a configuration it could not
+    // enable - reached the user as "did not arm feature 18" and the reason
+    // stayed in the helper's log.
+    const std::string escaped = JsonEscapeWide(detail);
+    return "{\"schema\":3,\"ok\":false,\"diagnosis\":{\"cause\":\"" +
+           std::string(NeuralPreflightCauseName(NeuralPreflightCause::ProbeFailed)) + "\",\"detail\":\"" +
+           escaped + "\"},\"error\":\"" + escaped + "\"}";
 }
 
 // NGX results are always written as eight lower-case hex digits ("0xbad00002")

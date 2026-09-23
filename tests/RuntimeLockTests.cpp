@@ -280,6 +280,12 @@ void unlocked_runtime_modules_are_named_and_packaged_files_are_allowed_test()
 
     // A directory that cannot be listed is a refusal, not a pass.
     CHECK(!FindUnlockedRuntimeModules(directory / L"does-not-exist", lock).has_value());
+
+    // A preflight helper that refuses to start says why in a diagnosis, which
+    // is where the parent reads the user's message from - not only in its log.
+    CHECK(Contains(BuildPreflightFailureJson(L"holds modules the runtime lock does not name: Stray.DLL"),
+                   "\"ok\":false,\"diagnosis\":{\"cause\":\"probeFailed\",\"detail\":\"holds modules the "
+                   "runtime lock does not name: Stray.DLL\"}"));
     std::filesystem::remove_all(directory);
 }
 

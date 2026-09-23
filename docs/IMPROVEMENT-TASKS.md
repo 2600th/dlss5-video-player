@@ -71,7 +71,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P1.7](#p17) | Bounds on untrusted media values | XS | Player, Pipeline | 🔍 |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
-| [P1.11](#p111) | The runtime lock ignores extra add-ons | S | Pipeline, Release | 🔍 |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.15](#p115) | Small render-thread costs | XS each | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
@@ -527,24 +526,6 @@ bytes on different runs**.
 **Fix** — resubmit without capturing, capture once when the gate opens, and
 reset history immediately before that capture. Tail the log from the last
 offset instead of re-reading it.
-
----
-
-<a id="p111"></a>
-### P1.11 · The runtime lock ignores extra add-ons
-
-`S` · **Pipeline, Release** · 🔍 · security
-
-**Where** — `packaging/ReShade.ini:2` (`AddonPath=.`),
-`RuntimeLock.cpp:378-418`, `NeuralWorkerMain.cpp:281-300`
-
-The lock checks only the files it knows about. A stray `*.addon64` in
-`neural-runtime/` gets loaded and can change what feature 18 produces, while
-the runtime digest, the cache key and the receipt still name the locked
-runtime.
-
-**Fix** — allowlist the directory's contents (refuse unknown `.addon64` and
-`.dll` files) and fold the directory listing into the runtime digest.
 
 ---
 
