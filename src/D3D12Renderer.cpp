@@ -5,6 +5,7 @@
 #include "Utf8Text.h"
 #include "Log.h"
 #include "NvofResolveShader.h"
+#include "TemporalStabilityShader.h"
 #include "RuntimePolicy.h"
 #include "GpuPreference.h"
 #include <d3dcompiler.h>
@@ -749,6 +750,37 @@ bool D3D12Renderer::CreatePipelines(){
     p.NumRenderTargets=1;p.RTVFormats[0]=DXGI_FORMAT_R16G16_FLOAT;p.DSVFormat=DXGI_FORMAT_UNKNOWN;
     p.DepthStencilState.DepthEnable=FALSE;p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
     if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoNvofMotion)),"Create NVOFA motion resolve PSO"))return false;
+
+    // The temporal stability pass exists only where a capture does: it is part of
+    // what the cache captures, and the player never captures. Its text is its own
+    // (TemporalStabilityShader.h) so the capture's PSPresent is not recompiled with it,
+    // and its root signature is its own because it reads five textures at once.
+    if(m_captureOutput){
+        ComPtr<ID3DBlob> stabilityVs,stabilityPs,stabilityErr;
+        auto CT=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{
+            stabilityErr.Reset();
+            const HRESULT hr=D3DCompile(kTemporalStabilityHlsl,sizeof(kTemporalStabilityHlsl)-1,"stability",nullptr,nullptr,entry,target,flags,0,&out,&stabilityErr);
+            if(FAILED(hr)){if(stabilityErr)LOG((char*)stabilityErr->GetBufferPointer());return false;}
+            return true;
+        };
+        if(!CT("VS","vs_5_1",stabilityVs)||!CT("PSTemporalStability","ps_5_1",stabilityPs))return false;
+        D3D12_DESCRIPTOR_RANGE table{};table.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;table.NumDescriptors=TemporalTableSize;table.BaseShaderRegister=0;
+        D3D12_ROOT_PARAMETER params[2]{};
+        params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        params[0].DescriptorTable.NumDescriptorRanges=1;params[0].DescriptorTable.pDescriptorRanges=&table;
+        params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        params[1].Constants.Num32BitValues=8;params[1].Constants.ShaderRegister=0;
+        D3D12_ROOT_SIGNATURE_DESC stability{};stability.NumParameters=2;stability.pParameters=params;
+        stability.NumStaticSamplers=1;stability.pStaticSamplers=&smp;stability.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        ComPtr<ID3DBlob> stabilitySig;
+        if(!HR(D3D12SerializeRootSignature(&stability,D3D_ROOT_SIGNATURE_VERSION_1,&stabilitySig,&err),"Serialize temporal stability root signature"))return false;
+        if(!HR(m_device->CreateRootSignature(0,stabilitySig->GetBufferPointer(),stabilitySig->GetBufferSize(),IID_PPV_ARGS(&m_stabilityRootSig)),"Create temporal stability root signature"))return false;
+        p.pRootSignature=m_stabilityRootSig.Get();
+        p.VS={stabilityVs->GetBufferPointer(),stabilityVs->GetBufferSize()};
+        p.PS={stabilityPs->GetBufferPointer(),stabilityPs->GetBufferSize()};
+        p.NumRenderTargets=1;p.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;p.DSVFormat=DXGI_FORMAT_UNKNOWN;
+        if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoTemporalStability)),"Create temporal stability PSO"))return false;
+    }
     return true;
 }
 
@@ -1241,6 +1273,7 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         [&] { return WaitGPUForContinuedUse() && m_dlss.RecreateFeature(cmd); },m_preserveSource);
     const bool needFeatureFlush = featureSetup.needsFlush;
     if (featureSetup.selected) temporalReset = true;
+    m_lastFrameTemporalReset = temporalReset;
     if (temporalReset && identity) {
         const HistoryReset reason = identity->reset != HistoryReset::None ? identity->reset
             : featureSetup.selected ? HistoryReset::FeatureRecreate : HistoryReset::None;
@@ -1578,11 +1611,18 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     // full-screen triangle below writes every texel of the plane it is drawing into, so
     // a clear in front of it is an extra full-plane write on the path whose cost is
     // proportional to the frame.
+    // What the capture reads: the neural output itself (descriptor 1), or at a
+    // temporal stability rung above Off the pass's output, recorded here so the
+    // capture below is its reader. A rung that cannot run fails the capture rather
+    // than cache an unstabilized frame under a stabilized key.
+    uint32_t captured=1u;
+    if(!RecordTemporalStability(cmd,captured))return false;
+    cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&scissor);
     auto target=RTV(nv12?FrameCount+3:FrameCount+2);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
     cmd->SetPipelineState(nv12?m_psoCaptureLuma.Get():m_psoCacheCapture.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));
+    cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(captured));
     // Cache frames are always the bare neural output: no comparison, no color/zoom.
     SetPresentConstants(cmd,ColorSettings{},ComparisonSettings{},false);
     cmd->DrawInstanced(3,1,0,0);
@@ -1623,6 +1663,83 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     m_captureId[readbackSlot]=m_lastRenderedId;
     m_captureWrite=(readbackSlot+1u)%CaptureSlots;
     ++m_capturePending;
+    return true;
+}
+
+bool D3D12Renderer::EnsureTemporalStabilityResources(){
+    if(m_stableOutput[0]&&m_stableOutput[1]&&m_stableSource[0]&&m_stableSource[1])return true;
+    if(!m_device||!m_dlssOutput||!m_decodedTexture||!m_motion)return false;
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    // Created shader-readable: the pass reads a slot before it ever writes the other,
+    // and a reset writes before anything reads.
+    auto output=Tex2D(DXGI_FORMAT_R16G16B16A16_FLOAT,m_outputW,m_outputH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    const D3D12_RESOURCE_DESC source=m_decodedTexture->GetDesc();
+    for(uint32_t slot=0;slot<2;++slot){
+        if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&output,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&m_stableOutput[slot])),"Create temporal stability output"))return false;
+        m_stableOutput[slot]->SetName(slot?L"Temporal_Stability_Output_B":L"Temporal_Stability_Output_A");
+        if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&source,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&m_stableSource[slot])),"Create temporal stability source"))return false;
+        m_stableSource[slot]->SetName(slot?L"Temporal_Stability_Source_B":L"Temporal_Stability_Source_A");
+        m_device->CreateRenderTargetView(m_stableOutput[slot].Get(),nullptr,RTV(TemporalRTV+slot));
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
+    const auto view=[&](ID3D12Resource*resource,DXGI_FORMAT format,uint32_t index){
+        srv.Format=format;m_device->CreateShaderResourceView(resource,&srv,SRVCPU(index));};
+    for(uint32_t read=0;read<2;++read){
+        const uint32_t table=TemporalTableSRV+read*TemporalTableSize;
+        view(m_dlssOutput.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,table+0);
+        view(m_stableOutput[read].Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,table+1);
+        view(m_motion.Get(),DXGI_FORMAT_R16G16_FLOAT,table+2);
+        view(m_decodedTexture.Get(),DXGI_FORMAT_B8G8R8A8_UNORM,table+3);
+        view(m_stableSource[read].Get(),DXGI_FORMAT_B8G8R8A8_UNORM,table+4);
+        view(m_stableOutput[read].Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,TemporalOutputSRV+read);
+    }
+    m_stabilityHistory={};
+    LOG("Temporal stability history allocated: two "<<m_outputW<<"x"<<m_outputH<<" FP16 outputs and two "
+        <<m_sourceW<<"x"<<m_sourceH<<" source frames.");
+    return true;
+}
+
+bool D3D12Renderer::RecordTemporalStability(ID3D12GraphicsCommandList*cmd,uint32_t&captured){
+    captured=1u;
+    const auto blend=temporal_stability::BlendFor(m_temporalStability);
+    if(!blend)return true;
+    if(!m_psoTemporalStability||!m_stabilityRootSig||!EnsureTemporalStabilityResources()){
+        LOG("Temporal stability "<<TemporalStabilityName(m_temporalStability)<<" was asked for and cannot run on this renderer; refusing the capture.");
+        return false;
+    }
+    const auto plan=temporal_stability::PlanFrame(m_stabilityHistory,m_lastRenderedId,m_lastFrameTemporalReset);
+    ID3D12Resource*output=m_stableOutput[plan.write].Get();
+    Barrier(cmd,m_motion.Get(),GuideReadState,GuideReadState|D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Barrier(cmd,output,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_VIEWPORT viewport{0,0,float(m_outputW),float(m_outputH),0,1};
+    D3D12_RECT scissor{0,0,LONG(m_outputW),LONG(m_outputH)};
+    cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&scissor);
+    auto target=RTV(TemporalRTV+plan.write);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
+    cmd->SetGraphicsRootSignature(m_stabilityRootSig.Get());
+    cmd->SetPipelineState(m_psoTemporalStability.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // The table of the slot being read. On a reset nothing in it is read - the pass
+    // returns the neural pixel before its first history fetch - but it is still a
+    // table of live descriptors, which is all binding it asks for.
+    cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(TemporalTableSRV+plan.read*TemporalTableSize));
+    const float constants[8]={
+        m_renderW?1.0f/float(m_renderW):0.0f,m_renderH?1.0f/float(m_renderH):0.0f,
+        plan.blend?blend->historyWeight:0.0f,blend->trustLow,blend->trustHigh,
+        m_sourceW?1.0f/float(m_sourceW):0.0f,m_sourceH?1.0f/float(m_sourceH):0.0f,0.0f};
+    cmd->SetGraphicsRoot32BitConstants(1,8,constants,0);
+    cmd->DrawInstanced(3,1,0,0);
+    Barrier(cmd,output,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Barrier(cmd,m_motion.Get(),GuideReadState|D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,GuideReadState);
+    // The source this output was made from goes into the same slot, so the next frame
+    // can judge its vectors against it.
+    Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Barrier(cmd,m_stableSource[plan.write].Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+    cmd->CopyResource(m_stableSource[plan.write].Get(),m_decodedTexture.Get());
+    Barrier(cmd,m_stableSource[plan.write].Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_stabilityHistory=temporal_stability::Commit(m_stabilityHistory,plan,m_lastRenderedId);
+    captured=TemporalOutputSRV+plan.write;
     return true;
 }
 

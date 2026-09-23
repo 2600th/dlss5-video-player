@@ -1945,6 +1945,7 @@ struct ProductionEvaluatorAdapter {
     TemporalSettings temporal{};
     void ApplyGuideSettings(const GuideControls& controls){
         guides.SetControls(controls);guides.SetSceneCutSensitivity(temporal.sceneCuts);
+        if(renderer)renderer->SetTemporalStability(temporal.stability);
     }
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};

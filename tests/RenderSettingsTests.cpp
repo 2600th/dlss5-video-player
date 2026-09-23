@@ -283,6 +283,10 @@ void temporal_settings_change_the_render_key_only_off_their_defaults()
                             scene_cut::Sensitivity::Off}) {
         TemporalSettings temporal;
         temporal.sceneCuts = rung;
+        temporal.stability = TemporalStability::Medium;
+        const auto parsedWithStability = ParseTemporalSettings(CanonicalTemporalSettings(temporal));
+        CHECK(parsedWithStability.has_value() && *parsedWithStability == temporal);
+        temporal.stability = TemporalStability::Off;
         CHECK(!temporal.IsDefault());
         terms.push_back(pipeline(temporal));
         CHECK(terms.back() != shipped);
@@ -291,10 +295,23 @@ void temporal_settings_change_the_render_key_only_off_their_defaults()
         CHECK(parsed.has_value());
         if (parsed) CHECK(*parsed == temporal);
     }
-    // Every rung its own entry: two rungs reset on different frames.
-    CHECK(terms[0] != terms[1] && terms[1] != terms[2] && terms[0] != terms[2]);
-    CHECK_EQ(std::string("cuts=default"), CanonicalTemporalSettings(TemporalSettings{}));
-    for (const std::string_view bad : {"", "cuts=", "cuts=Default", "cuts=more,", "stability=off", "cuts=on"})
+    // Every stability rung too (P2.5): each blends a different amount of history.
+    for (const auto level : {TemporalStability::Low, TemporalStability::Medium, TemporalStability::High}) {
+        TemporalSettings temporal;
+        temporal.stability = level;
+        terms.push_back(pipeline(temporal));
+        CHECK(terms.back() != shipped);
+        const auto parsed = ParseTemporalSettings(CanonicalTemporalSettings(temporal));
+        CHECK(parsed.has_value());
+        if (parsed) CHECK(*parsed == temporal);
+    }
+    // Every rung its own entry: two rungs reset or blend on different frames.
+    for (size_t a = 0; a < terms.size(); ++a)
+        for (size_t b = a + 1; b < terms.size(); ++b) CHECK(terms[a] != terms[b]);
+    CHECK_EQ(std::string("cuts=default,stability=off"), CanonicalTemporalSettings(TemporalSettings{}));
+    for (const std::string_view bad : {"", "cuts=", "cuts=default", "cuts=Default,stability=off", "cuts=more,",
+                                       "stability=off", "cuts=on,stability=off", "cuts=off,stability=",
+                                       "cuts=off,stability=max", "cuts=off,stability=low,", "cuts=off;stability=low"})
         CHECK(!ParseTemporalSettings(bad).has_value());
 }
 

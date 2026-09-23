@@ -373,6 +373,7 @@ NeuralRenderReceiptInputs SampleInputs()
     inputs.request.prerollFrames = 24;
     inputs.request.guides.depth = false;
     inputs.request.temporal.sceneCuts = scene_cut::Sensitivity::Less;
+    inputs.request.temporal.stability = TemporalStability::Medium;
     inputs.request.frameRetryLimit = 3;
     inputs.result.ok = false;
     inputs.result.failure = NeuralRenderFailure::GpuStall;
@@ -427,7 +428,7 @@ void receipt_json_records_failure_lock_status_and_preflight_verbatim_test()
     CHECK(Contains(json, "\"source\":\"C:\\\\media\\\\clip \\\"one\\\".mkv\""));
     CHECK(Contains(json, "\"range\":{\"start\":10000000,\"end\":30000000}"));
     CHECK(Contains(json, "\"guides\":\"mv=1,depth=0\""));
-    CHECK(Contains(json, "\"temporal\":\"cuts=less\""));
+    CHECK(Contains(json, "\"temporal\":\"cuts=less,stability=medium\""));
     CHECK(Contains(json, "\"prerollFrames\":24"));
     // The probe's own JSON is embedded byte for byte, not re-serialized.
     CHECK(Contains(json, "\"preflight\":" + std::string(kSamplePreflight)));

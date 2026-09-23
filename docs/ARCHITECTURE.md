@@ -219,6 +219,21 @@ codes - is held instead of generated between; the evaluates still run, so the
 runtime's history sees every frame. `tools/benchmark/duplab.py` measures that test
 on corpus clips re-timed onto twos.
 
+**Temporal stability** (`TemporalStabilityPolicy.h`, `TemporalStabilityShader.h`)
+is one pass in the helper's capture path, recorded on the capture's command list
+after the add-on has written the neural frame and before the cache capture reads
+it, so what it produces is what is cached. It warps the previous stabilized output
+by the motion NGX was given, measures along the same vector how the decoded source
+changed - a brightness gain, and whatever structure the gain does not explain -
+and blends the warped history in only where that structure agrees, carried
+through the gain. Two history slots, each with the source frame it was made from,
+let a re-submitted frame blend against the same history every time. At **Off** the
+pass is not recorded and the capture reads the neural output exactly as it always
+did; the capture's `PSPresent` is untouched, since the pass is its own program with
+its own root signature. The rung is a `TemporalSettings` term like the scene-cut
+rung, versioned (`stability-<rung>-v1`) so a change to the pass can retire what the
+previous one cached.
+
 ## D3D12 renderer
 
 `D3D12Renderer` owns:

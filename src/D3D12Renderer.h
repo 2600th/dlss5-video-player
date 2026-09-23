@@ -16,6 +16,7 @@
 #include "NgxSession.h"
 #include "OpticalFlowNvof.h"
 #include "PresentScalePolicy.h"
+#include "TemporalStabilityPolicy.h"
 
 #include <functional>
 
@@ -339,6 +340,12 @@ public:
     // unreachable: VideoDecoder is the only producer of NV12 source frames and it
     // asks for that layout only for a description the same function accepted.
     void SetSourceColor(const SourceColorDescription& color) { m_sourceColor = color; }
+    // The temporal stability rung the cache capture applies (TemporalStabilityPolicy.h).
+    // Off, the default, is the capture as it always was: the pass is not recorded and
+    // the capture reads the neural output directly. Settable between jobs; the
+    // history it keeps is judged per frame, so a new job starts it over by itself.
+    void SetTemporalStability(TemporalStability level) { m_temporalStability = level; }
+    TemporalStability ActiveTemporalStability() const { return m_temporalStability; }
 
     // Tearing is opt-in and belongs only to a renderer nobody watches. The offline
     // carrier presents into a hidden window purely so the neural add-on sees a present
@@ -528,11 +535,19 @@ private:
     // The compositor's overlay table: the spatial mask (t3) and the label atlas (t4).
     // Both hold null views until something is uploaded.
     static constexpr uint32_t OverlaySRV = 12, LabelSRV = 13;
-    static constexpr uint32_t SRVCount = 14;
+    // Temporal stability: two five-descriptor tables, one per history slot the pass can
+    // read from (neural output, that slot's stabilized frame, motion, decoded source,
+    // that slot's source), then one view of each slot's stabilized frame for the
+    // capture to read. Written when the pass first runs; nothing reads them before.
+    static constexpr uint32_t TemporalTableSRV = 14, TemporalTableSize = 5;
+    static constexpr uint32_t TemporalOutputSRV = TemporalTableSRV + 2 * TemporalTableSize;
+    static constexpr uint32_t SRVCount = TemporalOutputSRV + 2;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
-    // [+6] the composed-view capture (CaptureComposedView).
-    static constexpr uint32_t DecodedRTV = FrameCount + 5, ComposedRTV = FrameCount + 6, RTVCount = FrameCount + 7;
+    // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two
+    // temporal stability slots.
+    static constexpr uint32_t DecodedRTV = FrameCount + 5, ComposedRTV = FrameCount + 6;
+    static constexpr uint32_t TemporalRTV = FrameCount + 7, RTVCount = FrameCount + 9;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
     // at EvaluateFeature time. Debug/presentation passes temporarily transition selected
     // resources to PIXEL_SHADER_RESOURCE and restore them before the frame ends.
@@ -596,6 +611,13 @@ private:
     // Synchronous enqueue + resolve. Kept for the first-frame evidence loop, which must
     // read a capture back before it can decide whether to submit the same frame again.
     bool CaptureEvaluatedFrame(CapturedVideoFrame& capture);
+    // Allocates the two history slots on first use, so a renderer that never runs
+    // the pass - every player, and every job at Off - holds none of their memory.
+    bool EnsureTemporalStabilityResources();
+    // Records the pass for the frame the last RenderFrame produced and returns the
+    // descriptor the capture should read in `captured`: SRV 1, the neural output,
+    // when it is off. False when a rung was asked for and the pass cannot run.
+    bool RecordTemporalStability(ID3D12GraphicsCommandList* cmd, uint32_t& captured);
     void RecordReferenceUpload(ID3D12GraphicsCommandList* cmd, uint32_t slot);
     // targetWidth/targetHeight: the backbuffer the compositor draws into; the capture
     // passes pass neither, and PSPresent reads no Compose constant anyway.
@@ -682,6 +704,10 @@ private:
     // Turns the NVOFA S10.5 flow grid into the same R16G16_FLOAT motion texture
     // PSExpandGuides writes, so everything downstream is unchanged.
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoNvofMotion;
+    // The temporal stability pass has a root signature of its own: it reads five
+    // textures, which the shared signature's two tables cannot bind.
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_stabilityRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoTemporalStability;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_decodedTexture;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_upload[FrameCount];
@@ -697,6 +723,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_captureLuma;    // NV12 only
     Microsoft::WRL::ComPtr<ID3D12Resource> m_captureChroma;  // NV12 only
     Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback[CaptureSlots];
+    // Temporal stability history, two slots (TemporalStabilityPolicy.h History): the
+    // stabilized output at output size and the decoded source it was made from.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_stableOutput[2];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_stableSource[2];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_reference;   // source-size BGRA original member
     Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[ReferenceUploads];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_labelAtlas;  // premultiplied BGRA tags, see SetLabelAtlas
@@ -776,6 +806,11 @@ private:
     ColorSettings m_colorSettings{};
     ComparisonSettings m_comparison{};
     bool m_lastDLSSUsed = false;
+    // Whether the last recorded frame reset NGX's history for any reason, the feature
+    // recreate included, which the identity does not carry.
+    bool m_lastFrameTemporalReset = false;
+    TemporalStability m_temporalStability = TemporalStability::Off;
+    temporal_stability::History m_stabilityHistory{};
     bool m_gpuUnusable = false;
     d3d12_renderer_detail::FenceWaitResult m_lastFenceWaitResult =
         d3d12_renderer_detail::FenceWaitResult::Completed;

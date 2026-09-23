@@ -66,6 +66,8 @@
 #include "CompareImageIO.h"
 #include <d3dcompiler.h>
 #include <d3d12shader.h>
+#include "TemporalStabilityPolicy.h"
+#include "TemporalStabilityShader.h"
 #ifdef small
 #undef small
 #endif
@@ -7983,6 +7985,85 @@ void compare_panes_locate_the_point_under_the_pointer_test()
     }
 }
 
+// P2.5: which history slot the temporal stability pass reads and writes. The pass
+// itself needs a GPU; this is the part that decides whether it may blend at all,
+// and getting it wrong ghosts a frame across a cut or a seek.
+void temporal_stability_blends_only_across_a_continuous_history_test()
+{
+    using namespace temporal_stability;
+    CHECK(!BlendFor(TemporalStability::Off).has_value());
+    float previousWeight=0.0f;
+    for(const auto level:{TemporalStability::Low,TemporalStability::Medium,TemporalStability::High}){
+        const auto blend=BlendFor(level);
+        CHECK(blend.has_value());
+        if(!blend)continue;
+        // Each rung keeps more history, never all of it, and every rung trusts the
+        // same pixels: strength is not a licence to blend where the source moved.
+        CHECK(blend->historyWeight>previousWeight&&blend->historyWeight<1.0f);
+        CHECK(blend->trustLow==kTrustLow&&blend->trustHigh==kTrustHigh&&kTrustLow<kTrustHigh);
+        previousWeight=blend->historyWeight;
+        CHECK(ParseTemporalStability(TemporalStabilityName(level))==level);
+    }
+    CHECK(!ParseTemporalStability("Medium").has_value());
+
+    const auto frame=[](uint64_t number,HistoryReset reset=HistoryReset::None,uint64_t job=7,uint32_t source=1){
+        return FrameIdentity{number,int64_t(number)*333333,source,0,job,reset};
+    };
+    History history;
+    // Nothing held: the first frame is a copy, whatever its identity says.
+    Plan plan=PlanFrame(history,frame(10),false);
+    CHECK(plan.step==Step::Reset&&!plan.blend);
+    history=Commit(history,plan,frame(10));
+    CHECK(history.valid&&!history.hasBase);
+    const uint32_t first=history.current;
+    // The first frame again - the receipt gate resubmits it - stays a copy, in place.
+    plan=PlanFrame(history,frame(10),false);
+    CHECK(plan.step==Step::Reset&&!plan.blend&&plan.write==first);
+    history=Commit(history,plan,frame(10));
+    // Its successor blends against it and writes the other slot.
+    plan=PlanFrame(history,frame(11),false);
+    CHECK(plan.step==Step::Advance&&plan.blend&&plan.read==first&&plan.write==(first^1u));
+    history=Commit(history,plan,frame(11));
+    CHECK(history.hasBase&&history.current==(first^1u));
+    // A resubmit of 11 blends against 10 again - not against its own first attempt.
+    plan=PlanFrame(history,frame(11),false);
+    CHECK(plan.step==Step::Repeat&&plan.blend&&plan.read==first&&plan.write==(first^1u));
+    history=Commit(history,plan,frame(11));
+    CHECK(history.hasBase);
+    plan=PlanFrame(history,frame(12),false);
+    CHECK(plan.step==Step::Advance&&plan.read==(first^1u));
+    history=Commit(history,plan,frame(12));
+    // A scene cut, a declared reset or a recreated feature starts over.
+    CHECK(PlanFrame(history,frame(13,HistoryReset::Cut),false).step==Step::Reset);
+    CHECK(PlanFrame(history,frame(13),true).step==Step::Reset);
+    // So does anything that is not the direct successor in the same stream.
+    CHECK(PlanFrame(history,frame(14),false).step==Step::Reset);
+    CHECK(PlanFrame(history,frame(11),false).step==Step::Reset);
+    CHECK(PlanFrame(history,frame(13,HistoryReset::None,8),false).step==Step::Reset);
+    CHECK(PlanFrame(history,frame(13,HistoryReset::None,7,2),false).step==Step::Reset);
+    CHECK(PlanFrame(history,frame(13),false).step==Step::Advance);
+    // A reset writes away from the slot it leaves, and leaves no base behind.
+    plan=PlanFrame(history,frame(13,HistoryReset::Seek),false);
+    CHECK(plan.write==(history.current^1u));
+    history=Commit(history,plan,frame(13,HistoryReset::Seek));
+    CHECK(!history.hasBase);
+}
+
+// The pass's own program, compiled from the text the renderer compiles, with its
+// entry points and flags - the one check of it a machine without a GPU can make.
+void temporal_stability_shader_compiles_test()
+{
+    const auto compiles=[](const char* entry,const char* target){
+        Microsoft::WRL::ComPtr<ID3DBlob> code,errors;
+        const HRESULT hr=D3DCompile(kTemporalStabilityHlsl,sizeof(kTemporalStabilityHlsl)-1,"stability",nullptr,nullptr,
+                                    entry,target,D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&errors);
+        if(FAILED(hr)&&errors)std::cerr<<static_cast<const char*>(errors->GetBufferPointer())<<'\n';
+        return SUCCEEDED(hr)&&code&&code->GetBufferSize()>0;
+    };
+    CHECK(compiles("VS","vs_5_1"));
+    CHECK(compiles("PSTemporalStability","ps_5_1"));
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -11638,6 +11719,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_mask_shrinks_feathers_and_is_remembered_per_source_test),
     TEST_CASE(compare_saved_image_carries_its_provenance_test),
     TEST_CASE(compare_panes_locate_the_point_under_the_pointer_test),
+    TEST_CASE(temporal_stability_blends_only_across_a_continuous_history_test),
+    TEST_CASE(temporal_stability_shader_compiles_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
     TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),

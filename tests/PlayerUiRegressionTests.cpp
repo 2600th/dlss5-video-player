@@ -3191,6 +3191,12 @@ struct PlayerAppTestAccess {
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_SCENE_CUTS, CBN_SELCHANGE), 0);
         CHECK(app.m_temporalSettings.sceneCuts == scene_cut::Sensitivity::Off);
         CHECK(app.m_guides.SceneCutSensitivity() == scene_cut::Sensitivity::Off);
+        // Temporal stability: Off first and selected on a fresh install.
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_GETCOUNT, 0, 0)), 4);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_GETCURSEL, 0, 0)), 0);
+        SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_SETCURSEL, 2, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STABILITY, CBN_SELCHANGE), 0);
+        CHECK(app.m_temporalSettings.stability == TemporalStability::Medium);
         // Every control the dialog offers carries help text, and the text is the
         // localized tip rather than an empty tool.
         const auto tipHost = app.m_tipHosts.find(dialog);
@@ -3200,7 +3206,8 @@ struct PlayerAppTestAccess {
             CHECK(tools >= 12);
             for (const int id : {IDC_NS_INTENSITY, IDC_NS_STRUCTURE, IDC_NS_TONE, IDC_NS_SKIN,
                                  IDC_NS_STYLE, IDC_NS_AUTOMASK, IDC_NS_GUIDE_MV, IDC_NS_GUIDE_DEPTH,
-                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_NS_SCENE_CUTS, IDC_NS_APPLY, IDC_NS_RESET}) {
+                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_NS_SCENE_CUTS, IDC_NS_STABILITY,
+                                 IDC_NS_APPLY, IDC_NS_RESET}) {
                 wchar_t text[512] = {};
                 TTTOOLINFOW info{};
                 info.cbSize = TTTOOLINFOW_V2_SIZE;
@@ -3224,6 +3231,9 @@ struct PlayerAppTestAccess {
             wchar_t cuts[32] = {};
             GetPrivateProfileStringW(L"Temporal", L"SceneCuts", L"", cuts, 32, app.SettingsPath().c_str());
             CHECK_EQ(std::wstring(L"off"), std::wstring(cuts));
+            wchar_t stability[32] = {};
+            GetPrivateProfileStringW(L"Temporal", L"Stability", L"", stability, 32, app.SettingsPath().c_str());
+            CHECK_EQ(std::wstring(L"medium"), std::wstring(stability));
         }
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_RESET, BN_CLICKED), 0);
         CHECK(app.m_neuralSettings == NeuralSettings{});
@@ -3236,6 +3246,7 @@ struct PlayerAppTestAccess {
         CHECK(app.m_temporalSettings.IsDefault());
         CHECK(app.m_guides.SceneCutSensitivity() == scene_cut::Sensitivity::Default);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_SCENE_CUTS), CB_GETCURSEL, 0, 0)), 0);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_GETCURSEL, 0, 0)), 0);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_INTENSITY), TBM_GETPOS, 0, 0)), 100);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_GETCHECK, 0, 0)), BST_CHECKED);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);

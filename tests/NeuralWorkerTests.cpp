@@ -660,15 +660,24 @@ void temporal_settings_reach_the_helper_only_off_their_defaults_test()
     const auto tuned = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
     const auto flag = std::find(tuned.begin(), tuned.end(), L"--temporal");
     CHECK(flag != tuned.end() && flag + 1 != tuned.end());
-    if (flag != tuned.end() && flag + 1 != tuned.end()) CHECK_EQ(std::wstring(L"cuts=off"), *(flag + 1));
+    if (flag != tuned.end() && flag + 1 != tuned.end())
+        CHECK_EQ(std::wstring(L"cuts=off,stability=off"), *(flag + 1));
     const auto tunedView = view(tuned);
     const auto parsedTuned = neural_worker_detail::ParseWorkerArguments(tunedView);
     CHECK(parsedTuned.has_value());
     if (parsedTuned) CHECK(parsedTuned->request.temporal == request.temporal);
+    // Stability alone is also off the default and travels the same way.
+    request.temporal = {};
+    request.temporal.stability = TemporalStability::High;
+    const auto stable = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
+    const auto stableView = view(stable);
+    const auto parsedStable = neural_worker_detail::ParseWorkerArguments(stableView);
+    CHECK(parsedStable.has_value());
+    if (parsedStable) CHECK(parsedStable->request.temporal.stability == TemporalStability::High);
 
     auto unknown = tuned;
     for (size_t index = 0; index + 1 < unknown.size(); ++index)
-        if (unknown[index] == L"--temporal") unknown[index + 1] = L"cuts=sometimes";
+        if (unknown[index] == L"--temporal") unknown[index + 1] = L"cuts=sometimes,stability=off";
     const auto unknownView = view(unknown);
     CHECK(!neural_worker_detail::ParseWorkerArguments(unknownView).has_value());
 }

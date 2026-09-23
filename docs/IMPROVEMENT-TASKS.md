@@ -59,7 +59,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.2](#p22) | Dither wherever the image is cut to 8 bits | S | Pipeline, Player | ✅ |
 | [P2.3](#p23) | A quality ladder for cache and export: CQ, 10-bit, lossless | M | Pipeline | ✅ |
 | [P2.4](#p24) | Guide A/B harness, then evaluate Video Depth Anything | S / M-L | Pipeline | |
-| [P2.5](#p25) | Temporal stability with motion compensation | M | Pipeline, Player | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
 | [P2.11](#p211) | Quality metrics in the app | M | Player, Pipeline | |
 | [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
@@ -223,27 +222,6 @@ Refs: [Video-Depth-Anything](https://github.com/DepthAnything/Video-Depth-Anythi
 
 **Impact** — Pipeline: the deciding test for better depth and flow, and a
 prerequisite for P3.6.
-
----
-
-<a id="p25"></a>
-### P2.5 · Temporal stability with motion compensation
-
-`M` · **Pipeline, Player** · _supersedes old 3.6_
-
-The old plan ("one history texture, one lerp") ghosts on anything that moves.
-The player already computes a reverse flow field and a round-trip trust test
-(`FlowGate.h`).
-
-**Do** — warp the previous neural frame by that flow, blend only where the
-flow is trusted, and reset on `ClassifySceneCut`. Tune the default on the
-benchmark's added-sigma metric. It ships as a ladder with Off available,
-because this is quality-affecting.
-
-This is the defining failure mode of neural video: Merserk ships shimmer
-suppression, and Topaz has said on the record that it has no deflicker.
-
-Refs: [Lai et al., ECCV 2018](https://arxiv.org/pdf/1808.00449)
 
 ---
 

@@ -334,6 +334,7 @@ static constexpr int IDC_NS_GUIDE_DEPTH = 7312;
 // 7313-7315 were the encoder controls, moved to their own dialog below.
 // The Temporal group (TemporalSettings.h).
 static constexpr int IDC_NS_SCENE_CUTS = 7340;
+static constexpr int IDC_NS_STABILITY = 7341;
 static constexpr int IDC_NS_RESET = 7320;
 static constexpr int IDC_NS_APPLY = 7321;
 static constexpr int IDC_NS_CLOSE = 7322;
@@ -3738,6 +3739,9 @@ private:
             GetPrivateProfileStringW(L"Temporal",L"SceneCuts",L"default",cuts,static_cast<DWORD>(std::size(cuts)),SettingsPath().c_str());
             m_temporalSettings.sceneCuts=scene_cut::ParseSensitivity(WideToUtf8(cuts)).value_or(scene_cut::Sensitivity::Default);
             m_guides.SetSceneCutSensitivity(m_temporalSettings.sceneCuts);
+            wchar_t stability[32]{};
+            GetPrivateProfileStringW(L"Temporal",L"Stability",L"off",stability,static_cast<DWORD>(std::size(stability)),SettingsPath().c_str());
+            m_temporalSettings.stability=ParseTemporalStability(WideToUtf8(stability)).value_or(TemporalStability::Off);
         }
         m_gpuColorConversion=GetPrivateProfileIntW(L"Encoding",L"GpuColorConversion",0,SettingsPath().c_str())!=0;
         m_gpuSourceConversion=GetPrivateProfileIntW(L"Encoding",L"GpuSourceConversion",0,SettingsPath().c_str())!=0;
@@ -3906,6 +3910,7 @@ private:
         WritePrivateProfileStringW(L"NeuralGuides",L"MotionVectors",m_renderGuides.motionVectors?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"NeuralGuides",L"Depth",m_renderGuides.depth?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Temporal",L"SceneCuts",Utf8ToWide(std::string(scene_cut::SensitivityName(m_temporalSettings.sceneCuts))).c_str(),SettingsPath().c_str());
+        WritePrivateProfileStringW(L"Temporal",L"Stability",Utf8ToWide(std::string(TemporalStabilityName(m_temporalSettings.stability))).c_str(),SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuSourceConversion",m_gpuSourceConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"NvencPreset",std::to_wstring(m_nvencPreset).c_str(),SettingsPath().c_str());
@@ -4833,6 +4838,7 @@ private:
         select(IDC_NS_PASSES,std::clamp(m_neuralSettings.passes,1,4)-1);
         // The combo lists the rungs in the enum's own order, so the index IS the rung.
         select(IDC_NS_SCENE_CUTS,static_cast<int>(m_temporalSettings.sceneCuts));
+        select(IDC_NS_STABILITY,static_cast<int>(m_temporalSettings.stability));
         const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         check(IDC_NS_CHAINED,m_neuralSettings.chainedHistory);
@@ -4858,6 +4864,7 @@ private:
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
         TemporalSettings temporal=m_temporalSettings;
         temporal.sceneCuts=static_cast<scene_cut::Sensitivity>(std::clamp(sel(IDC_NS_SCENE_CUTS,static_cast<int>(temporal.sceneCuts)),0,3));
+        temporal.stability=static_cast<TemporalStability>(std::clamp(sel(IDC_NS_STABILITY,static_cast<int>(temporal.stability)),0,3));
         if(guides!=m_renderGuides||temporal!=m_temporalSettings){m_renderGuides=guides;m_temporalSettings=temporal;ApplyLiveGuideControls();}
         UpdateNeuralSettingValueLabels(h);
         // Sliders fire continuously; the preview waits for them to settle.
@@ -4923,17 +4930,24 @@ private:
                                        T(L"neural.scene_cuts.less"),T(L"neural.scene_cuts.off")};
             CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",522,
                               {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts");
+            // A ladder with Off first and the default, for the reason the policy
+            // header gives: it trades detail in motion for steadiness, and a
+            // default never moves down a ladder to buy something else.
+            const std::wstring stability[]={T(L"neural.stability.off"),T(L"neural.stability.low"),
+                                            T(L"neural.stability.medium"),T(L"neural.stability.high")};
+            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",556,
+                              {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability");
         }
-        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,562,418,38,0,DialogAnchor::StretchNote);
-        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,120,608,86,30);
-        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,216,608,122,30,true);
-        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,348,608,86,30);
+        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,596,418,38,0,DialogAnchor::StretchNote);
+        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,120,642,86,30);
+        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,216,642,122,30,true);
+        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,348,642,86,30);
         AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
         SyncNeuralSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kNeuralDesignW=466,kNeuralDesignH=692;
+    static constexpr int kNeuralDesignW=466,kNeuralDesignH=726;
 
     // Like a preset: the next render takes it, a paused frame re-previews with
     // it, and a render already running finishes at the scale it started with.
@@ -5052,7 +5066,7 @@ private:
             // it back, and the setting the user thinks they picked never
             // reaches the render. Adding a control without adding it to this
             // line is the one mistake this dialog invites, and it is silent.
-            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS)&&code==CBN_SELCHANGE)||
+            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY)&&code==CBN_SELCHANGE)||
                ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
         }

@@ -246,8 +246,8 @@ the fourth pane's Mix are remembered in `[Comparison]`.
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
 local structure, local tone, skin structure, style and automatic mask, the
 number of neural passes and whether temporal history carries between them, the
-motion-vector and depth guide switches, and how readily a scene cut resets the
-render's temporal history. The controls are grouped under **Look**, **Quality and
+motion-vector and depth guide switches, how readily a scene cut resets the
+render's temporal history, and how much temporal stability the render gets. The controls are grouped under **Look**, **Quality and
 render time**, **Guides sent to the model** and **Across frames**, so which
 ones answer the same question is visible before you read their labels. These change
 the render identity: **Apply** restarts an active session at the playhead, or
@@ -289,6 +289,18 @@ follows the first within 0.3 s. **Off** never resets on the picture; seeks,
 dropped frames and a new source still do. Each rung renders its own cache entry.
 `python tools/benchmark/cutlab.py --ladder` prints what each rung does on the
 labelled corpus.
+
+**Temporal stability** steadies shimmer the model adds from one frame to the
+next. The previous rendered frame is moved along the video's own motion and
+blended into the new one, but only where the source itself lines up after that
+move - so a moving edge, something coming out from behind something else, or a
+cut takes the new frame as it is, and a fade or a lighting change is followed
+rather than lagged. **Low**, **Medium** and **High** keep 30, 50 and 70 % of that
+history. **Off** is the default and the render as the model produced it. Measured
+on the benchmark's four real captures, High lowers the temporal sigma the render
+adds on every one of them (by 0.02 to 0.42 of an 8-bit code) with PSNR against
+the source unchanged within 0.2 dB; on a synthetic noise texture it costs some
+fine detail, which is why it is a choice. Each rung renders its own cache entry.
 
 Color strength and the render preset are deliberately not in that dialog. Each
 was measured against the pinned runtime and changes nothing - the add-on echoes
