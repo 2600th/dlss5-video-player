@@ -137,6 +137,8 @@ D3D12Renderer::~D3D12Renderer() {
     for (uint32_t i=0;i<ReferenceUploads;++i) {
         if (m_referenceUpload[i] && m_referenceMapped[i]) m_referenceUpload[i]->Unmap(0,nullptr);
         m_referenceMapped[i]=nullptr;
+        if (m_subtitleUpload[i] && m_subtitleMapped[i]) m_subtitleUpload[i]->Unmap(0,nullptr);
+        m_subtitleMapped[i]=nullptr;
     }
     for (uint32_t i=0;i<CaptureSlots;++i) {
         if (m_cacheReadback[i] && m_cacheReadbackMapped[i]) m_cacheReadback[i]->Unmap(0,nullptr);
@@ -398,8 +400,19 @@ cbuffer Compose:register(b1){
     float4 Loupe;   // xy = image UV under the pointer, z = circle radius px, w = px per output texel (0 = off)
     float4 LoupeAt; // xy = centre of the left circle, zw = of the right one, px
     float4 Diff;    // x = difference gain, y = 1 for grey luma, 0 per channel, z = mask on, w = mask inverted
+    float4 Subs;    // x = the subtitle overlay is on
 }
-Texture2D Mask:register(t3); Texture2D Labels:register(t4);
+Texture2D Mask:register(t3); Texture2D Labels:register(t4); Texture2D Subtitles:register(t5);
+// Subtitles, last of all: premultiplied BGRA drawn at the backbuffer's own size by
+// the player's subtitle child, over whatever the rest of the compositor made - the
+// picture, the panes, the tags, the loupe - and in the sRGB-encoded values every
+// subtitle is authored in. Never in PSPresent, so never in the cache capture, the
+// neural input or an export; while the window is being resized it is stretched
+// until a canvas of the new size arrives.
+float3 SubtitlesOver(float3 o,float2 uv){
+    if(Subs.x>0.5){float4 s=Subtitles.SampleLevel(S,uv,0);o=s.rgb+o*(1.0-s.a);}
+    return o;
+}
 // The spatial mask on the Mix: where it is white the neural member stays as dialled,
 // where it is black the original shows through, and grey is a blend - so a face can be
 // protected from the model while the rest of the frame keeps it. Stretched over the
@@ -494,6 +507,7 @@ float4 PSPresentScaled(V i):SV_Target{
     if(paneMode==6||paneMode==7){
         float4 panes=ComposePanes(i.uv,paneMode,Pane.y>0.5);
         if(Loupe.w>0.0)panes.rgb=LoupeOver(panes.rgb,i.uv*Target.xy,Pane.y>0.5);
+        panes.rgb=SubtitlesOver(panes.rgb,i.uv);
         return panes;
     }
     float zoom=max(Misc.y,0.01);
@@ -539,6 +553,7 @@ float4 PSPresentScaled(V i):SV_Target{
         }
     }
     if(Loupe.w>0.0)o=LoupeOver(o,i.uv*Target.xy,swap);
+    o=SubtitlesOver(o,i.uv);
     return float4(o,1);
 }
 // GPU colour conversion for the NV12 capture path. The picture is exactly what the
@@ -682,11 +697,11 @@ bool D3D12Renderer::CreatePipelines(){
     // which is a written descriptor either way because the flow views below are created
     // whether or not the engine came up.
     ranges[1].NumDescriptors=2;
-    // The compositor's table, t3 and t4. Its own parameter, appended, so nothing that
+    // The compositor's table, t3 to t5. Its own parameter, appended, so nothing that
     // binds the first three moves.
-    D3D12_DESCRIPTOR_RANGE overlayRange{};overlayRange.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;overlayRange.NumDescriptors=2;overlayRange.BaseShaderRegister=3;
+    D3D12_DESCRIPTOR_RANGE overlayRange{};overlayRange.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;overlayRange.NumDescriptors=3;overlayRange.BaseShaderRegister=3;
     // [0] t0 current view, [1] t1 comparison reference and t2 backward flow, [2]
-    // PresentConstantCount root constants (Params), [3] t3..t4, [4] ComposeConstantCount
+    // PresentConstantCount root constants (Params), [3] t3..t5, [4] ComposeConstantCount
     // root constants (Compose).
     D3D12_ROOT_PARAMETER rp[5]{};
     for(uint32_t r=0;r<2;++r){rp[r].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[r].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[r].DescriptorTable.NumDescriptorRanges=1;rp[r].DescriptorTable.pDescriptorRanges=&ranges[r];}
@@ -1020,6 +1035,9 @@ bool D3D12Renderer::CreateVideoResources(){
     // read with stays 0 (SetPresentConstants).
     srv.Format=DXGI_FORMAT_R8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(OverlaySRV));
     srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(LabelSRV));
+    // Null until the first subtitle frame, and never read before one: the flag the
+    // compositor tests is off (SetPresentConstants).
+    srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(SubtitleSRV));
 
     // Two timestamps per frame slot bracket DLSS Evaluate; resolved into a readback
     // buffer and harvested once that slot's fence is known complete.
@@ -1127,6 +1145,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     if(!DeviceHR(pre->Reset(m_uploadAllocators[slot].Get(),nullptr),"Reset frame upload command list")) return false;
     ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);pre->SetDescriptorHeaps(1,heaps);
     RecordReferenceUpload(pre,slot);
+    RecordSubtitleUpload(pre,slot);
 
     D3D12_TEXTURE_COPY_LOCATION d{};d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;D3D12_TEXTURE_COPY_LOCATION s{};s.pResource=m_upload[slot].Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     if(nv12Source){
@@ -1354,8 +1373,10 @@ bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const Fr
 }
 
 present_scale::Target D3D12Renderer::CurrentPresentTarget()const{
-    // A comparison the capture's PSPresent cannot draw takes the compositor even at 1:1.
-    const bool compose=m_debugView==DebugView::Final&&m_hasReference&&ComparisonNeedsCompositor(m_comparison);
+    // A comparison the capture's PSPresent cannot draw takes the compositor even at 1:1,
+    // and so do subtitles, which PSPresent never draws.
+    const bool compose=m_debugView==DebugView::Final&&
+        ((m_hasReference&&ComparisonNeedsCompositor(m_comparison))||m_subtitleShown);
     return present_scale::Choose(m_followWindow,m_psoPresentScaled!=nullptr,m_backbufferW,m_backbufferH,m_outputW,m_outputH,compose);
 }
 
@@ -1499,7 +1520,8 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
         float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),0,0,
         cmp.loupeU,cmp.loupeV,cmp.loupeRadius,loupe?std::max(cmp.loupeMagnification,1.0f):0.0f,
         cmp.loupeLeftX,cmp.loupeLeftY,cmp.loupeRightX,cmp.loupeRightY,
-        std::max(cmp.differenceGain,0.0f),cmp.differenceLuma?1.0f:0.0f,mask?1.0f:0.0f,cmp.maskInvert?1.0f:0.0f};
+        std::max(cmp.differenceGain,0.0f),cmp.differenceLuma?1.0f:0.0f,mask?1.0f:0.0f,cmp.maskInvert?1.0f:0.0f,
+        m_subtitleShown&&m_debugView==DebugView::Final?1.0f:0.0f,0,0,0};
     cmd->SetGraphicsRoot32BitConstants(RootCompose,ComposeConstantCount,compose,0);
     cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(OverlaySRV));
 }
@@ -1558,6 +1580,66 @@ bool D3D12Renderer::SetLabelAtlas(const uint8_t*premultipliedBgra,uint32_t width
     if(!UploadStaticTexture(m_labelAtlas,DXGI_FORMAT_B8G8R8A8_UNORM,premultipliedBgra,width,height,4u,LabelSRV,L"Compositor_Label_Atlas"))return false;
     m_labelAtlasW=width;m_labelAtlasH=height;m_labelRowHeight=rowHeight;m_labelWidths=rowWidths;
     return true;
+}
+
+bool D3D12Renderer::CreateSubtitleResources(uint32_t width,uint32_t height){
+    if(m_gpuUnusable||!m_device||!m_srvHeap)return false;
+    // The view below replaces one frames in flight may have bound, and the texture
+    // it replaces may still be read by them. Once per canvas size: a load, a resize.
+    if(!WaitGPUForContinuedUse())return false;
+    for(uint32_t i=0;i<ReferenceUploads;++i){
+        if(m_subtitleUpload[i]&&m_subtitleMapped[i])m_subtitleUpload[i]->Unmap(0,nullptr);
+        m_subtitleUpload[i].Reset();m_subtitleMapped[i]=nullptr;
+    }
+    m_subtitle.Reset();m_subtitleW=m_subtitleH=0;m_subtitleShown=false;m_subtitlePending=false;
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto desc=Tex2D(DXGI_FORMAT_B8G8R8A8_UNORM,width,height,D3D12_RESOURCE_FLAG_NONE);
+    ComPtr<ID3D12Resource> texture;
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&texture)),"Create subtitle overlay"))return false;
+    texture->SetName(L"Compositor_Subtitles_BGRA_Premultiplied");
+    for(uint32_t i=0;i<ReferenceUploads;++i){
+        uint32_t rows=0;uint64_t rowBytes=0,total=0;
+        if(!CreateUploadForTexture(desc,m_subtitleUpload[i],m_subtitleMapped[i],m_subtitleFootprint,rows,rowBytes,total,"Create subtitle overlay upload")){
+            for(uint32_t j=0;j<=i;++j){if(m_subtitleUpload[j]&&m_subtitleMapped[j])m_subtitleUpload[j]->Unmap(0,nullptr);m_subtitleUpload[j].Reset();m_subtitleMapped[j]=nullptr;}
+            return false;
+        }
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
+    srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(texture.Get(),&srv,SRVCPU(SubtitleSRV));
+    m_subtitle=std::move(texture);m_subtitleInCopyDest=true;m_subtitleW=width;m_subtitleH=height;
+    LOG("Subtitle overlay allocated: "<<width<<"x"<<height<<" with "<<ReferenceUploads<<" uploads.");
+    return true;
+}
+
+bool D3D12Renderer::SetSubtitleOverlay(const uint8_t*premultipliedBgra,uint32_t width,uint32_t height){
+    if(!premultipliedBgra){
+        // Hiding needs no GPU work: the compositor stops reading the texture.
+        if(m_subtitleShown||m_subtitlePending)m_presentStale=true;
+        m_subtitleShown=false;m_subtitlePending=false;
+        return true;
+    }
+    // Only the window compositor draws subtitles; a renderer without one (the
+    // offline carrier) has nowhere to put them.
+    if(m_gpuUnusable||!m_psoPresentScaled||!width||!height)return false;
+    if((!m_subtitle||width!=m_subtitleW||height!=m_subtitleH)&&!CreateSubtitleResources(width,height))return false;
+    // The same slot rule as the comparison reference: the next submission records
+    // the copy, so its fence guards this buffer, which it shares with the slot
+    // ReferenceUploads away.
+    const uint32_t slot=m_frameSlot%FrameCount;
+    if(!WaitForFrameSlot(slot)||!WaitForFrameSlot((slot+ReferenceUploads)%FrameCount))return false;
+    CopyMappedRows(m_subtitleMapped[slot%ReferenceUploads],m_subtitleFootprint,premultipliedBgra,size_t(width)*4u,height);
+    m_subtitleUploadSlot=slot;m_subtitlePending=true;m_presentStale=true;
+    return true;
+}
+
+void D3D12Renderer::RecordSubtitleUpload(ID3D12GraphicsCommandList*cmd,uint32_t slot){
+    if(!m_subtitlePending||m_subtitleUploadSlot!=slot||!m_subtitle)return;
+    if(!m_subtitleInCopyDest)Barrier(cmd,m_subtitle.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION d{};d.pResource=m_subtitle.Get();d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION s{};s.pResource=m_subtitleUpload[slot%ReferenceUploads].Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;s.PlacedFootprint=m_subtitleFootprint;
+    cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+    Barrier(cmd,m_subtitle.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_subtitleInCopyDest=false;m_subtitlePending=false;m_subtitleShown=true;
 }
 
 bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
@@ -1897,6 +1979,7 @@ bool D3D12Renderer::PresentCurrent(){
     ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
     HarvestNeuralTimings();
     RecordReferenceUpload(cmd,slot);
+    RecordSubtitleUpload(cmd,slot);
 
     uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);

@@ -7577,6 +7577,14 @@ void compare_compositor_stays_out_of_the_capture_program_test()
     const auto scaled=present_program_bindings("PSPresentScaled");
     CHECK(std::find(scaled.begin(),scaled.end(),"Compose@1")!=scaled.end());
     CHECK(std::find(scaled.begin(),scaled.end(),"Labels@4")!=scaled.end());
+    // Subtitles are composited after the network by the window compositor alone:
+    // the capture, the conversion and the NV12 capture never bind their texture,
+    // so a subtitle can never reach the cache or the model's input.
+    CHECK(std::find(scaled.begin(),scaled.end(),"Subtitles@5")!=scaled.end());
+    for(const char* entry:{"PSPresent","PSConvert","PSCaptureLuma","PSCaptureChroma"}){
+        const auto bound=present_program_bindings(entry);
+        CHECK(std::find(bound.begin(),bound.end(),"Subtitles@5")==bound.end());
+    }
     // The window compositor takes over at 1:1 only for what PSPresent cannot draw.
     using present_scale::Choose;
     CHECK(!Choose(true,true,1920,1080,1920,1080,false).scaled);

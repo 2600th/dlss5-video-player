@@ -453,6 +453,13 @@ public:
     bool SetMask(const uint8_t* gray, uint32_t width, uint32_t height);
     void ClearMask();
     bool HasMask() const { return m_mask != nullptr; }
+    // The subtitle overlay: premultiplied BGRA at the backbuffer's size, drawn by the
+    // window compositor over everything else and never by PSPresent, so it cannot reach
+    // the cache capture. Copied into an upload buffer now and onto the GPU by the next
+    // frame or present, like the comparison reference; only a new size drains the
+    // queue. Null hides it. False when the renderer has no window compositor.
+    bool SetSubtitleOverlay(const uint8_t* premultipliedBgra, uint32_t width, uint32_t height);
+    bool SubtitleOverlayShown() const { return m_subtitleShown || m_subtitlePending; }
     // The picture on screen, drawn again into an offscreen target of the present's own
     // size with the present's own constants and program - so a saved comparison is what
     // the window shows, tags and loupe included - and read back as tightly packed RGBA.
@@ -513,17 +520,18 @@ private:
     static_assert(FrameCount % ReferenceUploads == 0);
     // Root signature: [0] SRV table t0 (current view), [1] SRV table t1 (comparison
     // reference) and t2 (backward flow, read by the flow resolve alone), [2]
-    // PresentConstantCount 32-bit constants (Params), [3] SRV table t3..t4 (the
-    // compositor's mask and label atlas), [4] ComposeConstantCount constants (Compose).
+    // PresentConstantCount 32-bit constants (Params), [3] SRV table t3..t5 (the
+    // compositor's mask, label atlas and subtitles), [4] ComposeConstantCount constants
+    // (Compose).
     // The last two are read by PSPresentScaled alone, and appended so that the first
     // three keep the indices every other pass binds.
     static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
     static constexpr uint32_t RootOverlay = 3, RootCompose = 4;
     // 16 present parameters plus the capture pass's source texel size.
     static constexpr uint32_t PresentConstantCount = 20;
-    // Pane, Label, LabelW, Target, Loupe, LoupeAt, Diff; see the Compose cbuffer in
-    // D3D12Renderer.cpp.
-    static constexpr uint32_t ComposeConstantCount = 28;
+    // Pane, Label, LabelW, Target, Loupe, LoupeAt, Diff, Subs; see the Compose cbuffer
+    // in D3D12Renderer.cpp.
+    static constexpr uint32_t ComposeConstantCount = 32;
     static constexpr uint32_t ReferenceSRV = 6;
     // NV12 source planes, bound at t0/t1 for the one conversion draw.
     static constexpr uint32_t SourceLumaSRV = 7, SourceChromaSRV = 8;
@@ -532,14 +540,14 @@ private:
     // motion. The cost and reverse slots hold null descriptors when the engine offered
     // neither, because the reference table spans both of them.
     static constexpr uint32_t NvofFlowSRV = 9, NvofCostSRV = 10, NvofBackFlowSRV = 11;
-    // The compositor's overlay table: the spatial mask (t3) and the label atlas (t4).
-    // Both hold null views until something is uploaded.
-    static constexpr uint32_t OverlaySRV = 12, LabelSRV = 13;
+    // The compositor's overlay table: the spatial mask (t3), the label atlas (t4) and
+    // the subtitle overlay (t5). Each holds a null view until something is uploaded.
+    static constexpr uint32_t OverlaySRV = 12, LabelSRV = 13, SubtitleSRV = 14;
     // Temporal stability: two five-descriptor tables, one per history slot the pass can
     // read from (neural output, that slot's stabilized frame, motion, decoded source,
     // that slot's source), then one view of each slot's stabilized frame for the
     // capture to read. Written when the pass first runs; nothing reads them before.
-    static constexpr uint32_t TemporalTableSRV = 14, TemporalTableSize = 5;
+    static constexpr uint32_t TemporalTableSRV = 15, TemporalTableSize = 5;
     static constexpr uint32_t TemporalOutputSRV = TemporalTableSRV + 2 * TemporalTableSize;
     static constexpr uint32_t SRVCount = TemporalOutputSRV + 2;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
@@ -619,6 +627,8 @@ private:
     // when it is off. False when a rung was asked for and the pass cannot run.
     bool RecordTemporalStability(ID3D12GraphicsCommandList* cmd, uint32_t& captured);
     void RecordReferenceUpload(ID3D12GraphicsCommandList* cmd, uint32_t slot);
+    bool CreateSubtitleResources(uint32_t width, uint32_t height);
+    void RecordSubtitleUpload(ID3D12GraphicsCommandList* cmd, uint32_t slot);
     // targetWidth/targetHeight: the backbuffer the compositor draws into; the capture
     // passes pass neither, and PSPresent reads no Compose constant anyway.
     void SetPresentConstants(ID3D12GraphicsCommandList* cmd, const ColorSettings& colors,
@@ -731,6 +741,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[ReferenceUploads];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_labelAtlas;  // premultiplied BGRA tags, see SetLabelAtlas
     Microsoft::WRL::ComPtr<ID3D12Resource> m_mask;        // R8 spatial mask, see SetMask
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_subtitle;    // premultiplied BGRA, see SetSubtitleOverlay
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_subtitleUpload[ReferenceUploads];
+    uint8_t* m_subtitleMapped[ReferenceUploads]{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_subtitleFootprint{};
+    uint32_t m_subtitleW = 0, m_subtitleH = 0, m_subtitleUploadSlot = 0;
+    bool m_subtitlePending = false, m_subtitleInCopyDest = false, m_subtitleShown = false;
     uint32_t m_labelAtlasW = 0, m_labelAtlasH = 0, m_labelRowHeight = 0;
     std::array<uint32_t, 4> m_labelWidths{};
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap; // 2 timestamps per frame slot
