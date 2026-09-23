@@ -3,11 +3,13 @@
 #include "PlatformPaths.h"
 #include "NeuralWorkerProtocol.h"
 #include "HardErrorSuppression.h"
+#include "StrictJson.h"
 
 #include <windows.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -1739,8 +1741,15 @@ std::string LoadNeuralPreflightReceipt(const std::filesystem::path& cacheRoot,
     std::string identity;
     if (!std::getline(input, identity) || identity != PreflightIdentity(key)) return {};
     const std::string json{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>{}};
-    // Only a receipt that records a pass may stand in for a probe.
-    if (json.find("\"ok\":true") == std::string::npos) return {};
+    // Only a receipt that records a pass may stand in for a probe, and only a
+    // whole one. This used to search for "ok":true, which sits in the first
+    // bytes of the receipt, so a file cut short by a crash mid-write still
+    // read as a pass. Parsed, the truncated document is simply not JSON.
+    strict_json::JsonValue root;
+    if (!strict_json::JsonParser(json).ParseDocument(root) || root.kind != strict_json::JsonValue::Kind::Object)
+        return {};
+    const strict_json::JsonValue* ok = root.Member("ok");
+    if (!ok || ok->kind != strict_json::JsonValue::Kind::Bool || !ok->boolean) return {};
     return json;
 }
 
@@ -1752,12 +1761,28 @@ bool StoreNeuralPreflightReceipt(const std::filesystem::path& cacheRoot,
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
     if (error) return false;
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output) return false;
-    const std::string identity = PreflightIdentity(key) + "\n";
-    output.write(identity.data(), static_cast<std::streamsize>(identity.size()));
-    output.write(json.data(), static_cast<std::streamsize>(json.size()));
-    return output.good();
+    const std::string bytes = PreflightIdentity(key) + "\n" + std::string(json);
+    if (bytes.size() > MAXDWORD) return false;
+    // Written beside the destination, flushed, then renamed over it, so a
+    // reader sees the previous verdict or the new one and never part of one.
+    // Unique per process and call: two players storing the same verdict must
+    // not share a temporary file.
+    static std::atomic<unsigned long> sequence{};
+    std::filesystem::path temporary = path;
+    temporary += L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                 std::to_wstring(sequence.fetch_add(1));
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool flushed = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) &&
+                         written == bytes.size() && FlushFileBuffers(file);
+    const bool closed = CloseHandle(file) != FALSE;
+    const bool replaced = flushed && closed &&
+        MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+    // CREATE_NEW made this exact temporary ours; nothing else is removed.
+    if (!replaced) DeleteFileW(temporary.c_str());
+    return replaced;
 }
 
 std::string MarkReusedNeuralPreflight(std::string_view json)

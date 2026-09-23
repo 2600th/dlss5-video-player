@@ -1140,6 +1140,55 @@ void a_preflight_verdict_is_not_shared_by_two_non_ascii_gpu_names_test()
     std::filesystem::remove_all(root, error);
 }
 
+// P1.12: the stored verdict is written through a temporary and a rename, and
+// read back by parsing it. A search for "ok":true accepted a file cut short
+// mid-write, because that member sits in the receipt's first bytes.
+void a_stored_preflight_verdict_is_whole_or_absent_test()
+{
+    const auto root = std::filesystem::temp_directory_path() /
+        (L"preflight-atomic-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    const NeuralPreflightKey key{L"NVIDIA GeForce RTX 5090", L"32.0.16.1664", "digest-a"};
+    const std::filesystem::path path = NeuralPreflightReceiptPath(root, key);
+    const std::string pass = "{\"ok\":true,\"gpu\":{\"description\":\"fake\"},\"observations\":[]}";
+    CHECK(StoreNeuralPreflightReceipt(root, key, pass));
+    CHECK_EQ(pass, LoadNeuralPreflightReceipt(root, key));
+    // Replaced in place, and no temporary is left behind beside it.
+    CHECK(StoreNeuralPreflightReceipt(root, key, "{\"ok\":true,\"gpu\":\"second\"}"));
+    CHECK_EQ(std::string("{\"ok\":true,\"gpu\":\"second\"}"), LoadNeuralPreflightReceipt(root, key));
+    size_t files = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(path.parent_path(), error)) {
+        (void)entry;
+        ++files;
+    }
+    CHECK_EQ(size_t{1}, files);
+
+    // Whatever sits on disk under the right identity line, only a whole
+    // document whose top-level "ok" is true stands in for a probe.
+    std::string identity;
+    {
+        std::ifstream input(path, std::ios::binary);
+        std::getline(input, identity);
+    }
+    const auto plant = [&](std::string_view body) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << identity << '\n' << body;
+    };
+    for (const std::string_view rejected : {std::string_view("{\"ok\":true,\"gpu\":{\"descr"),
+                                            std::string_view("{\"ok\":true,"),
+                                            std::string_view("{\"ok\":false,\"note\":\"\\\"ok\\\":true\"}"),
+                                            std::string_view("{\"gpu\":{\"ok\":true}}"),
+                                            std::string_view("{\"ok\":\"true\"}"),
+                                            std::string_view("{\"ok\":true} trailing")}) {
+        plant(rejected);
+        CHECK(LoadNeuralPreflightReceipt(root, key).empty());
+    }
+    plant("{\"ok\":true}");
+    CHECK_EQ(std::string("{\"ok\":true}"), LoadNeuralPreflightReceipt(root, key));
+    std::filesystem::remove_all(root, error);
+}
+
 void preflight_latch_holds_one_verdict_per_runtime_identity_test()
 {
     const NeuralPreflightKey key{L"NVIDIA GeForce RTX 3060 Laptop GPU", L"32.0.15.6614", "runtime-digest-a"};
@@ -2210,6 +2259,7 @@ int wmain(int argc, wchar_t** argv)
     preflight_failure_detail_comes_from_the_receipt_diagnosis_test();
     identity_encoding_keeps_different_names_different_test();
     a_preflight_verdict_is_not_shared_by_two_non_ascii_gpu_names_test();
+    a_stored_preflight_verdict_is_whole_or_absent_test();
     preflight_latch_holds_one_verdict_per_runtime_identity_test();
     runtime_lease_admits_one_holder_per_directory_test();
     protocol_rejects_inconsistent_results_test();
