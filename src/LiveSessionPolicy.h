@@ -8,6 +8,8 @@
 #include <string_view>
 
 #include "NeuralCoverage.h"
+#include "PlaybackTiming.h"
+#include "UpscalingPolicy.h"
 
 // Decisions an active neural session makes on the UI thread, separated from the
 // player so they can be tested without a window, a GPU or a render helper.
@@ -309,6 +311,67 @@ inline bool ShouldRetarget(const SessionView& view, CoverageSpan target, Coverag
     // working somewhere the playhead is not.
     return view.positionSec + kBackwardSlack < double(target.start100ns) * 1e-7 ||
            view.positionSec >= double(target.end100ns) * 1e-7;
+}
+
+// ---- Keep-up forecast at a processing-scale rung ------------------------
+//
+// The forecast used to know one pace per source geometry, whatever rung the
+// session ran at, so the first 50% session was forecast at the 100% pace -
+// asking a card that keeps up at 50% whether the user really wanted to watch
+// it buffer - and whatever that session then measured was filed under the
+// source geometry, where it pulled the 100% forecast toward a pace 100% never
+// achieves. The player now keeps each rung's samples apart, and a rung with
+// none of its own starts from the 100% forecast scaled by what the reduced
+// model saves.
+//
+// Only part of a live frame follows the model's pixel count: the decode, the
+// guides, the Super Resolution restore, the readback and the encode stay at
+// the source size. Measured 2026-09-23 on an RTX 4080 SUPER (whole renders,
+// UpscalingPolicy.h's table), the cost of a 75%/50% frame against a 100% one:
+//
+//   4K     0.855 (75%)   0.673 (50%)    model share 0.33 / 0.44
+//   1080p  0.915 (75%)   0.820 (50%)    model share 0.19 / 0.24
+//
+// where cost = 1 - share * (1 - pixelRatio). The 1080p pair is one run and
+// mostly helper start-up, so it understates the saving. A quarter keeps every
+// measured rung within 3% of its measurement on the optimistic side (1080p
+// at 75%) and is pessimistic everywhere else, by up to 21% at 4K 50%.
+// Pessimistic is the direction the pace forecast is meant to err in:
+// overstating a cost asks before a marginal session, understating it lets the
+// session start and drop frames. A rung's own measurements replace this after
+// its first session.
+inline constexpr double kModelShareOfLiveFrameCost = 0.25;
+
+// Cost of a frame at `percent` against the same frame at 100%.
+inline double ProcessingScaleCostFactor(uint32_t percent)
+{
+    if (!IsProcessingScaleRung(percent) || percent >= kDefaultProcessingScale) return 1.0;
+    const double linear = double(percent) / 100.0;
+    return 1.0 - kModelShareOfLiveFrameCost * (1.0 - linear * linear);
+}
+
+// The keep-up forecast for a live session at `percent`. `atRung` holds the
+// paces measured at that rung and `atSource` those at 100%; a rung's own
+// measurements win, at any geometry the profile can extrapolate to, and
+// only a rung with none borrows the 100% forecast. `priorScale` is the GPU
+// generation's prior, which describes 100% and is used only through it.
+inline playback_timing::LiveRenderForecast ForecastAtProcessingScale(
+    uint32_t width, uint32_t height, double sourceFps, uint32_t percent,
+    const playback_timing::RenderPaceProfile& atRung,
+    const playback_timing::RenderPaceProfile& atSource, double priorScale)
+{
+    if (!IsProcessingScaleRung(percent) || percent >= kDefaultProcessingScale)
+        return playback_timing::ForecastLiveRender(width, height, sourceFps, atSource, priorScale);
+    if (const auto own = playback_timing::ForecastLiveRender(width, height, sourceFps, atRung, 0.0); own.measured)
+        return own;
+    playback_timing::LiveRenderForecast forecast =
+        playback_timing::ForecastLiveRender(width, height, sourceFps, atSource, priorScale);
+    if (!forecast.measured) return forecast;
+    forecast.msPerFrame *= ProcessingScaleCostFactor(percent);
+    forecast.renderFps = 1000.0 / forecast.msPerFrame;
+    forecast.realtimeRatio = forecast.renderFps / sourceFps;
+    forecast.keepsUp = forecast.realtimeRatio >= 0.98;
+    return forecast;
 }
 
 // Video seconds covered per second of wall clock. Meaningless until the job's

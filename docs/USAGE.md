@@ -468,7 +468,10 @@ guide switches. It
 also keeps `[NeuralPace]`: one measured steady-state render pace per source
 size (`Samples=WxH:ms;...`) for the detected GPU, which the keep-up forecast
 predicts from - exactly at a measured size, along this GPU's own fitted line
-between sizes, and conservatively beyond a single sample. Delete the section
+between sizes, and conservatively beyond a single sample. Paces measured at a
+reduced processing scale are kept apart under `Samples75` and `Samples50`;
+until a rung has one, its forecast is the source-scale one made cheaper by the
+pixels the smaller model no longer processes. Delete the section
 to fall back to the generation's prior. Keep the player in a writable folder
 to persist preferences.
 

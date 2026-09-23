@@ -862,6 +862,16 @@ comfortably. Five samples and a median let the measurements outvote the outlier,
 and the minimum is deliberately not used - this forecast exists to refuse
 sessions that cannot keep up, so erasing slow evidence is the wrong failure.
 
+The paces are also kept per processing-scale rung. They used to be filed under
+the source geometry whatever rung rendered them, so the first 50% session was
+forecast at the 100% pace and its own measurement then pulled the 100% forecast
+toward a pace 100% never reaches. `live_session::ForecastAtProcessingScale`
+reads a rung's own profile when it has one and otherwise scales the 100%
+forecast by `ProcessingScaleCostFactor`: only the model follows the reduced
+pixel count, so the cost is `1 - 0.25 * (1 - pixelRatio)`, a model share fitted
+to the ladder's measured rungs so that none forecasts more than 3% faster than
+it ran.
+
 Per *job* there is also about 7 s of fixed cost — the preflight process, ReShade
 stabilization, up to 120 priming frames, the reopen and seek, and 60 preroll
 frames — which is why a session is one long job rather than a chunk per few

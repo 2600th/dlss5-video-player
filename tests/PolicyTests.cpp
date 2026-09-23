@@ -4806,6 +4806,51 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
     CHECK(quad.valid); CHECK_EQ(uint32_t{4}, quad.multiplier); CHECK_EQ(120.0, quad.outputFps);
 }
 
+// The live keep-up forecast ignored the processing-scale rung: the first 50%
+// session was forecast at the 100% pace. A rung with no pace of its own now
+// starts from the 100% forecast scaled by what the smaller model saves, and
+// its own measurements replace that as soon as it has any.
+void live_forecast_scales_by_the_processing_rung_test()
+{
+    using namespace live_session;
+    CHECK_EQ(1.0, ProcessingScaleCostFactor(100));
+    CHECK_EQ(1.0, ProcessingScaleCostFactor(60));   // not a rung
+    // cost = 1 - share * (1 - pixelRatio), share a quarter.
+    CHECK(std::abs(ProcessingScaleCostFactor(75) - (1.0 - 0.25 * (1.0 - 0.5625))) < 1e-12);
+    CHECK(std::abs(ProcessingScaleCostFactor(50) - 0.8125) < 1e-12);
+    CHECK(ProcessingScaleCostFactor(50) < ProcessingScaleCostFactor(75));
+    // Never cheaper than the measurements in LiveSessionPolicy.h by more than
+    // 3% (1080p: 0.915 at 75%, 0.820 at 50%), and never above the 100% cost.
+    CHECK(ProcessingScaleCostFactor(75) > 0.915 * 0.97 && ProcessingScaleCostFactor(75) < 1.0);
+    CHECK(ProcessingScaleCostFactor(50) > 0.820 * 0.97 && ProcessingScaleCostFactor(50) < 1.0);
+
+    playback_timing::RenderPaceProfile source, half;
+    source.Record({1920, 1080, 36.0});   // 27.8 fps against a 30 fps source
+    // 100% is the forecast it always was.
+    const auto full = ForecastAtProcessingScale(1920, 1080, 30.0, 100, half, source, 1.0);
+    CHECK(full.measured); CHECK_EQ(36.0, full.msPerFrame); CHECK(!full.keepsUp);
+    // 50% with nothing measured at 50%: scaled, and here that is the difference
+    // between a warning and none.
+    const auto first = ForecastAtProcessingScale(1920, 1080, 30.0, 50, half, source, 1.0);
+    CHECK(first.measured);
+    CHECK(std::abs(first.msPerFrame - 36.0 * 0.8125) < 1e-9);
+    CHECK(std::abs(first.renderFps - 1000.0 / (36.0 * 0.8125)) < 1e-9);
+    CHECK(std::abs(first.realtimeRatio - first.renderFps / 30.0) < 1e-12);
+    CHECK(first.keepsUp);
+    // Its own measurement wins, at its geometry or extrapolated to another.
+    half.Record({1920, 1080, 40.0});
+    CHECK_EQ(40.0, ForecastAtProcessingScale(1920, 1080, 30.0, 50, half, source, 1.0).msPerFrame);
+    CHECK(ForecastAtProcessingScale(2560, 1440, 30.0, 50, half, source, 1.0).msPerFrame > 40.0);
+    // Unmeasured everywhere stays unmeasured: an unknown pace never blocks.
+    const auto unknown = ForecastAtProcessingScale(1920, 1080, 30.0, 50, {}, {}, 0.0);
+    CHECK(!unknown.measured); CHECK(unknown.keepsUp);
+    // The generation's prior describes 100% and reaches a rung only through it.
+    const auto prior = ForecastAtProcessingScale(1920, 1080, 30.0, 75, {}, {}, 1.0);
+    CHECK(prior.measured);
+    CHECK(std::abs(prior.msPerFrame - playback_timing::RenderPaceModel{}.MsPerFrame(1920, 1080) *
+                                      ProcessingScaleCostFactor(75)) < 1e-9);
+}
+
 // The stage export used to rename its Matroska carrier onto whatever name the
 // Save dialog returned, so "clip.mp4" was Matroska. The container now follows
 // the extension, and only the containers the output can be are offered.
@@ -12755,6 +12800,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(menus_group_two_to_seven_related_items_per_block_test),
     TEST_CASE(export_plan_runs_super_resolution_and_neural_as_one_pass_test),
     TEST_CASE(export_container_follows_the_chosen_extension_test),
+    TEST_CASE(live_forecast_scales_by_the_processing_rung_test),
     TEST_CASE(render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test),
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
     TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),

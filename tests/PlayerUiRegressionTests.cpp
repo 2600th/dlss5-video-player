@@ -651,6 +651,7 @@ struct PlayerAppTestAccess {
         PlayerApp& app = fixture->app;
 
         CheckLivePaceConfirmation(app);
+        CheckLivePacePerProcessingScale(app);
     }
 
     static void toolbar_pills_and_progress_panel_test()
@@ -2874,6 +2875,58 @@ struct PlayerAppTestAccess {
         std::filesystem::remove(sd); std::filesystem::remove(hd);
         app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_havePresentedPair = pair; app.m_seeking = seeking;
         app.m_renderer = MakeD3D12Renderer();
+    }
+
+    // The keep-up forecast knew one pace per geometry whatever rung the session
+    // ran at: the first 50% session was forecast at the 100% pace, and what it
+    // measured was then filed under the source geometry, dragging the 100%
+    // forecast toward a pace 100% never reaches. Each rung keeps its own, and
+    // a rung with none starts from the 100% pace scaled by what it saves.
+    static void CheckLivePacePerProcessingScale(PlayerApp& app)
+    {
+        const uint32_t scale = app.m_processingScale;
+        const auto history = app.m_paceHistory;
+        app.m_paceHistory.clear(); app.RebuildRenderPace();
+        // 40 ms a frame at 100%: 25 fps, short of a 30 fps source.
+        app.RecordPaceSample(1920, 1080, 40.0);
+        app.RebuildRenderPace();
+        app.m_processingScale = 100;
+        const auto full = app.LiveForecast(1920, 1080, 30.0);
+        CHECK(full.measured); CHECK_EQ(40.0, full.msPerFrame); CHECK(!full.keepsUp);
+        // Before any 50% session: the 100% pace, scaled.
+        app.m_processingScale = 50;
+        const auto first = app.LiveForecast(1920, 1080, 30.0);
+        CHECK(first.measured);
+        CHECK_EQ(40.0 * live_session::ProcessingScaleCostFactor(50), first.msPerFrame);
+        CHECK(first.msPerFrame < full.msPerFrame);
+        // A 50% measurement answers for 50% and leaves 100% as it was.
+        app.RecordPaceSample(1920, 1080, 20.0, 50);
+        app.RebuildRenderPace();
+        CHECK_EQ(20.0, app.LiveForecast(1920, 1080, 30.0).msPerFrame);
+        CHECK(app.LiveForecast(1920, 1080, 30.0).keepsUp);
+        app.m_processingScale = 100;
+        CHECK_EQ(40.0, app.LiveForecast(1920, 1080, 30.0).msPerFrame);
+        CHECK_EQ(size_t{1}, app.m_renderPace.samples.size());
+        // Persisted under a key of its own, which a build without rungs does
+        // not read, and read back into the same rung.
+        app.SaveRenderPace();
+        wchar_t stored[256]{};
+        GetPrivateProfileStringW(L"NeuralPace", L"Samples50", L"", stored, static_cast<DWORD>(std::size(stored)),
+                                 app.SettingsPath().c_str());
+        CHECK(std::wstring(stored) == L"1920x1080:20.000000");
+        GetPrivateProfileStringW(L"NeuralPace", L"Samples", L"", stored, static_cast<DWORD>(std::size(stored)),
+                                 app.SettingsPath().c_str());
+        CHECK(std::wstring(stored) == L"1920x1080:40.000000");
+        CHECK_EQ(0u, GetPrivateProfileStringW(L"NeuralPace", L"Samples75", L"", stored,
+                                              static_cast<DWORD>(std::size(stored)), app.SettingsPath().c_str()));
+        app.LoadRenderPace();
+        CHECK_EQ(20.0, playback_timing::PredictRenderMs(app.RenderPaceAt(50), 1920, 1080, 0.0));
+        CHECK_EQ(40.0, playback_timing::PredictRenderMs(app.RenderPaceAt(100), 1920, 1080, 0.0));
+        CHECK(app.RenderPaceAt(75).samples.empty());
+
+        app.m_paceHistory.clear(); app.SaveRenderPace();
+        app.m_paceHistory = history; app.RebuildRenderPace();
+        app.m_processingScale = scale;
     }
 
     // The running job's source key is offered to playback and to the next

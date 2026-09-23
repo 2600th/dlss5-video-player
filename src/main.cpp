@@ -4218,17 +4218,26 @@ private:
     // was missing when a 4K60 session dropped 848 of 869 frames, and one-sided
     // error means a low quantile drifts towards the best case the machine has
     // ever had rather than the case the user is about to get.
+    //
+    // Kept per processing-scale rung as well (live_session::
+    // ForecastAtProcessingScale): a 50% session's pace used to be filed under
+    // the source geometry, where it pulled the 100% forecast toward a pace
+    // 100% never reaches. The reduced rungs persist under `Samples75` and
+    // `Samples50`, which a build without rungs does not read.
     static constexpr size_t kPaceRingSamples=5;
-    struct PaceHistory{uint32_t width{},height{};std::vector<double> msPerFrame;};
+    struct PaceHistory{uint32_t width{},height{};std::vector<double> msPerFrame;uint32_t scale{kDefaultProcessingScale};};
     static double MedianMsPerFrame(std::vector<double> samples){
         if(samples.empty())return 0.0;
         std::sort(samples.begin(),samples.end());
         const size_t middle=samples.size()/2;
         return samples.size()%2?samples[middle]:(samples[middle-1]+samples[middle])*0.5;
     }
-    void RecordPaceSample(uint32_t width,uint32_t height,double msPerFrame){
-        if(!width||!height||!(msPerFrame>0.0))return;
+    void RecordPaceSample(uint32_t width,uint32_t height,double msPerFrame,uint32_t scale=kDefaultProcessingScale){
+        if(!width||!height||!(msPerFrame>0.0)||!IsProcessingScaleRung(scale))return;
+        size_t atScale=0;
         for(PaceHistory& history:m_paceHistory){
+            if(history.scale!=scale)continue;
+            ++atScale;
             if(history.width!=width||history.height!=height)continue;
             history.msPerFrame.push_back(msPerFrame);
             if(history.msPerFrame.size()>kPaceRingSamples)history.msPerFrame.erase(history.msPerFrame.begin());
@@ -4236,58 +4245,90 @@ private:
         }
         // Same bound as the profile the forecast reads, and the same eviction:
         // a geometry nobody has played for six geometries is the one to lose.
-        if(m_paceHistory.size()==playback_timing::RenderPaceProfile::kMaxSamples)m_paceHistory.erase(m_paceHistory.begin());
-        m_paceHistory.push_back({width,height,{msPerFrame}});
+        // Per rung, so trying a rung cannot evict the source-scale history.
+        if(atScale==playback_timing::RenderPaceProfile::kMaxSamples)
+            m_paceHistory.erase(std::find_if(m_paceHistory.begin(),m_paceHistory.end(),[&](const PaceHistory& history){return history.scale==scale;}));
+        m_paceHistory.push_back({width,height,{msPerFrame},scale});
     }
     // The forecast reads one number per geometry; that number is the geometry's
     // median, recomputed whenever the history changes.
     void RebuildRenderPace(){
         m_renderPace={};
+        for(auto& profile:m_reducedRenderPace)profile={};
         for(const PaceHistory& history:m_paceHistory)
-            m_renderPace.Record({history.width,history.height,MedianMsPerFrame(history.msPerFrame)});
+            MutableRenderPaceAt(history.scale).Record({history.width,history.height,MedianMsPerFrame(history.msPerFrame)});
+    }
+    // m_renderPace is the source-scale profile; the reduced rungs follow in
+    // kProcessingScaleRungs order.
+    playback_timing::RenderPaceProfile& MutableRenderPaceAt(uint32_t scale){
+        for(size_t rung=1;rung<std::size(kProcessingScaleRungs);++rung)
+            if(kProcessingScaleRungs[rung]==scale)return m_reducedRenderPace[rung-1];
+        return m_renderPace;
+    }
+    const playback_timing::RenderPaceProfile& RenderPaceAt(uint32_t scale)const{
+        for(size_t rung=1;rung<std::size(kProcessingScaleRungs);++rung)
+            if(kProcessingScaleRungs[rung]==scale)return m_reducedRenderPace[rung-1];
+        return m_renderPace;
+    }
+    static std::wstring PaceSamplesKey(uint32_t scale){
+        return scale==kDefaultProcessingScale?std::wstring(L"Samples"):L"Samples"+std::to_wstring(scale);
+    }
+    // The keep-up forecast for a live session on this source at the current
+    // processing scale, which is the one the session would render at.
+    playback_timing::LiveRenderForecast LiveForecast(uint32_t width,uint32_t height,double fps)const{
+        return live_session::ForecastAtProcessingScale(width,height,fps,m_processingScale,RenderPaceAt(m_processingScale),
+                                                       m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation));
     }
     void LoadRenderPace(){
         std::wstring gpu(512,L'\0');
         DWORD length=GetPrivateProfileStringW(L"NeuralPace",L"Gpu",L"",gpu.data(),static_cast<DWORD>(gpu.size()),SettingsPath().c_str());
         gpu.resize(length);
-        std::wstring samples(2048,L'\0');
-        length=GetPrivateProfileStringW(L"NeuralPace",L"Samples",L"",samples.data(),static_cast<DWORD>(samples.size()),SettingsPath().c_str());
-        samples.resize(length);
         m_paceHistory.clear();m_renderPace={};
+        for(auto& profile:m_reducedRenderPace)profile={};
         if(gpu!=m_opt.detectedGpu.description)return;
-        for(size_t start=0;start<samples.size();){
-            size_t end=samples.find(L';',start);if(end==std::wstring::npos)end=samples.size();
-            const std::wstring entry=samples.substr(start,end-start);
-            start=end+1;
-            const size_t cross=entry.find(L'x');if(cross==std::wstring::npos)continue;
-            const size_t colon=entry.find(L':',cross);if(colon==std::wstring::npos)continue;
-            unsigned width=0,height=0;
-            if(swscanf_s(entry.c_str(),L"%ux%u",&width,&height)!=2)continue;
-            for(size_t sample=colon+1;sample<=entry.size();){
-                size_t sampleEnd=entry.find(L',',sample);if(sampleEnd==std::wstring::npos)sampleEnd=entry.size();
-                double ms=0.0;
-                if(swscanf_s(entry.substr(sample,sampleEnd-sample).c_str(),L"%lf",&ms)==1)
-                    RecordPaceSample(width,height,ms);
-                sample=sampleEnd+1;
+        for(const uint32_t scale:kProcessingScaleRungs){
+            std::wstring samples(2048,L'\0');
+            length=GetPrivateProfileStringW(L"NeuralPace",PaceSamplesKey(scale).c_str(),L"",samples.data(),static_cast<DWORD>(samples.size()),SettingsPath().c_str());
+            samples.resize(length);
+            for(size_t start=0;start<samples.size();){
+                size_t end=samples.find(L';',start);if(end==std::wstring::npos)end=samples.size();
+                const std::wstring entry=samples.substr(start,end-start);
+                start=end+1;
+                const size_t cross=entry.find(L'x');if(cross==std::wstring::npos)continue;
+                const size_t colon=entry.find(L':',cross);if(colon==std::wstring::npos)continue;
+                unsigned width=0,height=0;
+                if(swscanf_s(entry.c_str(),L"%ux%u",&width,&height)!=2)continue;
+                for(size_t sample=colon+1;sample<=entry.size();){
+                    size_t sampleEnd=entry.find(L',',sample);if(sampleEnd==std::wstring::npos)sampleEnd=entry.size();
+                    double ms=0.0;
+                    if(swscanf_s(entry.substr(sample,sampleEnd-sample).c_str(),L"%lf",&ms)==1)
+                        RecordPaceSample(width,height,ms,scale);
+                    sample=sampleEnd+1;
+                }
             }
         }
         RebuildRenderPace();
     }
     void SaveRenderPace()const{
-        std::wstring samples;
-        for(const PaceHistory& history:m_paceHistory){
-            if(history.msPerFrame.empty())continue;
-            if(!samples.empty())samples+=L';';
-            wchar_t geometry[32]{};swprintf_s(geometry,L"%ux%u:",history.width,history.height);
-            samples+=geometry;
-            for(size_t index=0;index<history.msPerFrame.size();++index){
-                wchar_t text[32]{};swprintf_s(text,L"%.6f",history.msPerFrame[index]);
-                if(index)samples+=L',';
-                samples+=text;
-            }
-        }
         WritePrivateProfileStringW(L"NeuralPace",L"Gpu",m_opt.detectedGpu.description.c_str(),SettingsPath().c_str());
-        WritePrivateProfileStringW(L"NeuralPace",L"Samples",samples.c_str(),SettingsPath().c_str());
+        for(const uint32_t scale:kProcessingScaleRungs){
+            std::wstring samples;
+            for(const PaceHistory& history:m_paceHistory){
+                if(history.scale!=scale||history.msPerFrame.empty())continue;
+                if(!samples.empty())samples+=L';';
+                wchar_t geometry[32]{};swprintf_s(geometry,L"%ux%u:",history.width,history.height);
+                samples+=geometry;
+                for(size_t index=0;index<history.msPerFrame.size();++index){
+                    wchar_t text[32]{};swprintf_s(text,L"%.6f",history.msPerFrame[index]);
+                    if(index)samples+=L',';
+                    samples+=text;
+                }
+            }
+            // A reduced rung nobody has measured writes no key at all, so an
+            // ini that never used the ladder looks exactly as it did.
+            const bool source=scale==kDefaultProcessingScale;
+            WritePrivateProfileStringW(L"NeuralPace",PaceSamplesKey(scale).c_str(),source||!samples.empty()?samples.c_str():nullptr,SettingsPath().c_str());
+        }
         // Keys from the single-sample layout that preceded `Samples`.
         for(const wchar_t* stale:{L"MsPerFrame",L"Width",L"Height"})
             WritePrivateProfileStringW(L"NeuralPace",stale,nullptr,SettingsPath().c_str());
@@ -4296,16 +4337,23 @@ private:
     static constexpr uint64_t kMinPaceFrames=120;
     void RecordLiveRenderPace(){
         if(!m_liveSegments||!m_livePaceWidth||!m_livePaceHeight)return;
+        // A rung changed mid-session renders the rest of it at the new one, so
+        // the session's pace belongs to neither rung.
+        if(m_processingScale!=m_livePaceScale){
+            LOG("Neural render pace not recorded: the processing scale changed from "<<m_livePaceScale<<"% to "<<m_processingScale<<"% during the session.");
+            return;
+        }
         const auto pace=m_liveSegments->Pace();
         if(pace.frames<kMinPaceFrames||!(pace.wallMs>0.0))return;
-        RecordPaceSample(m_livePaceWidth,m_livePaceHeight,pace.MsPerFrame());
+        RecordPaceSample(m_livePaceWidth,m_livePaceHeight,pace.MsPerFrame(),m_livePaceScale);
         RebuildRenderPace();
         SaveRenderPace();
-        const size_t kept=[&]{for(const PaceHistory& history:m_paceHistory)if(history.width==m_livePaceWidth&&history.height==m_livePaceHeight)return history.msPerFrame.size();return size_t{0};}();
-        LOG("Measured neural render pace: "<<m_livePaceWidth<<"x"<<m_livePaceHeight<<" at "<<pace.MsPerFrame()
+        const size_t kept=[&]{for(const PaceHistory& history:m_paceHistory)if(history.scale==m_livePaceScale&&history.width==m_livePaceWidth&&history.height==m_livePaceHeight)return history.msPerFrame.size();return size_t{0};}();
+        const auto& profile=RenderPaceAt(m_livePaceScale);
+        LOG("Measured neural render pace: "<<m_livePaceWidth<<"x"<<m_livePaceHeight<<" at "<<m_livePaceScale<<"% processing scale, "<<pace.MsPerFrame()
             <<" ms/frame over "<<pace.frames<<" frames ("<<playback_timing::RenderPaceScale(pace.MsPerFrame(),m_livePaceWidth,m_livePaceHeight)
-            <<"x the reference GPU); "<<m_renderPace.samples.size()<<" geometries known for this GPU. This geometry forecasts from the median of "
-            <<kept<<" samples: "<<playback_timing::PredictRenderMs(m_renderPace,m_livePaceWidth,m_livePaceHeight,0.0)<<" ms/frame.");
+            <<"x the reference GPU); "<<profile.samples.size()<<" geometries known for this GPU at this scale. This geometry forecasts from the median of "
+            <<kept<<" samples: "<<playback_timing::PredictRenderMs(profile,m_livePaceWidth,m_livePaceHeight,0.0)<<" ms/frame.");
     }
 
     void SaveVideoSettings()const{
@@ -8290,7 +8338,7 @@ private:
     // when the forecast changes. A no ends the request and says so in the status
     // bar, where a refused toggle used to leave nothing at all.
     bool ConfirmLiveSessionPace(double fps){
-        const auto forecast=playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),fps,m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation));
+        const auto forecast=LiveForecast(m_decoder.Width(),m_decoder.Height(),fps);
         if(!forecast.measured){
             // No prior exists for every RTX generation, and inventing one would
             // be a guess dressed as a measurement. Say so instead of implying
@@ -8300,10 +8348,12 @@ private:
             return true;
         }
         if(forecast.keepsUp)return true;
-        const std::string key=LiveSourceGeometryKey();
+        // The rung is part of what was agreed to: a yes at 50% says nothing
+        // about the slower 100%.
+        const std::string key=LiveSourceGeometryKey()+"@"+std::to_string(m_processingScale);
         if(key==m_livePaceConfirmedKey)return true;
         LOG("Active neural session forecast: "<<m_decoder.Width()<<"x"<<m_decoder.Height()<<" at "<<fps
-            <<" fps renders at about "<<forecast.renderFps<<" fps ("<<forecast.realtimeRatio<<"x realtime).");
+            <<" fps and "<<m_processingScale<<"% processing scale renders at about "<<forecast.renderFps<<" fps ("<<forecast.realtimeRatio<<"x realtime).");
         wchar_t text[512];
         swprintf_s(text,T(L"neural.live.slow").c_str(),m_decoder.Width(),m_decoder.Height(),fps,
                    forecast.renderFps,forecast.realtimeRatio);
@@ -8471,12 +8521,10 @@ private:
         // and counting that made a GPU measured at 2x report 0.48x real time.
         m_livePaintedRevision=m_liveSegments->Revision();m_liveStartTick=0;m_neuralRequested=true;
         m_liveCoveredAtStart=CoveredDuration100ns(LiveCoverage(),CoverageSpan{range.start100ns,range.end100ns});
-        m_livePaceWidth=m_decoder.Width();m_livePaceHeight=m_decoder.Height();
+        m_livePaceWidth=m_decoder.Width();m_livePaceHeight=m_decoder.Height();m_livePaceScale=m_processingScale;
         // A GPU that renders far faster than real time refills the buffer faster
         // than playback drains it, so the four-second cushion is only a wait.
-        m_liveForecastRatio=
-            playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
-                                                m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation)).realtimeRatio;
+        m_liveForecastRatio=LiveForecast(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate()).realtimeRatio;
         m_liveStartLead=live_session::StartLead(m_liveForecastRatio,kLiveStartLead);
         EnterLiveBuffering();
         const auto target=WantedLiveTarget();
@@ -10056,8 +10104,7 @@ private:
         // Turing, Ampere and workstation cards have no measured prior, so the
         // forecast that let this session start was a default, not a check. Say
         // that once the session is running rather than implying the card passed.
-        else if(!playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
-                    m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation)).measured)
+        else if(!LiveForecast(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate()).measured)
             text+=L" \u00b7 pace unmeasured on this GPU";
         return text;
     }
@@ -11112,9 +11159,16 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // size against before RealtimeRatio has enough samples to report one.
     double m_liveForecastRatio=0.0;
     uint32_t m_livePaceWidth=0,m_livePaceHeight=0;
+    // The processing scale the session started at, which is the rung its
+    // pace is recorded under.
+    uint32_t m_livePaceScale=kDefaultProcessingScale;
     playback_timing::RenderPaceProfile m_renderPace;
-    // Every pace this GPU measured per geometry, newest last; m_renderPace
-    // carries the median of each and is what the forecast reads.
+    // The same for the reduced processing-scale rungs, in kProcessingScaleRungs
+    // order after 100.
+    std::array<playback_timing::RenderPaceProfile,std::size(kProcessingScaleRungs)-1> m_reducedRenderPace{};
+    // Every pace this GPU measured per geometry and rung, newest last;
+    // m_renderPace and m_reducedRenderPace carry the median of each and are
+    // what the forecast reads.
     std::vector<PaceHistory> m_paceHistory;
     // The cold start of the newest neural job, or null when no job has run.
     std::shared_ptr<NeuralColdStartRecord> m_coldStart;
