@@ -255,6 +255,14 @@ public:
     // "is there one?" cannot afford; this lets such a caller memoise the verdict
     // against the file's own size and write time instead of re-asking.
     std::optional<std::filesystem::path> SourcePayloadPath(std::string_view key) const;
+    // An entry's manifest and payload path as they are on disk, for a picture or
+    // a label and never for playback: nothing is hashed, the entry is not marked
+    // used (so showing it does not reorder eviction), no lock is taken and the
+    // payload may be missing. Static, so a thread can read a root the owner
+    // resolved without building a manager, which prepares directories and
+    // sweeps staging. Anything that plays the entry goes through Lookup*.
+    static std::optional<NeuralCacheEntry> Peek(const std::filesystem::path& root,
+                                                NeuralCacheEntryKind kind, std::string_view key);
     std::optional<std::filesystem::path> BeginSourceStaging(std::string_view key);
     std::optional<std::filesystem::path> BeginRenderStaging(std::string_view key);
     bool PromoteSource(std::string_view key, const std::filesystem::path& staging,

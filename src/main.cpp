@@ -1979,20 +1979,6 @@ static start_screen::RuntimeState CheckNeuralRuntime(const std::filesystem::path
     return RuntimeLockSatisfied(checks)?start_screen::RuntimeState::Verified:start_screen::RuntimeState::Drifted;
 }
 
-// A render's manifest read straight from the cache folder, WITHOUT the
-// authenticating lookup: this is a picture on a tile, never what plays, and
-// LookupRender would hash every recent render on every start and mark each one
-// used, which reorders eviction for videos nobody opened. Opening the tile runs
-// the real lookup.
-static std::optional<NeuralCacheManifest> PeekManifest(const std::filesystem::path& cacheRoot,const wchar_t* bucket,const std::string& key)
-{
-    if(key.size()!=64||cacheRoot.empty())return std::nullopt;
-    std::ifstream input(cacheRoot/bucket/std::wstring(key.begin(),key.end())/L"manifest.json",std::ios::binary);
-    if(!input.is_open())return std::nullopt;
-    const std::string bytes{std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
-    return ParseNeuralCacheManifest(bytes);
-}
-
 static void GatherStartScreen(StartScreenRequest request,std::shared_ptr<StartScreenAnswers> answers,uint64_t generation,
                               HWND window,UINT message,std::stop_token stop)
 {
@@ -2008,13 +1994,18 @@ static void GatherStartScreen(StartScreenRequest request,std::shared_ptr<StartSc
     std::error_code toolError;const bool haveFfmpeg=std::filesystem::is_regular_file(ffmpeg,toolError);
     for(const auto& recent:request.recent){
         if(stop.stop_requested())return;
-        const auto manifest=PeekManifest(request.cacheRoot,L"renders",recent.renderKey);
-        if(!manifest||!IsReusableNeuralCacheManifest(*manifest))continue;
+        // Peeked, not looked up: this is a picture on a tile, never what plays, and
+        // LookupRender would hash every recent render on every start and mark each
+        // one used, which reorders eviction for videos nobody opened. Opening the
+        // tile runs the real lookup.
+        const auto entry=NeuralCacheManager::Peek(request.cacheRoot,NeuralCacheEntryKind::Render,recent.renderKey);
+        if(!entry||!IsReusableNeuralCacheManifest(entry->manifest))continue;
+        const NeuralCacheManifest* manifest=&entry->manifest;
         StartScreenAnswers::Render render{};
         std::optional<int64_t> sourceDuration;
-        if(recent.youtube)if(const auto source=PeekManifest(request.cacheRoot,L"sources",recent.sourceKey))sourceDuration=source->duration100ns;
+        if(recent.youtube)if(const auto source=NeuralCacheManager::Peek(request.cacheRoot,NeuralCacheEntryKind::Source,recent.sourceKey))sourceDuration=source->manifest.duration100ns;
         render.badge=start_screen::CoverageBadge(manifest->rangeStart100ns,manifest->rangeEnd100ns,manifest->duration100ns,sourceDuration);
-        const auto payload=request.cacheRoot/L"renders"/std::wstring(recent.renderKey.begin(),recent.renderKey.end())/L"neural.mkv";
+        const auto& payload=entry->payloadPath;
         if(haveFfmpeg&&manifest->width&&manifest->height){
             const SIZE size=timeline::ThumbnailSize(double(manifest->width)/double(manifest->height),request.thumbnailWidth);
             const size_t bytes=size_t(size.cx)*size_t(size.cy)*4u;

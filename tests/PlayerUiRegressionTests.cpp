@@ -1393,6 +1393,22 @@ struct PlayerAppTestAccess {
             manifest.receiptDigest = Sha256Bytes(receipt).value_or("");
             REQUIRE(cache.PromoteRender(renderKey, *staging, manifest));
         }
+        // The read-only peek the worker uses: the manifest and where the payload
+        // is, with no last-use mark - a tile on screen must not reorder eviction.
+        {
+            const auto entryDirectory = directory / L"cache" / L"renders" / std::wstring(renderKey.begin(), renderKey.end());
+            std::error_code error;
+            const auto writtenBefore = std::filesystem::last_write_time(entryDirectory, error);
+            REQUIRE(!error);
+            const auto peeked = NeuralCacheManager::Peek(directory / L"cache", NeuralCacheEntryKind::Render, renderKey);
+            REQUIRE(peeked.has_value());
+            CHECK(peeked->payloadPath == entryDirectory / L"neural.mkv");
+            CHECK_EQ(96u, peeked->manifest.width);
+            CHECK(std::filesystem::last_write_time(entryDirectory, error) == writtenBefore);
+            CHECK(!NeuralCacheManager::Peek(directory / L"cache", NeuralCacheEntryKind::Source, renderKey).has_value());
+            CHECK(!NeuralCacheManager::Peek(directory / L"cache", NeuralCacheEntryKind::Render, "..").has_value());
+            CHECK(!NeuralCacheManager::Peek({}, NeuralCacheEntryKind::Render, renderKey).has_value());
+        }
 
         // The worker, run here on this thread: the runtime verdict, then the
         // render's badge and frame.

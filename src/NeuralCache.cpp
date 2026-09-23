@@ -1339,6 +1339,25 @@ std::optional<std::filesystem::path> NeuralCacheManager::SourcePayloadPath(std::
     return directory / L"source.mkv";
 }
 
+std::optional<NeuralCacheEntry> NeuralCacheManager::Peek(const std::filesystem::path& root,
+                                                         NeuralCacheEntryKind kind, std::string_view key)
+{
+    // The key is 64 hex digits, so it cannot climb out of the bucket.
+    if (root.empty() || !ValidKey(key)) return std::nullopt;
+    const std::filesystem::path directory = root /
+        (kind == NeuralCacheEntryKind::Source ? L"sources" : L"renders") /
+        std::wstring(key.begin(), key.end());
+    std::ifstream input(directory / L"manifest.json", std::ios::binary);
+    if (!input.is_open()) return std::nullopt;
+    const std::string bytes{std::istreambuf_iterator<char>(input),
+                            std::istreambuf_iterator<char>()};
+    auto manifest = ParseNeuralCacheManifest(bytes);
+    if (!manifest || manifest->kind != kind) return std::nullopt;
+    return NeuralCacheEntry{directory,
+                            directory / (kind == NeuralCacheEntryKind::Source ? L"source.mkv" : L"neural.mkv"),
+                            std::move(*manifest)};
+}
+
 std::optional<std::filesystem::path> NeuralCacheManager::BeginRenderStaging(std::string_view key)
 {
     return BeginStaging(NeuralCacheEntryKind::Render, key);
