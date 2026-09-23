@@ -7,6 +7,9 @@
 #include <dwmapi.h>
 #include <mfapi.h>
 #include <wrl/client.h>
+#include <wrl/event.h>
+#include <windows.media.h>
+#include <SystemMediaTransportControlsInterop.h>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -109,6 +112,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
+#include "MediaTransportPolicy.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -357,6 +361,10 @@ static constexpr UINT WM_FRAMEGEN_PROGRESS = WM_APP + 46;
 static constexpr UINT WM_STAGE_EXPORT_PROGRESS = WM_APP + 48;
 static constexpr UINT WM_FRAMEGEN_COMPLETE = WM_APP + 47;
 static constexpr UINT WM_TIMELINE_MEDIA = WM_APP + 49;
+// A press on Windows' media controls (wParam: the SMTC button) and a seek from
+// their timeline (lParam: milliseconds), both posted from WinRT's thread pool.
+static constexpr UINT WM_MEDIA_BUTTON = WM_APP + 50;
+static constexpr UINT WM_MEDIA_SEEK = WM_APP + 51;
 
 struct YouTubeUrlDialogState {
     const Localizer* localizer{};
@@ -1423,6 +1431,168 @@ static std::optional<std::string> RunToolCapture(const std::filesystem::path& ex
 // short FFmpeg run at a time however fast the cursor moves. Measured here on a
 // 1080p30 H.264 file with a 250-frame GOP: 0.38-0.43 s per thumbnail, 48 ms
 // of it starting the process, and 51 ms for the chapter list.
+// Windows' media controls - the volume flyout's player card, the lock
+// screen, a Bluetooth headset's buttons - through the WinRT ABI and WRL, both
+// in the Windows SDK. combase is loaded at run time rather than linked, so a
+// Windows without the WinRT runtime costs these controls and nothing else.
+//
+// ButtonPressed and PlaybackPositionChangeRequested arrive on a thread pool
+// thread, so their handlers only post a message: the player acts on them on
+// the UI thread, where every other command runs.
+class MediaTransportControls {
+public:
+    MediaTransportControls()=default;
+    ~MediaTransportControls(){Detach();}
+    MediaTransportControls(const MediaTransportControls&)=delete;
+    MediaTransportControls& operator=(const MediaTransportControls&)=delete;
+
+    bool Attach(HWND window,UINT buttonMessage,UINT seekMessage){
+        namespace media=ABI::Windows::Media;
+        namespace foundation=ABI::Windows::Foundation;
+        const Api& api=Functions();if(!api.ok)return false;
+        const OwnedString className(L"Windows.Media.SystemMediaTransportControls");if(!className.value)return false;
+        ComPtr<ISystemMediaTransportControlsInterop> interop;
+        if(FAILED(api.getFactory(className.value,__uuidof(ISystemMediaTransportControlsInterop),reinterpret_cast<void**>(interop.GetAddressOf()))))return false;
+        ComPtr<media::ISystemMediaTransportControls> controls;
+        if(FAILED(interop->GetForWindow(window,__uuidof(media::ISystemMediaTransportControls),reinterpret_cast<void**>(controls.GetAddressOf()))))return false;
+        controls->put_IsPlayEnabled(true);controls->put_IsPauseEnabled(true);controls->put_IsStopEnabled(true);
+        controls->put_IsEnabled(false);
+        const auto buttons=Microsoft::WRL::Callback<foundation::ITypedEventHandler<media::SystemMediaTransportControls*,media::SystemMediaTransportControlsButtonPressedEventArgs*>>(
+            [window,buttonMessage](media::ISystemMediaTransportControls*,media::ISystemMediaTransportControlsButtonPressedEventArgs* args)->HRESULT{
+                media::SystemMediaTransportControlsButton button{};
+                if(args&&SUCCEEDED(args->get_Button(&button)))PostMessageW(window,buttonMessage,static_cast<WPARAM>(button),0);
+                return S_OK;
+            });
+        if(!buttons||FAILED(controls->add_ButtonPressed(buttons.Get(),&m_buttonToken)))return false;
+        m_controls=controls;
+        // The seek bar in the flyout is the "timeline properties if cheap"
+        // half: ISystemMediaTransportControls2 is Windows 10 1607, and without
+        // it the card simply has no bar.
+        if(SUCCEEDED(m_controls.As(&m_controls2))){
+            const auto seeks=Microsoft::WRL::Callback<foundation::ITypedEventHandler<media::SystemMediaTransportControls*,media::PlaybackPositionChangeRequestedEventArgs*>>(
+                [window,seekMessage](media::ISystemMediaTransportControls*,media::IPlaybackPositionChangeRequestedEventArgs* args)->HRESULT{
+                    foundation::TimeSpan position{};
+                    if(args&&SUCCEEDED(args->get_RequestedPlaybackPosition(&position))&&position.Duration>=0)
+                        PostMessageW(window,seekMessage,0,static_cast<LPARAM>(position.Duration/10000));
+                    return S_OK;
+                });
+            if(!seeks||FAILED(m_controls2->add_PlaybackPositionChangeRequested(seeks.Get(),&m_seekToken)))m_controls2.Reset();
+        }
+        return true;
+    }
+    void Detach(){
+        if(m_controls2){m_controls2->remove_PlaybackPositionChangeRequested(m_seekToken);m_controls2.Reset();}
+        if(m_controls){m_controls->remove_ButtonPressed(m_buttonToken);m_controls.Reset();}
+    }
+    bool Attached()const{return m_controls!=nullptr;}
+    void SetStatus(media_transport::Status status){
+        if(!m_controls)return;
+        m_controls->put_IsEnabled(status!=media_transport::Status::Closed);
+        m_controls->put_PlaybackStatus(static_cast<ABI::Windows::Media::MediaPlaybackStatus>(static_cast<int>(status)));
+    }
+    void SetTitle(const std::wstring& title){
+        namespace media=ABI::Windows::Media;
+        if(!m_controls)return;
+        ComPtr<media::ISystemMediaTransportControlsDisplayUpdater> updater;
+        if(FAILED(m_controls->get_DisplayUpdater(&updater)))return;
+        if(title.empty()){updater->ClearAll();updater->Update();return;}
+        updater->put_Type(media::MediaPlaybackType_Video);
+        ComPtr<media::IVideoDisplayProperties> video;
+        const OwnedString text(title);
+        if(text.value&&SUCCEEDED(updater->get_VideoProperties(&video)))video->put_Title(text.value);
+        updater->Update();
+    }
+    void SetTimeline(double durationSeconds,double positionSeconds){
+        namespace media=ABI::Windows::Media;
+        if(!m_controls2)return;
+        const Api& api=Functions();
+        const OwnedString className(L"Windows.Media.SystemMediaTransportControlsTimelineProperties");
+        ComPtr<IInspectable> instance;
+        if(!className.value||FAILED(api.activate(className.value,instance.GetAddressOf())))return;
+        ComPtr<media::ISystemMediaTransportControlsTimelineProperties> timeline;
+        if(FAILED(instance.As(&timeline)))return;
+        const auto span=[](double seconds){return ABI::Windows::Foundation::TimeSpan{static_cast<INT64>(std::llround(std::max(0.0,seconds)*1e7))};};
+        timeline->put_StartTime(span(0.0));timeline->put_EndTime(span(durationSeconds));
+        timeline->put_MinSeekTime(span(0.0));timeline->put_MaxSeekTime(span(durationSeconds));
+        timeline->put_Position(span(std::min(positionSeconds,durationSeconds)));
+        m_controls2->UpdateTimelineProperties(timeline.Get());
+    }
+
+private:
+    struct Api{
+        using GetFactoryFn=HRESULT(WINAPI*)(HSTRING,REFIID,void**);
+        using ActivateFn=HRESULT(WINAPI*)(HSTRING,IInspectable**);
+        using CreateStringFn=HRESULT(WINAPI*)(PCNZWCH,UINT32,HSTRING*);
+        using DeleteStringFn=HRESULT(WINAPI*)(HSTRING);
+        GetFactoryFn getFactory{};ActivateFn activate{};CreateStringFn createString{};DeleteStringFn deleteString{};bool ok{};
+    };
+    static const Api& Functions(){
+        static const Api api=[]{
+            Api loaded{};
+            if(const HMODULE combase=LoadLibraryExW(L"combase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32)){
+                loaded.getFactory=reinterpret_cast<Api::GetFactoryFn>(GetProcAddress(combase,"RoGetActivationFactory"));
+                loaded.activate=reinterpret_cast<Api::ActivateFn>(GetProcAddress(combase,"RoActivateInstance"));
+                loaded.createString=reinterpret_cast<Api::CreateStringFn>(GetProcAddress(combase,"WindowsCreateString"));
+                loaded.deleteString=reinterpret_cast<Api::DeleteStringFn>(GetProcAddress(combase,"WindowsDeleteString"));
+            }
+            loaded.ok=loaded.getFactory&&loaded.activate&&loaded.createString&&loaded.deleteString;
+            return loaded;
+        }();
+        return api;
+    }
+    struct OwnedString{
+        HSTRING value{};
+        explicit OwnedString(std::wstring_view text){
+            if(Functions().ok&&FAILED(Functions().createString(text.data(),static_cast<UINT32>(text.size()),&value)))value=nullptr;
+        }
+        ~OwnedString(){if(value)Functions().deleteString(value);}
+        OwnedString(const OwnedString&)=delete;
+        OwnedString& operator=(const OwnedString&)=delete;
+    };
+    ComPtr<ABI::Windows::Media::ISystemMediaTransportControls> m_controls;
+    ComPtr<ABI::Windows::Media::ISystemMediaTransportControls2> m_controls2;
+    EventRegistrationToken m_buttonToken{},m_seekToken{};
+};
+
+// A Tabler glyph as a small icon, for the taskbar thumbnail's buttons, which
+// take nothing but HICONs. GDI draws no alpha, so the glyph is drawn white on
+// black and its coverage becomes the alpha of a premultiplied white icon -
+// the same glyph, antialiased, as the toolbar button beside it.
+static HICON RenderGlyphIcon(wchar_t glyph, int size)
+{
+    if(size<=0||glyph==L'\0')return nullptr;
+    BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=size;info.bmiHeader.biHeight=-size;
+    info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+    void* bits=nullptr;
+    HBITMAP color=CreateDIBSection(nullptr,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+    if(!color||!bits){if(color)DeleteObject(color);return nullptr;}
+    HDC dc=CreateCompatibleDC(nullptr);
+    HFONT font=CreateFontW(-size,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+                           ANTIALIASED_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"tabler-icons");
+    HICON icon=nullptr;
+    if(dc&&font){
+        const HGDIOBJ oldBitmap=SelectObject(dc,color),oldFont=SelectObject(dc,font);
+        RECT box{0,0,size,size};FillRect(dc,&box,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(255,255,255));
+        DrawTextW(dc,&glyph,1,&box,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        GdiFlush();
+        auto* pixel=static_cast<uint32_t*>(bits);
+        for(int index=0;index<size*size;++index){
+            const uint32_t value=pixel[index];
+            const uint32_t coverage=std::max({value&0xffu,(value>>8)&0xffu,(value>>16)&0xffu});
+            pixel[index]=(coverage<<24)|(coverage<<16)|(coverage<<8)|coverage;
+        }
+        SelectObject(dc,oldFont);SelectObject(dc,oldBitmap);
+        HBITMAP mask=CreateBitmap(size,size,1,1,nullptr);
+        ICONINFO iconInfo{TRUE,0,0,mask,color};
+        if(mask){icon=CreateIconIndirect(&iconInfo);DeleteObject(mask);}
+    }
+    if(font)DeleteObject(font);
+    if(dc)DeleteDC(dc);
+    DeleteObject(color);
+    return icon;
+}
+
 class TimelineMediaWorker {
 public:
     struct Thumbnail{uint64_t generation{};int64_t key{};SIZE size{};std::vector<uint8_t> bgra;};
@@ -1515,7 +1685,7 @@ class PlayerApp {
 #endif
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){}
-    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);}
+    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
 
     bool Create(HINSTANCE hi) {
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
@@ -1577,6 +1747,7 @@ public:
         LoadUpdateSettings();
         MaybeStartUpdateCheck(false);
         RegisterOverlayHotkeys();
+        LOG("System media transport controls "<<(m_mediaTransport.Attach(m_hwnd,WM_MEDIA_BUTTON,WM_MEDIA_SEEK)?"attached.":"unavailable; the media keys still reach the player through its hotkey."));
         BOOL dark=TRUE; DwmSetWindowAttribute(m_hwnd,20,&dark,sizeof(dark)); DWORD corner=2; DwmSetWindowAttribute(m_hwnd,33,&corner,sizeof(corner));
         m_viewport=CreateWindowExW(0,v.lpszClassName,nullptr,WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,100,100,m_hwnd,nullptr,hi,nullptr);
         m_renderWnd=CreateWindowExW(WS_EX_ACCEPTFILES,L"DLSSVideoRenderClassV11",nullptr,WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS,0,0,100,100,m_viewport,nullptr,hi,this);
@@ -2673,14 +2844,7 @@ private:
     // below is what says the shell accepted them.
     void SetTaskbarProgress(std::optional<double> fraction){
         if(!m_hwnd)return;
-        if(!m_taskbar&&!m_taskbarUnavailable){
-            const HRESULT created=CoCreateInstance(CLSID_TaskbarList,nullptr,CLSCTX_INPROC_SERVER,
-                                                   IID_PPV_ARGS(&m_taskbar));
-            const HRESULT initialized=(SUCCEEDED(created)&&m_taskbar)?m_taskbar->HrInit():created;
-            LOG("Taskbar progress: CoCreateInstance="<<HexText(created)<<" HrInit="<<HexText(initialized));
-            if(FAILED(created)||!m_taskbar||FAILED(initialized)){m_taskbar.Reset();m_taskbarUnavailable=true;return;}
-        }
-        if(!m_taskbar)return;
+        if(!EnsureTaskbar())return;
         if(!fraction){m_taskbar->SetProgressState(m_hwnd,TBPF_NOPROGRESS);return;}
         const HRESULT state=m_taskbar->SetProgressState(m_hwnd,TBPF_NORMAL);
         const HRESULT value=m_taskbar->SetProgressValue(m_hwnd,
@@ -5160,6 +5324,97 @@ private:
     // instead of 3: that lane is the render map, the one thing on this bar no
     // other player has, and at 3 dip it read as a hairline.
     RECT TimelineRect()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(30),c.right-Dip(18),c.bottom-Dip(12)};}
+    // ---- Windows' media controls and the taskbar thumbnail -----------------
+    //
+    // Both mirror state the player already has; nothing here decides anything
+    // (MediaTransportPolicy.h does). Synced with the status line, which every
+    // play, pause, seek, load and unload already reaches.
+    void SyncMediaTransport(){
+        if(!m_hwnd)return;
+        const bool playing=m_playing||LiveResumePending();
+        if(m_mediaTransport.Attached()){
+            const auto status=media_transport::StatusFor(m_loaded,playing);
+            if(status!=m_smtcStatus){m_smtcStatus=status;m_mediaTransport.SetStatus(status);}
+            const std::wstring title=m_loaded?m_displayTitle:std::wstring{};
+            if(title!=m_smtcTitle){m_smtcTitle=title;m_mediaTransport.SetTitle(title);}
+            const double duration=m_loaded?m_decoder.DurationSeconds():0.0;
+            if(duration>0.0){
+                const auto now=std::chrono::steady_clock::now();const double position=Position();
+                if(media_transport::ShouldPushTimeline(m_smtcTimeline,position,playing,now)){
+                    m_mediaTransport.SetTimeline(duration,position);m_smtcTimeline={true,playing,position,now};
+                }
+            }else m_smtcTimeline={};
+        }
+        SyncThumbBar();
+    }
+    void HandleMediaButton(int button){
+        switch(media_transport::ActionForButton(button,m_loaded,m_playing||LiveResumePending())){
+        case media_transport::Action::TogglePause:TogglePause();break;
+        case media_transport::Action::Stop:StopPlayback();break;
+        case media_transport::Action::None:break;
+        }
+    }
+    media_transport::ThumbBar CurrentThumbBar()const{
+        const auto neural=ButtonContent(ToolbarAction::ToggleNeuralRendering);
+        media_transport::ThumbState state{};
+        state.loaded=m_loaded;state.playing=m_playing||LiveResumePending();
+        state.neuralAvailable=neural.enabled;state.neuralOn=neural.active;
+        state.compareAvailable=ComparisonModesAvailable();state.comparing=m_comparison.mode!=ComparisonMode::Neural;
+        return media_transport::ThumbButtonsFor(state,IDM_PLAY,IDM_NEURAL_RENDERING,IDM_COMPARE_TOGGLE);
+    }
+    // One side-by-side switch for the thumbnail, over the Compare menu's own
+    // modes: split when showing the neural picture alone, the neural picture
+    // again from any comparison.
+    void ToggleSideBySide(){
+        if(!ComparisonModesAvailable())return;
+        SetComparisonMode(m_comparison.mode==ComparisonMode::Neural?ComparisonMode::SplitVertical:ComparisonMode::Neural);
+        SyncFeatureMenuState();UpdateCachedStatus();
+    }
+    HICON ThumbIcon(UiIcon icon){
+        const auto found=m_thumbIcons.find(icon);if(found!=m_thumbIcons.end())return found->second;
+        const HICON rendered=RenderGlyphIcon(GlyphForIcon(icon),GetSystemMetrics(SM_CXSMICON));
+        if(rendered)m_thumbIcons[icon]=rendered;
+        return rendered;
+    }
+    bool EnsureTaskbar(){
+        if(!m_taskbar&&!m_taskbarUnavailable){
+            const HRESULT created=CoCreateInstance(CLSID_TaskbarList,nullptr,CLSCTX_INPROC_SERVER,
+                                                   IID_PPV_ARGS(&m_taskbar));
+            const HRESULT initialized=(SUCCEEDED(created)&&m_taskbar)?m_taskbar->HrInit():created;
+            LOG("Taskbar: CoCreateInstance="<<HexText(created)<<" HrInit="<<HexText(initialized));
+            if(FAILED(created)||!m_taskbar||FAILED(initialized)){m_taskbar.Reset();m_taskbarUnavailable=true;}
+        }
+        return m_taskbar!=nullptr;
+    }
+    std::array<THUMBBUTTON,3> ThumbButtonsForShell(const media_transport::ThumbBar& bar){
+        std::array<THUMBBUTTON,3> buttons{};
+        for(size_t index=0;index<bar.size();++index){
+            THUMBBUTTON& button=buttons[index];
+            button.dwMask=THB_ICON|THB_TOOLTIP|THB_FLAGS;button.iId=bar[index].command;
+            button.hIcon=ThumbIcon(bar[index].icon);
+            button.dwFlags=bar[index].enabled?THBF_ENABLED:THBF_DISABLED;
+            const std::wstring tip=T(bar[index].tipKey);wcsncpy_s(button.szTip,tip.c_str(),_TRUNCATE);
+        }
+        return buttons;
+    }
+    // Explorer announces each taskbar button it makes, including after it
+    // restarts, and the thumbnail buttons can only be added after that.
+    void CreateThumbBar(){
+        if(!m_uiResources.IsLoaded()||!EnsureTaskbar())return;
+        m_thumbBar=CurrentThumbBar();
+        auto buttons=ThumbButtonsForShell(m_thumbBar);
+        const HRESULT added=m_taskbar->ThumbBarAddButtons(m_hwnd,UINT(buttons.size()),buttons.data());
+        m_thumbBarCreated=SUCCEEDED(added);
+        LOG("Taskbar thumbnail buttons: ThumbBarAddButtons=0x"<<std::hex<<added<<std::dec);
+    }
+    void SyncThumbBar(){
+        if(!m_thumbBarCreated||!m_taskbar)return;
+        const auto bar=CurrentThumbBar();if(bar==m_thumbBar)return;
+        m_thumbBar=bar;auto buttons=ThumbButtonsForShell(bar);
+        m_taskbar->ThumbBarUpdateButtons(m_hwnd,UINT(buttons.size()),buttons.data());
+    }
+    static UINT TaskbarButtonCreatedMessage(){static const UINT message=RegisterWindowMessageW(L"TaskbarButtonCreated");return message;}
+
     // ---- The dark menu bar ------------------------------------------------
     //
     // Drawn through user32's undocumented UAH menu messages (DarkModePolicy.h
@@ -5488,7 +5743,7 @@ private:
         for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);return;}
     }
     void UpdateCachedStatus(){
-        UpdateStatusChips();SyncTimelineMedia();
+        UpdateStatusChips();SyncTimelineMedia();SyncMediaTransport();
         const std::wstring status=BuildStatusText();if(status==m_cachedStatus)return;
         m_cachedStatus=status;if(m_hwnd){if(m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}else InvalidateRect(m_hwnd,nullptr,FALSE);}
     }
@@ -8474,6 +8729,7 @@ private:
     }
 
     LRESULT WndProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(m!=0&&m==TaskbarButtonCreatedMessage()){CreateThumbBar();return 0;}
         switch(m){
         case WM_ERASEBKGND:return 1;
         case WM_YOUTUBE_RESOLVED:CompleteYouTubeResolution(static_cast<uint64_t>(w));return 0;
@@ -8497,6 +8753,8 @@ private:
         case WM_FRAMEGEN_COMPLETE:CompleteFrameGeneration(static_cast<uint64_t>(w));return 0;
         case WM_UPDATE_CHECKED:CompleteUpdateCheck(static_cast<uint64_t>(w));return 0;
         case WM_TIMELINE_MEDIA:CompleteTimelineMedia();return 0;
+        case WM_MEDIA_BUTTON:HandleMediaButton(int(w));return 0;
+        case WM_MEDIA_SEEK:if(m_loaded)RequestSeek(double(l)/1000.0);return 0;
         case dark_mode::WM_UAHDRAWMENU:if(DrawDarkMenuBar(h,reinterpret_cast<const dark_mode::UAHMENU*>(l)))return TRUE;break;
         case dark_mode::WM_UAHDRAWMENUITEM:if(DrawDarkMenuBarItem(h,reinterpret_cast<const dark_mode::UAHDRAWMENUITEM*>(l)))return TRUE;break;
         case WM_NCPAINT:case WM_NCACTIVATE:{const LRESULT result=DefWindowProcW(h,m,w,l);PaintMenuBarSeparator(h);return result;}
@@ -8625,6 +8883,7 @@ private:
 case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExportStages();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
         case IDM_CHECK_FOR_UPDATES:MaybeStartUpdateCheck(true);break;
         case IDM_KEYBOARD_SHORTCUTS:ToggleShortcutSheet();break;
+        case IDM_COMPARE_TOGGLE:ToggleSideBySide();break;
         case IDM_UPDATE_AVAILABLE:ActivateUpdateBadge();break;
         case IDM_COMPARE_NEURAL:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Blend);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustBlendAmount(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustBlendAmount(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
@@ -8819,6 +9078,10 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // layout it was last shown with.
     // Latched when the undocumented menu-bar drawing does not check out.
     bool m_darkMenuFailed=false;
+    // What Windows' media controls and the taskbar thumbnail were last told.
+    MediaTransportControls m_mediaTransport;media_transport::Status m_smtcStatus{media_transport::Status::Closed};
+    std::wstring m_smtcTitle;media_transport::TimelinePush m_smtcTimeline{};
+    media_transport::ThumbBar m_thumbBar{};bool m_thumbBarCreated=false;std::map<UiIcon,HICON> m_thumbIcons;
     bool m_shortcutSheetOpen=false;HWND m_shortcutWnd=nullptr;std::vector<ShortcutGroup> m_shortcutGroups;
     shortcut_sheet::Metrics m_shortcutMetrics{};shortcut_sheet::Layout m_shortcutLayout{};
     // Drives Tick while a modal loop owns the thread; see StartModalTick.

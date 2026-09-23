@@ -105,6 +105,9 @@ inline constexpr UINT IDM_NEURAL_PRESET_CUSTOM = 479;
 inline constexpr UINT IDM_UPDATE_AVAILABLE = 461;
 // Help > Keyboard shortcuts, the menu route to the ? / F1 cheat sheet.
 inline constexpr UINT IDM_KEYBOARD_SHORTCUTS = 490;
+// Not on any menu: the taskbar thumbnail's side-by-side switch, which flips
+// between the Compare menu's Neural and Split rather than naming a mode.
+inline constexpr UINT IDM_COMPARE_TOGGLE = 491;
 
 enum class PlayerCommandRoute {
     KeyDown,

@@ -210,6 +210,13 @@ shortcut, grouped by the menu it belongs to, plus the keys no menu names
 read from the menus themselves, so it always matches them. The keys keep
 working while it is up; `?`, `F1`, `Esc` or a click on it closes it.
 
+The player also answers Windows' own media controls: the player card in the
+volume flyout and on the lock screen shows the video's title and position and
+its play, pause, stop and seek work, as do a headset's buttons. Hovering the
+taskbar button shows three buttons under the thumbnail - play/pause, Neural
+Rendering on/off and side-by-side compare (Split, and back to the neural
+picture) - which do exactly what the matching menu commands do.
+
 **DLSS Upscaling** is independent and starts off on a fresh installation. Its
 output is **Auto** by default: the player takes the largest rung the monitor's
 current mode can scan out - 1080p, 1440p or 2160p - and never one above it,

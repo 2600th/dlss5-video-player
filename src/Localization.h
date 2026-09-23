@@ -352,7 +352,15 @@ private:
             {L"shortcuts.reveal", L"Show the menu and bar in fullscreen"},
             {L"shortcuts.volume", L"Volume"},
             {L"shortcuts.overlay", L"Seek, mute and neural rendering over ReShade"},
-            {L"shortcuts.media_key", L"Play or pause from the keyboard's media key"}
+            {L"shortcuts.media_key", L"Play or pause from the keyboard's media key"},
+            // Taskbar thumbnail buttons (P2.24): each tip says what a press
+            // will do, as the toolbar's labels do.
+            {L"thumb.play", L"Play"},
+            {L"thumb.pause", L"Pause"},
+            {L"thumb.neural_on", L"Turn Neural Rendering on"},
+            {L"thumb.neural_off", L"Turn Neural Rendering off"},
+            {L"thumb.compare_on", L"Compare side by side"},
+            {L"thumb.compare_off", L"Back to the neural picture"}
         };
         return strings;
     }

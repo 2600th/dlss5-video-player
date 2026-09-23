@@ -74,7 +74,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.17](#p217) | A difference view | S-M | Player | |
 | [P2.20](#p220) | A start screen with a capability check and tiles | M | Player | |
 | [P2.21](#p221) | Export the comparison itself | S / M | Player | |
-| [P2.24](#p224) | Media controls and taskbar buttons | S-M | Player | |
 | [P2.25](#p225) | Synced multi-pane comparison | M-L | Player | |
 | **P3** | | | | |
 | [P3.1](#p31) | HDR end to end | L | Pipeline, Player | |
@@ -463,19 +462,6 @@ Save the composed split exactly as shown, with labels and a provenance footer
 (frame, settings digest, runtime), and later a short wipe clip. The demo video
 is assembled by hand today (`docs/media/README.md`). This turns every user
 into a source of verifiable evidence.
-
----
-
-<a id="p224"></a>
-### P2.24 · Media controls and taskbar buttons
-
-`S-M` · **Player**
-
-Taskbar progress already exists (`ITaskbarList3`, `main.cpp:2279`). Add System
-Media Transport Controls via
-[`ISystemMediaTransportControlsInterop`](https://learn.microsoft.com/en-us/windows/win32/api/systemmediatransportcontrolsinterop/nf-systemmediatransportcontrolsinterop-isystemmediatransportcontrolsinterop-getforwindow),
-and thumbnail-toolbar buttons for play/pause, neural on/off and compare
-(at most 7, fixed when created).
 
 ---
 

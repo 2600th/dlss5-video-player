@@ -20,6 +20,7 @@ enum class UiIcon {
     Maximize,
     YouTube,
     Warning,
+    Compare,
 };
 
 namespace ui_palette {

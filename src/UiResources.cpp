@@ -45,6 +45,10 @@ wchar_t GlyphForIcon(UiIcon icon)
     case UiIcon::Maximize: return L'\xeaea';         // maximize
     case UiIcon::YouTube: return L'\xec90';          // brand-youtube
     case UiIcon::Warning: return L'\xea06';          // alert-triangle
+    // layout-columns: two panes side by side, which is what the compare
+    // button on the taskbar thumbnail turns on. Verified present in the
+    // committed tabler-icons.ttf cmap (U+EAD4, 9 contours).
+    case UiIcon::Compare: return L'\xead4';          // layout-columns
     }
     return L'\0';
 }

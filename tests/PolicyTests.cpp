@@ -55,6 +55,7 @@
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
+#include "MediaTransportPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -1096,6 +1097,72 @@ void dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test()
     CHECK_EQ(132L, back.right);
 }
 
+void media_controls_ask_for_a_state_and_push_the_timeline_sparingly_test()
+{
+    using namespace media_transport;
+    // Play and Pause are requests for a state: a repeat is a no-op, never a toggle.
+    CHECK(ActionForButton(kSmtcPlay, true, false) == Action::TogglePause);
+    CHECK(ActionForButton(kSmtcPlay, true, true) == Action::None);
+    CHECK(ActionForButton(kSmtcPause, true, true) == Action::TogglePause);
+    CHECK(ActionForButton(kSmtcPause, true, false) == Action::None);
+    CHECK(ActionForButton(kSmtcStop, true, true) == Action::Stop);
+    CHECK(ActionForButton(kSmtcPlay, false, false) == Action::None);
+    CHECK(ActionForButton(6 /* Next */, true, true) == Action::None);
+    CHECK(StatusFor(false, false) == Status::Closed);
+    CHECK(StatusFor(true, true) == Status::Playing);
+    CHECK(StatusFor(true, false) == Status::Paused);
+
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point start{};
+    CHECK(ShouldPushTimeline({}, 0.0, true, start));
+    const TimelinePush pushed{true, true, 10.0, start};
+    // Playing on schedule: the flyout extrapolates, so nothing is pushed...
+    CHECK(!ShouldPushTimeline(pushed, 12.0, true, start + std::chrono::seconds(2)));
+    // ...until five seconds have passed, the playhead jumps, or play stops.
+    CHECK(ShouldPushTimeline(pushed, 15.0, true, start + std::chrono::seconds(5)));
+    CHECK(ShouldPushTimeline(pushed, 40.0, true, start + std::chrono::seconds(2)));
+    CHECK(ShouldPushTimeline(pushed, 12.0, false, start + std::chrono::seconds(2)));
+    const TimelinePush paused{true, false, 10.0, start};
+    CHECK(!ShouldPushTimeline(paused, 10.0, false, start + std::chrono::seconds(3)));
+    CHECK(ShouldPushTimeline(paused, 25.0, false, start + std::chrono::seconds(3)));
+}
+
+void taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test()
+{
+    using namespace media_transport;
+    ThumbState state{};
+    const ThumbBar idle = ThumbButtonsFor(state, 200, 300, 491);
+    // Always three, in one order, sending the menu's own commands; nothing
+    // is enabled with no media.
+    CHECK_EQ(UINT{200}, idle[0].command);
+    CHECK_EQ(UINT{300}, idle[1].command);
+    CHECK_EQ(UINT{491}, idle[2].command);
+    for (const auto& button : idle) CHECK(!button.enabled);
+    CHECK(idle[0].icon == UiIcon::Play);
+    state.loaded = true;
+    state.playing = true;
+    state.neuralAvailable = true;
+    state.neuralOn = true;
+    const ThumbBar playing = ThumbButtonsFor(state, 200, 300, 491);
+    CHECK(playing[0].icon == UiIcon::Pause);
+    CHECK(std::wstring_view(playing[0].tipKey) == L"thumb.pause");
+    CHECK(playing[1].enabled);
+    CHECK(std::wstring_view(playing[1].tipKey) == L"thumb.neural_off");
+    // Compare needs a rendered pair to compare against.
+    CHECK(!playing[2].enabled);
+    state.compareAvailable = true;
+    state.comparing = true;
+    const ThumbBar comparing = ThumbButtonsFor(state, 200, 300, 491);
+    CHECK(comparing[2].enabled);
+    CHECK(comparing[2].icon == UiIcon::Compare);
+    CHECK(std::wstring_view(comparing[2].tipKey) == L"thumb.compare_off");
+    CHECK(!(comparing == playing));
+    // Every tip key names an English string.
+    const Localizer localizer;
+    for (const auto* bar : {&idle, &playing, &comparing})
+        for (const auto& button : *bar) CHECK(localizer.Get(button.tipKey) != button.tipKey);
+}
+
 void status_chips_carry_the_rate_the_drops_and_the_render_test()
 {
     using namespace status_chips;
@@ -1530,6 +1597,7 @@ void tabler_glyph_mapping_uses_the_pinned_css_codepoints_test()
     CHECK_EQ(L'\xeaea', GlyphForIcon(UiIcon::Maximize));
     CHECK_EQ(L'\xec90', GlyphForIcon(UiIcon::YouTube));
     CHECK_EQ(L'\xea06', GlyphForIcon(UiIcon::Warning));
+    CHECK_EQ(L'\xead4', GlyphForIcon(UiIcon::Compare));
 }
 
 void native_button_palette_has_distinct_interaction_states_test()
@@ -10607,6 +10675,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(keyboard_cheat_sheet_is_read_from_the_menus_test),
     TEST_CASE(keyboard_cheat_sheet_flows_whole_groups_into_columns_test),
     TEST_CASE(dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test),
+    TEST_CASE(media_controls_ask_for_a_state_and_push_the_timeline_sparingly_test),
+    TEST_CASE(taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),
     TEST_CASE(long_media_title_is_bounded_with_a_real_ellipsis_test),

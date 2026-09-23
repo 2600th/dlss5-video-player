@@ -1223,6 +1223,87 @@ struct PlayerAppTestAccess {
         DeleteDC(dc);
     }
 
+    // The media controls' and the thumbnail's presses take the player's own
+    // paths; the thumbnail's icons are the toolbar's glyphs with real alpha.
+    static void media_controls_and_thumbnail_buttons_test()
+    {
+        PlayerApp& app = fixture->app;
+        // Nothing loaded: every press is a no-op, and the bar says so.
+        const bool loaded = app.m_loaded, playing = app.m_playing;
+        app.m_loaded = false;
+        app.WndProc(app.m_hwnd, WM_MEDIA_BUTTON, media_transport::kSmtcPlay, 0);
+        CHECK(!app.m_playing);
+        for (const auto& button : app.CurrentThumbBar()) CHECK(!button.enabled);
+
+        // The side-by-side switch flips between the Compare menu's Neural and
+        // Split, and only where the menu's modes are available.
+        const bool hadRenderer = app.m_renderer != nullptr;
+        if (!hadRenderer) app.m_renderer = MakeD3D12Renderer();
+        const bool cached = app.m_cachedPlayback, requested = app.m_neuralRequested;
+        const ComparisonMode mode = app.m_comparison.mode;
+        app.m_loaded = true; app.m_cachedPlayback = true; app.m_neuralRequested = true;
+        app.m_comparison.mode = ComparisonMode::Neural;
+        REQUIRE(app.ComparisonModesAvailable());
+        app.WndProc(app.m_hwnd, WM_COMMAND, MAKEWPARAM(IDM_COMPARE_TOGGLE, THBN_CLICKED), 0);
+        CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
+        CHECK(app.CurrentThumbBar()[2].enabled);
+        CHECK(std::wstring_view(app.CurrentThumbBar()[2].tipKey) == L"thumb.compare_off");
+        app.HandleCommand(IDM_COMPARE_TOGGLE);
+        CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        app.m_neuralRequested = false;
+        app.HandleCommand(IDM_COMPARE_TOGGLE);
+        CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        app.m_comparison.mode = mode; app.m_cachedPlayback = cached; app.m_neuralRequested = requested;
+        app.m_loaded = loaded; app.m_playing = playing;
+        if (!hadRenderer) app.m_renderer.reset();
+
+        // The WinRT half, against this hidden window: combase resolves, the
+        // interop factory hands back controls, and every setter runs. Status
+        // stays Closed, so the controls stay disabled and nothing reaches the
+        // shared machine's media flyout while the suite runs.
+        {
+            MediaTransportControls controls;
+            const bool attached = controls.Attach(app.m_hwnd, WM_MEDIA_BUTTON, WM_MEDIA_SEEK);
+            std::cout << "SMTC on a hidden window: " << (attached ? "attached" : "unavailable") << '\n';
+            CHECK(attached == controls.Attached());
+            controls.SetStatus(media_transport::Status::Closed);
+            controls.SetTitle(L"UI regression");
+            controls.SetTimeline(12.0, 3.0);
+            controls.SetTitle(L"");
+            controls.Detach();
+            CHECK(!controls.Attached());
+        }
+
+        // A glyph icon is white where the glyph is and transparent elsewhere.
+        const HICON icon = RenderGlyphIcon(GlyphForIcon(UiIcon::Play), 32);
+        REQUIRE(icon != nullptr);
+        ICONINFO info{};
+        REQUIRE(GetIconInfo(icon, &info));
+        BITMAP bitmap{};
+        CHECK(GetObjectW(info.hbmColor, sizeof(bitmap), &bitmap) != 0);
+        CHECK_EQ(LONG{32}, bitmap.bmWidth);
+        std::vector<uint32_t> pixels(32 * 32);
+        BITMAPINFO header{};
+        header.bmiHeader.biSize = sizeof(header.bmiHeader); header.bmiHeader.biWidth = 32; header.bmiHeader.biHeight = -32;
+        header.bmiHeader.biPlanes = 1; header.bmiHeader.biBitCount = 32; header.bmiHeader.biCompression = BI_RGB;
+        HDC dc = CreateCompatibleDC(nullptr);
+        CHECK(GetDIBits(dc, info.hbmColor, 0, 32, pixels.data(), &header, DIB_RGB_COLORS) == 32);
+        DeleteDC(dc);
+        size_t opaque = 0, clear = 0;
+        for (const uint32_t pixel : pixels) {
+            const uint32_t alpha = pixel >> 24;
+            if (alpha == 255) ++opaque;
+            if (alpha == 0) ++clear;
+            // Premultiplied white: no channel above its alpha.
+            CHECK((pixel & 0xffu) <= alpha);
+        }
+        CHECK(opaque > 20);
+        CHECK(clear > 400);
+        DeleteObject(info.hbmColor);
+        DeleteObject(info.hbmMask);
+        DestroyIcon(icon);
+    }
+
     static void source_menus_are_disabled_without_media_test()
     {
         PlayerApp& app = fixture->app;
@@ -1656,6 +1737,7 @@ struct PlayerAppTestAccess {
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
         UI_CASE(dark_menu_bar_test),
+        UI_CASE(media_controls_and_thumbnail_buttons_test),
         UI_CASE(source_menus_are_disabled_without_media_test),
         UI_CASE(source_menus_return_after_a_cancelled_job_test),
         UI_CASE(loading_feedback_test),
