@@ -61,6 +61,12 @@ existing `ReShade.ini` is left alone at whatever value it holds; 6.x ignores
 it, and rewriting a key it classifies as pre-v4 would re-run its config
 migration, which backs the file up beside the add-on every time it fires.
 
+One further key is written only when **DLSS > Processing scale** asks for it:
+`NRPreUpscale=1` for the 75% and 50% rungs, which put the model on the reduced
+picture ahead of DLSS Super Resolution, and `NRPreUpscale=0` when a render at
+100% finds a 1 left behind. A render at 100% on a file that holds 0, or no such
+key, writes nothing.
+
 Other RenoDX controls—including preset, style, intensity, automatic mask, and
 guide overrides—are preserved. Safe mode skips the neural helper entirely and
 does not change those user settings.

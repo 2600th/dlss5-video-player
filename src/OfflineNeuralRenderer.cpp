@@ -27,6 +27,8 @@
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "DLSSBackend.h"
+#include "FrameResample.h"
+#include "UpscalingPolicy.h"
 
 namespace {
 
@@ -957,6 +959,16 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         return fail(NeuralRenderFailure::Source,
                     L"The neural render output size is smaller than the source, which is not an upscale.");
     }
+    // What the model is shown. Below 100% the source adapter hands over frames
+    // already reduced to this size, and the carrier restores the source size.
+    const ProcessingInput modelInput =
+        ProcessingSize(request.width, request.height, request.processingScale);
+    if (!IsProcessingScaleRung(request.processingScale) ||
+        (request.processingScale != kDefaultProcessingScale &&
+         (outputWidth != request.width || outputHeight != request.height))) {
+        return fail(NeuralRenderFailure::Source,
+                    L"A reduced processing scale renders back to the source size and cannot also upscale.");
+    }
     const uint64_t expectedBytes64 = uint64_t{outputWidth} * outputHeight * 4u;
     if (expectedBytes64 > std::numeric_limits<size_t>::max()) {
         return fail(NeuralRenderFailure::Source, L"Neural render dimensions are too large.");
@@ -1049,7 +1061,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         return fail(NeuralRenderFailure::Source, L"The source video could not be opened.");
     }
     emit(NeuralRenderPhase::Decoding, 0, 0, false);
-    if (!evaluator.Initialize(request.renderWindow, request.width, request.height,
+    if (!evaluator.Initialize(request.renderWindow, modelInput.width, modelInput.height,
                               outputWidth, outputHeight, request.fps,
                               request.guides, source.Layout(), source.ColorDescription())) {
         source.Close();
@@ -1722,9 +1734,32 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     return result;
 }
 
+// The processing-scale reduction, applied where the frame is read so it runs
+// on the prefetch thread beside the render rather than inside it. Inactive at
+// 100%, where frames pass through untouched.
+struct FrameReduction {
+    uint32_t fromWidth{},fromHeight{},toWidth{},toHeight{};
+    bool Active()const{return toWidth&&toHeight&&(toWidth!=fromWidth||toHeight!=fromHeight);}
+    void Configure(const NeuralRenderRequest& request){
+        const ProcessingInput input=ProcessingSize(request.width,request.height,request.processingScale);
+        fromWidth=request.width;fromHeight=request.height;
+        toWidth=input.reduced?input.width:0;toHeight=input.reduced?input.height:0;
+    }
+    // Reduces `frame` in place. `spare` is a buffer to write into, typically the
+    // reduced frame the caller handed back; the full-size one is returned in
+    // it, for a decoder to reuse. False for a frame that is not the size the
+    // job was probed at, which the job reports as a source failure.
+    bool Apply(std::vector<uint8_t>& frame,std::vector<uint8_t>& spare)const{
+        if(!frame_resample::DownscaleBgraArea(frame,fromWidth,fromHeight,toWidth,toHeight,spare))return false;
+        frame.swap(spare);
+        return true;
+    }
+};
+
 struct InjectedSourceAdapter {
     IFrameSource& source;
     bool gpuConversion{true};
+    FrameReduction reduction;
     bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){return source.Open(path,stop,seekSeconds);}
     void Close(){source.Close();}
     // An injected source hands out BGRA; only the production decoder can choose NV12.
@@ -1736,6 +1771,10 @@ struct InjectedSourceAdapter {
         OfflineDecodedFrame decoded;const auto read=source.Read(decoded,stop);
         frame={std::move(decoded.bgra),decoded.timestamp100ns,decoded.discontinuity,
                decoded.frameNumber,decoded.sourceGeneration};
+        if(read==OfflineFrameRead::FrameReady&&reduction.Active()){
+            std::vector<uint8_t> spare;
+            if(!reduction.Apply(frame.bgra,spare))return JobRead::Error;
+        }
         switch(read){
             case OfflineFrameRead::FrameReady:return JobRead::FrameReady;
             case OfflineFrameRead::EndOfStream:return JobRead::EndOfStream;
@@ -1829,6 +1868,7 @@ struct InjectedEncoderAdapter {
 struct ProductionSourceAdapter {
     VideoDecoder decoder;
     bool gpuConversion{true};
+    FrameReduction reduction;
     bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){
         if(!decoder.OpenSequential(path.wstring(),MediaSourceKind::LocalFile,stop,gpuConversion))return false;
         return seekSeconds<=0.0||decoder.SeekSeconds(seekSeconds);
@@ -1846,11 +1886,18 @@ struct ProductionSourceAdapter {
         VideoFrame decoded;
         // Whatever this frame still carries has already been rendered and written,
         // so it goes back to the decoder rather than being freed here and
-        // reallocated - and zero-filled - by the next pipe read.
-        decoder.RecycleFrameBuffer(std::move(frame.bgra));
+        // reallocated - and zero-filled - by the next pipe read. A reduced frame
+        // is the wrong size for the decoder's pool; it becomes the next
+        // reduction's destination instead.
+        std::vector<uint8_t> spent=std::move(frame.bgra);
+        if(!reduction.Active())decoder.RecycleFrameBuffer(std::move(spent));
         const auto read = decoder.ReadNextBlocking(decoded, stop);
         frame = {std::move(decoded.bgra), decoded.timestamp100ns, decoded.discontinuity,
                  decoded.frameNumber, decoded.sourceGeneration};
+        if (read == VideoReadResult::FrameReady && reduction.Active()) {
+            if (!reduction.Apply(frame.bgra, spent)) return JobRead::Error;
+            decoder.RecycleFrameBuffer(std::move(spent));
+        }
         if (read == VideoReadResult::FrameReady) return JobRead::FrameReady;
         if (read == VideoReadResult::EndOfStream) return JobRead::EndOfStream;
         if (read == VideoReadResult::Cancelled) return JobRead::Cancelled;
@@ -1909,6 +1956,14 @@ struct ProductionEvaluatorAdapter {
     // that, so the next job keeps them and re-arms the feature alone - which
     // is the whole trade the FreeFeature arm makes.
     bool featureReleasedWhileIdle=false;
+    // Set before Initialize for a job below 100% processing scale: the carrier
+    // is then true Super Resolution from the reduced input, created at exactly
+    // the input size (the renderer's preserve-source mode), rather than DLAA
+    // at the output size over a resampled input, which is how an upscaling
+    // export's carrier runs.
+    bool superResolutionCarrier=false;
+    // What the live renderer was built with, for the reuse comparison.
+    bool builtSuperResolutionCarrier=false;
     bool Reused()const{return reused;}
     bool Initialize(HWND window,uint32_t w,uint32_t h,uint32_t ow,uint32_t oh,double rate,const GuideControls& controls,
                     PixelLayout layout,const SourceColorDescription& color){
@@ -1928,7 +1983,8 @@ struct ProductionEvaluatorAdapter {
         reused=renderer&&(renderer->DLSSFeatureCreated()||featureReleasedWhileIdle)&&
                width==w&&height==h&&outputWidth==ow&&outputHeight==oh&&fps==rate&&
                sourceLayout==layout&&sourceConversion==conversion&&
-               builtGpuColorConversion==gpuColorConversion;
+               builtGpuColorConversion==gpuColorConversion&&
+               builtSuperResolutionCarrier==superResolutionCarrier;
         // Answered, so spent: this job either re-arms the released feature or
         // rebuilds the device, and either way the next Initialize must judge
         // the feature on what it can see rather than on a stale promise.
@@ -1944,6 +2000,7 @@ struct ProductionEvaluatorAdapter {
         renderer=MakeD3D12Renderer();
         if(!renderer)return false;
         builtGpuColorConversion=gpuColorConversion;
+        builtSuperResolutionCarrier=superResolutionCarrier;
         renderer->SetCaptureFormat(gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
         renderer->SetSourceLayout(layout);
         renderer->SetSourceColor(color);
@@ -1954,7 +2011,7 @@ struct ProductionEvaluatorAdapter {
         // ow/oh, not w/h: this is where Super Resolution either happens or does
         // not. They are equal for every job that does not upscale, which is how
         // this read for as long as the pass could only render at source size.
-        if(!renderer->Initialize(window,w,h,ow,oh,gridW,gridH,DefaultNeuralCarrierQuality(),false,true))return false;
+        if(!renderer->Initialize(window,w,h,ow,oh,gridW,gridH,DefaultNeuralCarrierQuality(),superResolutionCarrier,true))return false;
         // Both sides apply the same even-size rule, so this only fires if that rule drifts.
         if(renderer->ActiveSourceLayout()!=layout){
             LOG("Renderer could not take the decoder's "<<(layout==PixelLayout::Nv12?"NV12":"BGRA")<<" source layout.");
@@ -2477,10 +2534,18 @@ NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegm
     // what the resources and the evaluate actually were, which is the better
     // evidence anyway: a config echo states an intention, "(native 1:1)" and
     // "[native]" state an outcome. 4.70 writes "(native)", 6.5.3 "(native 1:1)".
+    //
+    // A pre-SR evaluate - the model on the carrier's input, ahead of its
+    // upscale, which is how a reduced processing scale runs - tags its line
+    // "[pre-SR]" instead of "[native]". It is the same outcome at the model's
+    // own size: RenoDX 6.5.3 logs "created inline NR resources ws1 1440x810 ->
+    // 1440x810 (native 1:1)" and "pre-SR feature 18 evaluation succeeded (...
+    // NR input 1440x810 ..., output 1440x810, 1 stack pass(es) [pre-SR])" for
+    // a 75% render of a 1920x1080 source, measured on this project's own run.
     evidence.nativeResolution=
         lower.find("created inline nr resources")!=std::string::npos&&
         lower.find("(native")!=std::string::npos&&
-        lower.find("[native]")!=std::string::npos;
+        (lower.find("[native]")!=std::string::npos||lower.find("[pre-sr]")!=std::string::npos);
     // That the pass came through this player's own inline NGX path and not the
     // host's Streamline route. 4.70's half of this was the startup banner
     // "private feature-18 GPU ordering active"; 6.x prints no architecture
@@ -2670,6 +2735,7 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
             return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
                                       .detail=L"Offline renderer was constructed with an incomplete set of collaborators."};
         InjectedSourceAdapter source{*source_};InjectedEvaluatorAdapter evaluator{*evaluator_};
+        source.reduction.Configure(request);
         InjectedEncoderAdapter encoder{encoder_,{},encoderFactory_};
         const Clock clock=clock_?clock_:[]{return SteadyClock::now();};
         const std::function<bool()> paused=paused_?paused_:[]{return false;};
@@ -2681,8 +2747,12 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     // A job that unwound without closing its decoder must not leave the next
     // one an open one; every other path already closes it.
     state.source.Close();
-    state.source.gpuConversion=request.gpuSourceConversion;
+    state.source.reduction.Configure(request);
+    // The reduction reads BGRA; an NV12 source would reach it in the wrong
+    // layout, so a reduced job decodes to BGRA whatever the setting says.
+    state.source.gpuConversion=request.gpuSourceConversion&&!state.source.reduction.Active();
     state.evaluator.gpuColorConversion=request.gpuColorConversion;
+    state.evaluator.superResolutionCarrier=state.source.reduction.Active();
     // Read before the reset, because the reset is allowed to drop the feature.
     const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();
     state.evaluator.ResetForJob(request.guides);

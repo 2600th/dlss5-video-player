@@ -47,6 +47,8 @@
 // at the small size and finishes in seconds.
 #include "NeuralWorker.h"
 #include "OfflineNeuralRenderer.h"
+#include "ReShadeConfig.h"
+#include "UpscalingPolicy.h"
 
 #include <windows.h>
 
@@ -142,13 +144,71 @@ std::wstring WorksetPoolComplaint(const fs::path& reshadeLog)
     return {};
 }
 
+// `--processing-scale-cost WxH [seconds]`: the measurement behind the
+// processing-scale ladder's printed costs (UpscalingPolicy.h). Renders one
+// generated clip whole at every rung, with the add-on order each rung needs,
+// and prints the render rate. Not part of the registered smoke, which keeps
+// its three arguments: this is minutes of GPU time at 4K.
+int MeasureProcessingScale(const fs::path& helpers, const fs::path& worker, const fs::path& root,
+                           uint32_t width, uint32_t height, double seconds)
+{
+    constexpr double kCostFps = 30.0;
+    const auto source = root / L"scale-source.mp4";
+    if (!Generate(helpers / L"ffmpeg.exe",
+                  {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi", L"-i",
+                   std::format(L"testsrc2=s={}x{}:r={}:d={}", width, height, int(kCostFps), seconds),
+                   L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", source.wstring()},
+                  root / L"source-generation.log")) {
+        std::wcerr << L"FAIL: could not generate the " << width << L'x' << height << L" clip.\n";
+        return 2;
+    }
+    const auto ini = worker.parent_path() / L"ReShade.ini";
+    int failures = 0;
+    for (const uint32_t rung : kProcessingScaleRungs) {
+        const std::vector<NeuralAddonOverride> order{{"NRPreUpscale", rung < 100 ? "1" : "0"}};
+        if (!ConfigureNeuralAddon(ini, true, order).ok) {
+            std::wcerr << L"FAIL: could not write NRPreUpscale for " << rung << L"%\n";
+            return 2;
+        }
+        NeuralRenderRequest request{nullptr, source, root / std::format(L"scale-{}.mkv", rung),
+                                    width, height, kCostFps, seconds};
+        request.processingScale = rung;
+        const auto started = std::chrono::steady_clock::now();
+        const NeuralRenderResult result = RunNeuralWorker(worker, request);
+        const double elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        const ProcessingInput input = ProcessingSize(width, height, rung);
+        std::wcout << std::format(L"{:>3}% model {}x{}: ok={} frames={} verified={} elapsed={:.2f}s "
+                                  L"rate={:.1f} fps neuralGpuMs p50={:.2f} p95={:.2f}\n",
+                                  rung, input.width, input.height, result.ok ? 1 : 0, result.frameCount,
+                                  result.verifiedNeuralFrames, elapsed,
+                                  elapsed > 0.0 ? double(result.frameCount) / elapsed : 0.0,
+                                  result.timing.neuralGpuMsP50, result.timing.neuralGpuMsP95);
+        if (!result.ok) {
+            std::wcerr << L"  detail: " << result.detail << L'\n';
+            ++failures;
+        }
+        for (const auto* name : {L"ReShade.log", L"NeuralWorker.log"}) {
+            std::error_code error;
+            fs::copy_file(worker.parent_path() / name, root / std::format(L"{}-{}", rung, name),
+                          fs::copy_options::overwrite_existing, error);
+        }
+    }
+    // Leave the add-on in the shipped order for whatever runs next.
+    ConfigureNeuralAddon(ini, true, std::vector<NeuralAddonOverride>{{"NRPreUpscale", "0"}});
+    std::wcout << L"evidence: " << root.wstring() << L'\n';
+    return failures ? 1 : 0;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
 {
     test_support::ContainChildProcesses();
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
-    if (argc != 4) {
+    const bool measureScale =
+        (argc == 6 || argc == 7) && std::wstring_view(argv[4]) == L"--processing-scale-cost";
+    if (argc != 4 && !measureScale) {
         std::wcerr << L"Usage: NeuralRangeRenderSmoke <ffmpeg-directory> "
                       L"<NeuralWorker.exe> <output-directory>\n";
         return 2;
@@ -163,6 +223,12 @@ int wmain(int argc, wchar_t** argv)
         std::wcerr << L"FAIL: ffmpeg.exe and NeuralWorker.exe must exist and the run "
                       L"directory must be new.\n";
         return 2;
+    }
+    if (measureScale) {
+        unsigned width = 0, height = 0;
+        if (swscanf_s(argv[5], L"%ux%u", &width, &height) != 2 || !width || !height) return 2;
+        const double seconds = argc == 7 ? _wtof(argv[6]) : 10.0;
+        return MeasureProcessingScale(helpers, worker, root, width, height, seconds > 0.0 ? seconds : 10.0);
     }
 
     // testsrc2 rather than a flat pattern: the model is given interior detail

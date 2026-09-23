@@ -2119,12 +2119,19 @@ private:
 
 class FakeNeuralEvaluator final : public INeuralFrameEvaluator {
 public:
-    bool Initialize(HWND,uint32_t width,uint32_t height,uint32_t,uint32_t,double,const GuideControls& guides) override
-    { initialized=true;expectedBytes=size_t(width)*height*4u;controls=guides;return true; }
+    bool Initialize(HWND,uint32_t width,uint32_t height,uint32_t outputWidth,uint32_t outputHeight,double,
+                    const GuideControls& guides) override
+    {
+        initialized=true;inputWidth=width;inputHeight=height;
+        // A capture is the output size, which is the input size for every job
+        // but a reduced processing scale.
+        expectedBytes=size_t(outputWidth)*outputHeight*4u;controls=guides;return true;
+    }
     bool Submit(const OfflineDecodedFrame& frame,const FrameIdentity& id,bool capture,
                 OfflineEvaluation& out) override
     {
         submitted.push_back(frame.timestamp100ns);resets.push_back(id.reset!=HistoryReset::None);
+        submittedFrames.push_back(frame.bgra);
         ids.push_back(id);
         // Submissions since the last reset, including this one: what a temporal
         // model's output for this frame depends on.
@@ -2163,6 +2170,7 @@ public:
     double LastNeuralGpuMs() const override { return neuralGpuMs; }
     uint64_t PeakLocalVideoMemoryMiB() const override { return peakVramMiB; }
     bool initialized{};bool featureCreated{};uint64_t evaluations{};int primeSubmissions{};
+    uint32_t inputWidth{},inputHeight{};std::vector<std::vector<uint8_t>> submittedFrames;
     int requiredPrimeSubmissions{2};
     bool stampCaptureCount{};
     int captureSubmissions{};int temporalResets{};size_t expectedBytes{};
@@ -2665,6 +2673,53 @@ void offline_super_resolution_only_job_waits_for_no_neural_evidence_and_says_so_
     CHECK_EQ(size_t{1},encoder.attempts.size());CHECK_EQ(size_t{5},encoder.attempts.back().size());
     // One read, after capture, to prove the add-on stayed out of it.
     CHECK_EQ(1,evidenceCalls);
+}
+
+// Below 100% the model is shown the frame reduced to ProcessingSize and the
+// carrier restores the source size: the evaluator is created for the reduced
+// input and the source size as its output, every frame it is handed is the
+// area average of the decoded one, and what is encoded is the output size.
+void offline_reduced_processing_scale_shows_the_model_the_area_reduced_frame_test()
+{
+    // Four 4x4 frames whose 2x2 blocks each average to a known value.
+    std::vector<OfflineDecodedFrame> frames;
+    for(size_t index=0;index<4;++index){
+        std::vector<uint8_t> bgra(4*4*4);
+        for(uint32_t y=0;y<4;++y)for(uint32_t x=0;x<4;++x){
+            uint8_t* pixel=bgra.data()+(size_t(y)*4+x)*4;
+            // Top-left block {0,40,80,120} -> 60; the others a flat 10*index.
+            pixel[0]=(x<2&&y<2)?uint8_t((y*2+x)*40):uint8_t(10*index);
+            pixel[1]=uint8_t(200);pixel[2]=uint8_t(x*20+y*20);pixel[3]=255;
+        }
+        frames.push_back(OfflineDecodedFrame{std::move(bgra),int64_t(index)*333333,index==0,index,1});
+    }
+    TempDirectory fixture;FakeOfflineSource source(frames);FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+    auto request=OfflineRequest(fixture.Path());
+    request.width=4;request.height=4;request.durationSeconds=4.0/30.0;request.processingScale=50;
+    const NeuralRenderResult result=job.Run(request,{},{});
+    CHECK(result.ok);CHECK_EQ(uint64_t{4},result.frameCount);
+    CHECK_EQ(uint32_t{2},evaluator.inputWidth);CHECK_EQ(uint32_t{2},evaluator.inputHeight);
+    CHECK(!evaluator.submittedFrames.empty());
+    for(const auto& submitted:evaluator.submittedFrames)CHECK_EQ(size_t{2*2*4},submitted.size());
+    if(!evaluator.submittedFrames.empty()){
+        const auto& first=evaluator.submittedFrames.front();
+        CHECK_EQ(uint8_t{60},first[0]);                 // mean of 0, 40, 80, 120
+        CHECK_EQ(uint8_t{200},first[1]);CHECK_EQ(uint8_t{255},first[3]);
+        CHECK_EQ(uint8_t{20},first[2]);                  // mean of 0, 20, 20, 40
+    }
+    // Encoded at the source size: the model's input is not the file's size.
+    CHECK(!encoder.attempts.empty());
+    if(!encoder.attempts.empty())
+        for(const auto& written:encoder.attempts.back())CHECK_EQ(size_t{4*4*4},written.size());
+
+    // A reduced scale beside an upscaling output is two jobs for one carrier.
+    FakeOfflineSource upscaleSource(frames);FakeNeuralEvaluator upscaleEvaluator;FakeFrameEncoder upscaleEncoder;
+    OfflineNeuralRenderer refused(upscaleSource,upscaleEvaluator,upscaleEncoder,AdvancingNeuralEvidence());
+    auto both=request;both.outputWidth=8;both.outputHeight=8;
+    const NeuralRenderResult bothResult=refused.Run(both,{},{});
+    CHECK(!bothResult.ok);CHECK_EQ(NeuralRenderFailure::Source,bothResult.failure);
+    CHECK(!upscaleEvaluator.initialized);
 }
 
 // The claim a Super Resolution-only job makes is that the model did NOT run.
@@ -5314,6 +5369,7 @@ int wmain(int argc, wchar_t* argv[])
     offline_job_rejects_when_inline_interception_was_not_armed_before_capture_test();
     offline_super_resolution_only_job_waits_for_no_neural_evidence_and_says_so_test();
     offline_super_resolution_only_job_refuses_a_session_where_the_add_on_ran_test();
+    offline_reduced_processing_scale_shows_the_model_the_area_reduced_frame_test();
     offline_job_rejects_non_monotonic_source_timestamps_test();
     offline_job_reports_monotonic_progress_and_smoothed_eta_test();
     offline_job_cancel_stops_before_promotion_and_marks_result_cancelled_test();

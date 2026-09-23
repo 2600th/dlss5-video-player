@@ -195,6 +195,19 @@ measures. Measured over a 72-frame range: two passes took 9.81 s against 8.01 s
 and wrote 932,019 bytes against 780,048. **Keep temporal history per pass** sits
 beside it and greys out at a single pass, where it has nothing to govern.
 
+**DLSS > Processing scale** sets the resolution the model runs at. **Source,
+100%** is the default and the recommended rung: the model sees the decoded
+frame. **75%** and **50%** show the model an area-reduced picture and let DLSS
+Super Resolution bring the result back to the source size, which renders faster
+and looks softer - the add-on's `NRPreUpscale=1` is what puts the model on the
+smaller picture, so the player writes it for those rungs and puts it back to 0
+when you return to 100%. Each rung prints the rate it measured beside it: a
+whole 4K render on an RTX 4080 SUPER went 14.8, 17.3 and 22.0 frames per second.
+A rung is part of the render identity, so a render made at 50% is never served
+for 100%. It applies to renders at the source size: live and cached playback,
+and an export with Neural rendering but not Super Resolution. An export that
+upscales runs the model on the upscaled frame whatever this says.
+
 Color strength and the render preset are deliberately not in that dialog. Each
 was measured against the pinned runtime and changes nothing - the add-on echoes
 the value back and the output is byte-identical - while a change still costs a
@@ -318,7 +331,8 @@ not a backup.
 
 `DLSSVideoPlayer.ini` beside the executable stores volume, mute, fit/fill,
 original/neural view, upscaling preference and output size, YouTube quality,
-image adjustments, comparison mode, neural settings and guide switches. It
+image adjustments, comparison mode, neural settings, processing scale and guide
+switches. It
 also keeps `[NeuralPace]`: one measured steady-state render pace per source
 size (`Samples=WxH:ms;...`) for the detected GPU, which the keep-up forecast
 predicts from - exactly at a measured size, along this GPU's own fitted line
@@ -513,8 +527,8 @@ The same export runs without opening the player:
 
 ```
 DLSSVideoPlayer.exe --render <input> [--stages sr,nr,fg] [--height 1080|1440|2160]
-                    [--multiplier 2-5] [--preset NAME] [--range START-END]
-                    [--out FILE.mkv] [--quiet]
+                    [--multiplier 2-5] [--preset NAME] [--processing-scale 100|75|50]
+                    [--range START-END] [--out FILE.mkv] [--quiet]
 ```
 
 - `--stages` picks the stages as the dialog's ticks do: `sr` (Super
@@ -525,6 +539,8 @@ DLSSVideoPlayer.exe --render <input> [--stages sr,nr,fg] [--height 1080|1440|216
 - `--preset` is one of `natural`, `detail-only`, `gentle` or `strong`, the
   presets in **Neural settings**. Without it the render uses the Neural
   settings the player saved.
+- `--processing-scale` is `100`, `75` or `50`, the rungs of **DLSS >
+  Processing scale**, for `nr` without `sr`. Without it, the saved rung.
 - `--range` renders part of the source, in the timecode forms **Go to
   timecode** accepts, for example `0:10-0:25` or `f0-f300`. It needs `sr` or
   `nr`: frame generation then converts that pass's result rather than the whole

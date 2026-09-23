@@ -786,6 +786,33 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     }
     const auto badSourceConversionView = view(badSourceConversion);
     CHECK(!neural_worker_detail::ParseWorkerArguments(badSourceConversionView).has_value());
+    // The processing scale travels only off its default, so every job that
+    // predates the rungs has the command line it always had; a value that is
+    // not a rung, and a reduced scale beside an upscaling output, are refused.
+    for (const auto& argument : normal) CHECK(argument != L"--processing-scale");
+    if (parsedNormal) CHECK_EQ(uint32_t{100}, parsedNormal->request.processingScale);
+    NeuralRenderRequest reduced = request;
+    reduced.processingScale = 50;
+    const auto reducedArguments = neural_worker_detail::BuildWorkerArguments(reduced, metadata, pause, false);
+    const auto reducedView = view(reducedArguments);
+    const auto parsedReduced = neural_worker_detail::ParseWorkerArguments(reducedView);
+    CHECK(parsedReduced.has_value());
+    if (parsedReduced) CHECK_EQ(uint32_t{50}, parsedReduced->request.processingScale);
+    for (const wchar_t* notARung : {L"60", L"150", L"0", L"-50", L"50%"}) {
+        auto badScale = reducedArguments;
+        for (size_t index = 0; index + 1 < badScale.size(); ++index) {
+            if (badScale[index] == L"--processing-scale") badScale[index + 1] = notARung;
+        }
+        const auto badScaleView = view(badScale);
+        CHECK(!neural_worker_detail::ParseWorkerArguments(badScaleView).has_value());
+    }
+    NeuralRenderRequest reducedAndUpscaled = reduced;
+    reducedAndUpscaled.outputWidth = 3840;
+    reducedAndUpscaled.outputHeight = 2160;
+    const auto upscaledArguments =
+        neural_worker_detail::BuildWorkerArguments(reducedAndUpscaled, metadata, pause, false);
+    const auto upscaledView = view(upscaledArguments);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(upscaledView).has_value());
     auto duplicated = normal;
     duplicated.emplace_back(L"--width");
     duplicated.emplace_back(L"1920");

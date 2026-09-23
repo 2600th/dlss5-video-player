@@ -189,6 +189,13 @@ private:
             {L"menu.neural_presets", L"Neural presets"},
             {L"menu.neural_preset_custom", L"Custom (a control was changed)"},
             {L"menu.neural_settings", L"Neural settings\tCtrl+N"},
+            // The measured rates are whole 8 s 3840x2160 renders on an RTX 4080
+            // SUPER, helper start included, median of three; see UpscalingPolicy.h.
+            {L"menu.processing_scale", L"Processing scale"},
+            {L"menu.processing_scale_measured", L"Render rate of a 4K clip, measured on an RTX 4080 SUPER"},
+            {L"menu.processing_scale_100", L"Source, 100% (recommended)\t14.8 fps"},
+            {L"menu.processing_scale_75", L"75% - the model sees a smaller picture\t17.3 fps, 1.2x"},
+            {L"menu.processing_scale_50", L"50% - the model sees a smaller picture\t22.0 fps, 1.5x"},
             {L"menu.encoder_settings", L"Encoder settings"},
             {L"menu.advanced", L"Advanced"}, {L"menu.safe_mode", L"Restart in DLSS SR safe mode"},
             {L"menu.clear_neural_cache", L"Clear Neural Cache"}, {L"menu.open_receipt", L"Open render receipt"},

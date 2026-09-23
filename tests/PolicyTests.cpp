@@ -41,6 +41,7 @@
 #include "RangeSelection.h"
 #include "ExportPipeline.h"
 #include "RenderCommandLine.h"
+#include "FrameResample.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
 #include "DeferredCapture.h"
@@ -4777,6 +4778,106 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
     CHECK(ProgressLine(1, 1, L"Super Resolution", 125, 120) == L"1/1 Super Resolution: 125/120 frames (100%)");
     CHECK(Usage().find(L"--render <input>") != std::wstring::npos);
     CHECK_EQ(3, kExitRefused); CHECK_EQ(5, kExitCancelled);
+}
+
+// The processing-scale ladder. The default is the top rung and changes
+// nothing - not the model's input, not the cache key, not the add-on's ini -
+// and each reduced rung is even-sized, restored to the source, and its own
+// cache entry.
+void processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test()
+{
+    CHECK_EQ(uint32_t{100}, kDefaultProcessingScale);
+    CHECK_EQ(uint32_t{100}, kProcessingScaleRungs[0]);
+    for (const uint32_t rung : {100u, 75u, 50u}) CHECK(IsProcessingScaleRung(rung));
+    for (const uint32_t other : {0u, 25u, 60u, 99u, 101u, 150u}) CHECK(!IsProcessingScaleRung(other));
+
+    const ProcessingInput source = ProcessingSize(3840, 2160, 100);
+    CHECK(!source.reduced); CHECK_EQ(uint32_t{3840}, source.width); CHECK_EQ(uint32_t{2160}, source.height);
+    const ProcessingInput three = ProcessingSize(3840, 2160, 75);
+    CHECK(three.reduced); CHECK_EQ(uint32_t{2880}, three.width); CHECK_EQ(uint32_t{1620}, three.height);
+    const ProcessingInput half = ProcessingSize(1920, 1080, 50);
+    CHECK(half.reduced); CHECK_EQ(uint32_t{960}, half.width); CHECK_EQ(uint32_t{540}, half.height);
+    // Odd results round down to even; an odd source at 100 stays as it is.
+    const ProcessingInput odd = ProcessingSize(1279, 719, 75);
+    CHECK(odd.reduced); CHECK_EQ(0u, odd.width % 2); CHECK_EQ(0u, odd.height % 2);
+    CHECK_EQ(uint32_t{1279}, ProcessingSize(1279, 719, 100).width);
+    // Not a rung, or too small to reduce, is the source.
+    CHECK(!ProcessingSize(1920, 1080, 60).reduced);
+    CHECK(!ProcessingSize(2, 2, 50).reduced);
+
+    CHECK(ProcessingScaleIdentityTerm(100).empty());
+    CHECK(ProcessingScaleIdentityTerm(75) == "|processing-scale-75-v1");
+    CHECK(ProcessingScaleIdentityTerm(50) != ProcessingScaleIdentityTerm(75));
+
+    // The add-on order: the model ahead of the upscale below 100; at 100 the
+    // ini is left alone unless a reduced render left its 1 behind.
+    CHECK(PreUpscaleOverride(75, "") == std::optional<std::string_view>("1"));
+    CHECK(PreUpscaleOverride(50, "0") == std::optional<std::string_view>("1"));
+    CHECK(!PreUpscaleOverride(100, "").has_value());
+    CHECK(!PreUpscaleOverride(100, "0").has_value());
+    CHECK(PreUpscaleOverride(100, "1") == std::optional<std::string_view>("0"));
+
+    // The menu's rungs, in the ladder's order.
+    CHECK_EQ(app_menu::IDM_PROCESSING_SCALE_FIRST, app_menu::CommandForProcessingScale(100));
+    CHECK_EQ(app_menu::IDM_PROCESSING_SCALE_LAST, app_menu::CommandForProcessingScale(50));
+    CHECK(app_menu::ProcessingScaleForCommand(app_menu::IDM_PROCESSING_SCALE_FIRST + 1) == std::optional<uint32_t>(75));
+    CHECK(!app_menu::ProcessingScaleForCommand(app_menu::IDM_PROCESSING_SCALE_LAST + 1).has_value());
+    CHECK_EQ(app_menu::IDM_PROCESSING_SCALE_FIRST, app_menu::CommandForProcessingScale(60));
+
+    // `--render --processing-scale` takes a rung, and only for the model at
+    // the source size.
+    const auto parse = [](std::vector<std::wstring> arguments) { return render_command::Parse(arguments); };
+    const auto scaled = parse({L"--render", L"a.mp4", L"--processing-scale", L"75"});
+    CHECK(scaled.mode == render_command::Mode::Render);
+    CHECK(scaled.command.processingScale == std::optional<uint32_t>(75));
+    CHECK(!parse({L"--render", L"a.mp4"}).command.processingScale.has_value());
+    CHECK(parse({L"--render", L"a.mp4", L"--processing-scale", L"60"}).mode == render_command::Mode::BadArguments);
+    CHECK(parse({L"--render", L"a.mp4", L"--stages", L"sr,nr", L"--processing-scale", L"50"}).mode ==
+          render_command::Mode::BadArguments);
+    CHECK(parse({L"--render", L"a.mp4", L"--stages", L"fg", L"--processing-scale", L"50"}).mode ==
+          render_command::Mode::BadArguments);
+}
+
+// The reduction the model sees below 100%: the exact coverage-weighted mean,
+// which at 50% is the 2x2 box, the same bytes whatever the thread count, and
+// refused for anything that is not a reduction of a whole frame.
+void area_downscale_is_the_exact_coverage_mean_and_deterministic_test()
+{
+    // 4x2 -> 2x1: each output pixel is the mean of a 2x2 block.
+    std::vector<uint8_t> source{
+        0, 10, 20, 255,   40, 50, 60, 255,   100, 100, 100, 255,   200, 200, 200, 255,
+        80, 90, 100, 255, 120, 130, 140, 255, 100, 100, 100, 255,   0, 0, 0, 255};
+    std::vector<uint8_t> half;
+    CHECK(frame_resample::DownscaleBgraArea(source, 4, 2, 2, 1, half));
+    CHECK(half == std::vector<uint8_t>({60, 70, 80, 255, 100, 100, 100, 255}));
+
+    // 3 -> 2 along one axis: weights 2/3 + 1/3 and 1/3 + 2/3.
+    std::vector<uint8_t> row{0, 0, 0, 255, 90, 90, 90, 255, 180, 180, 180, 255};
+    std::vector<uint8_t> two;
+    CHECK(frame_resample::DownscaleBgraArea(row, 3, 1, 2, 1, two));
+    CHECK(two == std::vector<uint8_t>({30, 30, 30, 255, 150, 150, 150, 255}));
+    for (const uint32_t size : {3u, 4u, 7u, 1920u}) {
+        const auto axis = frame_resample::BuildAxis(size, size * 3 / 4 ? size * 3 / 4 : 1);
+        for (const auto& span : axis.spans) {
+            float sum = 0.0f;
+            for (uint32_t tap = 0; tap < span.count; ++tap) sum += axis.weights[span.offset + tap];
+            CHECK(std::fabs(sum - 1.0f) < 1e-5f);
+        }
+    }
+
+    // A large frame, twice: the row split across the pool changes nothing.
+    std::vector<uint8_t> large(size_t(1920) * 1080 * 4);
+    for (size_t index = 0; index < large.size(); ++index) large[index] = uint8_t((index * 2654435761u) >> 24);
+    std::vector<uint8_t> first, second;
+    CHECK(frame_resample::DownscaleBgraArea(large, 1920, 1080, 1440, 810, first));
+    CHECK(frame_resample::DownscaleBgraArea(large, 1920, 1080, 1440, 810, second));
+    CHECK_EQ(size_t(1440) * 810 * 4, first.size());
+    CHECK(first == second);
+
+    std::vector<uint8_t> untouched{1, 2, 3};
+    CHECK(!frame_resample::DownscaleBgraArea(row, 3, 1, 4, 1, untouched));   // an enlargement
+    CHECK(!frame_resample::DownscaleBgraArea(row, 4, 1, 2, 1, untouched));   // not a whole frame
+    CHECK(untouched == std::vector<uint8_t>({1, 2, 3}));
 }
 
 void one_step_of_the_frame_grid_is_always_work_test()
@@ -11029,6 +11130,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(menus_group_two_to_seven_related_items_per_block_test),
     TEST_CASE(export_plan_runs_super_resolution_and_neural_as_one_pass_test),
     TEST_CASE(render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test),
+    TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
+    TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),
     TEST_CASE(one_step_of_the_frame_grid_is_always_work_test),
     TEST_CASE(every_hole_the_session_keeps_is_a_hole_a_job_can_start_on_test),
     TEST_CASE(render_start_snaps_into_the_frame_it_lands_in_not_past_it_test),

@@ -54,6 +54,8 @@ struct Command {
     // Index into neural_presets::kPresets; empty uses the saved Neural settings,
     // as the dialog does.
     std::optional<size_t> preset;
+    // One of kProcessingScaleRungs; empty uses the saved processing scale.
+    std::optional<uint32_t> processingScale;
     // Stages, output rung and multiplier, in the dialog's own vocabulary so the
     // plan comes out of the same PlanExport.
     ExportSelection selection;
@@ -119,7 +121,8 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     };
     Command& command = parsed.command;
     bool seenRender = false, seenRange = false, seenPreset = false, seenStages = false,
-         seenHeight = false, seenMultiplier = false, seenOut = false, seenQuiet = false;
+         seenHeight = false, seenMultiplier = false, seenOut = false, seenQuiet = false,
+         seenScale = false;
     std::wstring_view presetName;
     // What the dialog opens with: the neural pass alone.
     command.selection = ExportSelection{};
@@ -143,7 +146,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
         };
         const bool takesValue = argument == L"--render" || argument == L"--range" ||
             argument == L"--preset" || argument == L"--stages" || argument == L"--height" ||
-            argument == L"--multiplier" || argument == L"--out";
+            argument == L"--multiplier" || argument == L"--out" || argument == L"--processing-scale";
         if (!takesValue) return bad(L"Unknown argument: " + argument);
         if (index + 1 >= userArguments.size() || userArguments[index + 1].empty())
             return bad(argument + L" needs a value.");
@@ -189,6 +192,12 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             for (const uint32_t candidate : kUpscaleRungHeights) rung = rung || (height && *height == candidate);
             if (!rung) return bad(L"--height takes 1080, 1440 or 2160.");
             command.selection.targetHeight = *height;
+        } else if (argument == L"--processing-scale") {
+            if (!once(seenScale)) return bad(L"--processing-scale was given twice.");
+            const auto percent = ParseCount(value);
+            if (!percent || !IsProcessingScaleRung(*percent))
+                return bad(L"--processing-scale takes 100, 75 or 50.");
+            command.processingScale = *percent;
         } else if (argument == L"--multiplier") {
             if (!once(seenMultiplier)) return bad(L"--multiplier was given twice.");
             const auto multiplier = ParseCount(value);
@@ -223,6 +232,10 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
         command.preset = found;
     }
     if (seenHeight && !selection.upscale) return bad(L"--height needs the sr stage.");
+    // The model's scale is restored to the SOURCE size, so it has nothing to
+    // act on in a pass that upscales, and nothing at all without the model.
+    if (seenScale && (!selection.neural || selection.upscale))
+        return bad(L"--processing-scale needs the nr stage without sr.");
     if (seenMultiplier && !selection.frameGeneration) return bad(L"--multiplier needs the fg stage.");
     // Frame generation converts a whole file and copies the source's audio onto
     // it with no retime, so it has no range of its own; a range reaches it only
@@ -271,6 +284,10 @@ inline std::wstring Usage()
         L"                     this GPU admits. Default: 2.\n"
         L"  --preset NAME      Neural look for nr: natural, detail-only, gentle or strong.\n"
         L"                     Default: the Neural settings saved by the player.\n"
+        L"  --processing-scale N  The resolution the model runs at, as a percentage of\n"
+        L"                     the source: 100, 75 or 50, restored to the source size by\n"
+        L"                     Super Resolution. For nr without sr. Default: the player's\n"
+        L"                     saved setting, 100 unless changed.\n"
         L"  --range START-END  Render only this part, e.g. 0:10-0:25 or f0-f300. Needs sr\n"
         L"                     or nr. Default: the whole source.\n"
         L"  --out FILE         The .mkv to write. An existing file is replaced. Default:\n"

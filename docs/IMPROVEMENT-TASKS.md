@@ -61,7 +61,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.4](#p24) | Guide A/B harness, then evaluate Video Depth Anything | S / M-L | Pipeline | |
 | [P2.5](#p25) | Temporal stability with motion compensation | M | Pipeline, Player | |
 | [P2.6](#p26) | Spatial mask and feather; face protection later | S-M | Pipeline, Player | |
-| [P2.7](#p27) | Processing scale | S-M | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
 | [P2.11](#p211) | Quality metrics in the app | M | Player, Pipeline | |
 | [P2.12](#p212) | Scene-cut controls and duplicate-frame handling | S / M | Pipeline | |
@@ -269,18 +268,6 @@ is now the loudest criticism of DLSS 5 ("beautified" faces), and NVIDIA's own
 answer is masking. A ComfyUI pack already ships an automatic skin mask, and
 Merserk has an open mask issue (#65). Detection is a separate dependency;
 defer it.
-
----
-
-<a id="p27"></a>
-### P2.7 · Processing scale
-
-`S-M` · **Pipeline** · _old 3.5_
-
-A selector for the resolution the model runs at, independent of the output,
-and a cache-key term. It goes straight at the "4K30 could not keep up" limit.
-**The default is Source / 100%.** Below 100% is an explicit, labelled rung
-with its measured cost; above 100% is offered for more quality.
 
 ---
 

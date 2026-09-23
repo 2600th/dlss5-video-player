@@ -1382,6 +1382,34 @@ static const wchar_t* ExportRefusalKey(ExportRefusal refusal){
     return L"export.stages.refusal.nothing";
 }
 
+// The saved processing scale, or the default for a value that is not a rung -
+// a hand-edited 60 is not a choice this player offers, so it is not honoured.
+static uint32_t ReadProcessingScale(const std::filesystem::path& settings){
+    const UINT saved=GetPrivateProfileIntW(L"NeuralRender",L"ProcessingScale",kDefaultProcessingScale,settings.c_str());
+    return IsProcessingScaleRung(saved)?saved:kDefaultProcessingScale;
+}
+
+// Everything a neural render writes into the add-on's [RenoDX.DLSS5]: the
+// Neural settings, and the model's place against the carrier's upscale that
+// the processing scale needs (PreUpscaleOverride says when that is written).
+static std::vector<NeuralAddonOverride> RenderAddonOverrides(const std::filesystem::path& ini,
+                                                             const NeuralSettings& settings,
+                                                             uint32_t processingScale){
+    std::vector<NeuralAddonOverride> overrides=NeuralAddonOverridesFor(settings);
+    std::string current;
+    if(const auto snapshot=ReadNeuralAddonSettingsSnapshot(ini)){
+        // The snapshot is canonical: one exact-case key per line.
+        constexpr std::string_view kKey="\nNRPreUpscale=";
+        if(const size_t at=snapshot->find(kKey);at!=std::string::npos){
+            const size_t begin=at+kKey.size();
+            current=snapshot->substr(begin,snapshot->find('\n',begin)-begin);
+        }
+    }
+    if(const auto order=PreUpscaleOverride(processingScale,current))
+        overrides.emplace_back("NRPreUpscale",std::string(*order));
+    return overrides;
+}
+
 // ---- Export with DLSS stages, the passes themselves --------------------
 //
 // Shared by the dialog and by `--render`, so a script gets the file the dialog
@@ -1403,6 +1431,11 @@ struct StageExportJob {
     // generation then reads that pass's carrier, which covers just the range.
     NeuralRenderRange range{};
     uint32_t nvencPreset{5};
+    // The model's resolution for a neural pass at the source size. An export
+    // that upscales runs the model on the upscaled frame, as it always has,
+    // whatever this says: a reduced model input and a Super Resolution output
+    // are one carrier's two jobs, and it can only do one of them.
+    uint32_t processingScale{kDefaultProcessingScale};
     // Written to the add-on before a neural pass. The dialog's tooltip has
     // always said the neural stage "runs the neural model with the settings
     // from Neural settings", but nothing wrote them: the export used whatever
@@ -1445,9 +1478,11 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
         request.range=job.range;
         request.nvencPreset=job.nvencPreset;
         request.requireNeural=plan.requireNeural;
-        if(plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight){
+        const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;
+        if(upscales){
             request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
         }
+        if(plan.requireNeural&&!upscales)request.processingScale=job.processingScale;
         const wchar_t* passKey=plan.requireNeural
             ?(plan.outputWidth!=job.sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
             :L"export.progress.pass_sr";
@@ -1461,7 +1496,9 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
         // The add-on state the job needs, with the neural settings when it runs
         // the model. The helper checks the same state itself and relaunches when
         // it had to change it; writing it here first saves that relaunch.
-        const auto overrides=plan.requireNeural?NeuralAddonOverridesFor(job.neuralSettings):std::vector<NeuralAddonOverride>{};
+        const auto overrides=plan.requireNeural
+            ?RenderAddonOverrides(runtimeDirectory/L"ReShade.ini",job.neuralSettings,request.processingScale)
+            :std::vector<NeuralAddonOverride>{};
         const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",plan.requireNeural,overrides);
         if(!configured.ok){
             LOG("Stage export could not prepare the neural add-on: "<<WideToUtf8(configured.error));
@@ -3643,6 +3680,7 @@ private:
         m_gpuColorConversion=GetPrivateProfileIntW(L"Encoding",L"GpuColorConversion",0,SettingsPath().c_str())!=0;
         m_gpuSourceConversion=GetPrivateProfileIntW(L"Encoding",L"GpuSourceConversion",0,SettingsPath().c_str())!=0;
         m_nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,SettingsPath().c_str())),1,7);
+        m_processingScale=ReadProcessingScale(SettingsPath());
         m_neuralSettings={};LoadNeuralSettings(SettingsPath(),m_neuralSettings);
         const UINT mode=GetPrivateProfileIntW(L"Comparison",L"Mode",0,SettingsPath().c_str());
         m_comparison={};
@@ -3797,6 +3835,7 @@ private:
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuSourceConversion",m_gpuSourceConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"NvencPreset",std::to_wstring(m_nvencPreset).c_str(),SettingsPath().c_str());
+        WritePrivateProfileStringW(L"NeuralRender",L"ProcessingScale",std::to_wstring(m_processingScale).c_str(),SettingsPath().c_str());
         SaveNeuralSettings(SettingsPath(),m_neuralSettings);
         WritePrivateProfileStringW(L"Comparison",L"Mode",std::to_wstring(static_cast<int>(m_comparison.mode)).c_str(),SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"Amount",m_comparison.amount);
@@ -3936,6 +3975,8 @@ private:
                                    ?IDM_NEURAL_PRESET_CUSTOM
                                    :UINT(IDM_NEURAL_PRESET_FIRST+presetIndex),
                                MF_BYCOMMAND);
+            CheckMenuRadioItem(menu,IDM_PROCESSING_SCALE_FIRST,IDM_PROCESSING_SCALE_LAST,
+                               app_menu::CommandForProcessingScale(m_processingScale),MF_BYCOMMAND);
             // 2x..5x then "as many as the display allows", in the order the
             // submenu appends them, so the radio always shows what the next
             // conversion will plan against.
@@ -4411,6 +4452,18 @@ private:
 
     static constexpr int kNeuralDesignW=466,kNeuralDesignH=622;
 
+    // Like a preset: the next render takes it, a paused frame re-previews with
+    // it, and a render already running finishes at the scale it started with.
+    void SetProcessingScale(uint32_t percent){
+        if(!IsProcessingScaleRung(percent))return;
+        if(percent==m_processingScale){SyncFeatureMenuState();return;}
+        m_processingScale=percent;
+        LOG("Processing scale set to "<<percent<<"%.");
+        SaveVideoSettings();
+        SchedulePausedSettingsPreview();
+        SyncFeatureMenuState();
+    }
+
     // A preset is a starting point, not a mode: it writes the same six controls
     // the dialog edits, so the dialog stays the place the values live and an
     // edit afterwards simply lands on Custom. Applied the same way the dialog
@@ -4777,7 +4830,7 @@ private:
         job.helpers=ExecutableDirectory();
         job.sourceWidth=m_decoder.Width();job.sourceHeight=m_decoder.Height();
         job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
-        job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;
+        job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
         HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{
             m_exportWorker=std::jthread([=](std::stop_token stop){
@@ -7834,7 +7887,7 @@ private:
         const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
         SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         try{
-            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const std::wstring driverVersion=m_opt.detectedGpu.driverVersion;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;const bool gpuColorConversion=m_gpuColorConversion;const bool gpuSourceConversion=m_gpuSourceConversion;const uint32_t nvencPreset=m_nvencPreset;
+            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const std::wstring driverVersion=m_opt.detectedGpu.driverVersion;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;const bool gpuColorConversion=m_gpuColorConversion;const bool gpuSourceConversion=m_gpuSourceConversion;const uint32_t nvencPreset=m_nvencPreset;const uint32_t processingScale=m_processingScale;
             // The background acquisition of this very source, when one is in
             // flight: the job waits for it rather than downloading again.
             const std::shared_ptr<SourcePrefetchState> prefetch=(sourceKind==MediaSourceKind::YouTube&&!pageUrl.empty()&&pageUrl==m_prefetchPageUrl)?m_prefetchState:nullptr;
@@ -7883,7 +7936,7 @@ private:
             // neural frame reaches the screen.
             m_coldStart=std::make_shared<NeuralColdStartRecord>();
             const std::shared_ptr<NeuralColdStartRecord> coldStart=m_coldStart;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset,sourceDigestMemo=m_sourceDigestMemo](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset,processingScale,sourceDigestMemo=m_sourceDigestMemo](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 // Set the moment the job knows its local source; every progress
@@ -7976,7 +8029,7 @@ private:
                     // second player instance must not interleave with this job.
                     NeuralRuntimeLease runtimeLease(runtimeDirectory);
                     if(!runtimeLease.Held()){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("Neural runtime is in use by another render; refusing to share it.");goto finish;}
-                    const auto overrides=NeuralAddonOverridesFor(settings);const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",true,overrides);
+                    const auto overrides=RenderAddonOverrides(runtimeDirectory/L"ReShade.ini",settings,processingScale);const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",true,overrides);
                     if(!configured.ok){completion->result.detail=L"The neural settings could not be prepared.";goto finish;}
                     std::wstring settingsError;const auto settingsSnapshot=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini",&settingsError);
                     if(!settingsSnapshot){completion->result.detail=settingsError.empty()?L"The neural settings could not be read.":settingsError;goto finish;}
@@ -7994,7 +8047,7 @@ private:
                     // model is shown rather than how the result is encoded.
                     const auto modelStore=ResolveNeuralModelStore(driverVersion,stop);
                     LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest);
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
+                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion)+ProcessingScaleIdentityTerm(processingScale),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
                     LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
                     if(const auto cached=cache.LookupRender(renderKey,stop)){
                         // LookupRender already verifies the full payload hash and
@@ -8093,7 +8146,7 @@ private:
                     }
                     const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=cacheFailureText.Describe(cache);goto finish;}
                     {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
-                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.firstSegmentFrames=liveIndex?firstSegmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;
+                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.firstSegmentFrames=liveIndex?firstSegmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;request.processingScale=processingScale;
                     NeuralRenderReceiptInputs receipt{preflightJson,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
                     NeuralSegmentSink sink{};
                     if(liveIndex){
@@ -9180,6 +9233,9 @@ private:
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_NEURAL_RENDERING:ToggleNeuralRendering();break;
         case IDM_DLSS_UPSCALING:ToggleUpscaling();break;
         case IDM_UPSCALE_AUTO:SetUpscaleTarget(0);break;
+        case IDM_PROCESSING_SCALE_FIRST:case IDM_PROCESSING_SCALE_FIRST+1:case IDM_PROCESSING_SCALE_LAST:
+            if(const auto percent=app_menu::ProcessingScaleForCommand(id))SetProcessingScale(*percent);
+            break;
         case IDM_UPSCALE_1080:SetUpscaleTarget(1080);break;
         case IDM_UPSCALE_1440:SetUpscaleTarget(1440);break;
         case IDM_UPSCALE_2160:SetUpscaleTarget(2160);break;
@@ -9460,6 +9516,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     bool m_gpuSourceConversion=false;
     // p5, on the measurement recorded beside EncoderSpec::nvencPreset.
     uint32_t m_nvencPreset=5;
+    // The resolution the model runs at, one of kProcessingScaleRungs. 100 on a
+    // fresh install and never moved down by anything but the user.
+    uint32_t m_processingScale=kDefaultProcessingScale;
     NeuralSettings m_neuralSettings;
     // Frame-accurate in/out markers on the loaded source's timeline.
     RangeMarkers m_markers;
@@ -9729,6 +9788,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         job.sourceWidth=width;job.sourceHeight=height;job.fps=fps;job.duration=duration;job.range=range;
         job.nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,settings.c_str())),1,7);
         job.neuralSettings=neuralSettings;
+        job.processingScale=command.processingScale?*command.processingScale:ReadProcessingScale(settings);
 
         wchar_t summary[256];
         swprintf_s(summary,L"%u x %u at %.4g fps -> %u x %u at %.4g fps, %u pass%s",width,height,fps,

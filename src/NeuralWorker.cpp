@@ -7,6 +7,7 @@
 #include "Utf8Text.h"
 #include "KillOnCloseJob.h"
 #include "StrictJson.h"
+#include "UpscalingPolicy.h"
 
 #include <windows.h>
 
@@ -820,6 +821,11 @@ bool ValidRequest(const NeuralRenderRequest& request)
         request.durationSeconds <= 0.0) return false;
     if (request.range.start100ns < 0 || request.range.end100ns < 0) return false;
     if (request.range.end100ns && request.range.end100ns <= request.range.start100ns) return false;
+    // A reduced model input is restored to the SOURCE size by the carrier, so
+    // it cannot share the job with a Super Resolution output of its own.
+    if (!IsProcessingScaleRung(request.processingScale)) return false;
+    if (request.processingScale != kDefaultProcessingScale && request.outputWidth &&
+        (request.outputWidth != request.width || request.outputHeight != request.height)) return false;
     return true;
 }
 
@@ -1175,6 +1181,11 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"--require-neural");
         arguments.emplace_back(L"0");
     }
+    // Absent means 100, the source size, which is every job before the rungs.
+    if (request.processingScale != kDefaultProcessingScale) {
+        arguments.emplace_back(L"--processing-scale");
+        arguments.emplace_back(std::to_wstring(request.processingScale));
+    }
     const std::string guides = CanonicalGuideControls(request.guides);
     arguments.emplace_back(L"--guides");
     arguments.emplace_back(guides.begin(), guides.end());
@@ -1265,7 +1276,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
-               OutputWidth, OutputHeight, RequireNeural, KeyCount };
+               OutputWidth, OutputHeight, RequireNeural, ProcessingScale, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1275,7 +1286,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // Absent on every helper invocation that does not upscale, which keeps
         // an older helper binary compatible with a newer player for the jobs
         // that binary can actually do.
-        L"--output-width", L"--output-height", L"--require-neural"};
+        L"--output-width", L"--output-height", L"--require-neural", L"--processing-scale"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1394,6 +1405,12 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         if (!ParseUnsigned(*values[RequireNeural], neuralRequired) || neuralRequired > 1)
             return std::nullopt;
         request.requireNeural = neuralRequired == 1;
+    }
+    if (values[ProcessingScale]) {
+        uint64_t percent = 0;
+        if (!ParseUnsigned(*values[ProcessingScale], percent) || percent > UINT32_MAX ||
+            !IsProcessingScaleRung(static_cast<uint32_t>(percent))) return std::nullopt;
+        request.processingScale = static_cast<uint32_t>(percent);
     }
     if (values[GpuColorConversion]) {
         uint64_t enabled = 0;

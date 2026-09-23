@@ -88,6 +88,13 @@ struct NeuralRenderRequest {
     // published as neural; this job makes the opposite claim and is held to
     // that instead: no feature-18 evaluation may appear in its session log.
     bool requireNeural{true};
+    // The resolution the model runs at, as a percentage of the source: one of
+    // kProcessingScaleRungs (UpscalingPolicy.h). Below 100 the job area-reduces
+    // each frame to ProcessingSize, runs the carrier as true Super Resolution
+    // back to the source size, and the add-on (NRPreUpscale=1, written by the
+    // parent) puts the model on the reduced input. Only for a job whose output
+    // is the source size: it is refused beside an upscaling output.
+    uint32_t processingScale{100};
 };
 
 struct NeuralRenderProgress {

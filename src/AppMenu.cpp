@@ -1,5 +1,6 @@
 #include "AppMenu.h"
 #include "NeuralPresets.h"
+#include "UpscalingPolicy.h"
 
 #include "Localization.h"
 #include "YouTubeResolver.h"
@@ -151,6 +152,22 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     const std::wstring presetsName = localizer.Get(L"menu.neural_presets");
     AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(presets), presetsName.c_str());
     add(dlss, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+    // The resolution the model runs at. The one neural choice that trades
+    // picture for speed, so it follows the project's ladder rule to the letter:
+    // the default is the top rung and says so, and every rung carries the rate
+    // it measured, so the trade is read before the render rather than after.
+    // Numbers and method in UpscalingPolicy.h.
+    HMENU processingScale = CreatePopupMenu();
+    AppendMenuW(processingScale, MF_STRING | MF_GRAYED, 0,
+                localizer.Get(L"menu.processing_scale_measured").c_str());
+    AppendMenuW(processingScale, MF_SEPARATOR, 0, nullptr);
+    add(processingScale, IDM_PROCESSING_SCALE_FIRST, L"menu.processing_scale_100");
+    add(processingScale, IDM_PROCESSING_SCALE_FIRST + 1, L"menu.processing_scale_75");
+    add(processingScale, IDM_PROCESSING_SCALE_FIRST + 2, L"menu.processing_scale_50");
+    CheckMenuRadioItem(processingScale, IDM_PROCESSING_SCALE_FIRST, IDM_PROCESSING_SCALE_LAST,
+                       CommandForProcessingScale(kDefaultProcessingScale), MF_BYCOMMAND);
+    AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(processingScale),
+                localizer.Get(L"menu.processing_scale").c_str());
     AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
 
     // --- DLSS Super Resolution: the toggle and the size it targets. --------
@@ -356,6 +373,19 @@ bool UpdateSourceActionAvailability(HMENU menuBar, bool openEnabled,
     }
     return openState != static_cast<UINT>(-1) &&
            youtubeState != static_cast<UINT>(-1) && examplesUpdated;
+}
+
+std::optional<uint32_t> ProcessingScaleForCommand(UINT command)
+{
+    if (command < IDM_PROCESSING_SCALE_FIRST || command > IDM_PROCESSING_SCALE_LAST) return std::nullopt;
+    return kProcessingScaleRungs[command - IDM_PROCESSING_SCALE_FIRST];
+}
+
+UINT CommandForProcessingScale(uint32_t percent)
+{
+    for (UINT index = 0; index < UINT(std::size(kProcessingScaleRungs)); ++index)
+        if (kProcessingScaleRungs[index] == percent) return IDM_PROCESSING_SCALE_FIRST + index;
+    return IDM_PROCESSING_SCALE_FIRST;
 }
 
 std::optional<YouTubeSourceQuality> YouTubeQualityForCommand(UINT command)
