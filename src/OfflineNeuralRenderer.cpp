@@ -451,9 +451,17 @@ public:
     }
 
 private:
-    // Match the capture ring: more idle buffers would retain memory without allowing
-    // another readback to be in flight.
-    static constexpr size_t kRecycledFrameCapacity = 4;
+    // Idle frame buffers kept for the render loop's next readbacks. Sized to what the
+    // queue can hold rather than to the capture ring: a start-up stall puts that many
+    // buffers in circulation, and with room for four every buffer past the fourth was
+    // freed on its way back and allocated again by the drain that replaced it - a
+    // value-initialised 33 MB at 4K. The pool is bounded by the same bytes as the queue
+    // and only ever holds buffers that were already allocated.
+    static constexpr size_t kMinRecycledFrames = 4;
+    static size_t RecycledFrameCapacity(size_t frameBytes)
+    {
+        return std::max(kMinRecycledFrames, kQueuedFrameBytes / std::max<size_t>(1, frameBytes));
+    }
 
     struct Frame {
         std::vector<uint8_t> bgra;
@@ -499,7 +507,7 @@ private:
             }
             {
                 std::lock_guard lock(mutex_);
-                if (recycled_.size() < kRecycledFrameCapacity)
+                if (recycled_.size() < RecycledFrameCapacity(frame.bgra.size()))
                     recycled_.push_back(std::move(frame.bgra));
             }
         }
