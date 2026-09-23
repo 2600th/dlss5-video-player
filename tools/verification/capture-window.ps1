@@ -7,8 +7,13 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -Namespace Win -Name Cap -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 public struct RECT { public int Left, Top, Right, Bottom; }
 '@
+# Physical pixels, not the scaled ones a DPI-unaware PowerShell is given: at
+# 150% GetWindowRect reported two thirds of the player's real size and the
+# bitmap kept only its top-left corner.
+[void][Win.Cap]::SetProcessDPIAware()
 $p = Get-Process -Name $Process -ErrorAction Stop | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $p) { throw "no window for $Process" }
 # GetWindowRect, not GetClientRect: PrintWindow renders the whole window into
