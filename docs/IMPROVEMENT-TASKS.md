@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
 | **P1** | | | | |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
-| [P1.15](#p115) | Small render-thread costs | XS each | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
 | [P1.17](#p117) | The GPU CI workflow cannot pass on a fresh runner | S | Release | 🔍 |
 | [P1.18](#p118) | The attestation workflow signs a digest someone typed | S | Release | ✅ |
@@ -153,21 +152,6 @@ keeps reading them after the join. Peak disk is about twice the render.
 published payload (a `SynchronizedPlayback` retarget) and delete the
 segments, or publish by concatenating straight into the entry's staging
 directory with no intermediate copy.
-
----
-
-<a id="p115"></a>
-### P1.15 · Small render-thread costs
-
-`XS each` · **Pipeline** · 🔍 · _open rows of old 2.10_
-
-| Item | Where | Fix |
-| --- | --- | --- |
-| The capture fence wait runs on the render thread | `OfflineNeuralRenderer.cpp:1984` → `D3D12Renderer.cpp:1290` | Move `BeginResolveOldestCapture` into the `DeferredCapture` worker |
-| The recycle pool holds 4 buffers against a queue of about 30 frames | `:446` vs `:320` | Size the pool to the queue depth (a miss is a 33 MB memset at 4K) |
-| Telemetry vectors have no `reserve` | `:118-135` | Reserve for the frame count |
-| `SelectSegment` returns a segment by value under the index mutex | `SynchronizedPlayback.cpp:429` | Return an index |
-| `Log::Write` holds a global mutex across `OutputDebugStringA` and a flushed write | `Log.h:14-18` | Skip `OutputDebugStringA` unless a debugger is attached; flush on a timer |
 
 ---
 

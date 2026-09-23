@@ -30,6 +30,7 @@
 #include "NgxSession.h"
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
+#include "Log.h"
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
 #include "FrameRatePolicy.h"
@@ -9092,6 +9093,49 @@ void deferred_capture_serves_a_second_job_after_a_shutdown_test()
     delete worker;
 }
 
+// Log lines are formatted outside the lock and written with one unbuffered
+// WriteFile each, so the lock covers nothing but the file. Every line written
+// from several threads at once has to land whole, once, with its timestamp.
+void log_lines_written_concurrently_land_whole_and_once_test()
+{
+    const std::string token = "log-concurrency-" + std::to_string(GetCurrentProcessId()) + "-" +
+                              std::to_string(GetTickCount64());
+    constexpr int kThreads = 8, kLines = 200;
+    {
+        std::vector<std::jthread> writers;
+        for (int thread = 0; thread < kThreads; ++thread) {
+            writers.emplace_back([&token, thread] {
+                for (int line = 0; line < kLines; ++line)
+                    LOG(token << " t=" << thread << " n=" << line << " payload=" << std::string(64, 'x'));
+            });
+        }
+    }
+    // A roll mid-test moves the earlier lines to the .1 file.
+    std::filesystem::path previous = Log::Path();
+    previous += L".1";
+    std::vector<int> seen(kThreads * kLines, 0);
+    size_t malformed = 0;
+    for (const auto& path : {previous, Log::Path()}) {
+        std::ifstream input(path, std::ios::binary);
+        for (std::string line; std::getline(input, line);) {
+            const size_t at = line.find(token);
+            if (at == std::string::npos) continue;
+            int thread = -1, index = -1;
+            const bool timestamped = line.size() > 15 && line[0] == '[' && line[13] == ']' && at == 15;
+            if (!timestamped ||
+                sscanf_s(line.c_str() + at + token.size(), " t=%d n=%d", &thread, &index) != 2 ||
+                thread < 0 || thread >= kThreads || index < 0 || index >= kLines ||
+                line.find(" payload=" + std::string(64, 'x')) == std::string::npos) {
+                ++malformed;
+                continue;
+            }
+            ++seen[size_t(thread) * kLines + size_t(index)];
+        }
+    }
+    CHECK_EQ(size_t{0}, malformed);
+    CHECK(std::all_of(seen.begin(), seen.end(), [](int count) { return count == 1; }));
+}
+
 // The capture's fence wait runs on the worker with the copy, so what the wait
 // found - and which frame the slot held - has to come back to the renderer's
 // thread with the bytes. Join hands back the view as the copy left it, per
@@ -10214,6 +10258,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(playback_cadence_reports_a_rate_no_cadence_can_follow_test),
     TEST_CASE(deferred_capture_serves_a_second_job_after_a_shutdown_test),
     TEST_CASE(deferred_capture_join_returns_the_view_the_copy_updated_test),
+    TEST_CASE(log_lines_written_concurrently_land_whole_and_once_test),
     TEST_CASE(audio_clock_stops_being_the_master_once_it_stops_advancing_test),
     TEST_CASE(audio_clock_carries_through_a_stall_and_slews_back_instead_of_jumping_test),
     TEST_CASE(live_session_directory_is_per_process_and_never_relative_test),
