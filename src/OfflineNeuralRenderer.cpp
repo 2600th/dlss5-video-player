@@ -1084,6 +1084,23 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         source.Close();
         return fail(NeuralRenderFailure::Neural, L"The neural renderer could not be initialized.");
     }
+    // Super Resolution from the source size may not reach every rung: DLSS
+    // admits a bounded input-to-output ratio, and the renderer adopts the
+    // largest output the runtime accepts for this source. Encoding that under
+    // the size the caller asked for would be a wrong-sized file, so the job
+    // says what the runtime can do instead.
+    if constexpr (requires { evaluator.OutputSize(); }) {
+        const auto [settledWidth, settledHeight] = evaluator.OutputSize();
+        if (settledWidth != outputWidth || settledHeight != outputHeight) {
+            source.Close();
+            std::wostringstream detail;
+            detail << L"DLSS Super Resolution cannot reach " << outputWidth << L"x" << outputHeight
+                   << L" from a " << request.width << L"x" << request.height << L" source on this runtime; "
+                   << L"the largest output it admits is " << settledWidth << L"x" << settledHeight
+                   << L". Choose a lower output height.";
+            return fail(NeuralRenderFailure::Source, detail.str());
+        }
+    }
     // The source open and the evaluator's own bring-up (device, NGX) are one
     // boundary: nothing between them is separately observable from here.
     //
@@ -2013,12 +2030,19 @@ struct ProductionEvaluatorAdapter {
     // that, so the next job keeps them and re-arms the feature alone - which
     // is the whole trade the FreeFeature arm makes.
     bool featureReleasedWhileIdle=false;
-    // Set before Initialize for a job below 100% processing scale: the carrier
-    // is then true Super Resolution from the reduced input, created at exactly
-    // the input size (the renderer's preserve-source mode), rather than DLAA
-    // at the output size over a resampled input, which is how an upscaling
-    // export's carrier runs.
+    // Set before Initialize for a job below 100% processing scale and for an
+    // export that upscales (SuperResolutionCarrier): the carrier is then true
+    // Super Resolution from the frame the model is shown, created at exactly
+    // that size (the renderer's preserve-source mode), rather than DLAA at the
+    // output size over an input the renderer resampled to it - which is how an
+    // upscaling export's carrier used to run.
     bool superResolutionCarrier=false;
+    // The output DLSS settled for. Preserve-source asks the runtime which
+    // input sizes an output admits and shrinks the output when the source is
+    // below its minimum; the job has sized its encoder for the requested one.
+    std::pair<uint32_t,uint32_t> OutputSize()const{
+        return renderer?std::pair{renderer->OutputW(),renderer->OutputH()}:std::pair{outputWidth,outputHeight};
+    }
     // What the live renderer was built with, for the reuse comparison.
     bool builtSuperResolutionCarrier=false;
     bool Reused()const{return reused;}
@@ -2824,7 +2848,11 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     // layout, so a reduced job decodes to BGRA whatever the setting says.
     state.source.gpuConversion=request.gpuSourceConversion&&!state.source.reduction.Active();
     state.evaluator.gpuColorConversion=request.gpuColorConversion;
-    state.evaluator.superResolutionCarrier=state.source.reduction.Active();
+    {
+        const ProcessingInput model=ProcessingSize(request.width,request.height,request.processingScale);
+        state.evaluator.superResolutionCarrier=SuperResolutionCarrier(model.width,model.height,
+            request.outputWidth?request.outputWidth:request.width,request.outputHeight?request.outputHeight:request.height);
+    }
     state.evaluator.temporal=request.temporal;
     // Read before the reset, because the reset is allowed to drop the feature.
     const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();

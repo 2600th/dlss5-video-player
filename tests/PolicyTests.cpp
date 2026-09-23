@@ -5010,6 +5010,18 @@ void processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test()
     CHECK(!ProcessingSize(1920, 1080, 60).reduced);
     CHECK(!ProcessingSize(2, 2, 50).reduced);
 
+    // The carrier is Super Resolution from the model's frame whenever the
+    // output is larger than it: a reduced rung restoring the source, and an
+    // export's Super Resolution stage reaching its rung - which ran as DLAA at
+    // the rung over a resampled source until this was asked of it. At the
+    // source size it stays DLAA, as every cached render always was.
+    CHECK(SuperResolutionCarrier(half.width, half.height, 1920, 1080));
+    CHECK(SuperResolutionCarrier(1280, 720, 2560, 1440));
+    CHECK(SuperResolutionCarrier(960, 540, 1920, 1080));
+    CHECK(!SuperResolutionCarrier(1920, 1080, 1920, 1080));
+    CHECK(!SuperResolutionCarrier(1279, 719, 1279, 719));
+    CHECK(!SuperResolutionCarrier(0, 0, 1920, 1080));
+
     CHECK(ProcessingScaleIdentityTerm(100).empty());
     CHECK(ProcessingScaleIdentityTerm(75) == "|processing-scale-75-v1");
     CHECK(ProcessingScaleIdentityTerm(50) != ProcessingScaleIdentityTerm(75));

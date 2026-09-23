@@ -71,6 +71,22 @@ inline UpscalingSize AdmissibleDLSSOutput(uint32_t w, uint32_t h, uint32_t ow, u
     return {reducedW,reducedH,true};
 }
 
+// Whether an offline render's DLSS carrier is Super Resolution from the frame
+// the model is shown (the renderer's preserve-source mode), rather than DLAA at
+// the output size. Both ways of growing the picture need it: a reduced
+// processing scale restores the source size, and an export's Super Resolution
+// stage reaches its rung. The export used to run DLAA at the rung over a
+// source the renderer had already resampled to it, so its "Super Resolution"
+// was a bilinear upscale that DLSS then anti-aliased; the player's own
+// playback upscaling (EnableUpscaling) has always created the feature from the
+// source size, and so does the export now. A render at the source size keeps
+// DLAA, which is what every cached render has always been.
+inline bool SuperResolutionCarrier(uint32_t modelWidth, uint32_t modelHeight,
+                                   uint32_t outputWidth, uint32_t outputHeight) {
+    return modelWidth && modelHeight && outputWidth && outputHeight &&
+           (outputWidth != modelWidth || outputHeight != modelHeight);
+}
+
 // ---- Processing scale ----------------------------------------------------
 //
 // The resolution the neural model runs at, as a percentage of the source. At

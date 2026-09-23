@@ -1054,9 +1054,14 @@ latches on is an inert control wearing a hat.
 
 A plan is at most two passes. The first is the neural worker, which carries
 Super Resolution and the neural pass together: `NeuralRenderRequest` takes a
-source size and an output size separately, and `D3D12Renderer::Initialize` has
-always accepted both, so handing it a larger output turns the 1:1 DLAA carrier
-into a true Super Resolution pass. RenoDX's `NRPreUpscale` defaults to 0 -
+source size and an output size separately, and a larger output makes the
+carrier DLSS Super Resolution from the source size (`SuperResolutionCarrier`,
+the renderer's preserve-source mode, the same feature the player's playback
+upscaling creates). Until 2026-09-23 it stayed DLAA at the output size over a
+source the renderer had already resampled to it, which is a bilinear upscale
+that DLSS then anti-aliased. A rung the runtime cannot reach from the source
+fails the job by name rather than being encoded at a size nobody asked for.
+RenoDX's `NRPreUpscale` defaults to 0 -
 neural after the upscale - so the model then runs on the upscaled frame with no
 further plumbing. The second pass is frame generation over the file the first
 one wrote. `ExportStageCount` is what the progress panel divides by.
