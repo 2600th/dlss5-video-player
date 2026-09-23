@@ -1,0 +1,552 @@
+{
+  "knob-shipped": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "the ten player keys, normalization governor off"
+  },
+  "knob-governor-2": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "2"
+    },
+    "description": "Normalization governor (hidden): 0 -> 2 (the add-on default the player ships) (reference otherwise)"
+  },
+  "knob-governor-1": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "1"
+    },
+    "description": "Normalization governor (hidden): 0 -> 1 (slew) (reference otherwise)"
+  },
+  "knob-intensity-040": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "0.400000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Intensity: 1.00 -> 0.40 (reference otherwise)"
+  },
+  "knob-tone-030": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "0.300000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Local tone: 1.00 -> 0.30 (reference otherwise)"
+  },
+  "knob-structure-030": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "0.300000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Local structure: 1.00 -> 0.30 (reference otherwise)"
+  },
+  "knob-globaltone-030": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0",
+      "NRGlobalTone": "0.300000"
+    },
+    "description": "Global tone (hidden): 1.00 -> 0.30 (reference otherwise)"
+  },
+  "knob-globaltone-105": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0",
+      "NRGlobalTone": "1.050000"
+    },
+    "description": "Global tone (hidden): 1.00 -> 1.05 (reference otherwise)"
+  },
+  "knob-globaltone-0": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0",
+      "NRGlobalTone": "0.000000"
+    },
+    "description": "Global tone (hidden): 1.00 -> 0.00 (reference otherwise)"
+  },
+  "knob-globaltone-2": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0",
+      "NRGlobalTone": "2.000000"
+    },
+    "description": "Global tone (hidden): 1.00 -> 2.00 (reference otherwise)"
+  },
+  "knob-style-1": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "1",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Style: 0 -> 1 (Natural) (reference otherwise)"
+  },
+  "knob-style-2": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "2",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Style: 0 -> 2 (Cinematic) (reference otherwise)"
+  },
+  "knob-mv-off": {
+    "guides": "mv=0,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Motion-vector guide: on -> off (reference otherwise)"
+  },
+  "knob-depth-off": {
+    "guides": "mv=1,depth=0",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Depth guide: on -> off (motion on) (reference otherwise)"
+  },
+  "knob-skin-0": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "0.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Skin structure: -1.00 -> 0.00 (reference otherwise)"
+  },
+  "knob-skin-plus1": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Skin structure: -1.00 -> +1.00 (reference otherwise)"
+  },
+  "knob-skin-m050": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-0.500000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Skin structure: -1.00 -> -0.50 (reference otherwise)"
+  },
+  "knob-skin-m001": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-0.010000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Skin structure: -1.00 -> -0.01 (reference otherwise)"
+  },
+  "knob-skin-p025": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "0.250000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Skin structure: -1.00 -> +0.25 (reference otherwise)"
+  },
+  "knob-skin-p050": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "0.500000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Skin structure: -1.00 -> +0.50 (reference otherwise)"
+  },
+  "knob-skin-p099": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "0.990000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Skin structure: -1.00 -> +0.99 (reference otherwise)"
+  },
+  "knob-automask-off": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "0",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Automatic mask: on -> off (reference otherwise)"
+  },
+  "knob-skin-0-nomask": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "0.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "0",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Skin structure, mask off: -1.00 -> 0.00 with NRAutoMask=0 (reference otherwise)"
+  },
+  "knob-skin-plus1-nomask": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "0",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Skin structure, mask off: -1.00 -> +1.00 with NRAutoMask=0 (reference otherwise)"
+  },
+  "knob-uicorrection-1": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0",
+      "NRUICorrection": "1"
+    },
+    "description": "UI correction (hidden): 0 -> 1 (reference otherwise)"
+  },
+  "knob-uicorrection-05": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0",
+      "NRUICorrection": "0.500000"
+    },
+    "description": "UI correction (hidden): 0 -> 0.5 (reference otherwise)"
+  },
+  "knob-colorstrength-020": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "0.200000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Color strength: 1.00 -> 0.20 (reference otherwise)"
+  },
+  "knob-colorstrength-060": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "0.600000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Color strength: 1.00 -> 0.60 (reference otherwise)"
+  },
+  "knob-preset-1": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "1",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Render preset (hidden): 0 -> 1 (reference otherwise)"
+  },
+  "knob-preset-3": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "3",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Render preset (hidden): 0 -> 3 (reference otherwise)"
+  },
+  "knob-passes-2": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "2",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "Passes: 1 -> 2 (reference otherwise)"
+  },
+  "knob-passes-2-unchained": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "2",
+      "NRChainedHistory": "0",
+      "NRNormGovernor": "0"
+    },
+    "description": "Chained history: on -> off (2 passes) (reference otherwise)"
+  }
+}

@@ -26,9 +26,10 @@ runs in `runs/<clip>__<profile>__<repeat>/`, the report in
 `blind/key.json`.
 
 Every measurement on this page was taken against RenoDX 4.70 and DLSS-NR
-310.8.0. The pinned runtime is now RenoDX 6.5.3 with DLSS SR 310.9.1, so the
-numbers here are the last known state rather than the current one; the pages
-below say per section which of them a rerun would be expected to move.
+310.8.0, except the settings table at the end, which was re-measured on the pinned
+RenoDX 6.5.3 on 2026-09-24. The rest are the last known state rather than the
+current one; the pages below say per section which of them a rerun would be
+expected to move.
 
 Prerequisites: Python 3.12 with `tools/benchmark/requirements.txt`,
 `external/ffmpeg/bin`, a built `build-upscaling/Release/neural-runtime/`
@@ -302,6 +303,9 @@ columns now, so the rerun is one command and the comparison it then allows is th
 whole reason the staleness matters.
 
 - Rerenders are bit-identical across repeats (framemd5 sequence digests match).
+  On RenoDX 6.5.3 that holds only with `NRNormGovernor=0`: the add-on's default
+  governor makes repeats differ on saturated synthetic clips (see the settings
+  table below).
 - The mask guide is gone, and the `mask-off` rows are why. `mask-off` was
   byte-identical to `baseline` on both clips, and the mask was not missing: the
   generator produced a mask with 5–24 % of cells non-zero on `cuts-motion` (0 %
@@ -555,64 +559,111 @@ To A/B a guide against the **upscaling** feature rather than neural rendering,
 writes every captured output frame as raw BGRA, so two runs can be compared byte
 for byte. That is how the mask question was settled for DLSS-SR.
 
-## Which neural settings change the image (2026-09-09, RenoDX 4.70)
+## Which neural settings change the image (2026-09-24, RenoDX 6.5.3)
 
-Measured through the player, not the benchmark driver: with playback paused, each
-control was changed one at a time and the debounced single-frame preview it
-triggers was rendered. Every preview is an ordinary range render, so each
-distinct combination has its own cache entry; the entries were paired from the
-worker's `Checking neural cache key=… settings=…` log lines and compared as
-decoded rgb24 bytes, so every row below differs in exactly one field at the same
-source frame.
+Re-measured on the pinned runtime (ReShade 6.8.0.2155, RenoDX 6.5.3, DLSS-NR 310.8.0,
+RTX 4080 SUPER) with `tools/benchmark/knobs.py`, which replaced the 4.70 method of
+pairing the player's single-frame previews: every row renders a whole clip through the
+worker at the player's shipped state - the ten keys it writes - changed in exactly one
+key or one guide, and is compared with the reference as decoded rgb24 bytes over every
+frame. Two clips: `real-film-cuts` (102 frames, faces on 12 of 21 sampled frames) and
+`real-game-cuts` (68 frames, a static game HUD). The reference also writes
+`NRNormGovernor=0` and was rendered twice to 0 differing bytes; why is the next
+subsection. Full table, face shares and method:
+[knobs-653 report](measurements/knobs-653-20260924/REPORT.md).
 
-| control | change | bytes differing | mean abs delta |
+| control | change | bytes differing (film / game) | mean abs delta (film / game) |
 |---|---|---:|---:|
-| Intensity | 1.00 → 0.40 | 84.75 % | 2.40 |
-| Local tone | 1.00 → 0.30 | 66.45 % | 1.14 |
-| Local structure | 1.00 → 0.30 | 53.41 % | 0.87 |
-| Style | 2 → 0 | 49.31 % | 0.79 |
-| Motion-vector guide | on → off | 39.79 % | 0.63 |
-| Depth guide | on → off (motion on) | 37.92 % | 0.57 |
-| Skin structure | +1.00 → −0.40 | 36.50 % | 0.56 |
-| Automatic mask | on → off | 36.08 % | 0.54 |
-| **Color strength** | 1.00 → 0.20 | **0 %** | 0 |
-| **Render preset** | 0→1, 0→2, 0→3, 1→3 | **0 %** | 0 |
+| (reference, rendered again) | none | 0 % / 0 % | 0 / 0 |
+| Style | 0 → 1 (Natural) | 76.37 % / 93.64 % | 5.79 / 6.36 |
+| Style | 0 → 2 (Cinematic) | 76.32 % / 92.20 % | 4.34 / 5.87 |
+| Passes | 1 → 2 | 69.97 % / 89.29 % | 2.31 / 3.63 |
+| **Color strength** | 1.00 → 0.20 | **68.28 % / 88.69 %** | **2.06 / 3.47** |
+| **Color strength** | 1.00 → 0.60 | **59.38 % / 81.66 %** | **1.22 / 2.09** |
+| Intensity | 1.00 → 0.40 | 64.74 % / 85.94 % | 1.63 / 2.76 |
+| Local tone | 1.00 → 0.30 | 63.46 % / 85.29 % | 1.51 / 2.55 |
+| Local structure | 1.00 → 0.30 | 53.69 % / 78.65 % | 1.12 / 2.04 |
+| Chained history (2 passes, vs 2 passes chained) | on → off | 49.41 % / 77.41 % | 0.89 / 2.08 |
+| Motion-vector guide | on → off | 46.89 % / 81.94 % | 1.02 / 2.72 |
+| Automatic mask | on → off | 43.80 % / 67.14 % | 0.68 / 1.28 |
+| Skin structure | −1.00 → 0.00 | 43.13 % / 66.34 % | 0.78 / 1.27 |
+| Skin structure | −1.00 → +0.25 / +0.50 / +0.99 | 38.7-42.5 % / 65.2-66.0 % | 0.59-0.76 / 1.22-1.26 |
+| Depth guide | on → off (motion on) | 35.91 % / 63.23 % | 0.54 / 1.18 |
+| **Skin structure** | −1.00 → −0.50, −0.01, **+1.00** | **0 % / 0 %** | 0 / 0 |
+| **Skin structure, mask off** | any value | **0 % against mask off** | 0 |
+| **Render preset** | 0 → 1, 0 → 3 | **0 % / 0 %** | 0 / 0 |
+| **Global tone** (`NRGlobalTone`, not written by the player) | 1.00 → 0.00, 0.30, 1.05, 2.00 | **0 % / 0 %** | 0 / 0 |
+| **UI correction** (`NRUICorrection`, not written by the player) | 0 → 1 | **0 % / 0 %** | 0 / 0 |
 
-Six of the eight model parameters and both guides reach the output. **Color
-strength and render preset do not**, on any of the four preset pairs tried and
-from two independent baselines. This is not a plumbing fault on our side, and
-the add-on is not dropping the value either: driving the runtime `ReShade.ini`
-directly and rendering one frame per value through
-`NeuralWorkerTests --real-worker`, the add-on's own log reports back
-`preset=0`, `preset=1` and `preset=3` to match, and every pair still decodes to
-0 differing bytes. So the hint reaches NGX and the model ignores it — the same
-shape of result as the deleted mask guide and the inert SR preset hints.
+What moved since 4.70, and what the UI does about it:
 
-What the preset is meant to be: the dialog's `Default, 1, 2, 3` are passed as
-`NRPreset` in `[RenoDX.DLSS5]`, which the add-on maps to the NGX parameter
-`DLSSNR.Hint.Render.Preset` — the neural-rendering analogue of DLSS-SR's render
-presets, a request for a particular trained variant. NVIDIA publishes no meaning
-for the NR values, which is why the combo is labelled with bare numbers.
-`matiasLombo/neural-upstream` reports the same parameter "turned out to be
-inert", independently of this measurement. Note also that the add-on exposes a
-`DLSSNR.UICorrection` control this player does not, which has not been tested.
+- **Color strength now changes the image**: 0.20 moves more of the picture than
+  Intensity at 0.40. On 4.70 it was 0 bytes on every pair, which is why the dialog hid
+  it. It is back in the dialog as a 0.00-1.00 slider (default 1.00, unchanged); it
+  was never out of `NeuralSettings`, the INI or the render identity, so no cache
+  entry changes meaning.
+- **The render preset is still inert**, now on a third runtime, and stays hidden.
+- **Skin structure only has a range of 0.00 to 0.99.** Every negative value and
+  exactly +1.00 render the shipped picture, byte for byte; 0.00, 0.25, 0.50 and 0.99
+  each change it, and by less as they rise. So the shipped −1.00 means *off*, half of
+  the dialog's −1..+1 slider is inert, and the add-on's own overlay text ("negative
+  smooths, positive enhances, 0 = neutral") does not describe what the runtime does.
+  The slider and its default are unchanged - moving the default would change every
+  render - and its tooltip now says this.
+- **Skin structure needs the automatic mask**: with `NRAutoMask=0` its value changes
+  nothing, which matches the add-on's description of the mask ("so the
+  Character/Skin Structure response applies to them"). The mask's own tooltip said it
+  "chooses regions to leave untouched"; it now says what the add-on and this table say.
+- **Neither gives face protection** (P2.6). The change a skin value makes lands on
+  Haar-detected face boxes 2.1× as densely as their area, against 1.8× for Intensity
+  and 1.9× for Color strength on the same frames: skin is barely more face-local than
+  a global control, and the mask toggle less (1.35×). There is nothing here worth
+  wiring into the P2.6 mask as a "Protect skin" option, so nothing was.
+- **Global tone and UI correction are inert** on this path at every value tried, so
+  the player does not write them and the dialog does not show them.
+  `NRUICorrection` is read as an integer (0.5 is stored back as 0).
+- **Chained history works.** A first pass of this measurement said it did nothing;
+  that was a harness bug, below.
 
-The depth guide only matters while motion vectors are on: with `mv=0`, toggling
-depth changes nothing (0 %), which is what a temporal consumer with no
-reprojection to perform should do. An earlier reading that called depth inert had
-motion vectors already off.
+### Two harness corrections this table depends on
 
-**This table was measured on RenoDX 4.70 and has not been re-run on 6.5.3.** It
-is what keeps colour strength and the render preset out of the settings dialog,
-so it is a live product decision resting on a superseded runtime - and 6.x is a
-three-major-version move that renamed the working-resolution control and changed
-what the add-on reports. Two controls the table does not cover were added with
-6.5.3: `NRPasses` and `NRChainedHistory`, whose effect was measured on render
-time and output size rather than per-control byte deltas. Re-running this table
-is the cheapest way to find out whether the two hidden controls are still inert.
+**The normalization governor.** The add-on's `NRNormGovernor` (0 off, 1 slew, 2
+stable; the player does not write it, so 2 ships) settles its brightness divisor at
+rates per second. On the two synthetic near/far clips a repeat of one configuration
+at the default is not byte-identical: 12.5 % of bytes from frame 69 of `depth-pan`
+and 26 % from frame 37 of `depth-subject`, mean |Δ| 0.41-0.46, worst frame 0.9-2.2
+levels. At `NRNormGovernor=0` every repeat of every clip tried was identical, and on
+the three NR-processed captures the governor changes nothing at all (0 bytes between
+0 and 2, repeats identical). So the shipped render is reproducible on the captures
+and not on saturated synthetic material, and every byte-for-byte comparison in the
+harness now writes `NRNormGovernor=0`. Whether the player should write 0 too is a
+flicker trade this table cannot decide, so it does not.
 
-Cost of a change: settings and guides are part of the render identity, so every
-distinct combination is rendered from scratch — 16 cold single-frame previews
-took a median of **10.6 s** each, and the 4 repeats of an already-rendered
-combination came back in **1.03 s** from cache. Changing color strength or the
-preset therefore costs a full re-render and produces byte-identical output.
+**Schema migration.** `run.py` wrote 4.70's `NREnableUpscaling=0` and no
+`ConfigVersion`, so 6.5.3 read every fresh profile as config schema v0 and migrated
+it on load ("inherited NRCodecMode/NRChainedHistory defaults adopted", a `.bak`
+beside the add-on) - which set `NRChainedHistory` back to 1 and made a chained-off
+profile render the chained picture. `run.py` now writes the player's own managed keys
+plus `ConfigVersion=6`, the stamp the add-on writes on first load and so the state of
+every player runtime after its first launch. At the defaults this changes no pixel
+(identical digests with and without the migration on three clips).
+
+The same migration can reach the player once: `packaging/ReShade.ini` carries no
+`[RenoDX.DLSS5]` section, so the first launch's section has no `ConfigVersion` and a
+chained-off setting in `DLSSVideoPlayer.ini` would be rendered chained on that first
+launch only. It is recorded in the report rather than changed here.
+
+Cost of a change is unchanged in kind: settings and guides are part of the render
+identity, so every distinct combination renders from scratch (16 cold 1080p
+single-frame previews took a median of **10.6 s** each on 4.70, and repeats came back
+from cache in **1.03 s**). Changing the render preset therefore still costs a full
+re-render and produces byte-identical output.
+
+### The 4.70 table it replaces (2026-09-09)
+
+Measured through the player's paused previews, one frame per pair: Intensity 84.75 %,
+Local tone 66.45 %, Local structure 53.41 %, Style 2 → 0 49.31 %, motion guide
+39.79 %, depth guide 37.92 %, Skin structure +1.00 → −0.40 36.50 %, Automatic mask
+36.08 %, and **Color strength 0 %** and **render preset 0 %** on every pair. The skin
+pair would measure 0 % on 6.5.3, where both of its values are off: the runtime
+changed, not the method.

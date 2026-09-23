@@ -3234,9 +3234,18 @@ struct PlayerAppTestAccess {
         CHECK(std::abs(app.m_neuralSettings.intensity - 1.5f) < 0.001f);
         CHECK(std::abs(app.m_neuralSettings.skinStructure + 0.75f) < 0.001f);
         CHECK_EQ(std::wstring(L"1.50"), ReadText(GetDlgItem(dialog, IDC_NS_INTENSITY + 100)));
-        // Colour strength and the render preset are not offered: the runtime
-        // ignores them, so the dialog must not present them as quality controls.
-        CHECK(GetDlgItem(dialog, 7305) == nullptr);
+        // Colour strength is offered again: RenoDX 6.5.3 honours it, where 4.70
+        // ignored it. Its slider is 0..100 for 0.00..1.00, and the value reaches
+        // the add-on - and with it the render identity - as NRColorStrength.
+        CHECK_EQ(app.m_neuralSettings.colorStrength, 1.0f);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_COLOR), TBM_GETPOS, 0, 0)), 100);
+        setTrack(IDC_NS_COLOR, 40);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
+        CHECK(std::abs(app.m_neuralSettings.colorStrength - 0.4f) < 0.001f);
+        CHECK_EQ(std::wstring(L"0.40"), ReadText(GetDlgItem(dialog, IDC_NS_COLOR + 100)));
+        CHECK(CanonicalNeuralSettings(app.m_neuralSettings).find("colorStrength=0.400000") != std::string::npos);
+        // The render preset is still not offered: the runtime still ignores it,
+        // so the dialog must not present it as a quality control.
         CHECK(GetDlgItem(dialog, 7306) == nullptr);
         SendMessageW(GetDlgItem(dialog, IDC_NS_STYLE), CB_SETCURSEL, 2, 0);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STYLE, CBN_SELCHANGE), 0);
@@ -3271,6 +3280,7 @@ struct PlayerAppTestAccess {
                 return std::string("<missing>");
             };
             CHECK_EQ(std::string("3"), valueOf("NRPasses"));
+            CHECK_EQ(std::string("0.400000"), valueOf("NRColorStrength"));
             CHECK_EQ(std::string("0"), valueOf("NRChainedHistory"));
         }
         // Guide switches persist for the next render and reach the live guide generator.

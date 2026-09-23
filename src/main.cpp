@@ -355,8 +355,10 @@ static constexpr int IDC_NS_INTENSITY = 7301;
 static constexpr int IDC_NS_STRUCTURE = 7302;
 static constexpr int IDC_NS_TONE = 7303;
 static constexpr int IDC_NS_SKIN = 7304;
-// 7305 and 7306 were the colour-strength slider and the render-preset combo,
-// both removed after measurement showed the runtime ignores them.
+// Colour strength came back on RenoDX 6.5.3, which honours it (68-89 % of bytes
+// move at 1.00 -> 0.20; docs/measurements/knobs-653-20260924). 7306 was the
+// render-preset combo, removed because the runtime still ignores the preset.
+static constexpr int IDC_NS_COLOR = 7305;
 static constexpr int IDC_NS_STYLE = 7307;
 static constexpr int IDC_NS_AUTOMASK = 7308;
 static constexpr int IDC_NS_PASSES = 7309;
@@ -5329,6 +5331,7 @@ private:
         SetAdjustmentValue(h,IDC_NS_STRUCTURE,PlainValue(m_neuralSettings.localStructure));
         SetAdjustmentValue(h,IDC_NS_TONE,PlainValue(m_neuralSettings.localTone));
         SetAdjustmentValue(h,IDC_NS_SKIN,SignedValue(m_neuralSettings.skinStructure));
+        SetAdjustmentValue(h,IDC_NS_COLOR,PlainValue(m_neuralSettings.colorStrength));
     }
 
     void SyncNeuralSettingControls(HWND h){
@@ -5336,6 +5339,7 @@ private:
         SetTrack(h,IDC_NS_STRUCTURE,0,200,int(std::lround(m_neuralSettings.localStructure*100.0f)));
         SetTrack(h,IDC_NS_TONE,0,200,int(std::lround(m_neuralSettings.localTone*100.0f)));
         SetTrack(h,IDC_NS_SKIN,0,200,int(std::lround((m_neuralSettings.skinStructure+1.0f)*100.0f)));
+        SetTrack(h,IDC_NS_COLOR,0,100,int(std::lround(m_neuralSettings.colorStrength*100.0f)));
         const auto select=[&](int id,int index){if(HWND combo=GetDlgItem(h,id))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(index),0);};
         select(IDC_NS_STYLE,std::clamp(m_neuralSettings.style,0,2));
         // The combo lists 1..4 and the setting IS the pass count, so the
@@ -5361,6 +5365,7 @@ private:
         m_neuralSettings.localStructure=float(pos(IDC_NS_STRUCTURE))/100.0f;
         m_neuralSettings.localTone=float(pos(IDC_NS_TONE))/100.0f;
         m_neuralSettings.skinStructure=float(pos(IDC_NS_SKIN))/100.0f-1.0f;
+        m_neuralSettings.colorStrength=float(pos(IDC_NS_COLOR))/100.0f;
         m_neuralSettings.style=sel(IDC_NS_STYLE,m_neuralSettings.style);
         m_neuralSettings.autoMask=checked(IDC_NS_AUTOMASK);
         m_neuralSettings.passes=std::clamp(sel(IDC_NS_PASSES,m_neuralSettings.passes-1)+1,1,4);
@@ -5392,12 +5397,13 @@ private:
         AddTip(h,box,tipKey);return box;
     }
 
-    // Color strength and render preset are deliberately absent: measured on the
-    // pinned runtime they change nothing (0 differing bytes across four preset
-    // pairs and two colour baselines, with the add-on echoing the value back),
-    // while every change still costs a full re-render. They remain in
+    // The render preset is deliberately absent: re-measured on RenoDX 6.5.3 it
+    // still changes nothing (0 differing bytes for 0->1 and 0->3 on two clips),
+    // while every change still costs a full re-render. It remains in
     // NeuralSettings and in DLSSVideoPlayer.ini so runtime-comparison work can
-    // still drive them; see docs/BENCHMARK.md.
+    // still drive it. So do the add-on's NRGlobalTone and NRUICorrection, which
+    // the player does not write at all: both measured inert on the same clips.
+    // See docs/measurements/knobs-653-20260924/REPORT.md.
     // A heading over each block of controls. Nine controls at one visual level
     // is a list; three named groups is a structure, and the Gestalt common
     // region is the whole reason a heading works - it tells you which controls
@@ -5411,48 +5417,49 @@ private:
     void BuildNeuralSettingControls(HWND h){
         CreateSettingsGroupHeading(h,L"neural.settings.group_look",12);
         CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",38,L"neural.tip.intensity");
-        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",88,L"neural.tip.structure");
-        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",138,L"neural.tip.tone");
-        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",188,L"neural.tip.skin");
-        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",238,{L"Default",L"Natural",L"Cinematic"},L"neural.tip.style");
-        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,276,236,L"neural.tip.automask");
+        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",84,L"neural.tip.structure");
+        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",130,L"neural.tip.tone");
+        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",176,L"neural.tip.skin");
+        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",222,L"neural.tip.color");
+        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",268,{L"Default",L"Natural",L"Cinematic"},L"neural.tip.style");
+        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,306,236,L"neural.tip.automask");
         // Stacking, which arrived with RenoDX 6.x. Its own group because it
         // costs render time rather than changing the model's look: a second
         // pass measured 780,048 -> 932,019 bytes of output over the same
         // 72-frame range and took 9.81 s against 8.01 s.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",316);
-        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",346,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes");
-        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132,384,300,L"neural.tip.chained");
-        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",424);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,452,116,L"neural.tip.guide_mv");
-        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,452,80,L"neural.tip.guide_depth");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",346);
+        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",376,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes");
+        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132,414,300,L"neural.tip.chained");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",454);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,482,116,L"neural.tip.guide_mv");
+        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,482,80,L"neural.tip.guide_depth");
         // What the render does across time rather than to one frame: when a cut
         // resets the history. A ladder, not a slider - every rung is a measured
         // point (SceneCut.h), and Default is the one labelled recommended.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",492);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",522);
         {
             const std::wstring cuts[]={T(L"neural.scene_cuts.default"),T(L"neural.scene_cuts.more"),
                                        T(L"neural.scene_cuts.less"),T(L"neural.scene_cuts.off")};
-            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",522,
+            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",552,
                               {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts");
             // A ladder with Off first and the default, for the reason the policy
             // header gives: it trades detail in motion for steadiness, and a
             // default never moves down a ladder to buy something else.
             const std::wstring stability[]={T(L"neural.stability.off"),T(L"neural.stability.low"),
                                             T(L"neural.stability.medium"),T(L"neural.stability.high")};
-            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",556,
+            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",586,
                               {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability");
         }
-        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,596,418,38,0,DialogAnchor::StretchNote);
-        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,120,642,86,30);
-        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,216,642,122,30,true);
-        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,348,642,86,30);
+        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,626,418,38,0,DialogAnchor::StretchNote);
+        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,120,672,86,30);
+        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,216,672,122,30,true);
+        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,348,672,86,30);
         AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
         SyncNeuralSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kNeuralDesignW=466,kNeuralDesignH=726;
+    static constexpr int kNeuralDesignW=466,kNeuralDesignH=756;
 
     // Like a preset: the next render takes it, a paused frame re-previews with
     // it, and a render already running finishes at the scale it started with.

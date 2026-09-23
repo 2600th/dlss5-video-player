@@ -282,7 +282,7 @@ measure the tone map rather than the model. **Save comparison image**, exports
 and the cache stay SDR.
 
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
-local structure, local tone, skin structure, style and automatic mask, the
+local structure, local tone, skin structure, color strength, style and automatic mask, the
 number of neural passes and whether temporal history carries between them, the
 motion-vector and depth guide switches, how readily a scene cut resets the
 render's temporal history, and how much temporal stability the render gets. The controls are grouped under **Look**, **Quality and
@@ -340,13 +340,16 @@ adds on every one of them (by 0.02 to 0.42 of an 8-bit code) with PSNR against
 the source unchanged within 0.2 dB; on a synthetic noise texture it costs some
 fine detail, which is why it is a choice. Each rung renders its own cache entry.
 
-Color strength and the render preset are deliberately not in that dialog. Each
-was measured against the pinned runtime and changes nothing - the add-on echoes
-the value back and the output is byte-identical - while a change still costs a
-full re-render. They remain in `DLSSVideoPlayer.ini` as `[NeuralSettings]
-ColorStrength` and `Preset` so runtime-comparison work can still drive them, and
-they remain part of the render identity so a runtime that does honour them
-cannot be served a stale cache entry. See [Benchmark](BENCHMARK.md).
+The render preset is deliberately not in that dialog. Measured against the
+pinned RenoDX 6.5.3 it changes nothing - the output is byte-identical - while a
+change still costs a full re-render. It remains in `DLSSVideoPlayer.ini` as
+`[NeuralSettings] Preset` so runtime-comparison work can still drive it, and it
+remains part of the render identity so a runtime that does honour it cannot be
+served a stale cache entry. Color strength was hidden for the same reason on
+RenoDX 4.70 and is back, because 6.5.3 honours it. Skin structure only acts
+between 0.00 and 0.99 and only with Automatic mask on: every negative value and
++1.00 render the default picture, which is why the default -1.00 means off. See
+[Benchmark](BENCHMARK.md).
 
 Photos support PNG, JPEG, BMP, TIFF and static WebP. They remain paused on the
 single processed frame; the cache uses a one-second carrier without adding

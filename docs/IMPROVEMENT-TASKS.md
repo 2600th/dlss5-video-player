@@ -59,7 +59,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.3](#p23) | A quality ladder for cache and export: CQ, 10-bit, lossless | M | Pipeline | ✅ |
 | [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
-| [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
 | **P3** | | | | |
 | [P3.4](#p34) | Extract testable units from `main.cpp` | M | Player | |
@@ -187,19 +186,6 @@ same frame during a live render.** At 1× it also doubles as a
 compression-cleanup pre-pass.
 
 Ref: [RTX Video SDK](https://developer.nvidia.com/blog/enhancing-low-resolution-sdr-video-with-the-nvidia-rtx-video-sdk/)
-
----
-
-<a id="p213"></a>
-### P2.13 · Re-measure which settings change the image on RenoDX 6.5.3
-
-`S` · **Pipeline**
-
-`docs/BENCHMARK.md`'s table of which controls change the image was measured
-on RenoDX 4.70, and it still decides which controls are hidden. Community
-tools now expose `SkinStructure`, `AutoMask` and `UICorrection` as live
-controls. Re-run the table on the pinned runtime. It may also give P2.6 its
-face protection for free.
 
 ---
 

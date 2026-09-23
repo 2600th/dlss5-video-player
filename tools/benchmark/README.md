@@ -18,6 +18,7 @@ python tools/benchmark/run.py --ablation --repeats 2   # every profile in run.AB
 python tools/benchmark/run.py --profiles depth-constant depth-proxy  # the depth A/B
 python tools/benchmark/analyze.py                      # build-upscaling/benchmark-work/analysis/report.md
 python tools/benchmark/blind.py --pairs-per-clip 3     # sealed A/B pairs for one-pass vs two-pass
+python tools/benchmark/knobs.py --clips real-film-cuts real-game-cuts  # which settings change the image
 python tools/benchmark/guidefiles.py truth             # true depth/motion of the near/far clips
 python tools/benchmark/guidefiles.py prove             # guide files render byte-identically to the estimator
 ```
@@ -40,6 +41,7 @@ directory holding `ffmpeg.exe` and `ffprobe.exe`.
 | `cutmirror.py` | The mirror of `src/TemporalGuides.cpp`'s cut path (analysis grid, cell luma, global search, histogram overlap, per-cell match costs, both criteria, the debounce), shared by `analyze.py` and `cutlab.py` |
 | `cutlab.py` | Scores the cut criterion itself against the manifest's labelled cuts and sweeps it; `--ladder` scores the four Scene cuts rungs the player offers; needs no GPU, no worker and no render |
 | `duplab.py` | Scores `scene_cut::IsDuplicateDecodedPair` - frame generation's hold-a-repeat test - on corpus clips re-timed onto twos through libx264, against the real pairs of the same files and a small object crossing a still frame; needs no GPU |
+| `knobs.py` | Renders one control at a time from the player's shipped state and reports bytes differing, mean and max absolute delta, and how much of the change lands on detected faces; the table in `docs/BENCHMARK.md` is its output |
 | `guidefiles.py` | The `depth=file:` / `mv=file:` layout (PFM read/write, area average), `truth` for the near/far clips, `convert` for offline depth maps, `compare`, and `prove` - the byte-identical round trip |
 | `roundtrip.profile.json` | The four arms `guidefiles.py prove` renders |
 | `blind.py` | Randomized A/B stills + excerpts with a sealed `key.json`; every candidate frame is provably inside a manifest shot and each excerpt is clipped to that shot, so `--seconds` caps a length it does not guarantee; `--score` tallies a ballot |
