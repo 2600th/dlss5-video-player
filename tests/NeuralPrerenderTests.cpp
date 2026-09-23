@@ -497,15 +497,15 @@ void schema_four_entries_are_retired_by_the_schema_gate_test()
     CHECK_EQ(std::string("neural-frames"), ReadBytes(published->payloadPath));
 }
 
-// The model-store term has to move when the weights do. Every file under a
-// resolved root is listed by relative name, size and write time; the files
-// small enough to afford it - the configs and selectors that decide which
-// weights load - are hashed byte for byte as well.
+// The model-store term has to move when the weights the pass evaluates do.
+// The files small enough to afford it - the configs and selectors that decide
+// which weights load - are listed by name and content; the blobs above the
+// bound by name, size and write time.
 void model_store_digest_tracks_root_contents_and_names_its_fallback_test()
 {
     TempDirectory fixture;
     const auto models = fixture.Path() / L"models";
-    const auto files = models / L"dlssd" / L"versions" / L"20318464" / L"files";
+    const auto files = models / L"dlss" / L"versions" / L"20318464" / L"files";
     std::error_code error;
     CHECK(std::filesystem::create_directories(files, error));
     const auto config = models / L"nvngx_config.txt";
@@ -538,7 +538,7 @@ void model_store_digest_tracks_root_contents_and_names_its_fallback_test()
     CHECK(grown.digest != edited.digest);
 
     // A refreshed model store: a new version directory beside the old one.
-    const auto refreshedFiles = models / L"dlssd" / L"versions" / L"20318465" / L"files";
+    const auto refreshedFiles = models / L"dlss" / L"versions" / L"20318465" / L"files";
     CHECK(std::filesystem::create_directories(refreshedFiles, error));
     WriteBytes(refreshedFiles / L"160_E658701.bin", "refreshed-weights");
     const auto refreshed = DigestNeuralModelStore(roots, L"32.0.16.1047");
@@ -584,6 +584,94 @@ void model_store_digest_tracks_root_contents_and_names_its_fallback_test()
 // the previous one's renders. It is hashed into the runtime digest for that
 // reason, and deliberately not lock-pinned: the lock is the vendor stack, and
 // every build of this repository changes the worker.
+// The walk took every NGX feature, so the NVIDIA App refreshing frame
+// generation or ray reconstruction weights - or merely rewriting a config file
+// with the bytes it already had - changed every render key and orphaned the
+// whole cache. Only what the neural pass evaluates may move the term now; a
+// feature nobody has classified still does.
+void model_store_digest_ignores_features_outside_the_neural_pass_test()
+{
+    TempDirectory fixture;
+    const auto models = fixture.Path() / L"models";
+    const auto dlss = models / L"dlss" / L"versions" / L"20318464" / L"files";
+    const auto serverConfig = models / L"config" / L"versions" / L"2" / L"files";
+    std::error_code error;
+    CHECK(std::filesystem::create_directories(dlss, error));
+    CHECK(std::filesystem::create_directories(serverConfig, error));
+    const auto blob = dlss / L"160_E658700.bin";
+    WriteBytes(blob, std::string((1u << 20) + 1u, 'w'));
+    const auto config = models / L"nvngx_config.txt";
+    const std::string configBytes =
+        "[dlss]\r\napp_E658700 = 310.9.0\r\n\r\n[DLSSG]\r\napp_E658703 = 310.0.0\r\n"
+        "[sl_dlss_g_0]\r\napp_E658703 = 2.14.0\r\n";
+    WriteBytes(config, configBytes);
+    const auto server = serverConfig / L"nvngx_server_config.txt";
+    WriteBytes(server, "[dlssd]\napp_0000000 = 0.0.0\n[driver]\nversion = 1\n");
+    const std::array<NeuralModelRoot, 1> roots{NeuralModelRoot{models, true, {}}};
+    const auto digest = [&] { return DigestNeuralModelStore(roots, L"32.0.16.1047"); };
+
+    const auto first = digest();
+    CHECK(NeuralModelStoreSettled(first));
+    CHECK_EQ(uint32_t{3}, first.files);
+
+    // Weights of features the pass never evaluates, arriving or changing.
+    for (const wchar_t* feature : {L"dlssd", L"dlssg", L"dlisp", L"sl_dlss_g_override_0",
+                                   L"sl_reflex_0", L"sl_deepdvc_0", L"nvbcast_vfx_gs_v0_9"}) {
+        const auto directory = models / feature / L"versions" / L"1" / L"files";
+        CHECK(std::filesystem::create_directories(directory, error));
+        WriteBytes(directory / L"160_B9D3EF0.bin", std::string((1u << 20) + 7u, 'r'));
+        WriteBytes(directory / L"nvngx_package_config.txt", "selector");
+    }
+    const auto unrelated = digest();
+    CHECK_EQ(first.digest, unrelated.digest);
+    CHECK_EQ(first.files, unrelated.files);
+
+    // Their sections in the two selector files, edited.
+    WriteBytes(config, "[dlss]\r\napp_E658700 = 310.9.0\r\n\r\n[DLSSG]\r\napp_E658703 = 310.5.0\r\n"
+                       "[sl_dlss_g_0]\r\napp_E658703 = 2.15.0\r\n");
+    WriteBytes(server, "[dlssd]\napp_0000000 = 9.9.9\n[driver]\nversion = 1\n");
+    CHECK_EQ(first.digest, digest().digest);
+    // ...while a section the pass does read still moves it, in either file.
+    WriteBytes(config, "[dlss]\r\napp_E658700 = 310.9.1\r\n\r\n[DLSSG]\r\napp_E658703 = 310.5.0\r\n"
+                       "[sl_dlss_g_0]\r\napp_E658703 = 2.15.0\r\n");
+    const auto dlssEdited = digest();
+    CHECK(dlssEdited.digest != first.digest);
+    WriteBytes(server, "[dlssd]\napp_0000000 = 9.9.9\n[driver]\nversion = 2\n");
+    const auto driverSection = digest();
+    CHECK(driverSection.digest != dlssEdited.digest);
+
+    // A config rewritten in place with the bytes it had: only its write time
+    // moved, and a hashed file is its content.
+    const auto rewritten = std::filesystem::last_write_time(config) - std::chrono::hours(48);
+    std::filesystem::last_write_time(config, rewritten);
+    CHECK_EQ(driverSection.digest, digest().digest);
+    // A blob too large to hash is still identified by its write time.
+    std::filesystem::last_write_time(blob, std::filesystem::last_write_time(blob) - std::chrono::hours(48));
+    const auto touched = digest();
+    CHECK(touched.digest != driverSection.digest);
+
+    // A feature this list has never heard of - an NR directory, the day NGX
+    // ships one - is in the term.
+    const auto nr = models / L"dlssnr" / L"versions" / L"1" / L"files";
+    CHECK(std::filesystem::create_directories(nr, error));
+    WriteBytes(nr / L"160_E658700.bin", "neural-rendering-weights");
+    const auto grown = digest();
+    CHECK(grown.digest != touched.digest);
+    CHECK_EQ(touched.files + 1u, grown.files);
+    CHECK(NeuralModelStoreSettled(grown));
+
+    // Settledness is what eviction trusts: a registered root that is simply
+    // not there reads the same every time, one that is there and cannot be
+    // walked does not.
+    const std::array<NeuralModelRoot, 1> absent{
+        NeuralModelRoot{fixture.Path() / L"no-such-root", true, {}}};
+    CHECK(NeuralModelStoreSettled(DigestNeuralModelStore(absent, L"32.0.16.1047")));
+    WriteBytes(fixture.Path() / L"not-a-directory", "file");
+    const std::array<NeuralModelRoot, 1> unreadable{
+        NeuralModelRoot{fixture.Path() / L"not-a-directory", true, {}}};
+    CHECK(!NeuralModelStoreSettled(DigestNeuralModelStore(unreadable, L"32.0.16.1047")));
+}
+
 void hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test()
 {
     const auto hashed = LockedRuntimeFileNames();
@@ -4341,6 +4429,7 @@ int wmain(int argc, wchar_t* argv[])
     published_render_is_not_reused_across_identity_changes_test();
     schema_four_entries_are_retired_by_the_schema_gate_test();
     model_store_digest_tracks_root_contents_and_names_its_fallback_test();
+    model_store_digest_ignores_features_outside_the_neural_pass_test();
     hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test();
     runtime_digest_is_order_independent_byte_sensitive_and_rejects_duplicates_test();
     manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test();

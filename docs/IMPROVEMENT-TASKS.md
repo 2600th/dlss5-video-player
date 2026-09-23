@@ -70,7 +70,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P1.6](#p16) | Failures that look like success | S | Player, Pipeline | 🔍 |
 | [P1.7](#p17) | Bounds on untrusted media values | XS | Player, Pipeline | 🔍 |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
-| [P1.9](#p19) | The model-store digest covers every NGX model | S | Pipeline | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
 | [P1.11](#p111) | The runtime lock ignores extra add-ons | S | Pipeline, Release | 🔍 |
 | [P1.12](#p112) | Helper robustness batch | S | Pipeline | 🔍 |
@@ -511,23 +510,6 @@ file that is still being decoded.
 switch.
 
 **Fix** — include the attempt or launch number in the segment name.
-
----
-
-<a id="p19"></a>
-### P1.9 · The model-store digest covers every NGX model
-
-`S` · **Pipeline** · 🔍
-
-**Where** — `NeuralPreflight.cpp:157-188`, `:249-276`
-
-The digest walks every file under `%ProgramData%\NVIDIA\NGX\models`
-recursively, write times included. When the NVIDIA App updates an unrelated
-model (SR, frame generation, ray reconstruction), every key changes and the
-whole render cache is orphaned, and P0.7 then never cleans it up.
-
-**Fix** — restrict the walk to the neural-rendering model files. Drop the
-write time wherever a content hash is already taken.
 
 ---
 

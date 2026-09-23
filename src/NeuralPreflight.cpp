@@ -10,6 +10,8 @@
 #include <array>
 #include <cstdint>
 #include <cwctype>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -153,6 +155,91 @@ struct ModelStoreFile {
     bool unreadable{};   // size, write time or (within the bound) content missing
 };
 
+// Which NGX features the neural pass evaluates, as the model store names them.
+//
+// The store is organised by feature - models/<feature>/versions/<n>/files/...
+// under %ProgramData%\NVIDIA\NGX - and nvngx_config.txt and the server config
+// (config/versions/<n>/files/nvngx_server_config.txt) carry one [<feature>]
+// section each. Listed on the development machine (2026-09-23, 185 files):
+// dlss, dlss_override, dlssd, dlssg, dlisp,
+// config, and sl_<plugin>_0 / sl_<plugin>_override_0 for common, sdk, dlss,
+// dlss_d, dlss_g, nis, reflex, pcl, nvperf and deepdvc; the server config
+// adds sections for dlisr, dlslowmo, dlinpainting, dlvsr, vsr, truehdr,
+// nvbroadcast*, nvbcast* and rise*. There is no NR (dlssnr) directory: the
+// locked runtime evaluates feature 18 out of neural-runtime\nvngx_dlssnr.dll,
+// which runtimeDigest already covers.
+//
+// The walk took all of it, so the NVIDIA App refreshing Ray Reconstruction or
+// Frame Generation weights - 463 MB and 51 MB of blobs here - changed every
+// render key and orphaned the whole cache. What the pass does evaluate is the
+// player's own DLAA (feature 1, SuperSampling: dlss, and dlss_override, which
+// is how the NVIDIA App substitutes those weights), feature 18 (a future
+// dlssnr OTA directory, and the Streamline NR plugin) and the Streamline core
+// the add-on loads (sl_common, sl_sdk, sl_dlss). So this is a deny list of
+// the features that are certainly not in the pass - denoising, frame
+// generation, sharpening, latency, vibrance, profiling, and the non-game
+// features - and everything else stays in: a feature this list has not heard
+// of is kept, because leaving a pixel-relevant file out of the key serves a
+// stale render, while keeping an irrelevant one only costs a re-render.
+bool OutsideNeuralPass(std::wstring_view feature)
+{
+    static constexpr std::array<std::wstring_view, 9> kFeatures{
+        L"dlssd", L"dlssg", L"dlisp", L"dlisr", L"dlslowmo", L"dlinpainting", L"dlvsr", L"vsr",
+        L"truehdr"};
+    static constexpr std::array<std::wstring_view, 10> kFamilies{
+        L"sl_dlss_d_", L"sl_dlss_g_", L"sl_nis_", L"sl_reflex_", L"sl_pcl_", L"sl_nvperf_",
+        L"sl_deepdvc_", L"nvbroadcast", L"nvbcast", L"rise"};
+    return std::ranges::find(kFeatures, feature) != kFeatures.end() ||
+           std::ranges::any_of(kFamilies, [&](std::wstring_view family) {
+               return feature.starts_with(family);
+           });
+}
+
+// The two selector files hold a section per feature, so a refresh of any
+// feature rewrote them - the same orphaning through the back door. Their
+// sections for features outside the pass are dropped before hashing; every
+// other line, the ones before the first section included, is kept byte for
+// byte.
+bool SectionedSelector(std::wstring_view lowerName)
+{
+    return lowerName == L"nvngx_config.txt" || lowerName == L"nvngx_server_config.txt";
+}
+
+std::string KeepNeuralPassSections(std::string_view text)
+{
+    std::string kept;
+    bool keep = true;
+    while (!text.empty()) {
+        const size_t newline = text.find('\n');
+        const std::string_view line =
+            text.substr(0, newline == std::string_view::npos ? text.size() : newline + 1);
+        text.remove_prefix(line.size());
+        std::string_view trimmed = line;
+        while (!trimmed.empty() && (trimmed.back() == '\n' || trimmed.back() == '\r' ||
+                                    trimmed.back() == ' ' || trimmed.back() == '\t'))
+            trimmed.remove_suffix(1);
+        while (!trimmed.empty() && (trimmed.front() == ' ' || trimmed.front() == '\t'))
+            trimmed.remove_prefix(1);
+        if (trimmed.size() >= 2 && trimmed.front() == '[' && trimmed.back() == ']') {
+            std::wstring section;
+            for (const char character : trimmed.substr(1, trimmed.size() - 2))
+                section.push_back(static_cast<wchar_t>(std::towlower(static_cast<unsigned char>(character))));
+            keep = !OutsideNeuralPass(section);
+        }
+        if (keep) kept.append(line);
+    }
+    return kept;
+}
+
+std::optional<std::string> HashNeuralPassSelector(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return std::nullopt;
+    const std::string bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    if (input.bad()) return std::nullopt;
+    return Sha256Bytes(KeepNeuralPassSections(bytes));
+}
+
 // One root's listing, or nothing when the root cannot be walked whole: a
 // partial listing would digest as though the files it missed did not exist.
 std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoot& root,
@@ -186,7 +273,11 @@ std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoo
             // term of the render identity: a stale digest here serves a render
             // built against weights that are no longer the ones on disk. Only
             // files at or below the bound reach this, so the re-read is small.
-            if (const auto digest = Sha256File(entry.path(), stop)) file.digest = *digest;
+            const bool selector =
+                SectionedSelector(LowerWide(entry.path().filename().wstring()));
+            if (const auto digest = selector ? HashNeuralPassSelector(entry.path())
+                                             : Sha256File(entry.path(), stop))
+                file.digest = *digest;
             else file.unreadable = true;
         }
         files.push_back(std::move(file));
@@ -196,6 +287,14 @@ std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoo
         for (fs::recursive_directory_iterator iterator(root.directory, options, error), end;
              !error && iterator != end; iterator.increment(error)) {
             if (stop.stop_requested()) return std::nullopt;
+            // A feature directory the pass never evaluates is not walked at
+            // all (see OutsideNeuralPass).
+            std::error_code local;
+            if (iterator.depth() == 0 && iterator->is_directory(local) && !local &&
+                OutsideNeuralPass(LowerWide(iterator->path().filename().wstring()))) {
+                iterator.disable_recursion_pending();
+                continue;
+            }
             consider(*iterator);
         }
     } else {
@@ -247,10 +346,13 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
                                         std::stop_token stop)
 {
     NeuralModelStore store;
-    // Canonical form 1. The root spelling is part of it: a driver update lands
-    // a new nv_dispsi.inf_<id> directory, so the name alone retires the renders
-    // made against the old one even before its contents are compared.
-    std::string canonical = "model-store=1\n";
+    // Canonical form 2: form 1 listed every feature, and the size and write
+    // time of files it had already hashed. The root spelling is part of it: a
+    // driver update lands a new nv_dispsi.inf_<id> directory, so the name
+    // alone retires the renders made against the old one even before its
+    // contents are compared. The no-root fallback below keeps form 1, which
+    // this change did not alter.
+    std::string canonical = "model-store=2\n";
     for (const NeuralModelRoot& root : roots) {
         const std::wstring spelling = LowerWide(root.directory.generic_wstring());
         const auto files = CollectModelRoot(root, stop);
@@ -271,13 +373,22 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
         canonical += '\n';
         store.enumeratedRoots.push_back(spelling);
         for (const ModelStoreFile& file : *files) {
+            // A hashed file is its content and nothing else. The NVIDIA App
+            // rewrites the config files in place with unchanged bytes - their
+            // write times on the reference machine are the time of its last
+            // check - and each rewrite moved every render key. Size and write
+            // time identify only the blobs too large to hash.
             canonical += Utf8(file.relative);
             canonical.push_back('\0');
-            canonical += std::to_string(file.size);
-            canonical.push_back('\0');
-            canonical += std::to_string(file.writeTime);
-            canonical.push_back('\0');
-            canonical += file.digest.empty() ? "-" : file.digest;
+            if (!file.digest.empty()) {
+                canonical += file.digest;
+            } else {
+                canonical += std::to_string(file.size);
+                canonical.push_back('\0');
+                canonical += std::to_string(file.writeTime);
+                canonical += '\0';
+                canonical += '-';
+            }
             canonical.push_back('\n');
             ++store.files;
             if (!file.digest.empty()) ++store.contentHashedFiles;

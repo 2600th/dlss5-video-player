@@ -141,7 +141,9 @@ const char* NeuralModelStoreSourceName(NeuralModelStoreSource source) noexcept;
 
 // One directory the pass resolves weights out of. A driver-store root holds the
 // whole display driver, so only its top-level nvngx* modules belong in the
-// identity; the ProgramData model store is walked whole.
+// identity; the ProgramData model store is walked except for the feature
+// directories the neural pass never evaluates (frame generation, ray
+// reconstruction and the like).
 struct NeuralModelRoot {
     std::filesystem::path directory;
     bool recursive{};
@@ -184,8 +186,10 @@ struct NeuralModelStore {
 // deterministic.
 bool NeuralModelStoreSettled(const NeuralModelStore& store);
 
-// Digests the given roots: every file's relative name, size and write time,
-// plus the content hash of each file small enough to afford one. Files a root
+// Digests the given roots: every file's relative name, and its content hash
+// when it is small enough to afford one or its size and write time when it is
+// not. Feature directories and selector sections for features the neural
+// pass never evaluates are left out of a recursive root. Files a root
 // cannot enumerate leave the root out of the listing and named in
 // fallbackDetail; when no root can be read at all the digest covers
 // `driverVersion` instead and the source says so.

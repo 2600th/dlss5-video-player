@@ -441,7 +441,13 @@ which a driver update or a model refresh can replace with the digest unchanged.
 
 Two terms close it. `driverVersion` enters the key directly, so a render cannot
 cross a driver change. `modelStoreDigest` covers the resolved model-path
-contents, so it cannot cross a model refresh on one driver either; when a root
+contents, so it cannot cross a model refresh on one driver either. It covers
+only the features the pass evaluates: the ProgramData walk skips the feature
+directories and selector sections of frame generation, ray reconstruction and
+the other features the pass never loads (`OutsideNeuralPass`), and a file small
+enough to hash is identified by its content alone, so a refresh of unrelated
+weights or an in-place rewrite of an unchanged config no longer moves every
+key. When a root
 cannot be enumerated the digest falls back to the driver version alone, and
 `ResolveNeuralModelStore` records which of the two it got in the preflight
 receipt rather than degrading silently. The manifest schema moved 4 → 5 in the
