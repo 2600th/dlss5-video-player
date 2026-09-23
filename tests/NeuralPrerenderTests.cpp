@@ -1930,6 +1930,13 @@ public:
         if(!featureCreated){lastFailure=NeuralRenderFailure::Neural;return false;}
         if(cutAtCapture&&captureSubmissions==*cutAtCapture){out.id.reset=HistoryReset::Cut;out.id.historyGeneration=++historyGeneration;}
         if(mismatchAtCapture&&captureSubmissions==*mismatchAtCapture)++out.id.frameNumber;
+        // A readback ring one slot behind: every capture from here on hands back
+        // the frame captured before it.
+        const FrameIdentity stamped=out.id;
+        if(staleIdentityFromCapture&&captureSubmissions>=*staleIdentityFromCapture){
+            out.id.frameNumber=previousCapture.frameNumber;out.id.pts100ns=previousCapture.pts100ns;
+        }
+        previousCapture=stamped;
         ++evaluations;
         // The backend's own tally: what an accepted submit is normally also
         // counted by, unless the test says the pass silently did not run.
@@ -1950,6 +1957,7 @@ public:
     bool stampCaptureCount{};
     int captureSubmissions{};int temporalResets{};size_t expectedBytes{};
     std::optional<int> failCaptureAt,failCaptureFrom,cutAtCapture,mismatchAtCapture,backendMissesCaptureAt;
+    std::optional<int> staleIdentityFromCapture;FrameIdentity previousCapture{};
     uint64_t backendEvaluations{};
     NeuralRenderFailure captureFailure{NeuralRenderFailure::Neural};
     NeuralRenderFailure lastFailure{NeuralRenderFailure::None};
@@ -2714,6 +2722,46 @@ void offline_identity_mismatch_from_the_evaluator_fails_the_job_test()
     CHECK_EQ(size_t{1},encoder.attempts.size());
     if(!encoder.attempts.empty())CHECK_EQ(size_t{1},encoder.attempts.front().size());
     CHECK_EQ(0,encoder.finishes);CHECK(encoder.cancels>0);
+    // Frame 1 is pipelined, so which frame its capture holds is only known when
+    // its readback resolves: after frame 2 has been queued behind it.
+    CHECK_EQ(3,evaluator.captureSubmissions);
+}
+
+// The identity a capture resolves with is compared with the frame queued in
+// that position, on the synchronous first frame and on every pipelined drain.
+// It used to be an echo of the request stamped before rendering, so a ring
+// that slid out of step published shuffled frames as verified.
+void offline_capture_identity_is_checked_where_the_readback_resolves_test()
+{
+    // The synchronous first frame.
+    {
+        TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        evaluator.mismatchAtCapture=1;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{});
+        CHECK(!result.ok);CHECK_EQ(NeuralRenderFailure::Identity,result.failure);
+        CHECK_EQ(1,evaluator.captureSubmissions);
+        if(!encoder.attempts.empty())CHECK(encoder.attempts.front().empty());
+    }
+    // A readback ring one slot behind from frame 2: frames 0 and 1 are the
+    // frames they claim, frame 2's slot hands back frame 1, and nothing from
+    // the shifted ring reaches the encoder.
+    {
+        TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        evaluator.stampCaptureCount=true;evaluator.staleIdentityFromCapture=3;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{});
+        CHECK(!result.ok);CHECK(!result.cancelled);CHECK_EQ(NeuralRenderFailure::Identity,result.failure);
+        CHECK_EQ(0,encoder.finishes);
+        CHECK_EQ(size_t{1},encoder.attempts.size());
+        if(!encoder.attempts.empty()){
+            CHECK_EQ(size_t{2},encoder.attempts.front().size());
+            if(encoder.attempts.front().size()==2){
+                CHECK_EQ(uint8_t{1},encoder.attempts.front()[0].front());
+                CHECK_EQ(uint8_t{2},encoder.attempts.front()[1].front());
+            }
+        }
+    }
 }
 
 void offline_job_passes_guide_controls_to_the_evaluator_test()
@@ -4752,6 +4800,7 @@ int wmain(int argc, wchar_t* argv[])
     offline_pause_holds_between_frames_without_a_temporal_reset_test();
     offline_pause_still_honours_cancellation_test();
     offline_identity_mismatch_from_the_evaluator_fails_the_job_test();
+    offline_capture_identity_is_checked_where_the_readback_resolves_test();
     offline_job_passes_guide_controls_to_the_evaluator_test();
     segmented_offline_job_publishes_finalized_files_and_drops_the_armed_one_test();
     offline_job_reports_the_cold_start_phases_it_reached_test();

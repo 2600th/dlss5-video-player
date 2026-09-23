@@ -912,10 +912,12 @@ void D3D12Renderer::CopyMappedRows(uint8_t*mapped,const D3D12_PLACED_SUBRESOURCE
 }
 
 bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,bool motionGuides,float frameTimeMs){
+    m_lastRenderedId={};
     return RenderFrameInternal(bgra,bytes,guideGridRGBA32F,guideBytes,gridW,gridH,temporalReset,motionGuides,frameTimeMs,nullptr);
 }
 
 bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const FrameIdentity&frame,const GuideFrame&guide,float frameTimeMs){
+    m_lastRenderedId={};
     if(!guide.id.SameSource(frame)){
         LOG("Rejected frame/guide identity mismatch: frame#"<<frame.frameNumber<<" pts="<<frame.pts100ns
             <<" src="<<frame.sourceGeneration<<" job="<<frame.jobId
@@ -923,8 +925,10 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const FrameIdent
             <<" src="<<guide.id.sourceGeneration<<" job="<<guide.id.jobId);
         return false;
     }
-    return RenderFrameInternal(bgra,bytes,guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
-        guide.gridW,guide.gridH,guide.id.reset!=HistoryReset::None,guide.motionVectors,frameTimeMs,&guide.id);
+    if(!RenderFrameInternal(bgra,bytes,guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
+        guide.gridW,guide.gridH,guide.id.reset!=HistoryReset::None,guide.motionVectors,frameTimeMs,&guide.id))return false;
+    m_lastRenderedId=guide.id;
+    return true;
 }
 
 bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,bool motionGuides,float frameTimeMs,const FrameIdentity*identity){
@@ -1178,7 +1182,10 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
 bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const FrameIdentity&frame,
                                         const GuideFrame&guide,float frameTimeMs,
                                         CapturedVideoFrame&capture){
-    capture.pixels.clear();capture.width=0;capture.height=0;capture.id=guide.id;
+    // No identity is stamped here. The capture carries the one its readback slot
+    // recorded, which is what makes the caller's comparison a check: stamping
+    // guide.id up front only ever compared the request with an echo of itself.
+    capture.pixels.clear();capture.width=0;capture.height=0;capture.id={};
     if(!RenderFrame(bgra,bytes,frame,guide,frameTimeMs))return false;
     return CaptureEvaluatedFrame(capture);
 }
@@ -1314,7 +1321,7 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
 }
 
 bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
-    capture.pixels.clear();capture.width=0;capture.height=0;
+    capture.pixels.clear();capture.width=0;capture.height=0;capture.id={};
     if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
     // Whatever the active capture format produces, not four bytes per pixel: an NV12
     // capture is 1.5, and the size is the contract the caller checks the frame against.
@@ -1327,6 +1334,7 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
         std::vector<uint8_t> bytes;
         if(!m_testHooks->cacheCapture(bytes)||bytes.size()!=tightBytes)return false;
         capture.pixels=std::move(bytes);capture.width=m_outputW;capture.height=m_outputH;
+        capture.id=m_lastRenderedId;
         return true;
     }
     // The synchronous form owns the whole ring, so it may only be used while nothing is
@@ -1405,6 +1413,7 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     // the full CPU copy and encode stage of every frame.
     if(!SignalFrameSlot(slot))return false;
     m_captureFence[readbackSlot]=m_fenceValue;
+    m_captureId[readbackSlot]=m_lastRenderedId;
     m_captureWrite=(readbackSlot+1u)%CaptureSlots;
     ++m_capturePending;
     return true;
@@ -1432,6 +1441,7 @@ bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
     view.bytes=static_cast<size_t>(tightBytes64);
     view.width=m_outputW;view.height=m_outputH;
     view.format=m_captureFormat;
+    view.id=m_captureId[readbackSlot];
     if(nv12){
         view.chromaBase=base+m_chromaFootprint.Offset;
         view.chromaRowPitch=size_t(m_chromaFootprint.Footprint.RowPitch);
@@ -1484,12 +1494,12 @@ void D3D12Renderer::CopyCaptureView(const CaptureReadbackView&view,std::vector<u
 }
 
 bool D3D12Renderer::ResolveOldestCapture(CapturedVideoFrame&capture){
-    capture.width=0;capture.height=0;
+    capture.width=0;capture.height=0;capture.id={};
     CaptureReadbackView view;
     if(!BeginResolveOldestCapture(view)){capture.pixels.clear();return false;}
     CopyCaptureView(view,capture.pixels);
     EndResolveOldestCapture();
-    capture.width=view.width;capture.height=view.height;
+    capture.width=view.width;capture.height=view.height;capture.id=view.id;
     return true;
 }
 

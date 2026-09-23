@@ -1184,6 +1184,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         struct InFlightCapture {
             uint64_t frameNumber{};
             int64_t timestamp100ns{};
+            // The frame queued in this position, which the identity the readback
+            // slot resolves with has to name.
+            FrameIdentity id{};
             double readMs{},guideMs{},evalMs{},neuralGpuMs{};
             SteadyClock::time_point frameStart{};
         };
@@ -1207,13 +1210,24 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                                          : encoder.TakeRecycled(pixels);
             if (!recycled) pixels.clear();
             double captureMs = 0.0;
+            FrameIdentity resolved{};
             {
                 StageClock clock(stages.resolve);
-                if (!evaluator.ResolveOldest(pixels, captureMs) || pixels.size() != expectedBytes) {
+                if (!evaluator.ResolveOldest(pixels, resolved, captureMs) ||
+                    pixels.size() != expectedBytes) {
                     return evaluatorFailure();
                 }
             }
             inFlight.pop_front();
+            // The slot and the queue advance together, so the bytes that just came
+            // back must be the frame queued first. A ring that slid out of step would
+            // otherwise publish every later frame one place off, as verified.
+            if (!resolved.SameSource(queued.id)) {
+                LOG("Neural capture identity mismatch: expected frame#" << queued.id.frameNumber
+                    << " pts=" << queued.id.pts100ns << ", readback holds frame#" << resolved.frameNumber
+                    << " pts=" << resolved.pts100ns);
+                return NeuralRenderFailure::Identity;
+            }
             const size_t written = pixels.size();
             double writeMs = 0.0;
             EncodeError writeError;
@@ -1248,8 +1262,10 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             // Frames already captured but not yet read back are valid output: write
             // them out so a failed attempt never omits a frame it successfully
             // evaluated. A cancelled job discards them instead, which keeps
-            // cancellation prompt.
-            if (failure != NeuralRenderFailure::Cancelled) {
+            // cancellation prompt, and an identity mismatch means the readback ring
+            // is out of step, so nothing still in it can be trusted to be the frame
+            // it claims.
+            if (failure != NeuralRenderFailure::Cancelled && failure != NeuralRenderFailure::Identity) {
                 while (!inFlight.empty() && drainOldest() == NeuralRenderFailure::None) {}
             }
             attempt.failure = failure;
@@ -1417,6 +1433,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 InFlightCapture queued;
                 queued.frameNumber = frame.frameNumber;
                 queued.timestamp100ns = frame.timestamp100ns;
+                queued.id = identity(frame, HistoryReset::None);
                 queued.readMs = readMs;queued.guideMs = evaluation.guideMs;
                 queued.evalMs = evalMs;queued.neuralGpuMs = evaluation.neuralGpuMs;
                 queued.frameStart = frameStart;
@@ -1630,18 +1647,24 @@ struct InjectedEvaluatorAdapter {
         out.bgra=std::move(evaluation.bgra);out.id=evaluation.id;
         out.neuralGpuMs=evaluator.LastNeuralGpuMs();return true;
     }
+    // Production learns which frame a pipelined capture holds only when its readback
+    // slot resolves, so the identity the evaluator stamped travels with the pixels and
+    // is judged at the drain. What the submit hands back is the request's source
+    // identity with the evaluator's own history decision, as production's guide does.
     bool SubmitAsync(const JobFrame& frame,const FrameIdentity& id,JobEvaluation& out){
         if(!Submit(frame,id,true,out))return false;
-        captured.push_back(std::move(out));
+        captured.push_back(out);
+        out.id=FrameIdentity{id.frameNumber,id.pts100ns,id.sourceGeneration,
+                             out.id.historyGeneration,id.jobId,out.id.reset};
         return true;
     }
     uint32_t Pending()const{return uint32_t(captured.size());}
     static constexpr uint32_t MaxPending(){return 2u;}
     // The test evaluator always captures BGRA.
     static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Bgra;}
-    bool ResolveOldest(std::vector<uint8_t>& pixels,double& captureMs){
+    bool ResolveOldest(std::vector<uint8_t>& pixels,FrameIdentity& id,double& captureMs){
         if(captured.empty())return false;
-        pixels=std::move(captured.front().bgra);captured.pop_front();
+        pixels=std::move(captured.front().bgra);id=captured.front().id;captured.pop_front();
         captureMs=0.0;return true;
     }
     void DiscardPending(){captured.clear();}
@@ -1875,13 +1898,17 @@ struct ProductionEvaluatorAdapter {
     // Set when a readback slot could not be opened. The slot is gone by then, so every
     // later capture would answer for the wrong frame; the drain has to stop instead.
     bool resolveBroken=false;
+    // The identity of the slot the posted copy is reading, handed to the drain that
+    // joins it.
+    FrameIdentity postedId{};
     // Guide generation cost, split out of the submit stage for the stage log.
     // Shared by the synchronous and the pipelined submit paths, which differ
     // only in how the capture is read back.
     SteadyClock::duration guideCost{};
     // The renderer resets NGX history when guide.id.reset != None (requested
-    // reset or a cut detected by the guide generator) and stamps guide.id on
-    // the capture, so the job can verify it received the frame it submitted.
+    // reset or a cut detected by the guide generator). A capture carries the
+    // identity its readback slot recorded when the copy was queued, so the job
+    // can verify it received the frame it submitted.
     bool Submit(const JobFrame& frame,const FrameIdentity& id,bool capture,JobEvaluation& out){
         GuideFrame guide;const auto guideStart=SteadyClock::now();
         {
@@ -1953,6 +1980,8 @@ struct ProductionEvaluatorAdapter {
         if(!renderer->EnqueueEvaluatedFrameCapture()){
             lastFailure=ClassifyRendererFailure(*renderer);return false;
         }
+        // The guide's identity: which frame the capture holds is only known when its
+        // readback slot resolves, and ResolveOldest hands that back for the drain.
         out.id=guide.id;out.neuralGpuMs=renderer->LastNeuralGpuMs();++successfulEvaluations;return true;
     }
     uint32_t Pending()const{return renderer?renderer->PendingCaptureCount():0u;}
@@ -1967,13 +1996,14 @@ struct ProductionEvaluatorAdapter {
     // returning, the next oldest capture is posted so the same overlap covers the drain
     // after this one, which is why the returned frame is still the oldest one: the posted
     // copy and the deque the job drains advance together.
-    bool ResolveOldest(std::vector<uint8_t>& pixels,double& captureMs){
+    bool ResolveOldest(std::vector<uint8_t>& pixels,FrameIdentity& id,double& captureMs){
         if(!renderer||resolveBroken)return false;
         std::vector<uint8_t> spare=std::move(pixels);pixels.clear();
         const auto captureStart=SteadyClock::now();
         bool ok;
         if(deferred.Posted()){
             ok=deferred.Join(pixels);
+            id=postedId;postedId={};
             renderer->EndResolveOldestCapture();
         }else{
             // The job's first drain, and the tail flush once the ring has run dry: with
@@ -1981,6 +2011,7 @@ struct ProductionEvaluatorAdapter {
             captureScratch.pixels=std::move(spare);spare.clear();
             ok=renderer->ResolveOldestCapture(captureScratch);
             pixels=std::move(captureScratch.pixels);captureScratch.pixels.clear();
+            id=captureScratch.id;captureScratch.id={};
         }
         captureMs=MillisecondsSince(captureStart);
         if(!ok){
@@ -2004,6 +2035,7 @@ struct ProductionEvaluatorAdapter {
             lastFailure=ClassifyRendererFailure(*renderer);
             return;
         }
+        postedId=view.id;
         deferred.Post(view,std::move(scratch));
     }
     void DiscardPending(){
@@ -2011,7 +2043,7 @@ struct ProductionEvaluatorAdapter {
         // The posted copy holds a slot, so it has to be joined before the ring can drain.
         std::vector<uint8_t> dropped;
         if(deferred.Join(dropped))renderer->EndResolveOldestCapture();
-        resolveBroken=false;
+        resolveBroken=false;postedId={};
         while(renderer->PendingCaptureCount()){
             CapturedVideoFrame discarded;
             if(!renderer->ResolveOldestCapture(discarded))break;

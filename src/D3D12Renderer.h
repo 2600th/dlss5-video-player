@@ -211,6 +211,10 @@ public:
         // the same readback buffer at its own aligned offset.
         const uint8_t* chromaBase = nullptr;
         size_t chromaRowPitch = 0;
+        // The frame this slot's capture was recorded for, stamped when the copy was
+        // queued. It is the only thing that says which frame the bytes are: the job
+        // compares it with the frame it queued in that position.
+        FrameIdentity id{};
     };
 
     // Asynchronous capture. EnqueueEvaluatedFrameCapture records the cache draw and the
@@ -590,6 +594,13 @@ private:
     // the same reason: the alternative is a Map/Unmap pair on every frame.
     const uint64_t* m_timestampMapped = nullptr;
     uint64_t m_captureFence[CaptureSlots]{};
+    // Identity of the frame each readback slot holds, recorded at enqueue and handed
+    // back when the slot resolves, so a ring that fell out of step is caught rather
+    // than trusted.
+    FrameIdentity m_captureId[CaptureSlots]{};
+    // Identity of the frame the last RenderFrame recorded; empty after a failed or
+    // unidentified frame, so a capture of it can never match a real one.
+    FrameIdentity m_lastRenderedId{};
     uint32_t m_captureWrite = 0;
     uint32_t m_captureRead = 0;
     uint32_t m_capturePending = 0;

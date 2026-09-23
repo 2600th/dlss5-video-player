@@ -29,6 +29,7 @@
 #include "FrameGenerationPass.h"
 #include "NgxSession.h"
 #include "D3D12Renderer.h"
+#include "TemporalGuides.h"
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
 #include "FrameRatePolicy.h"
@@ -252,6 +253,10 @@ struct D3D12RendererTestAccess {
     static bool CaptureEvaluatedFrame(D3D12Renderer& renderer,CapturedVideoFrame& frame)
     {
         return renderer.CaptureEvaluatedFrame(frame);
+    }
+    static void SetLastRenderedIdentity(D3D12Renderer& renderer,const FrameIdentity& id)
+    {
+        renderer.m_lastRenderedId=id;
     }
     // The deleter ends the process on the second renderer it has to retain;
     // a suite that retains one per case starts each such case from zero.
@@ -3026,6 +3031,29 @@ void renderer_cache_capture_returns_exact_tight_bgra_geometry_test()
         *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(17,0);return true;});
     CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
     CHECK(frame.pixels.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
+}
+
+// The capture says which frame it holds from what the renderer recorded, not
+// from what the caller asked for: stamping the request's identity on it before
+// rendering made the job's identity check compare a value with itself.
+void renderer_cache_capture_carries_the_identity_of_the_frame_it_rendered_test()
+{
+    auto renderer=MakeD3D12Renderer();
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(16,0x11);return true;});
+    const FrameIdentity rendered{7,70,1,2,9,HistoryReset::None};
+    D3D12RendererTestAccess::SetLastRenderedIdentity(*renderer,rendered);
+    CapturedVideoFrame frame;frame.id=FrameIdentity{8,80,1,2,9,HistoryReset::None};
+    CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK(frame.id==rendered);
+
+    // A frame the renderer refused leaves no identity a capture could claim.
+    GuideFrame guide;guide.id=FrameIdentity{8,80,1,0,9,HistoryReset::None};
+    const std::vector<uint8_t> pixels(16,0);
+    CHECK(!renderer->RenderFrame(pixels.data(),pixels.size(),FrameIdentity{9,90,1,0,9,HistoryReset::None},
+                                 guide,16.0f));
+    CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK(frame.id==FrameIdentity{});
 }
 
 void renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test()
@@ -10027,6 +10055,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(renderer_frame_signal_success_advances_tracking_once_test),
     TEST_CASE(renderer_cache_capture_requires_a_successful_neural_evaluation_test),
     TEST_CASE(renderer_cache_capture_returns_exact_tight_bgra_geometry_test),
+    TEST_CASE(renderer_cache_capture_carries_the_identity_of_the_frame_it_rendered_test),
     TEST_CASE(renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test),
     TEST_CASE(renderer_cache_capture_does_not_apply_playback_color_adjustments_test),
     TEST_CASE(gpu_classification_table_test),

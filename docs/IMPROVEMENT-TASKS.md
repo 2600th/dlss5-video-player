@@ -53,7 +53,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | --- | --- | :---: | --- | :---: |
 | **P0** | | | | |
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
-| [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
 | **P1** | | | | |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
@@ -131,30 +130,6 @@ nobody can verify what they downloaded.
 **Fix** — add a package mode that takes the version from `PACKAGE_MANIFEST.txt`
 or the folder name, and checks against the manifest's hashes. Have CI run it
 from an extracted zip with no repository around it. Correct the README command.
-
----
-
-<a id="p06"></a>
-### P0.6 · The per-frame identity check compares a value with itself
-
-`S` · **Pipeline** · ✅
-
-**Where** — `D3D12Renderer.cpp:1130`, `OfflineNeuralRenderer.cpp:1281`,
-`:1197-1210`, `:1938-1976`
-
-`RenderFrameForCache` sets `capture.id=guide.id` **before** rendering, so
-`out.id.SameSource(id)` compares the input with an echo of itself.
-Pipelined frames carry no identity, and `drainOldest` never checks one.
-
-**Scenario** — if the readback ring falls out of step, which is the case the
-flag at `:1978` guards against, shuffled frames are published as verified.
-`NeuralRenderFailure::Identity` can never be reached.
-
-**Impact** — Pipeline: the cache's frame-order guarantee is not enforced.
-
-**Fix** — record the identity in the readback slot when the copy is queued,
-return it when the slot resolves, and compare it with the frame queued in
-that position.
 
 ---
 
