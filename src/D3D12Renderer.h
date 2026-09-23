@@ -361,6 +361,12 @@ public:
     // that reason (NeuralRenderPipelineIdentity).
     void SetCaptureDither(bool dither) { m_requestedCaptureDither = dither; }
     bool ActiveCaptureDither() const { return m_captureDither; }
+    // The deband pre-pass on the decoded source ahead of the model (DebandPolicy.h).
+    // Selected before Initialize, which compiles it into the colour conversion in place
+    // of the plain one; off by default, and a cache-key term because it changes what
+    // the model is shown.
+    void SetSourceDeband(bool deband) { m_requestedSourceDeband = deband; }
+    bool ActiveSourceDeband() const { return m_sourceDeband; }
 
     // Layout of the bytes RenderFrame/RenderFrameForCache receive. Selected before
     // Initialize like the capture format, and likewise downgraded to Bgra when the source
@@ -909,6 +915,8 @@ private:
     CaptureFormat m_captureFormat = CaptureFormat::Bgra;
     bool m_requestedCaptureDither = false;
     bool m_captureDither = false;
+    bool m_requestedSourceDeband = false;
+    bool m_sourceDeband = false;
     // NV12 source: both planes in one upload buffer per slot, chroma at an aligned offset.
     // m_uploadFootprint keeps describing the BGRA layout, which the reference upload shares.
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_sourceLumaFootprint{};

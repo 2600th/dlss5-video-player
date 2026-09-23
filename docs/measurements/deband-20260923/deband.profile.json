@@ -1,0 +1,44 @@
+{
+  "q-lossless": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "shipped state, Lossless rung (FFV1 10-bit via P010 capture) - the reference",
+    "worker_flags": [
+      "--cache-quality",
+      "lossless"
+    ]
+  },
+  "q-lossless-deband": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "Lossless rung plus the deband pre-pass on the source",
+    "worker_flags": [
+      "--cache-quality",
+      "lossless",
+      "--deband",
+      "1"
+    ]
+  }
+}

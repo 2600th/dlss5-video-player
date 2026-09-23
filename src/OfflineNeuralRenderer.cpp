@@ -2042,6 +2042,9 @@ struct ProductionEvaluatorAdapter {
     // A 10-bit rung's P010 capture, requested and built, for the same reason.
     bool tenBitCapture{false};
     bool builtTenBitCapture{false};
+    // The deband pre-pass, compiled into the colour conversion at bring-up.
+    bool sourceDeband{false};
+    bool builtSourceDeband{false};
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
     // Which conversion the live renderer's source pass was COMPILED for, which is
@@ -2094,7 +2097,7 @@ struct ProductionEvaluatorAdapter {
                sourceLayout==layout&&sourceConversion==conversion&&
                builtGpuColorConversion==gpuColorConversion&&
                builtSuperResolutionCarrier==superResolutionCarrier&&builtCaptureDither==captureDither&&
-               builtTenBitCapture==tenBitCapture;
+               builtTenBitCapture==tenBitCapture&&builtSourceDeband==sourceDeband;
         // Answered, so spent: this job either re-arms the released feature or
         // rebuilds the device, and either way the next Initialize must judge
         // the feature on what it can see rather than on a stale promise.
@@ -2111,6 +2114,8 @@ struct ProductionEvaluatorAdapter {
         if(!renderer)return false;
         builtGpuColorConversion=gpuColorConversion;builtCaptureDither=captureDither;builtTenBitCapture=tenBitCapture;
         builtSuperResolutionCarrier=superResolutionCarrier;
+        builtSourceDeband=sourceDeband;
+        renderer->SetSourceDeband(sourceDeband);
         renderer->SetCaptureFormat(tenBitCapture?CaptureFormat::P010:gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
         renderer->SetCaptureDither(captureDither&&!tenBitCapture);
         renderer->SetSourceLayout(layout);
@@ -2913,6 +2918,7 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     // The dither has an 8-bit store only on the Standard rung.
     state.evaluator.tenBitCapture=EncoderQualityIsTenBit(request.quality);
     state.evaluator.captureDither=request.captureDither&&!state.evaluator.tenBitCapture;
+    state.evaluator.sourceDeband=request.sourceDeband;
     // Read before the reset, because the reset is allowed to drop the feature.
     const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();
     state.evaluator.ResetForJob(request.guides);

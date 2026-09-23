@@ -124,6 +124,9 @@ struct NeuralRenderRequest {
     // away what they exist to keep; Lossless encodes FFV1 on the CPU and has no
     // NVENC attempt to fall back from.
     EncoderQuality quality{EncoderQuality::Standard};
+    // The deband pre-pass on the decoded source ahead of the model (DebandPolicy.h).
+    // Off by default and a cache-key term: it changes what the model is shown.
+    bool sourceDeband{false};
 };
 
 struct NeuralRenderProgress {

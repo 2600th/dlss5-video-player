@@ -1,5 +1,6 @@
 #include "D3D12Renderer.h"
 #include "D3D12FenceWait.h"
+#include "DebandPolicy.h"
 #include "DitherPolicy.h"
 #include "TemporalGuides.h"
 #include "HexText.h"
@@ -160,6 +161,7 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
     // Resolved before CreatePipelines, which compiles the dithered capture programs in
     // place of the plain ones. A renderer with no capture ring has nothing to dither.
     m_captureDither=m_requestedCaptureDither&&captureOutput;
+    m_sourceDeband=m_requestedSourceDeband;
     m_hwnd=hwnd; m_sourceW=sourceW; m_sourceH=sourceH; m_outputW=outputW; m_outputH=outputH; m_gridW=gridW; m_gridH=gridH; m_quality=quality;
     if(!m_gridW||!m_gridH)return false;
     // NV12 planes need even dimensions, so an odd source keeps the BGRA upload
@@ -315,6 +317,39 @@ float DitherOffsetBayer8(float2 pixel){
 // and 0.0 at phase 0.5) and hand the reconstruction a different amount of blur every frame.
 // Feature 18 does not read a jitter offset at all, so nothing downstream undoes it either.
 float4 PSConvert(V i):SV_Target{float3 c=T.SampleLevel(S,i.uv,0).rgb;return float4(SRGBToLinear(c),1);}
+// PSConvert with the deband pre-pass in front of the linearisation, for a renderer that
+// asked for it (SetSourceDeband). DebandPolicy.h has the algorithm - libplacebo's deband
+// at its defaults, with a fixed per-pixel pattern instead of a per-frame one - its four
+// parameters, pasted here, and a C++ mirror. A separate entry point, so PSConvert and
+// every render made with it keep their bytecode.
+)" "static const int kDebandIterations=" DLSS_HLSL_TEXT(DLSS_DEBAND_ITERATIONS) ";"
+   "static const float kDebandThreshold=" DLSS_HLSL_TEXT(DLSS_DEBAND_THRESHOLD) ";"
+   "static const float kDebandRadius=" DLSS_HLSL_TEXT(DLSS_DEBAND_RADIUS) ";"
+   "static const float kDebandGrain=" DLSS_HLSL_TEXT(DLSS_DEBAND_GRAIN) ";" R"(
+uint DebandHash(uint2 p,uint k){
+    uint v=p.x*1664525u+p.y*1013904223u+k*2654435761u;
+    v^=v>>16;v*=0x7feb352du;v^=v>>15;v*=0x846ca68bu;v^=v>>16;return v;
+}
+float DebandRandom(uint2 p,uint k){return float(DebandHash(p,k)>>8)*(1.0/16777216.0);}
+float4 PSConvertDebanded(V i):SV_Target{
+    float w,h;T.GetDimensions(w,h);
+    float2 texel=1.0/float2(w,h);
+    uint2 px=uint2(i.uv*float2(w,h));
+    float3 c=T.SampleLevel(S,i.uv,0).rgb;
+    [unroll] for(int it=1;it<=kDebandIterations;++it){
+        float dist=DebandRandom(px,0u)*kDebandRadius*it;
+        float ang=DebandRandom(px,1u)*6.2831853;
+        float2 d=dist*float2(cos(ang),sin(ang))*texel;
+        // Quarter turns around the pixel, then the pixel itself wherever it differs
+        // from that average by the bound or more.
+        float3 avg=0.25*(T.SampleLevel(S,i.uv+float2(d.x,d.y),0).rgb+T.SampleLevel(S,i.uv+float2(-d.x,d.y),0).rgb+
+                         T.SampleLevel(S,i.uv+float2(-d.x,-d.y),0).rgb+T.SampleLevel(S,i.uv+float2(d.x,-d.y),0).rgb);
+        c=lerp(avg,c,step(kDebandThreshold/(1000.0*it),abs(c-avg)));
+    }
+    // Grain, scaled down towards black so true black stays black.
+    c+=min(abs(c),kDebandGrain/1000.0)*(DebandRandom(px,2u)-0.5);
+    return float4(SRGBToLinear(saturate(c)),1);
+}
 float Luma709(float3 c){return dot(c,float3(0.2126,0.7152,0.0722));}
 float3 ApplyVideoAdjustments(float3 c){
     float brightness=ColorA.x;
@@ -802,7 +837,7 @@ bool D3D12Renderer::CompileSourceNv12(SourceNv12Conversion conversion,ComPtr<ID3
 
 bool D3D12Renderer::CreatePipelines(){
     UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,depthWrite,expand,err;
-    ComPtr<ID3DBlob>captureLuma,captureChroma,sourceNv12,presentScaled,captureDithered;
+    ComPtr<ID3DBlob>captureLuma,captureChroma,sourceNv12,presentScaled,captureDithered,convertDebanded;
     auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(kPresentHlsl,sizeof(kPresentHlsl)-1,nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
     if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand)||
        !C("PSCaptureLuma","ps_5_1",captureLuma)||!C("PSCaptureChroma","ps_5_1",captureChroma))return false;
@@ -816,6 +851,8 @@ bool D3D12Renderer::CreatePipelines(){
     // renderer simply never binds these.
     const bool p010=m_requestedCaptureFormat==CaptureFormat::P010;
     if(p010&&(!C("PSCaptureLuma10","ps_5_1",captureLuma)||!C("PSCaptureChroma10","ps_5_1",captureChroma)))return false;
+    // The deband pre-pass replaces the conversion outright, for the renderer's life.
+    if(m_sourceDeband&&!C("PSConvertDebanded","ps_5_1",convertDebanded))return false;
     // Only a renderer that presents to a window it follows ever scales the present.
     if(m_followWindow&&!C("PSPresentScaled","ps_5_1",presentScaled))return false;
     // The HDR backbuffer programs: the compositor and the two debug views with
@@ -867,6 +904,7 @@ bool D3D12Renderer::CreatePipelines(){
     ComPtr<ID3DBlob>sig;if(!HR(D3D12SerializeRootSignature(&rs,D3D_ROOT_SIGNATURE_VERSION_1,&sig,&err),"SerializeRootSignature"))return false;
     if(!HR(m_device->CreateRootSignature(0,sig->GetBufferPointer(),sig->GetBufferSize(),IID_PPV_ARGS(&m_rootSig)),"CreateRootSignature"))return false;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};p.pRootSignature=m_rootSig.Get();p.VS={vs->GetBufferPointer(),vs->GetBufferSize()};p.PS={convert->GetBufferPointer(),convert->GetBufferSize()};
+    if(convertDebanded)p.PS={convertDebanded->GetBufferPointer(),convertDebanded->GetBufferSize()};
     p.BlendState.RenderTarget[0].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
     p.SampleMask=UINT_MAX;p.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;p.RasterizerState.DepthClipEnable=TRUE;
     p.DepthStencilState.DepthEnable=FALSE;p.DepthStencilState.StencilEnable=FALSE;p.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;p.NumRenderTargets=1;p.SampleDesc={1,0};

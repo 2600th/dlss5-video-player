@@ -423,6 +423,25 @@ void quality_rung_changes_the_render_key_and_drops_the_switches_it_makes_inert()
     CHECK(BuildNeuralCacheKey(identity) != highKey);
 }
 
+void deband_changes_the_render_key_on_every_rung()
+{
+    CHECK_EQ(std::string{}, CaptureQualityIdentityTerm(CaptureQualityTerms{}));
+    CaptureQualityTerms debanded;
+    debanded.sourceDeband = true;
+    CHECK_EQ(std::string("|deband-i1t3r16g4-static-v1"), CaptureQualityIdentityTerm(debanded));
+    // It changes what the model is shown, so no rung makes it inert, and it follows
+    // the rung's term.
+    for (const EncoderQuality rung : {EncoderQuality::High, EncoderQuality::Lossless}) {
+        CaptureQualityTerms plain;
+        plain.quality = rung;
+        CaptureQualityTerms withDeband = plain;
+        withDeband.sourceDeband = true;
+        CHECK(CaptureQualityIdentityTerm(withDeband) != CaptureQualityIdentityTerm(plain));
+        CHECK_EQ(CaptureQualityIdentityTerm(plain) + "|deband-i1t3r16g4-static-v1",
+                 CaptureQualityIdentityTerm(withDeband));
+    }
+}
+
 void schema_three_manifests_parse_with_defaults_and_stay_reusable()
 {
     // Byte-exact schema-3 manifest as written by the previous release.
@@ -887,6 +906,7 @@ int main()
     encoder_settings_that_change_the_written_pixels_change_the_render_key();
     capture_dither_changes_the_render_key_and_names_its_map();
     quality_rung_changes_the_render_key_and_drops_the_switches_it_makes_inert();
+    deband_changes_the_render_key_on_every_rung();
     schema_three_manifests_parse_with_defaults_and_stay_reusable();
     current_schema_manifest_round_trips_with_receipt_digest();
     receipt_is_authenticated_on_promotion_and_lookup();

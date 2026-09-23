@@ -192,12 +192,18 @@ inline constexpr bool kDefaultGpuColorConversion = false;
 // `quality` is the rung of the ladder (EncoderQuality). A 10-bit rung captures P010
 // and has no 8-bit store, so the dither term is dropped there: flipping an inert
 // switch must not re-render anything. The High term carries its CQ.
+//
+// `sourceDeband` is the deband pre-pass on the decoded source (DebandPolicy.h),
+// which changes what the model is shown; the term spells out its parameters and
+// its fixed pattern, so a change to either is a new term.
 struct CaptureQualityTerms {
     bool captureDither{false};
     EncoderQuality quality{EncoderQuality::Standard};
+    bool sourceDeband{false};
 };
 inline constexpr bool kDefaultCaptureDither = false;
 inline constexpr EncoderQuality kDefaultCacheQuality = EncoderQuality::Standard;
+inline constexpr bool kDefaultSourceDeband = false;
 std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms);
 
 // The encoder switches a rung makes inert, as the key should see them: a 10-bit rung

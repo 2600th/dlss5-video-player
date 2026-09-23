@@ -57,7 +57,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.1](#p21) | Supply a smoothed exposure instead of auto-exposure | S | Pipeline | ✅ |
 | [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
-| [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
 | **P3** | | | | |
 | [P3.4](#p34) | Extract testable units from `main.cpp` | M | Player | |
 | [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | |
@@ -150,16 +149,6 @@ compression-cleanup pre-pass.
 Ref: [RTX Video SDK](https://developer.nvidia.com/blog/enhancing-low-resolution-sdr-video-with-the-nvidia-rtx-video-sdk/)
 
 ---
-
-<a id="p214"></a>
-### P2.14 · A deband pre-pass for compressed sources
-
-`S-M` · **Pipeline**
-
-A libplacebo-style deband (1 iteration, threshold 3, radius 16, grain 4)
-before the model, off by default until measured. It is cheaper than running
-RTX VSR at 1× as a cleanup step. Measure first whether the neural pass
-amplifies banding; P2.11's metrics are the tool.
 
 ## Player UX
 

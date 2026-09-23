@@ -73,6 +73,7 @@
 #include "NeuralMotionPolicy.h"
 #include "TemporalStabilityShader.h"
 #include "DitherPolicy.h"
+#include "DebandPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -8782,6 +8783,64 @@ void blue_noise_dither_reaches_the_present_and_capture_programs_test()
     }
 }
 
+// The deband pre-pass on its own terms: a one-code step in a smooth ramp - the band a
+// compressed source leaves - is averaged away, a real edge is kept, black stays black,
+// and the pattern is fixed, so the same pixel always draws the same numbers.
+void deband_pre_pass_smooths_bands_and_keeps_edges_test()
+{
+    // Bands: 40 columns at code 100, then 40 at 101, repeating, on a 0..1 scale.
+    const auto banded = [](int x, int) { return (100.0f + float((x / 40) % 2)) / 255.0f; };
+    // Near a band edge the pass lands between the two codes; the plain frame cannot.
+    uint32_t between = 0, total = 0;
+    for (int y = 20; y < 60; ++y)
+        for (int x = 30; x < 50; ++x) {
+            const float code = deband::DebandPixel(banded, x, y) * 255.0f;
+            CHECK(code > 99.4f && code < 101.6f);
+            if (code > 100.15f && code < 100.85f) ++between;
+            ++total;
+        }
+    CHECK(between * 4 > total);
+    // A real edge - twenty codes - is far past the threshold and survives, up to grain.
+    const auto edge = [](int x, int) { return (x < 200 ? 60.0f : 80.0f) / 255.0f; };
+    for (int y = 0; y < 40; ++y) {
+        CHECK(std::abs(deband::DebandPixel(edge, 199, y) * 255.0f - 60.0f) < 0.6f);
+        CHECK(std::abs(deband::DebandPixel(edge, 200, y) * 255.0f - 80.0f) < 0.6f);
+    }
+    // Grain is scaled by the value itself, so black is left exactly black.
+    const auto black = [](int, int) { return 0.0f; };
+    for (int x = 0; x < 64; ++x) CHECK_EQ(0.0f, deband::DebandPixel(black, x, 7));
+    // A fixed per-pixel pattern: the same pixel draws the same numbers every frame,
+    // and different pixels different ones.
+    CHECK_EQ(deband::Random(10, 20, 0), deband::Random(10, 20, 0));
+    CHECK(deband::Random(10, 20, 0) != deband::Random(11, 20, 0));
+    CHECK(deband::Random(10, 20, 0) != deband::Random(10, 20, 1));
+    for (uint32_t k = 0; k < 3; ++k)
+        for (uint32_t x = 0; x < 50; ++x) {
+            const float r = deband::Random(x, 3, k);
+            CHECK(r >= 0.0f && r < 1.0f);
+        }
+}
+
+// The deband program compiles from the shared text as its own entry point, leaves
+// PSConvert alone, and carries the header's parameters: fxc folds threshold/1000 and
+// grain/1000 into immediates, so a paste that lost them would not contain either.
+void deband_pre_pass_reaches_the_conversion_program_test()
+{
+    Microsoft::WRL::ComPtr<ID3DBlob> plain,debanded;
+    CHECK(D3D12RendererTestAccess::CompilePresentProgram("PSConvert",plain));
+    CHECK(D3D12RendererTestAccess::CompilePresentProgram("PSConvertDebanded",debanded));
+    if(!plain||!debanded)return;
+    const std::string plainProgram(static_cast<const char*>(plain->GetBufferPointer()),plain->GetBufferSize());
+    const std::string program(static_cast<const char*>(debanded->GetBufferPointer()),debanded->GetBufferSize());
+    CHECK(program!=plainProgram);
+    const auto contains=[&](float value){
+        char bytes[sizeof(float)];std::memcpy(bytes,&value,sizeof(value));
+        return program.find(std::string(bytes,sizeof(bytes)))!=std::string::npos;
+    };
+    CHECK(contains(deband::kThreshold/1000.0f));
+    CHECK(contains(deband::kGrain/1000.0f));
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -12898,6 +12957,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(blue_noise_dither_preserves_the_mean_a_rounded_store_loses_test),
     TEST_CASE(blue_noise_dither_reaches_the_present_and_capture_programs_test),
     TEST_CASE(bayer_capture_dither_map_is_the_classic_matrix_test),
+    TEST_CASE(deband_pre_pass_smooths_bands_and_keeps_edges_test),
+    TEST_CASE(deband_pre_pass_reaches_the_conversion_program_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
     TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),

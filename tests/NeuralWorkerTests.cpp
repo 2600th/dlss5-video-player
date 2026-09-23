@@ -1066,6 +1066,22 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     }
     const auto badDitherView = view(badDither);
     CHECK(!neural_worker_detail::ParseWorkerArguments(badDitherView).has_value());
+    // The deband pre-pass changes what the model is shown, so absent must mean off.
+    for (const auto& argument : normal) CHECK(argument != L"--deband");
+    if (parsedNormal) CHECK(!parsedNormal->request.sourceDeband);
+    NeuralRenderRequest debanded = request;
+    debanded.sourceDeband = true;
+    const auto debandedArguments = neural_worker_detail::BuildWorkerArguments(debanded, metadata, pause, false);
+    const auto debandedView = view(debandedArguments);
+    const auto parsedDebanded = neural_worker_detail::ParseWorkerArguments(debandedView);
+    CHECK(parsedDebanded.has_value());
+    if (parsedDebanded) CHECK(parsedDebanded->request.sourceDeband);
+    auto badDeband = debandedArguments;
+    for (size_t index = 0; index + 1 < badDeband.size(); ++index) {
+        if (badDeband[index] == L"--deband") badDeband[index + 1] = L"2";
+    }
+    const auto badDebandView = view(badDeband);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badDebandView).has_value());
     // The quality rung travels by name, absent meaning Standard - the only rung an
     // older parent can ask for - and a name this build does not know is refused
     // rather than read as the default the parent did not key for.

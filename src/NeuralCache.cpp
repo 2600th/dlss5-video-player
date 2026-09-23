@@ -933,6 +933,7 @@ std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms)
         term += "|high-main10-cq" + std::to_string(kHighRungCq) + "-v1";
     else if (terms.quality == EncoderQuality::Lossless)
         term += "|lossless-ffv1-10bit-v1";
+    if (terms.sourceDeband != kDefaultSourceDeband) term += "|deband-i1t3r16g4-static-v1";
     return term;
 }
 

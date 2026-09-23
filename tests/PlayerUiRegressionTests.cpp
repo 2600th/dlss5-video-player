@@ -3482,7 +3482,14 @@ struct PlayerAppTestAccess {
             CHECK_EQ(std::wstring(L"lossless"), std::wstring(rung));
         }
         CHECK(!IsWindowEnabled(GetDlgItem(dialog, IDC_ES_CAPTURE_DITHER)));
+        // The deband pre-pass is a checkbox read back and saved like the others.
+        CHECK(GetDlgItem(dialog, IDC_ES_DEBAND) != nullptr);
+        SendMessageW(GetDlgItem(dialog, IDC_ES_DEBAND), BM_SETCHECK, BST_CHECKED, 0);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_DEBAND, BN_CLICKED), 0);
+        CHECK(app.m_sourceDeband);
+        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"SourceDeband", 0, app.SettingsPath().c_str()), UINT{1});
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_RESET, BN_CLICKED), 0);
+        CHECK(!app.m_sourceDeband);
         CHECK(app.m_cacheQuality == EncoderQuality::Standard);
         CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_ES_CAPTURE_DITHER)));
         CHECK(!app.m_captureDither);

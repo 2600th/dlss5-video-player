@@ -494,11 +494,12 @@ pixels the smaller model no longer processes. Delete the section
 to fall back to the generation's prior. Keep the player in a writable folder
 to persist preferences.
 
-**DLSS > Encoder settings** holds the three `[Encoding]` keys, kept apart from
-the model settings because they apply to the next render. All three are part of
-the render identity, so changing one re-renders instead of serving a cached
-range made under the other value. At their defaults they add nothing to the
-key, so a default render keeps the cache entries it already has:
+**DLSS > Encoder settings** holds the `[Encoding]` keys, kept apart from the
+model settings because they apply to the next render. Every one that changes the
+written pixels is part of the render identity, so changing one re-renders
+instead of serving a cached range made under the other value. At their defaults
+they add nothing to the key, so a default render keeps the cache entries it
+already has:
 
 - `NvencPreset` (1-7, default 5). p7 is the slowest and best; drop it if NVENC
   is the bottleneck on your card. A non-default preset adds `nvenc-p<N>` to the
@@ -518,6 +519,13 @@ key, so a default render keeps the cache entries it already has:
   every rung: MKV copies the stream, MP4 carries High's HEVC as it is and turns
   Lossless's FFV1 into lossless 10-bit H.264. The numbers are in
   `docs/measurements/cache-quality-20260923/`.
+- `SourceDeband` (default off). Runs libplacebo's deband (1 iteration,
+  threshold 3, radius 16, grain 4, with a fixed pattern) on the decoded source
+  before the model. Measured on seven clips the model already removes almost
+  all of a source's banding (CAMBI 1.6-10.9 in, 0.004-1.9 out at 10 bits), so
+  the pre-pass has little left to do and costs some fine texture; see
+  `docs/measurements/deband-20260923/`. The key carries
+  `deband-i1t3r16g4-static-v1` while it is on.
 - `CaptureDither` (default off). Dithers each rendered frame against a static
   8x8 ordered map where it is cut to 8 bits for the cache, so a smooth dark
   gradient is written as a fine mix of two levels instead of flat bands.
