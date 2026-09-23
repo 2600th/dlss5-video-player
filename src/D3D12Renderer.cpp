@@ -381,6 +381,27 @@ float3 SampleFootprint(Texture2D tex,float2 uv,float2 footprint,bool srgb){
     }
     return sum/float(taps.x*taps.y);
 }
+// Parameters only the window compositor below reads. A second cbuffer rather than more
+// members of Params: PSPresent never references it, so fxc drops it from that program
+// and the cache capture's bytecode stays byte for byte what every cached render on disk
+// was made with. The label atlas at t4 is the compositor's alone for the same reason.
+cbuffer Compose:register(b1){
+    float4 Pane;    // y = original on the right of the divider (swap), w = labels on
+    float4 Label;   // x = atlas row height px, y = inset from the picture's corner px, zw = atlas size px
+    float4 LabelW;  // atlas row widths px: Original, DLSS 5, and two spare rows
+    float4 Target;  // xy = backbuffer size px
+}
+Texture2D Labels:register(t4);
+// One tag from the premultiplied atlas over an sRGB-encoded colour, with its top-left
+// corner at `anchor` in backbuffer pixels. Load, not Sample: the tags were drawn by GDI
+// at the window's DPI and are shown texel for pixel.
+float LabelWidth(int row){return row==0?LabelW.x:row==1?LabelW.y:row==2?LabelW.z:LabelW.w;}
+float3 LabelOver(float3 c,float2 px,float2 anchor,int row){
+    float2 rel=floor(px-anchor);
+    if(Label.x<1.0||rel.x<0.0||rel.y<0.0||rel.x>=LabelWidth(row)||rel.y>=Label.x)return c;
+    float4 t=Labels.Load(int3(int(rel.x),int(float(row)*Label.x+rel.y),0));
+    return t.rgb+c*(1.0-t.a);
+}
 float4 PSPresentScaled(V i):SV_Target{
     float zoom=max(Misc.y,0.01);
     float2 zc=Compare.zw;
@@ -390,23 +411,38 @@ float4 PSPresentScaled(V i):SV_Target{
     float3 c=SampleFootprint(T,uv,footprint,false);
     int mode=int(Compare.x+0.5);
     float strength=ColorB.z;
+    bool swap=Pane.y>0.5;
     if(mode!=0||strength!=1.0){
         float3 ref=SampleFootprint(Ref,uv,footprint,true);
         if(strength!=1.0)c=ApplyNeuralStrength(c,ref,strength,max(ColorB.w,1.0));
         if(mode==1)c=ref;
         else if(mode==2)c=lerp(ref,c,saturate(Compare.y));
-        else if(mode!=0)c=uv.x<Compare.y?ref:c;
+        else if(mode!=0)c=(uv.x<Compare.y)!=swap?ref:c;
     }
     c=ApplyVideoAdjustments(c);
+    float screenSplit=(Compare.y-zc.x)*zoom+zc.x;
     if(mode==4){
         // Misc.x is one BACKBUFFER pixel here, so the divider stays a fixed width
         // on screen whatever the output's size.
-        float screenSplit=(Compare.y-zc.x)*zoom+zc.x;
         float d=abs(i.uv.x-screenSplit);
         if(d<Misc.x*2.5)c=0.0;
         if(d<Misc.x)c=1.0;
     }
-    return float4(LinearToSRGB(c),1);
+    float3 o=LinearToSRGB(c);
+    // The tags name what each side of the picture is, pinned to the picture's top
+    // corners and clipped to their own side of the divider, so a divider dragged to
+    // an edge takes its tag with it rather than printing it over the other member.
+    if(Pane.w>0.5){
+        float2 px=i.uv*Target.xy;
+        float inset=Label.y;
+        if(mode==1)o=LabelOver(o,px,float2(inset,inset),0);
+        else if(mode==3||mode==4){
+            int left=swap?1:0,right=1-left;
+            if(px.x<screenSplit*Target.x)o=LabelOver(o,px,float2(inset,inset),left);
+            else o=LabelOver(o,px,float2(Target.x-inset-LabelWidth(right),inset),right);
+        }
+    }
+    return float4(o,1);
 }
 // GPU colour conversion for the NV12 capture path. The picture is exactly what the
 // cache-capture pass produces; only the encoding differs, from 8-bit BGRA to BT.709
@@ -549,13 +585,19 @@ bool D3D12Renderer::CreatePipelines(){
     // which is a written descriptor either way because the flow views below are created
     // whether or not the engine came up.
     ranges[1].NumDescriptors=2;
+    // The compositor's table, t3 and t4. Its own parameter, appended, so nothing that
+    // binds the first three moves.
+    D3D12_DESCRIPTOR_RANGE overlayRange{};overlayRange.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;overlayRange.NumDescriptors=2;overlayRange.BaseShaderRegister=3;
     // [0] t0 current view, [1] t1 comparison reference and t2 backward flow, [2]
-    // PresentConstantCount root constants (Params).
-    D3D12_ROOT_PARAMETER rp[3]{};
+    // PresentConstantCount root constants (Params), [3] t3..t4, [4] ComposeConstantCount
+    // root constants (Compose).
+    D3D12_ROOT_PARAMETER rp[5]{};
     for(uint32_t r=0;r<2;++r){rp[r].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[r].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[r].DescriptorTable.NumDescriptorRanges=1;rp[r].DescriptorTable.pDescriptorRanges=&ranges[r];}
     rp[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;rp[2].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[2].Constants.Num32BitValues=PresentConstantCount;rp[2].Constants.ShaderRegister=0;
+    rp[RootOverlay].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[RootOverlay].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[RootOverlay].DescriptorTable.NumDescriptorRanges=1;rp[RootOverlay].DescriptorTable.pDescriptorRanges=&overlayRange;
+    rp[RootCompose].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;rp[RootCompose].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[RootCompose].Constants.Num32BitValues=ComposeConstantCount;rp[RootCompose].Constants.ShaderRegister=1;
     D3D12_STATIC_SAMPLER_DESC smp{};smp.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;smp.AddressU=smp.AddressV=smp.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;smp.ShaderRegister=0;smp.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;smp.MaxLOD=D3D12_FLOAT32_MAX;
-    D3D12_ROOT_SIGNATURE_DESC rs{};rs.NumParameters=3;rs.pParameters=rp;rs.NumStaticSamplers=1;rs.pStaticSamplers=&smp;rs.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    D3D12_ROOT_SIGNATURE_DESC rs{};rs.NumParameters=5;rs.pParameters=rp;rs.NumStaticSamplers=1;rs.pStaticSamplers=&smp;rs.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob>sig;if(!HR(D3D12SerializeRootSignature(&rs,D3D_ROOT_SIGNATURE_VERSION_1,&sig,&err),"SerializeRootSignature"))return false;
     if(!HR(m_device->CreateRootSignature(0,sig->GetBufferPointer(),sig->GetBufferSize(),IID_PPV_ARGS(&m_rootSig)),"CreateRootSignature"))return false;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};p.pRootSignature=m_rootSig.Get();p.VS={vs->GetBufferPointer(),vs->GetBufferSize()};p.PS={convert->GetBufferPointer(),convert->GetBufferSize()};
@@ -845,6 +887,11 @@ bool D3D12Renderer::CreateVideoResources(){
     // table slot holds a null view, which samples as the black the texture used to be
     // cleared to, and SetPresentConstants degrades every mode to Neural anyway.
     srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(ReferenceSRV));
+    // The compositor's overlay table likewise holds null views until something is
+    // uploaded into it; a null atlas is never read, because the row height it would be
+    // read with stays 0 (SetPresentConstants).
+    srv.Format=DXGI_FORMAT_R8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(OverlaySRV));
+    srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(LabelSRV));
 
     // Two timestamps per frame slot bracket DLSS Evaluate; resolved into a readback
     // buffer and harvested once that slot's fence is known complete.
@@ -1144,7 +1191,7 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         const present_scale::Target target=CurrentPresentTarget();
         D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         const bool finalView=(m_debugView==DebugView::Final);
-        SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width);
+        SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
         ID3D12PipelineState* presentPso=target.scaled?m_psoPresentScaled.Get():m_psoPresent.Get();
         // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
         // debug/fallback presentation pass is temporarily made pixel-shader readable.
@@ -1178,7 +1225,9 @@ bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const Fr
 }
 
 present_scale::Target D3D12Renderer::CurrentPresentTarget()const{
-    return present_scale::Choose(m_followWindow,m_psoPresentScaled!=nullptr,m_backbufferW,m_backbufferH,m_outputW,m_outputH);
+    // A comparison the capture's PSPresent cannot draw takes the compositor even at 1:1.
+    const bool compose=m_debugView==DebugView::Final&&m_hasReference&&ComparisonNeedsCompositor(m_comparison);
+    return present_scale::Choose(m_followWindow,m_psoPresentScaled!=nullptr,m_backbufferW,m_backbufferH,m_outputW,m_outputH,compose);
 }
 
 bool D3D12Renderer::CompilePresentProgram(const char*entry,const char*target,ComPtr<ID3DBlob>&blob){
@@ -1286,7 +1335,7 @@ void D3D12Renderer::RecordReferenceUpload(ID3D12GraphicsCommandList*cmd,uint32_t
 // amount|splitX, zoomCenterX, zoomCenterY}, [16..17] Capture.xy = one chroma texel in UV.
 // Also binds the comparison reference at t1. Without an uploaded reference every
 // comparison mode degrades to Neural so the shader never selects the black texture.
-void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const ColorSettings&cs,const ComparisonSettings&cmp,bool useReference,uint32_t targetWidth){
+void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const ColorSettings&cs,const ComparisonSettings&cmp,bool useReference,uint32_t targetWidth,uint32_t targetHeight){
     // One target pixel in UV, which is what the wipe divider is drawn in. The capture
     // passes draw at the output's size and pass nothing.
     const uint32_t dividerWidth=targetWidth?targetWidth:m_outputW;
@@ -1305,6 +1354,61 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
         m_outputW?2.0f/float(m_outputW):0.0f,m_outputH?2.0f/float(m_outputH):0.0f,0,0};
     cmd->SetGraphicsRoot32BitConstants(RootConstants,PresentConstantCount,params,0);
     cmd->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(ReferenceSRV));
+    // The compositor's constants. Harmless for every other pass, none of which declares
+    // b1. The tags need both a reference (they name its two members) and an atlas; the
+    // row height is what the shader tests, so 0 draws none.
+    const bool labels=useReference&&cmp.labels&&m_labelAtlas&&m_labelRowHeight;
+    const float inset=float(m_labelRowHeight/2u);
+    const float compose[ComposeConstantCount]={
+        0,useReference&&cmp.swap?1.0f:0.0f,0,labels?1.0f:0.0f,
+        labels?float(m_labelRowHeight):0.0f,inset,float(m_labelAtlasW),float(m_labelAtlasH),
+        float(m_labelWidths[0]),float(m_labelWidths[1]),float(m_labelWidths[2]),float(m_labelWidths[3]),
+        float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),0,0};
+    cmd->SetGraphicsRoot32BitConstants(RootCompose,ComposeConstantCount,compose,0);
+    cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(OverlaySRV));
+}
+
+bool D3D12Renderer::UploadStaticTexture(ComPtr<ID3D12Resource>&texture,DXGI_FORMAT format,const uint8_t*pixels,
+                                        uint32_t width,uint32_t height,uint32_t bytesPerPixel,uint32_t srvIndex,const wchar_t*name){
+    if(m_gpuUnusable||!m_device||!m_queue||!m_srvHeap||!pixels||!width||!height||srvIndex>=SRVCount)return false;
+    // The view below replaces one that frames still in flight may have bound, and the
+    // texture it replaces may still be read by them.
+    if(!WaitGPUForContinuedUse())return false;
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto desc=Tex2D(format,width,height,D3D12_RESOURCE_FLAG_NONE);
+    ComPtr<ID3D12Resource> created;
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&created)),"Create compositor texture"))return false;
+    created->SetName(name);
+    ComPtr<ID3D12Resource> upload;uint8_t*mapped=nullptr;D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};uint32_t rows=0;uint64_t rowBytes=0,total=0;
+    if(!CreateUploadForTexture(desc,upload,mapped,fp,rows,rowBytes,total,"Create compositor texture upload"))return false;
+    CopyMappedRows(mapped,fp,pixels,size_t(width)*bytesPerPixel,height);
+    upload->Unmap(0,nullptr);
+    // Everything is idle after the drain above, so any slot's upload list is free.
+    const uint32_t slot=m_frameSlot%FrameCount;
+    if(!DeviceHR(m_uploadAllocators[slot]->Reset(),"Reset compositor upload allocator"))return false;
+    auto*cmd=m_uploadCmds[slot].Get();
+    if(!DeviceHR(cmd->Reset(m_uploadAllocators[slot].Get(),nullptr),"Reset compositor upload list"))return false;
+    D3D12_TEXTURE_COPY_LOCATION d{};d.pResource=created.Get();d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION src{};src.pResource=upload.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;src.PlacedFootprint=fp;
+    cmd->CopyTextureRegion(&d,0,0,0,&src,nullptr);
+    Barrier(cmd,created.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if(!DeviceHR(cmd->Close(),"Close compositor upload list"))return false;
+    ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
+    // Waited for here so the upload buffer can be released on return.
+    if(!WaitGPUForContinuedUse())return false;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;srv.Format=format;
+    m_device->CreateShaderResourceView(created.Get(),&srv,SRVCPU(srvIndex));
+    texture=std::move(created);m_presentStale=true;
+    return true;
+}
+
+bool D3D12Renderer::SetLabelAtlas(const uint8_t*premultipliedBgra,uint32_t width,uint32_t height,
+                                  uint32_t rowHeight,const std::array<uint32_t,4>&rowWidths){
+    if(!rowHeight||height<rowHeight*uint32_t(rowWidths.size()))return false;
+    for(const uint32_t rowWidth:rowWidths)if(rowWidth>width)return false;
+    if(!UploadStaticTexture(m_labelAtlas,DXGI_FORMAT_B8G8R8A8_UNORM,premultipliedBgra,width,height,4u,LabelSRV,L"Compositor_Label_Atlas"))return false;
+    m_labelAtlasW=width;m_labelAtlasH=height;m_labelRowHeight=rowHeight;m_labelWidths=rowWidths;
+    return true;
 }
 
 bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
@@ -1571,7 +1675,7 @@ bool D3D12Renderer::PresentCurrent(){
     cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     const bool finalView=(m_debugView==DebugView::Final);
-    SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width);
+    SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
     ID3D12PipelineState* presentPso=target.scaled?m_psoPresentScaled.Get():m_psoPresent.Get();
 
     ID3D12Resource* debugPixelResource=nullptr;

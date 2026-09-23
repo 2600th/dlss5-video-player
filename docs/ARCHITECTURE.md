@@ -227,6 +227,16 @@ output-sized backbuffer bilinearly. `PSPresent` is unchanged byte for byte:
 the cache capture runs it, and the offline carrier never follows its hidden
 window, so captures stay at the output's size.
 
+`PSPresentScaled` is also the player's comparison compositor. What it draws
+beyond `PSPresent` - the ORIGINAL / DLSS 5 tags, the swapped split - comes
+from a second cbuffer (`Compose`, b1) and a texture table (t3-t4) that only it
+declares, so fxc strips them from `PSPresent` and the capture program keeps
+its bindings (a PolicyTests case reflects both programs). A comparison that
+needs the compositor takes it even when the window is exactly the output's
+size (`ComparisonNeedsCompositor`); there, one bilinear tap at each texel's
+centre is the picture `PSPresent` would have drawn. The tags are drawn by GDI
+at the window's DPI into a premultiplied atlas and uploaded once per DPI.
+
 During neural pre-render, `RenderFrameForCache` copies the evaluated output to a
 dedicated readback resource and emits tightly packed BGRA frames to a bounded
 FFmpeg encoder process. The same persistent NGX/feature-18 session is retained
@@ -235,7 +245,7 @@ job's monotonic successful-submission count.
 
 The renderer also holds a source-size reference texture (the original member
 of a synchronized pair), allocated on the first upload with three upload
-buffers, so the presentation shader can show Blend, Split, Wipe
+buffers, so the presentation shader can show the Mix, Original, Split, Wipe
 and Zoom comparisons instantly without re-rendering; cache capture always
 samples the neural output with identity constants. Timestamp queries around
 the DLSS evaluation and a per-frame local VRAM sample feed the render receipt.

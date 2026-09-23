@@ -168,7 +168,7 @@ struct PlayerAppTestAccess {
         app.m_youtubeSourceQuality = YouTubeSourceQuality::P1440;
         app.m_renderGuides = GuideControls{false, true};
         app.m_neuralSettings.intensity = 1.5f; app.m_neuralSettings.preset = 2; app.m_neuralSettings.autoMask = false;
-        app.m_comparison.mode = ComparisonMode::Wipe; app.m_comparison.amount = 0.3f; app.m_comparison.splitX = 0.8f; app.m_comparison.zoomScale = 2.0f;
+        app.m_comparison.mode = ComparisonMode::Wipe; app.m_comparison.swap = true; app.m_comparison.splitX = 0.8f; app.m_comparison.zoomScale = 2.0f;
         app.m_comparison.strength = 0.4f;
         const auto savedCacheRoot=app.SettingsPath().parent_path()/L"shared-cache-location";
         app.m_cacheRoot=savedCacheRoot;
@@ -187,7 +187,7 @@ struct PlayerAppTestAccess {
         CHECK((app.m_renderGuides == GuideControls{false, true}));
         CHECK(app.m_neuralSettings.intensity == 1.5f && app.m_neuralSettings.preset == 2 && !app.m_neuralSettings.autoMask);
         CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
-        CHECK(std::abs(app.m_comparison.amount - 0.3f) < 0.001f && std::abs(app.m_comparison.splitX - 0.8f) < 0.001f);
+        CHECK(app.m_comparison.swap && std::abs(app.m_comparison.splitX - 0.8f) < 0.001f);
         CHECK_EQ(app.m_comparison.zoomScale, 2.0f);
         // The presentation-only strength dial rides the same save/load as the image
         // adjustments it sits with, clamps to the 0..2 the shader composites over, and
@@ -227,6 +227,14 @@ struct PlayerAppTestAccess {
         app.m_upscaleTargetHeight = 2160;
         app.LoadVideoSettings();
         CHECK_EQ(app.m_upscaleTargetHeight, 2160u);
+        // The Mix this build wrote is read back, and wins over the legacy key it replaced.
+        CHECK_EQ(app.ReadIniFloat(L"Comparison", L"Mix", -1.0f), 0.4f);
+        app.WriteIniFloat(L"VideoAdjustments", L"NeuralStrength", 1.7f);
+        app.LoadVideoSettings();
+        CHECK(std::abs(app.m_comparison.strength - 0.4f) < 0.001f);
+        // A file from before the Mix has only NeuralStrength, which is read as the Mix,
+        // clamped to the 0..2 the shader composites over, and 1 when absent.
+        WritePrivateProfileStringW(L"Comparison", L"Mix", nullptr, app.SettingsPath().c_str());
         app.WriteIniFloat(L"VideoAdjustments", L"NeuralStrength", 9.0f);
         app.LoadVideoSettings();
         CHECK_EQ(app.m_comparison.strength, 2.0f);
@@ -238,10 +246,14 @@ struct PlayerAppTestAccess {
         CHECK_EQ(app.m_comparison.strength, 1.0f);
         // Original is a view, not a comparison mode; an out-of-range mode falls back to Neural.
         WritePrivateProfileStringW(L"Comparison", L"Mode", L"1", app.SettingsPath().c_str());
-        app.WriteIniFloat(L"Comparison", L"Amount", 4.0f);
         app.LoadVideoSettings();
         CHECK(app.m_comparison.mode == ComparisonMode::Neural);
-        CHECK_EQ(app.m_comparison.amount, 1.0f);
+        // Blend is the Mix now: Blend at 0.3 opens as the neural view at a Mix of 0.3.
+        WritePrivateProfileStringW(L"Comparison", L"Mode", L"2", app.SettingsPath().c_str());
+        app.WriteIniFloat(L"Comparison", L"Amount", 0.3f);
+        app.LoadVideoSettings();
+        CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        CHECK(std::abs(app.m_comparison.strength - 0.3f) < 0.001f);
         app.m_comparison = {};
         // Absent guide keys mean every guide is on, matching a fresh install.
         for (const wchar_t* key : {L"MotionVectors", L"Depth"})
@@ -1930,6 +1942,109 @@ struct PlayerAppTestAccess {
         app.m_renderer = MakeD3D12Renderer();
     }
 
+    // The compare bar and the press-and-hold A/B, with a pair resident and the neural
+    // view on (CheckComparisonAvailability sets that up).
+    static void CheckCompareBarAndPeek(PlayerApp& app)
+    {
+        const ComparisonSettings entry = app.m_comparison;
+        app.m_comparison.zoomScale = 1.0f;
+        // Blend has no row of its own; a stray command gets the neural view it became.
+        app.m_comparison.mode = ComparisonMode::Wipe;
+        app.HandleCommand(IDM_COMPARE_BLEND);
+        CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        app.HandleCommand(IDM_COMPARE_ORIGINAL);
+        CHECK(app.m_comparison.mode == ComparisonMode::Original);
+        CHECK(app.m_renderer->GetComparison().mode == ComparisonMode::Original);
+        // C walks the bar's modes and wraps; Shift+C walks back.
+        app.HandleCommand(IDM_COMPARE_NEXT_MODE);
+        CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
+        app.HandleCommand(IDM_COMPARE_NEXT_MODE); app.HandleCommand(IDM_COMPARE_NEXT_MODE);
+        CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        app.HandleCommand(IDM_COMPARE_PREVIOUS_MODE);
+        CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
+        app.HandleCommand(IDM_COMPARE_SWAP);
+        CHECK(app.m_comparison.swap && app.m_renderer->GetComparison().swap);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_COMPARE_SWAP, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        app.HandleCommand(IDM_COMPARE_SWAP);
+        CHECK(!app.m_comparison.swap);
+
+        // Holding still on the picture shows the original until release, whatever the
+        // mode, and leaves the mode alone.
+        app.m_comparison.mode = ComparisonMode::Neural; app.ApplyComparison(false);
+        app.RenderMouseDown(app.m_renderWnd, MAKELPARAM(20, 20));
+        CHECK(app.EffectiveComparison().mode == ComparisonMode::Neural);
+        app.PeekHoldElapsed();
+        CHECK(app.m_peekOriginal);
+        CHECK(app.EffectiveComparison().mode == ComparisonMode::Original);
+        CHECK(app.m_renderer->GetComparison().mode == ComparisonMode::Original);
+        CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        app.RenderMouseUp(app.m_renderWnd);
+        CHECK(!app.m_peekOriginal);
+        CHECK(app.m_renderer->GetComparison().mode == ComparisonMode::Neural);
+        // In split, a click still moves the divider; a drag past the slop before the
+        // hold is a drag, and the late timer does not turn it into a peek.
+        app.m_comparison.mode = ComparisonMode::SplitVertical; app.m_comparison.splitX = 0.5f; app.ApplyComparison(false);
+        // A render window of a known size for the divider to be measured against; this
+        // fixture has none of its own.
+        const HWND fixtureRender = app.m_renderWnd;
+        app.m_renderWnd = CreateWindowExW(0, L"STATIC", nullptr, WS_CHILD, 0, 0, 400, 200, app.m_hwnd, nullptr, nullptr, nullptr);
+        RECT client{}; GetClientRect(app.m_renderWnd, &client);
+        CHECK_EQ(400L, client.right);
+        app.RenderMouseDown(app.m_renderWnd, MAKELPARAM(client.right / 4, client.bottom / 2));
+        CHECK(std::abs(app.m_comparison.splitX - 0.25f) < 0.02f);
+        app.RenderMouseMove(app.m_renderWnd, MAKELPARAM(client.right * 3 / 4, client.bottom / 2));
+        CHECK(std::abs(app.m_comparison.splitX - 0.75f) < 0.02f);
+        app.PeekHoldElapsed();
+        CHECK(!app.m_peekOriginal);
+        app.RenderMouseUp(app.m_renderWnd);
+        // Losing capture mid-peek ends the peek.
+        app.RenderMouseDown(app.m_renderWnd, MAKELPARAM(10, 10));
+        app.PeekHoldElapsed();
+        CHECK(app.m_peekOriginal);
+        app.RenderCaptureLost();
+        CHECK(!app.m_peekOriginal);
+        DestroyWindow(app.m_renderWnd); app.m_renderWnd = fixtureRender;
+
+        // The bar: shown only where a neural member can exist, above the toolbar.
+        const bool configured = app.m_opt.neuralAddonConfigured;
+        const int plainHeight = app.ControlHeight();
+        app.m_opt.neuralAddonConfigured = true;
+        CHECK(app.CompareBarVisible());
+        CHECK_EQ(app.ControlHeight(), plainHeight + app.Dip(compare_bar::kBarHeightDip));
+        const auto layout = app.CompareBarLayout();
+        RECT main{}; GetClientRect(app.m_hwnd, &main);
+        CHECK_EQ(layout.bar.top, main.bottom - app.ControlHeight());
+        // Clicking a mode segment selects it; clicking the track sets the Mix.
+        for (const auto& item : layout.items) {
+            if (item.part == compare_bar::Part::Mode && item.index == 2) {
+                CHECK(app.CompareBarMouseDown((item.bounds.left + item.bounds.right) / 2, (item.bounds.top + item.bounds.bottom) / 2));
+                CHECK(app.m_comparison.mode == app.CompareBarModes()[2]);
+            }
+        }
+        const int quarter = layout.mixTrack.left + (layout.mixTrack.right - layout.mixTrack.left) / 4;
+        CHECK(app.CompareBarMouseDown(quarter, (layout.bar.top + layout.bar.bottom) / 2));
+        CHECK(app.m_dragMix);
+        CHECK(std::abs(app.m_comparison.strength - 0.5f) < 0.051f);
+        app.MouseUp(quarter, layout.bar.top + 2);
+        CHECK(!app.m_dragMix);
+        // A press on the row that hits nothing is still the row's.
+        CHECK(app.CompareBarMouseDown(1, layout.bar.top + 1));
+        // The tags the compositor draws: two non-empty rows, flag rule opaque at the left
+        // edge, plate translucent beside it, nothing past each tag's width.
+        const auto atlas = app.BuildLabelAtlas(96);
+        CHECK(!atlas.pixels.empty());
+        CHECK(atlas.widths[0] > 0 && atlas.widths[1] > 0 && atlas.widths[2] == 0);
+        CHECK_EQ(size_t(atlas.width) * atlas.height * 4, atlas.pixels.size());
+        if (!atlas.pixels.empty() && atlas.widths[1] + 1 < atlas.width) {
+            const auto alpha = [&](uint32_t x, uint32_t y) { return atlas.pixels[(size_t(y) * atlas.width + x) * 4 + 3]; };
+            CHECK_EQ(255, int(alpha(0, 1)));
+            CHECK(alpha(atlas.widths[0] - 1, 1) > 150 && alpha(atlas.widths[0] - 1, 1) < 255);
+            CHECK_EQ(0, int(alpha(atlas.width - 1, atlas.rowHeight + 1)));
+        }
+        app.m_opt.neuralAddonConfigured = configured;
+        app.m_comparison = entry; app.m_comparison.strength = 1.0f; app.ApplyComparison(false);
+    }
+
     static void CheckComparisonAvailability(PlayerApp& app)
     {
         const HMENU menu = GetMenu(app.m_hwnd);
@@ -1944,12 +2059,16 @@ struct PlayerAppTestAccess {
         CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
         CHECK(app.m_renderer->GetComparison().mode == ComparisonMode::SplitVertical);
         CHECK((GetMenuState(menu, IDM_COMPARE_SPLIT, MF_BYCOMMAND) & MF_CHECKED) != 0);
-        app.m_comparison.amount = 0.5f;
+        // [ and ] step the Mix, which is the strength the renderer composites with.
+        app.m_comparison.strength = 0.5f;
         app.HandleCommand(IDM_COMPARE_BLEND_MORE);
         app.HandleCommand(IDM_COMPARE_BLEND_MORE);
-        CHECK(std::abs(app.m_comparison.amount - 0.7f) < 0.001f);
+        CHECK(std::abs(app.m_comparison.strength - 0.7f) < 0.001f);
+        CHECK(std::abs(app.m_renderer->GetComparison().strength - 0.7f) < 0.001f);
         for (int step = 0; step < 12; ++step) app.HandleCommand(IDM_COMPARE_BLEND_LESS);
-        CHECK_EQ(app.m_comparison.amount, 0.0f);
+        CHECK_EQ(app.m_comparison.strength, 0.0f);
+        app.m_comparison.strength = 1.0f;
+        CheckCompareBarAndPeek(app);
         app.HandleCommand(IDM_COMPARE_ZOOM);
         CHECK_EQ(app.m_comparison.zoomScale, 2.0f);
         CHECK((GetMenuState(menu, IDM_COMPARE_ZOOM, MF_BYCOMMAND) & MF_CHECKED) != 0);

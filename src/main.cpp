@@ -115,6 +115,8 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "DarkModePolicy.h"
 #include "MediaTransportPolicy.h"
 #include "StartScreenPolicy.h"
+#include "CompareBarPolicy.h"
+#include "CompareViewPolicy.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -2240,6 +2242,9 @@ private:
     static constexpr UINT_PTR kPreviewTimerId=0xD157;
     static constexpr UINT_PTR kModalTickTimerId=0xD158;
     static constexpr UINT_PTR kChipFlashTimerId=0xD159;
+    // The press-and-hold A/B: fires once, compare_gesture::kHoldMs after a press on the
+    // picture that has not become a drag.
+    static constexpr UINT_PTR kPeekTimerId=0xD15A;
     static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
     // How long a live or cached pair may stay NotReady before the player stops
     // waiting for it. A segment source is reopened at every boundary and after
@@ -3573,7 +3578,13 @@ private:
 
     int Dip(int value)const{return MulDiv(value,static_cast<int>(ActiveWindowDpi(m_hwnd)),USER_DEFAULT_SCREEN_DPI);}
     bool ControlsVisible()const{return !m_loaded||!m_fullscreen||!m_fullscreenControlsHidden;}
-    int ControlHeight()const{return ControlsVisible()?Dip(CONTROL_H_DIP):0;}
+    int ControlHeight()const{return ControlsVisible()?Dip(CONTROL_H_DIP)+(CompareBarVisible()?Dip(compare_bar::kBarHeightDip):0):0;}
+    // The compare bar is a row of its own on top of the strip whenever a source is
+    // loaded on a build that can render neurally, and its controls grey out while
+    // nothing can be compared. Shown only when comparing it would be one more thing to
+    // jump in and out of the layout at every seek and view switch; hidden in safe mode,
+    // where there is never a neural member to compare.
+    bool CompareBarVisible()const{return m_loaded&&ControlsVisible()&&NeuralPreRenderEnabled();}
     void UpdateFontsForDpi(UINT dpi){
         const UINT activeDpi=dpi==0?USER_DEFAULT_SCREEN_DPI:dpi;
         HFONT regular=CreateUiFont(16,activeDpi);
@@ -3682,15 +3693,19 @@ private:
         m_nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,SettingsPath().c_str())),1,7);
         m_processingScale=ReadProcessingScale(SettingsPath());
         m_neuralSettings={};LoadNeuralSettings(SettingsPath(),m_neuralSettings);
-        const UINT mode=GetPrivateProfileIntW(L"Comparison",L"Mode",0,SettingsPath().c_str());
+        const int mode=static_cast<int>(GetPrivateProfileIntW(L"Comparison",L"Mode",0,SettingsPath().c_str()));
         m_comparison={};
-        for(const auto value:{ComparisonMode::Blend,ComparisonMode::SplitVertical,ComparisonMode::Wipe})
-            if(mode==static_cast<UINT>(value))m_comparison.mode=value;
-        m_comparison.amount=std::clamp(ReadIniFloat(L"Comparison",L"Amount",0.5f),0.0f,1.0f);
+        // The Mix replaced the strength dial and Blend; compare_settings::Migrate reads
+        // a file from before it. -1 is outside every value either key could hold.
+        const float savedMix=ReadIniFloat(L"Comparison",L"Mix",-1.0f);
+        std::vector<int> knownModes;for(const ComparisonMode known:CompareBarModes())knownModes.push_back(static_cast<int>(known));
+        const auto loaded=compare_settings::Migrate(savedMix>=0.0f?std::optional<float>(savedMix):std::nullopt,mode,
+            ReadIniFloat(L"Comparison",L"Amount",0.5f),ReadIniFloat(L"VideoAdjustments",L"NeuralStrength",1.0f),knownModes);
+        m_comparison.mode=static_cast<ComparisonMode>(loaded.mode);
+        m_comparison.strength=loaded.mix;
         m_comparison.splitX=std::clamp(ReadIniFloat(L"Comparison",L"SplitX",0.5f),0.0f,1.0f);
         m_comparison.zoomScale=ReadIniFloat(L"Comparison",L"ZoomScale",1.0f)>=kZoomScale?kZoomScale:1.0f;
-        // Read back after the comparison defaults above, which would otherwise clear it.
-        m_comparison.strength=std::clamp(ReadIniFloat(L"VideoAdjustments",L"NeuralStrength",1.0f),0.0f,2.0f);
+        m_comparison.swap=GetPrivateProfileIntW(L"Comparison",L"Swap",0,SettingsPath().c_str())!=0;
         LoadRenderPace();
     }
 
@@ -3827,8 +3842,8 @@ private:
         WriteIniFloat(L"VideoAdjustments",L"Gamma",m_colorSettings.gamma);
         WriteIniFloat(L"VideoAdjustments",L"Temperature",m_colorSettings.temperature);
         WriteIniFloat(L"VideoAdjustments",L"Tint",m_colorSettings.tint);
-        // The dial lives in m_comparison but is grouped with the image adjustments here
-        // because the adjustments dialog owns its control and its reset.
+        // The Mix lives in [Comparison] Mix. NeuralStrength is still written with the same
+        // value so that an older build reading this file shows the picture this one did.
         WriteIniFloat(L"VideoAdjustments",L"NeuralStrength",m_comparison.strength);
         WritePrivateProfileStringW(L"NeuralGuides",L"MotionVectors",m_renderGuides.motionVectors?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"NeuralGuides",L"Depth",m_renderGuides.depth?L"1":L"0",SettingsPath().c_str());
@@ -3838,7 +3853,8 @@ private:
         WritePrivateProfileStringW(L"NeuralRender",L"ProcessingScale",std::to_wstring(m_processingScale).c_str(),SettingsPath().c_str());
         SaveNeuralSettings(SettingsPath(),m_neuralSettings);
         WritePrivateProfileStringW(L"Comparison",L"Mode",std::to_wstring(static_cast<int>(m_comparison.mode)).c_str(),SettingsPath().c_str());
-        WriteIniFloat(L"Comparison",L"Amount",m_comparison.amount);
+        WriteIniFloat(L"Comparison",L"Mix",m_comparison.strength);
+        WritePrivateProfileStringW(L"Comparison",L"Swap",m_comparison.swap?L"1":L"0",SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"SplitX",m_comparison.splitX);
         WriteIniFloat(L"Comparison",L"ZoomScale",m_comparison.zoomScale);
     }
@@ -3856,8 +3872,24 @@ private:
     // Without a resident pair there is no original to composite against, so the mode
     // degrades to Neural and the strength dial degrades to 1: a missing reference shows
     // today's picture instead of compositing the neural frame against a black texture.
-    ComparisonSettings EffectiveComparison()const{ComparisonSettings effective=m_comparison;if(!ComparisonModesAvailable()){effective.mode=ComparisonMode::Neural;effective.strength=1.0f;}return effective;}
-    static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Blend:return IDM_COMPARE_BLEND;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;default:return IDM_COMPARE_NEURAL;}}
+    // A held press on the picture shows the original in place of whatever the mode is,
+    // without changing the mode; see compare_gesture.
+    ComparisonSettings EffectiveComparison()const{
+        ComparisonSettings effective=m_comparison;
+        if(!ComparisonModesAvailable()){effective.mode=ComparisonMode::Neural;effective.strength=1.0f;return effective;}
+        if(m_peekOriginal)effective.mode=ComparisonMode::Original;
+        return effective;
+    }
+    // The modes the compare bar offers, in its order, which is also the order C steps
+    // through. Blend is not one of them: it was the Mix under another name.
+    static std::span<const ComparisonMode> CompareBarModes(){
+        static constexpr std::array modes{ComparisonMode::Neural,ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe};
+        return modes;
+    }
+    static const wchar_t* CompareModeLabelKey(ComparisonMode mode){
+        switch(mode){case ComparisonMode::Original:return L"compare.mode.original";case ComparisonMode::SplitVertical:return L"compare.mode.split";case ComparisonMode::Wipe:return L"compare.mode.wipe";default:return L"compare.mode.neural";}
+    }
+    static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Original:return IDM_COMPARE_ORIGINAL;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;default:return IDM_COMPARE_NEURAL;}}
     // Uploads the original member the presentation shader compares against.
     // Only modes that read the reference pay for the source-size copy, plus a strength
     // dial off its default, which composites against that same original.
@@ -3873,6 +3905,7 @@ private:
         // only while someone is actually comparing - a paused inspection, where
         // a CPU pass over one frame costs nothing anyone can perceive.
         if(effective.mode==ComparisonMode::Neural&&effective.strength==1.0f)return false;
+        EnsureLabelAtlas();
         if(original.layout==VideoPixelLayout::Nv12){
             Nv12ToBgraBt709Limited(original.bgra.data(),m_decoder.Width(),m_decoder.Height(),
                                    m_referenceBgra);
@@ -3895,9 +3928,10 @@ private:
     void ApplyComparison(bool refreshPaused=true){
         if(m_renderer){
             m_renderer->SetComparison(EffectiveComparison());
+            if(ComparisonModesAvailable())EnsureLabelAtlas();
             if(refreshPaused&&!m_playing&&!m_seeking){UploadPausedComparisonReference();if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
         }
-        SyncFeatureMenuState();
+        SyncFeatureMenuState();InvalidateCompareBar();
     }
     // A refused mode used to be indistinguishable from one that did nothing: the
     // menu item greys out, but a command that arrives while no pair is resident
@@ -3907,12 +3941,26 @@ private:
             LOG("Comparison mode refused: loaded="<<m_loaded<<" cachedPair="<<m_cachedPlayback<<" neuralView="<<m_neuralRequested);
             return;
         }
-        if(mode==ComparisonMode::Original)return;
         m_comparison.mode=mode;ApplyComparison();
         LOG("Comparison mode="<<static_cast<int>(mode)<<" splitX="<<m_comparison.splitX<<" zoom="<<m_comparison.zoomScale
             <<" reference="<<m_havePresentedPair);
     }
-    void AdjustBlendAmount(float delta){if(!ComparisonModesAvailable())return;m_comparison.amount=std::clamp(std::round((m_comparison.amount+delta)*10.0f)/10.0f,0.0f,1.0f);ApplyComparison();}
+    // The Mix is also the adjustments dialog's DLSS 5 mix slider; both drive this value.
+    void SetMix(float mix){
+        if(!ComparisonModesAvailable())return;
+        const float clamped=std::clamp(mix,0.0f,2.0f);if(clamped==m_comparison.strength)return;
+        m_comparison.strength=clamped;ApplyComparison();
+        if(m_adjustWnd)SyncAdjustmentControls(m_adjustWnd);
+    }
+    void AdjustMix(float delta){SetMix(compare_settings::StepMix(m_comparison.strength,delta));}
+    void ToggleSwap(){if(!ComparisonModesAvailable())return;m_comparison.swap=!m_comparison.swap;ApplyComparison();}
+    void CycleComparisonMode(bool reverse){
+        if(!ComparisonModesAvailable())return;
+        const auto modes=CompareBarModes();
+        const auto current=std::find(modes.begin(),modes.end(),m_comparison.mode);
+        const size_t index=current==modes.end()?0:size_t(current-modes.begin());
+        SetComparisonMode(modes[(index+(reverse?modes.size()-1:1))%modes.size()]);
+    }
     // The divider is an image-UV position; while zoomed the shader shows
     // uv=(screen-center)/zoom+center, so invert that to keep it under the pointer.
     void SetSplitFromRenderX(int x){
@@ -3932,17 +3980,41 @@ private:
         }else{m_comparison.zoomCenterX=0.5f;m_comparison.zoomCenterY=0.5f;}
         ApplyComparison();
     }
+    // A press on the picture: the divider, a drag, or the press-and-hold A/B; see
+    // compare_gesture for how the three are told apart.
     void RenderMouseDown(HWND source,LPARAM position){
         m_fullscreenKeyboardFocus=false;SetFocus(m_hwnd);
-        if(!SplitDragActive())return;
-        m_dragSplit=true;SetCapture(source);SetSplitFromRenderX(GET_X_LPARAM(position));
+        if(!ComparisonModesAvailable())return;
+        const POINT point{GET_X_LPARAM(position),GET_Y_LPARAM(position)};
+        ApplyGestureStep(compare_gesture::Press(m_gesture,point,SplitDragActive(),false),point);
+        m_dragSplit=SplitDragActive();SetCapture(source);
+        SetTimer(m_hwnd,kPeekTimerId,compare_gesture::kHoldMs,nullptr);
     }
     void RenderMouseMove(HWND source,LPARAM position){
         FullscreenPointerMoved(source,position);
         m_renderMouse={GET_X_LPARAM(position),GET_Y_LPARAM(position)};m_renderMouseKnown=true;
-        if(m_dragSplit&&GetCapture()==source)SetSplitFromRenderX(m_renderMouse.x);
+        // Not gated on holding the capture: losing it ends the press (RenderCaptureLost),
+        // so a press still in progress is the only thing this needs to know.
+        if(m_gesture.phase!=compare_gesture::Phase::Idle)
+            ApplyGestureStep(compare_gesture::Move(m_gesture,m_renderMouse,Dip(compare_gesture::kSlopDip)),m_renderMouse);
     }
-    void RenderMouseUp(HWND source){if(!m_dragSplit)return;m_dragSplit=false;if(GetCapture()==source)ReleaseCapture();}
+    void RenderMouseUp(HWND source){
+        KillTimer(m_hwnd,kPeekTimerId);
+        const bool pressed=m_gesture.phase!=compare_gesture::Phase::Idle;
+        ApplyGestureStep(compare_gesture::Release(m_gesture),m_renderMouse);
+        m_dragSplit=false;if(pressed&&GetCapture()==source)ReleaseCapture();
+    }
+    // Capture taken away mid-press (a menu, a dialog, alt-tab) ends the press the way a
+    // release would, so a peek can never outlive the button that started it.
+    void RenderCaptureLost(){KillTimer(m_hwnd,kPeekTimerId);m_dragSplit=false;ApplyGestureStep(compare_gesture::Release(m_gesture),m_renderMouse);}
+    void PeekHoldElapsed(){KillTimer(m_hwnd,kPeekTimerId);ApplyGestureStep(compare_gesture::HoldElapsed(m_gesture),m_renderMouse);}
+    void ApplyGestureStep(const compare_gesture::Step& step,POINT point){
+        // The peek ends before the divider moves, so the move that ends a hold already
+        // drags the divider it lands on.
+        if(step.endPeek&&m_peekOriginal){m_peekOriginal=false;ApplyComparison();}
+        if(step.setDivider&&SplitDragActive())SetSplitFromRenderX(point.x);
+        if(step.startPeek&&!m_peekOriginal){m_peekOriginal=true;ApplyComparison();LOG("Press-and-hold: showing the original.");}
+    }
 
     void SyncFeatureMenuState(){
         if(!m_hwnd)return;
@@ -4007,7 +4079,7 @@ private:
             }
             CheckMenuRadioItem(menu,IDM_ASPECT_FIT,IDM_ASPECT_FILL,m_fill?IDM_ASPECT_FILL:IDM_ASPECT_FIT,MF_BYCOMMAND);
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
-            app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_comparison.zoomScale>1.0f);
+            app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_comparison.zoomScale>1.0f,m_comparison.swap);
             DrawMenuBar(m_hwnd);
         }
     }
@@ -4899,7 +4971,7 @@ private:
             if(m==WM_MOUSEMOVE){a->RenderMouseMove(h,l);return 0;}
             if(m==WM_LBUTTONDOWN){a->RenderMouseDown(h,l);return 0;}
             if(m==WM_LBUTTONUP){a->RenderMouseUp(h);return 0;}
-            if(m==WM_CAPTURECHANGED){a->m_dragSplit=false;return 0;}
+            if(m==WM_CAPTURECHANGED){a->RenderCaptureLost();return 0;}
             if(m==WM_LBUTTONDBLCLK){a->ToggleFullscreen();return 0;}
             if(m==WM_MOUSEWHEEL||m==WM_KEYDOWN||m==WM_SYSKEYDOWN)return SendMessageW(a->m_hwnd,m,w,l);
             if(m==WM_DROPFILES)return SendMessageW(a->m_hwnd,m,w,l); // main window owns DragFinish().
@@ -4963,7 +5035,7 @@ private:
         // a settings preview still settling, or a neural toggle pressed during
         // a seek, would otherwise fire on the next file's first seek.
         CancelPausedSettingsPreview();m_previewShown=false;m_neuralToggleDeferred=false;m_livePaceConfirmedKey.clear();
-        m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_decodeNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
+        m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_decodeNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;m_gesture={};m_peekOriginal=false;m_dragMix=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_nextPairFrame.reset();m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
         m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();m_sourceCache.reset();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
@@ -6342,6 +6414,171 @@ private:
         return text;
     }
 
+    // --- The compare bar (compare_bar lays it out) ----------------------------------
+    // Square segments and one mark, after DESIGN.md: the selected mode is not a filled
+    // pill but a 2 px rule in the flag orange under its label, the one ink the site
+    // uses for the comparison seam. Everything else is the strip's own greys.
+    static constexpr COLORREF kCompareMark=RGB(255,106,26);
+    struct CompareHover{compare_bar::Part part=compare_bar::Part::None;int index=0;
+        friend bool operator==(const CompareHover&,const CompareHover&)=default;};
+    compare_bar::Layout CompareBarLayout()const{
+        RECT c{};GetClientRect(m_hwnd,&c);
+        return compare_bar::LayoutBar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom)-ControlHeight(),
+                                      ActiveWindowDpi(m_hwnd),CompareBarModes().size(),false);
+    }
+    void InvalidateCompareBar(){
+        if(!m_hwnd||!CompareBarVisible())return;
+        const RECT bar=CompareBarLayout().bar;InvalidateRect(m_hwnd,&bar,FALSE);
+    }
+    void SetCompareHover(CompareHover hover){if(hover==m_compareHover)return;m_compareHover=hover;InvalidateCompareBar();}
+    bool CompareBarPartEnabled(compare_bar::Part part)const{
+        switch(part){
+        case compare_bar::Part::ZoomOut:case compare_bar::Part::ZoomIn:return m_loaded&&m_renderer!=nullptr;
+        case compare_bar::Part::None:return false;
+        default:return ComparisonModesAvailable();
+        }
+    }
+    void CompareBarMouseMove(int x,int y){
+        if(m_dragMix&&GetCapture()==m_hwnd){SetMix(compare_bar::MixFromX(CompareBarLayout().mixTrack,x));return;}
+        if(!CompareBarVisible()){SetCompareHover({});return;}
+        const auto layout=CompareBarLayout();const auto* item=compare_bar::HitTest(layout,POINT{x,y});
+        SetCompareHover(item&&CompareBarPartEnabled(item->part)?CompareHover{item->part,item->index}:CompareHover{});
+    }
+    bool CompareBarMouseDown(int x,int y){
+        if(!CompareBarVisible())return false;
+        const auto layout=CompareBarLayout();
+        if(!PtIn(layout.bar,x,y))return false;
+        const auto* item=compare_bar::HitTest(layout,POINT{x,y});
+        // A press anywhere on the row is the row's, enabled or not, so it never falls
+        // through to a toolbar button that happens to sit under it.
+        if(!item||!CompareBarPartEnabled(item->part))return true;
+        switch(item->part){
+        case compare_bar::Part::Mode:SetComparisonMode(CompareBarModes()[size_t(item->index)]);break;
+        case compare_bar::Part::MixTrack:m_dragMix=true;SetCapture(m_hwnd);SetMix(compare_bar::MixFromX(layout.mixTrack,x));break;
+        case compare_bar::Part::ZoomOut:if(m_comparison.zoomScale>1.0f)ToggleZoom();break;
+        case compare_bar::Part::ZoomIn:if(m_comparison.zoomScale<=1.0f)ToggleZoom();break;
+        case compare_bar::Part::Swap:ToggleSwap();break;
+        default:break;
+        }
+        return true;
+    }
+    void DrawCompareSegment(HDC dc,RECT r,const std::wstring& label,bool enabled,bool selected,bool hover){
+        // One pixel of the strip between neighbours, so a run of segments reads as a
+        // segmented control without a border around each.
+        r.right-=1;
+        HBRUSH fill=CreateSolidBrush(hover&&enabled?ui_palette::Hover:ui_palette::Inactive);FillRect(dc,&r,fill);DeleteObject(fill);
+        SetTextColor(dc,!enabled?RGB(98,101,108):(selected?ui_palette::PrimaryText:ui_palette::SecondaryText));
+        RECT text=r;DrawTextW(dc,label.c_str(),-1,&text,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        if(selected){RECT mark{r.left,r.bottom-std::max(1,Dip(2)),r.right,r.bottom};HBRUSH ink=CreateSolidBrush(enabled?kCompareMark:RGB(98,101,108));FillRect(dc,&mark,ink);DeleteObject(ink);}
+    }
+    static std::wstring PercentText(float value){return std::to_wstring(int(std::lround(value*100.0f)))+L"%";}
+    void DrawCompareBar(HDC dc){
+        const auto layout=CompareBarLayout();
+        const bool available=ComparisonModesAvailable();
+        HPEN rule=CreatePen(PS_SOLID,1,RGB(40,42,46));const HGDIOBJ oldPen=SelectObject(dc,rule);
+        MoveToEx(dc,layout.bar.left,layout.bar.bottom-1,nullptr);LineTo(dc,layout.bar.right,layout.bar.bottom-1);
+        SelectObject(dc,oldPen);DeleteObject(rule);
+        SetBkMode(dc,TRANSPARENT);const HGDIOBJ oldFont=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
+        const auto hovered=[&](const compare_bar::Item& item){return m_compareHover.part==item.part&&m_compareHover.index==item.index;};
+        for(const auto& item:layout.items){
+            const bool enabled=CompareBarPartEnabled(item.part);
+            switch(item.part){
+            case compare_bar::Part::Mode:{
+                const ComparisonMode mode=CompareBarModes()[size_t(item.index)];
+                DrawCompareSegment(dc,item.bounds,T(CompareModeLabelKey(mode)),enabled,mode==m_comparison.mode,hovered(item));break;}
+            case compare_bar::Part::MixTrack:{
+                const RECT& t=item.bounds;const int mid=(t.top+t.bottom)/2,thick=std::max(1,Dip(2));
+                RECT line{t.left,mid-thick/2,t.right,mid-thick/2+thick};
+                HBRUSH track=CreateSolidBrush(enabled?RGB(94,98,105):RGB(64,67,72));FillRect(dc,&line,track);DeleteObject(track);
+                // 100%, the render untouched, is marked on the track.
+                const int centre=compare_bar::XFromMix(t,1.0f);RECT tick{centre,mid-Dip(5),centre+std::max(1,Dip(1)),mid+Dip(5)};
+                HBRUSH tb=CreateSolidBrush(ui_palette::SecondaryText);FillRect(dc,&tick,tb);DeleteObject(tb);
+                const int x=compare_bar::XFromMix(t,m_comparison.strength),knob=std::max(3,Dip(5));
+                RECT k{x-knob,mid-knob,x+knob,mid+knob};
+                HBRUSH kb=CreateSolidBrush(!enabled?RGB(98,101,108):(m_dragMix||hovered(item)?kCompareMark:ui_palette::PrimaryText));FillRect(dc,&k,kb);DeleteObject(kb);
+                break;}
+            case compare_bar::Part::ZoomOut:DrawCompareSegment(dc,item.bounds,L"\u2212",enabled&&m_comparison.zoomScale>1.0f,false,hovered(item));break;
+            case compare_bar::Part::ZoomIn:DrawCompareSegment(dc,item.bounds,L"+",enabled&&m_comparison.zoomScale<=1.0f,false,hovered(item));break;
+            case compare_bar::Part::Swap:DrawCompareSegment(dc,item.bounds,T(L"compare.swap"),enabled,m_comparison.swap,hovered(item));break;
+            default:break;
+            }
+        }
+        SetTextColor(dc,available?ui_palette::SecondaryText:RGB(98,101,108));
+        RECT mixLabel=layout.mixLabel;DrawTextW(dc,T(L"compare.mix").c_str(),-1,&mixLabel,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        SetTextColor(dc,available?ui_palette::PrimaryText:RGB(98,101,108));
+        RECT mixValue=layout.mixValue;DrawTextW(dc,PercentText(m_comparison.strength).c_str(),-1,&mixValue,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        SetTextColor(dc,m_loaded&&m_renderer?ui_palette::PrimaryText:RGB(98,101,108));
+        RECT zoomValue=layout.zoomValue;DrawTextW(dc,(m_comparison.zoomScale>1.0f?std::wstring(L"2\u00d7"):T(L"compare.zoom.fit")).c_str(),-1,&zoomValue,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        if(layout.hint.right>layout.hint.left){
+            SetTextColor(dc,ui_palette::SecondaryText);RECT hint=layout.hint;
+            DrawTextW(dc,T(available?L"compare.hint.hold":L"compare.hint.unavailable").c_str(),-1,&hint,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        }
+        SelectObject(dc,oldFont);
+    }
+    // The tags the compositor draws on the picture, rendered here because GDI is where
+    // the player's text already comes from: uppercase, on a near-black plate with the
+    // flag rule down its left edge, DESIGN.md's provenance tag. Premultiplied, one row
+    // per tag, at the window's DPI; see compare_labels::Premultiply for the alpha.
+    struct LabelAtlasPixels{std::vector<uint8_t> pixels;uint32_t width{},height{},rowHeight{};std::array<uint32_t,4> widths{};};
+    std::array<std::wstring,4> LabelAtlasTexts()const{return{T(L"compare.tag.original"),T(L"compare.tag.dlss"),std::wstring{},std::wstring{}};}
+    LabelAtlasPixels BuildLabelAtlas(UINT dpi)const{
+        LabelAtlasPixels atlas;
+        const auto texts=LabelAtlasTexts();
+        const auto scale=[&](int dip){return MulDiv(dip,static_cast<int>(dpi?dpi:USER_DEFAULT_SCREEN_DPI),USER_DEFAULT_SCREEN_DPI);};
+        const int rowHeight=scale(22),rule=std::max(2,scale(2)),padLeft=rule+scale(8),padRight=scale(8);
+        HDC screen=GetDC(nullptr);HDC dc=CreateCompatibleDC(screen);ReleaseDC(nullptr,screen);
+        if(!dc)return atlas;
+        HFONT font=CreateFontW(-scale(12),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
+        const HGDIOBJ oldFont=SelectObject(dc,font?font:GetStockObject(DEFAULT_GUI_FONT));
+        SetTextCharacterExtra(dc,std::max(1,scale(1)));
+        std::array<SIZE,4> extents{};int width=1;
+        for(size_t row=0;row<texts.size();++row){
+            if(texts[row].empty())continue;
+            GetTextExtentPoint32W(dc,texts[row].c_str(),int(texts[row].size()),&extents[row]);
+            atlas.widths[row]=uint32_t(padLeft+extents[row].cx+padRight);width=std::max(width,int(atlas.widths[row]));
+        }
+        const int height=rowHeight*int(texts.size());
+        BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+        void* bits=nullptr;HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+        if(!bitmap||!bits){SelectObject(dc,oldFont);if(font)DeleteObject(font);if(bitmap)DeleteObject(bitmap);DeleteDC(dc);return atlas;}
+        const HGDIOBJ oldBitmap=SelectObject(dc,bitmap);
+        const compare_labels::Bgra plate{6,5,5,255},ink{232,235,236,255},mark{26,106,255,255};
+        RECT all{0,0,width,height};HBRUSH plateBrush=CreateSolidBrush(RGB(plate.r,plate.g,plate.b));FillRect(dc,&all,plateBrush);DeleteObject(plateBrush);
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(ink.r,ink.g,ink.b));
+        for(size_t row=0;row<texts.size();++row)
+            if(!texts[row].empty())TextOutW(dc,padLeft,int(row)*rowHeight+(rowHeight-extents[row].cy)/2,texts[row].c_str(),int(texts[row].size()));
+        GdiFlush();
+        atlas.pixels.assign(size_t(width)*size_t(height)*4u,0);
+        const auto* source=static_cast<const compare_labels::Bgra*>(bits);
+        auto* target=reinterpret_cast<compare_labels::Bgra*>(atlas.pixels.data());
+        for(int y=0;y<height;++y){
+            const size_t row=size_t(y/rowHeight);
+            for(int x=0;x<int(atlas.widths[row]);++x){
+                const size_t at=size_t(y)*size_t(width)+size_t(x);
+                target[at]=x<rule?mark:compare_labels::Premultiply(source[at],plate,ink,0.78f);
+            }
+        }
+        SelectObject(dc,oldBitmap);DeleteObject(bitmap);SelectObject(dc,oldFont);if(font)DeleteObject(font);DeleteDC(dc);
+        atlas.width=uint32_t(width);atlas.height=uint32_t(height);atlas.rowHeight=uint32_t(rowHeight);
+        return atlas;
+    }
+    // Uploads the tags when the renderer has none or the DPI or the text changed. A
+    // synchronous upload (it drains the queue), so it runs when a comparison starts
+    // using the reference, not per frame; a renderer that refused one is not asked
+    // again until something changes.
+    // Called per presented pair while comparing, so the common case is two compares and
+    // no allocation: the texts are only rebuilt when m_labelTextRevision says they moved.
+    void EnsureLabelAtlas(){
+        if(!m_renderer||!m_hwnd)return;
+        const UINT dpi=ActiveWindowDpi(m_hwnd);
+        const bool current=m_labelAtlasDpi==dpi&&m_labelAtlasRevision==m_labelTextRevision;
+        if(current&&(m_renderer->HasLabelAtlas()||m_labelAtlasRefusedBy==m_renderer.get()))return;
+        const auto atlas=BuildLabelAtlas(dpi);
+        const bool uploaded=!atlas.pixels.empty()&&m_renderer->SetLabelAtlas(atlas.pixels.data(),atlas.width,atlas.height,atlas.rowHeight,atlas.widths);
+        m_labelAtlasDpi=dpi;m_labelAtlasRevision=m_labelTextRevision;m_labelAtlasRefusedBy=uploaded?nullptr:m_renderer.get();
+        if(!uploaded)LOG("Comparison tags unavailable: the label atlas was not uploaded ("<<atlas.width<<"x"<<atlas.height<<").");
+    }
+
     void RenderUi(HDC dc,const RECT& c){
         m_neuralCancelBounds={};
         HBRUSH windowBg=CreateSolidBrush(ui_palette::Window);FillRect(dc,&c,windowBg);DeleteObject(windowBg);
@@ -6432,6 +6669,7 @@ private:
         }
         if(!ControlsVisible())return;
         RECT bar{0,c.bottom-ControlHeight(),c.right,c.bottom};HBRUSH bg=CreateSolidBrush(ui_palette::ControlSurface);FillRect(dc,&bar,bg);DeleteObject(bg);HPEN line=CreatePen(PS_SOLID,1,RGB(54,56,61));auto op=SelectObject(dc,line);MoveToEx(dc,0,bar.top,nullptr);LineTo(dc,c.right,bar.top);SelectObject(dc,op);DeleteObject(line);
+        if(CompareBarVisible())DrawCompareBar(dc);
         const auto toolbarItems=ToolbarItems();
         for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,item.compact,content.working);}
         const auto volumeRect=LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),toolbarItems);if(volumeRect){const RECT& vr=*volumeRect;HPEN vp=CreatePen(PS_SOLID,std::max(1,Dip(4)),RGB(94,98,105));op=SelectObject(dc,vp);MoveToEx(dc,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(dc,vr.right,(vr.top+vr.bottom)/2);SelectObject(dc,op);DeleteObject(vp);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));const int knob=std::max(3,Dip(5));DrawSolidEllipse(dc,RECT{vx-knob,(vr.top+vr.bottom)/2-knob,vx+knob,(vr.top+vr.bottom)/2+knob},RGB(230,232,235),"Volume knob");}
@@ -8951,6 +9189,7 @@ private:
         if(ActivityBusy()&&PtIn(m_neuralCancelBounds,x,y)){if(m_liveSession)StopLiveNeuralSession(true);else if(NeuralJobActive())CancelNeuralJob();else CancelYouTubeResolution();return;}
         if(!ControlsVisible())return;
         if(!m_loaded){const auto items=FocusableItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action==ToolbarAction::None&&ActivateStartScreen(x,y))return;if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);break;}}return;}
+        if(CompareBarMouseDown(x,y))return;
         // A source with no length has no position to map a click to - every
         // click would seek to the start - so its bar is greyed and inert;
         // Left and Right still seek, which is what the hover says.
@@ -8970,6 +9209,7 @@ private:
             RequestSeek(target,m_dragWasPlaying);return;
         }
         if(m_dragVolume){m_dragVolume=false;if(GetCapture()==m_hwnd)ReleaseCapture();return;}
+        if(m_dragMix){m_dragMix=false;if(GetCapture()==m_hwnd)ReleaseCapture();return;}
         const ToolbarAction pressed=m_pressedToolbarAction;if(pressed==ToolbarAction::None)return;
         m_pressedToolbarAction=ToolbarAction::None;if(GetCapture()==m_hwnd)ReleaseCapture();
         if(!m_loaded){const auto items=FocusableItems();for(const auto& item:items)if(item.action==pressed){InvalidateRect(m_hwnd,&item.bounds,FALSE);if(PtIn(item.bounds,x,y)&&ToolbarActionEnabled(pressed))ActivateToolbarAction(pressed,item.bounds);break;}return;}
@@ -9135,7 +9375,7 @@ private:
         case dark_mode::WM_UAHDRAWMENU:if(DrawDarkMenuBar(h,reinterpret_cast<const dark_mode::UAHMENU*>(l)))return TRUE;break;
         case dark_mode::WM_UAHDRAWMENUITEM:if(DrawDarkMenuBarItem(h,reinterpret_cast<const dark_mode::UAHDRAWMENUITEM*>(l)))return TRUE;break;
         case WM_NCPAINT:case WM_NCACTIVATE:{const LRESULT result=DefWindowProcW(h,m,w,l);PaintMenuBarSeparator(h);return result;}
-        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}break;
+        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
         case WM_ENTERSIZEMOVE:StartModalTick();break;
@@ -9161,7 +9401,10 @@ private:
             const auto* suggested=reinterpret_cast<const RECT*>(l);
             if(suggested){const RECT target=ClampWindowRectToMinimumTrackSize(*suggested,MinimumPlayerWindowTrackSize(h,dpi));SetWindowPos(h,nullptr,target.left,target.top,target.right-target.left,target.bottom-target.top,SWP_NOZORDER|SWP_NOACTIVATE);}
             InvalidateMonitorMode();
-            Layout();InvalidateRect(h,nullptr,FALSE);return 0;
+            Layout();InvalidateRect(h,nullptr,FALSE);
+            // The tags on the picture are drawn at the window's DPI.
+            if(ComparisonModesAvailable())ApplyComparison();
+            return 0;
         }
         // A mode change on the monitor the window is already on keeps the same
         // HMONITOR, so the handle comparison cannot see it and the cached mode
@@ -9176,11 +9419,11 @@ private:
             if(ScreenToClient(h,&point))FullscreenPointerMoved(h,MAKELPARAM(point.x,point.y));
             break;
         }
-        case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();ScrubToPreview();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));UpdateTimelineHover(m_mouseX,m_mouseY);if(!m_loaded)UpdateStartHover(m_mouseX,m_mouseY);return 0;}
-        case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);if(!m_dragSeek)ClearTimelineHover();return 0;
+        case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}CompareBarMouseMove(m_mouseX,m_mouseY);if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();ScrubToPreview();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));UpdateTimelineHover(m_mouseX,m_mouseY);if(!m_loaded)UpdateStartHover(m_mouseX,m_mouseY);return 0;}
+        case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);SetCompareHover({});if(!m_dragSeek)ClearTimelineHover();return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
-        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();UpdateTimelineHover(m_mouseX,m_mouseY);}if(m_dragVolume)m_dragVolume=false;if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
+        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();UpdateTimelineHover(m_mouseX,m_mouseY);}if(m_dragVolume)m_dragVolume=false;m_dragMix=false;if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
         case WM_SETFOCUS:InvalidateControls();return 0;
         case WM_KILLFOCUS:InvalidateControls();return 0;
         case WM_DROPFILES:{
@@ -9265,8 +9508,11 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         case IDM_KEYBOARD_SHORTCUTS:ToggleShortcutSheet();break;
         case IDM_COMPARE_TOGGLE:ToggleSideBySide();break;
         case IDM_UPDATE_AVAILABLE:ActivateUpdateBadge();break;
-        case IDM_COMPARE_NEURAL:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Blend);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
-        case IDM_COMPARE_BLEND_LESS:AdjustBlendAmount(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustBlendAmount(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
+        // IDM_COMPARE_BLEND has no menu row any more; anything that still sends it gets
+        // the view Blend became, the neural frame at the Mix.
+        case IDM_COMPARE_NEURAL:case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_ORIGINAL:SetComparisonMode(ComparisonMode::Original);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
+        case IDM_COMPARE_BLEND_LESS:AdjustMix(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustMix(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
+        case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_NEXT_MODE:CycleComparisonMode(false);break;case IDM_COMPARE_PREVIOUS_MODE:CycleComparisonMode(true);break;
         }
     }
 
@@ -9547,6 +9793,17 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     std::map<HWND,HFONT> m_dialogFonts;
     POINT m_renderMouse{};
     bool m_renderMouseKnown=false,m_dragSplit=false;
+    // The press on the picture in progress, and whether it is holding the original up.
+    compare_gesture::State m_gesture{};
+    bool m_peekOriginal=false;
+    // The compare bar: the part under the pointer, and a Mix drag in progress.
+    CompareHover m_compareHover{};
+    bool m_dragMix=false;
+    // What the renderer's tag atlas was drawn for; see EnsureLabelAtlas. Whatever
+    // changes a tag's text bumps m_labelTextRevision.
+    UINT m_labelAtlasDpi=0;
+    uint64_t m_labelAtlasRevision=0,m_labelTextRevision=1;
+    const D3D12Renderer* m_labelAtlasRefusedBy=nullptr;
     // Settings the playing cache entry was rendered with (its receipt has the full record).
     NeuralSettings m_cachedSettings;
     GuideControls m_cachedGuides;

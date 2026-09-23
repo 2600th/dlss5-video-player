@@ -166,13 +166,30 @@ network.
 
 ### Compare the neural result
 
-**Video > Compare** works during cached playback on the neural view. **Blend**
-mixes the original into the neural frame (`[` and `]` step the amount by 0.1);
-**Split** and **Wipe** show the original left of a divider you drag in the
-image, Wipe adding a white line. `Z` zooms 2x around the mouse position in the
-image. Pause and step with `.` to judge a single frame; `D` still switches the
-whole view between original and neural. The modes gray out on the original
-view or outside cached playback and are remembered in `[Comparison]`.
+The **compare bar** sits above the toolbar whenever a video is loaded, and works
+during cached playback on the neural view (it grays out otherwise; `D` turns the
+neural view on). It holds the mode, the Mix, the zoom and the swap, which are
+also under **Video > Compare**:
+
+- **DLSS 5** shows the neural frame, **Original** the source frame. `C` steps
+  through the modes and `Shift+C` steps back.
+- **Split** and **Wipe** show the original left of a divider; click or drag in
+  the picture to move it. Wipe adds a white line. Both are tagged **ORIGINAL**
+  and **DLSS 5** in the picture's top corners. **Swap** (`X`) puts the original
+  on the right.
+- **Mix** is how much of the neural result you see: 100% is the render
+  untouched, lower mixes back toward the original, higher extends the model's
+  own change. Drag the slider or press `[` and `]` (a tenth per press). It
+  costs a present, not a re-render, and it is the same value as **DLSS 5 mix**
+  in Image adjustments. It replaces both the old Blend mode and the Neural
+  strength slider: a saved Blend opens as the neural view at the same Mix.
+- **Hold the left mouse button still on the picture** for 150 ms to see the
+  original in place of any mode; release to go back. Moving the pointer while
+  holding turns the hold into the drag it would have been.
+
+`Z` zooms 2x around the mouse position in the image. Pause and step with `.` to
+judge a single frame; `D` still switches the whole view between original and
+neural. The mode, Mix, split position and swap are remembered in `[Comparison]`.
 
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
 local structure, local tone, skin structure, style and automatic mask, the
@@ -331,8 +348,8 @@ not a backup.
 
 `DLSSVideoPlayer.ini` beside the executable stores volume, mute, fit/fill,
 original/neural view, upscaling preference and output size, YouTube quality,
-image adjustments, comparison mode, neural settings, processing scale and guide
-switches. It
+image adjustments, comparison mode and Mix, neural settings, processing scale and
+guide switches. It
 also keeps `[NeuralPace]`: one measured steady-state render pace per source
 size (`Samples=WxH:ms;...`) for the detected GPU, which the keep-up forecast
 predicts from - exactly at a measured size, along this GPU's own fitted line

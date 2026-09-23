@@ -3,6 +3,7 @@
 #include <wrl/client.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -138,7 +139,9 @@ struct CapturedVideoFrame {
     FrameIdentity id;
 };
 
-// Which member of an original/neural pair the presentation shader shows.
+// Which member of an original/neural pair the presentation shader shows. The values
+// are persisted ([Comparison] Mode) and are the shader's mode numbers, so new ones
+// only ever go on the end.
 enum class ComparisonMode { Neural, Original, Blend, SplitVertical, Wipe };
 
 struct ComparisonSettings {
@@ -146,13 +149,29 @@ struct ComparisonSettings {
     float amount = 0.5f;       // Blend: lerp(original, neural, amount)
     float splitX = 0.5f;       // SplitVertical/Wipe divider, in image UV [0,1]
     // Presentation-only neural strength dial: the composite of the neural frame against
-    // the original, which costs a present instead of a re-render.
+    // the original, which costs a present instead of a re-render. The player calls it
+    // the Mix and it is the one control for it: Blend at `amount` and a strength of
+    // `amount` were the same lerp(original, neural, x) in the shader.
     float strength = 1.0f;     // 0..2, 1 shows the neural frame untouched
     float ratioGuard = 2.0f;   // >= 1: two-sided bound on the luminance ratio above 1
     float zoomScale = 1.0f;    // >= 1 magnifies around the zoom center
     float zoomCenterX = 0.5f;
     float zoomCenterY = 0.5f;
+    // The original on the right of the split and wipe instead of the left.
+    bool swap = false;
+    // "Original" / "DLSS 5" tags drawn on the picture wherever both members share it.
+    // Drawn from the atlas SetLabelAtlas uploads; without one nothing is drawn.
+    bool labels = true;
 };
+
+// Whether a comparison needs the window compositor (PSPresentScaled) even when the
+// window is exactly the output's size, where the present would otherwise be PSPresent
+// at 1:1. PSPresent is the cache capture's program and is never changed, so anything
+// it cannot draw - the labels, the swap - lives in the compositor alone.
+inline bool ComparisonNeedsCompositor(const ComparisonSettings& comparison)
+{
+    return comparison.mode != ComparisonMode::Neural && comparison.mode != ComparisonMode::Blend;
+}
 
 class D3D12Renderer {
 public:
@@ -384,6 +403,14 @@ public:
     bool UploadReferenceFrame(const uint8_t* bgra, size_t bytes);
     // A reference has been uploaded, or is queued behind the next submission.
     bool HasReference() const { return m_hasReference || m_referencePending; }
+    // The tags the compositor draws on the picture: premultiplied BGRA, one row of
+    // `rowHeight` pixels per tag, in the order Original, DLSS 5, then two spare rows,
+    // each `rowWidths[i]` pixels wide from the left edge. Drawn by the caller at the
+    // window's DPI; uploaded synchronously, so it drains the queue - call it when the
+    // text or the DPI changes, not per frame. False leaves the previous atlas in use.
+    bool SetLabelAtlas(const uint8_t* premultipliedBgra, uint32_t width, uint32_t height,
+                       uint32_t rowHeight, const std::array<uint32_t, 4>& rowWidths);
+    bool HasLabelAtlas() const { return m_labelAtlas != nullptr; }
     // Something the present pass reads - colours, comparison, debug view, the
     // reference - changed since the last present was attempted. A paused player
     // presents only then, instead of re-presenting the same image at 60 Hz.
@@ -438,10 +465,16 @@ private:
     static_assert(FrameCount % ReferenceUploads == 0);
     // Root signature: [0] SRV table t0 (current view), [1] SRV table t1 (comparison
     // reference) and t2 (backward flow, read by the flow resolve alone), [2]
-    // PresentConstantCount 32-bit constants (Params).
+    // PresentConstantCount 32-bit constants (Params), [3] SRV table t3..t4 (the
+    // compositor's mask and label atlas), [4] ComposeConstantCount constants (Compose).
+    // The last two are read by PSPresentScaled alone, and appended so that the first
+    // three keep the indices every other pass binds.
     static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
+    static constexpr uint32_t RootOverlay = 3, RootCompose = 4;
     // 16 present parameters plus the capture pass's source texel size.
     static constexpr uint32_t PresentConstantCount = 20;
+    // Pane, Label, LabelW, Target; see the Compose cbuffer in D3D12Renderer.cpp.
+    static constexpr uint32_t ComposeConstantCount = 16;
     static constexpr uint32_t ReferenceSRV = 6;
     // NV12 source planes, bound at t0/t1 for the one conversion draw.
     static constexpr uint32_t SourceLumaSRV = 7, SourceChromaSRV = 8;
@@ -450,7 +483,10 @@ private:
     // motion. The cost and reverse slots hold null descriptors when the engine offered
     // neither, because the reference table spans both of them.
     static constexpr uint32_t NvofFlowSRV = 9, NvofCostSRV = 10, NvofBackFlowSRV = 11;
-    static constexpr uint32_t SRVCount = 12;
+    // The compositor's overlay table: a spare slot (t3) and the label atlas (t4). Both
+    // hold null views until something is uploaded.
+    static constexpr uint32_t OverlaySRV = 12, LabelSRV = 13;
+    static constexpr uint32_t SRVCount = 14;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source).
     static constexpr uint32_t DecodedRTV = FrameCount + 5, RTVCount = FrameCount + 6;
@@ -518,9 +554,18 @@ private:
     // read a capture back before it can decide whether to submit the same frame again.
     bool CaptureEvaluatedFrame(CapturedVideoFrame& capture);
     void RecordReferenceUpload(ID3D12GraphicsCommandList* cmd, uint32_t slot);
+    // targetWidth/targetHeight: the backbuffer the compositor draws into; the capture
+    // passes pass neither, and PSPresent reads no Compose constant anyway.
     void SetPresentConstants(ID3D12GraphicsCommandList* cmd, const ColorSettings& colors,
                              const ComparisonSettings& comparison, bool useReference,
-                             uint32_t targetWidth = 0);
+                             uint32_t targetWidth = 0, uint32_t targetHeight = 0);
+    // Creates `texture`, fills it from tightly packed `pixels` and publishes its view at
+    // `srvIndex`, synchronously: the queue is drained before the view is rewritten and
+    // again after the copy, so the upload buffer can go. For the compositor's rare
+    // uploads (the label atlas), never for per-frame data.
+    bool UploadStaticTexture(Microsoft::WRL::ComPtr<ID3D12Resource>& texture, DXGI_FORMAT format,
+                             const uint8_t* pixels, uint32_t width, uint32_t height,
+                             uint32_t bytesPerPixel, uint32_t srvIndex, const wchar_t* name);
     // What the backbuffer pass draws into: the window-sized backbuffer through the
     // scaled present, or - when the sizes agree, or the renderer does not follow its
     // window - the output's size through PSPresent, exactly as before.
@@ -608,6 +653,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback[CaptureSlots];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_reference;   // source-size BGRA original member
     Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[ReferenceUploads];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_labelAtlas;  // premultiplied BGRA tags, see SetLabelAtlas
+    uint32_t m_labelAtlasW = 0, m_labelAtlasH = 0, m_labelRowHeight = 0;
+    std::array<uint32_t, 4> m_labelWidths{};
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap; // 2 timestamps per frame slot
     Microsoft::WRL::ComPtr<ID3D12Resource> m_timestampReadback;
 

@@ -92,6 +92,16 @@ inline constexpr UINT IDM_COMPARE_WIPE = 423;
 inline constexpr UINT IDM_COMPARE_ZOOM = 424;
 inline constexpr UINT IDM_COMPARE_BLEND_LESS = 425;
 inline constexpr UINT IDM_COMPARE_BLEND_MORE = 426;
+// The modes are one radio group in the Compare popup. CheckMenuRadioItem works on
+// the POSITIONS between its first and last command, so the group is contiguous in
+// the popup - IDM_COMPARE_NEURAL first, kLastComparisonModeCommand last - whatever
+// the ids are. IDM_COMPARE_BLEND keeps its number but has no row: Blend became the
+// Mix, which [ and ] still step.
+inline constexpr UINT IDM_COMPARE_ORIGINAL = 427;
+inline constexpr UINT IDM_COMPARE_SWAP = 428;
+inline constexpr UINT IDM_COMPARE_NEXT_MODE = 429;
+inline constexpr UINT IDM_COMPARE_PREVIOUS_MODE = 430;
+inline constexpr UINT kLastComparisonModeCommand = IDM_COMPARE_WIPE;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 inline constexpr UINT IDM_CLEAR_NEURAL_CACHE = 451;
 inline constexpr UINT IDM_OPEN_RENDER_RECEIPT = 452;
@@ -162,12 +172,13 @@ bool SetMenuCommandText(HMENU menu, UINT command, const std::wstring& text);
 bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool rangeRenderAvailable,
                                     bool jobActive, bool jobPaused, bool receiptAvailable);
 // Video > Compare: the mode radio group is enabled only while modesAvailable;
-// selectedMode is one of IDM_COMPARE_NEURAL..IDM_COMPARE_WIPE.
+// selectedMode is one of the mode commands (IDM_COMPARE_NEURAL, _ORIGINAL, _SPLIT,
+// _WIPE); anything else checks IDM_COMPARE_NEURAL.
 bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable,
-                          UINT selectedMode, bool zoomed);
+                          UINT selectedMode, bool zoomed, bool swapped = false);
 // Menu command for a plain-key accelerator of the range, preview, neural
 // settings and comparison items (I, O, Shift+I/O, Ctrl+G, F, Shift+F, Ctrl+R,
-// Ctrl+N, Z, [ and ]); nullopt when the key is not one of them.
+// Ctrl+N, Z, [ and ], X, C and Shift+C); nullopt when the key is not one of them.
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown);
 
 // One row of the keyboard cheat sheet: the menu it lives in (or "Keyboard"

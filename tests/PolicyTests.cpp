@@ -60,6 +60,10 @@
 #include "DarkModePolicy.h"
 #include "MediaTransportPolicy.h"
 #include "StartScreenPolicy.h"
+#include "CompareBarPolicy.h"
+#include "CompareViewPolicy.h"
+#include <d3dcompiler.h>
+#include <d3d12shader.h>
 #ifdef small
 #undef small
 #endif
@@ -1007,7 +1011,8 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
     // Runs of spaces in a menu's accelerator column close up on the sheet.
     CHECK(has(L"Playback", L"Play / Pause", L"Space (Overlay: Ctrl+Alt+Space)"));
     // A submenu's commands are found, under the top-level menu they live in.
-    CHECK(has(L"Video", L"Blend less", L"["));
+    CHECK(has(L"Video", L"Mix less", L"["));
+    CHECK(has(L"Video", L"Next mode", L"C"));
     CHECK(has(L"DLSS", L"Convert marked clip to neural video", L"Ctrl+R"));
     CHECK(has(L"Advanced", L"Recreate NGX / re-hook DLSS 5", L"F6"));
     CHECK(has(L"Help", L"Keyboard shortcuts", L"? / F1"));
@@ -1952,12 +1957,15 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(compare != nullptr);
     std::vector<MenuEntry> compareEntries;
     if (compare) collect_menu_entries(compare, compareEntries);
-    CHECK(has_menu_entry(compareEntries, L"Neural", app_menu::IDM_COMPARE_NEURAL));
-    CHECK(has_menu_entry(compareEntries, L"Blend", app_menu::IDM_COMPARE_BLEND));
+    CHECK(has_menu_entry(compareEntries, L"DLSS 5", app_menu::IDM_COMPARE_NEURAL));
+    CHECK(has_menu_entry(compareEntries, L"Original", app_menu::IDM_COMPARE_ORIGINAL));
     CHECK(has_menu_entry(compareEntries, L"Split", app_menu::IDM_COMPARE_SPLIT));
     CHECK(has_menu_entry(compareEntries, L"Wipe", app_menu::IDM_COMPARE_WIPE));
-    CHECK(has_menu_entry(compareEntries, L"Blend less\t[", app_menu::IDM_COMPARE_BLEND_LESS));
-    CHECK(has_menu_entry(compareEntries, L"Blend more\t]", app_menu::IDM_COMPARE_BLEND_MORE));
+    // Blend was the Mix under another name; its row is gone and [ and ] step the Mix.
+    CHECK(!has_menu_text(compareEntries, L"Blend"));
+    CHECK(has_menu_entry(compareEntries, L"Mix less\t[", app_menu::IDM_COMPARE_BLEND_LESS));
+    CHECK(has_menu_entry(compareEntries, L"Mix more\t]", app_menu::IDM_COMPARE_BLEND_MORE));
+    CHECK(has_menu_entry(compareEntries, L"Swap sides\tX", app_menu::IDM_COMPARE_SWAP));
 
     // A fresh bar has nothing loaded: every range, render and compare item is grayed.
     const auto grayed = [&](UINT command) {
@@ -1968,7 +1976,7 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     };
     for (const UINT command : {app_menu::IDM_MARK_IN, app_menu::IDM_GOTO_TIMECODE, app_menu::IDM_PREVIEW_FRAME,
                                app_menu::IDM_RENDER_WHOLE, app_menu::IDM_PAUSE_NEURAL_RENDER, app_menu::IDM_OPEN_RENDER_RECEIPT,
-                               app_menu::IDM_COMPARE_BLEND, app_menu::IDM_COMPARE_ZOOM})
+                               app_menu::IDM_COMPARE_ORIGINAL, app_menu::IDM_COMPARE_SWAP, app_menu::IDM_COMPARE_ZOOM})
         CHECK(grayed(command));
     CHECK(checked(app_menu::IDM_COMPARE_NEURAL));
 
@@ -1993,6 +2001,15 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(!grayed(app_menu::IDM_COMPARE_ZOOM)); // Zoom is view-independent.
     CHECK(checked(app_menu::IDM_COMPARE_NEURAL)); // Unknown selection falls back to Neural.
     CHECK(!checked(app_menu::IDM_COMPARE_ZOOM));
+    // The group is positional: Original sits between Neural and Split in the popup
+    // with an id outside that range, and still takes the one radio mark.
+    CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_ORIGINAL, false, true));
+    CHECK(checked(app_menu::IDM_COMPARE_ORIGINAL));
+    CHECK(!checked(app_menu::IDM_COMPARE_NEURAL));CHECK(!checked(app_menu::IDM_COMPARE_SPLIT));
+    CHECK(checked(app_menu::IDM_COMPARE_SWAP));
+    CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_WIPE, false, false));
+    CHECK(checked(app_menu::IDM_COMPARE_WIPE));CHECK(!checked(app_menu::IDM_COMPARE_ORIGINAL));
+    CHECK(!checked(app_menu::IDM_COMPARE_SWAP));
 
     using app_menu::CommandForPlayerKey;
     CHECK(CommandForPlayerKey('I', false, false) == app_menu::IDM_MARK_IN);
@@ -2007,6 +2024,11 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(CommandForPlayerKey('Z', false, false) == app_menu::IDM_COMPARE_ZOOM);
     CHECK(CommandForPlayerKey(VK_OEM_4, false, false) == app_menu::IDM_COMPARE_BLEND_LESS);
     CHECK(CommandForPlayerKey(VK_OEM_6, false, false) == app_menu::IDM_COMPARE_BLEND_MORE);
+    CHECK(CommandForPlayerKey('X', false, false) == app_menu::IDM_COMPARE_SWAP);
+    CHECK(CommandForPlayerKey('C', false, false) == app_menu::IDM_COMPARE_NEXT_MODE);
+    CHECK(CommandForPlayerKey('C', false, true) == app_menu::IDM_COMPARE_PREVIOUS_MODE);
+    // Ctrl+Alt+C is the overlay hotkey for the adjustments; Ctrl+C stays unclaimed.
+    CHECK(!CommandForPlayerKey('C', true, false).has_value());
     // Existing single-letter and Ctrl accelerators keep their owners.
     for (const UINT key : {UINT('D'), UINT('S'), UINT('A'), UINT('M'), UINT('G'), UINT('R'), UINT('N'), UINT(VK_SPACE), UINT(VK_F6)})
         CHECK(!CommandForPlayerKey(key, false, false).has_value());
@@ -7436,6 +7458,198 @@ void present_scale_follows_the_window_only_where_it_should_test()
               std::string(static_cast<const char*>(scaled->GetBufferPointer()),scaled->GetBufferSize()));
 }
 
+// The compositor draws what the cache capture's PSPresent cannot - tags, a swapped
+// split - through a cbuffer (b1) and textures (t3, t4) of its own. fxc drops what an
+// entry point never reads, so PSPresent's program, which every cached render on disk
+// was made with, still binds exactly the four things it always did. Its reflection is
+// part of its bytecode, so this is a test that the capture program kept its shape.
+static std::vector<std::string> present_program_bindings(const char* entry)
+{
+    std::vector<std::string> names;
+    Microsoft::WRL::ComPtr<ID3DBlob> blob;
+    if(!D3D12RendererTestAccess::CompilePresentProgram(entry,blob)||!blob)return names;
+    Microsoft::WRL::ComPtr<ID3D12ShaderReflection> reflection;
+    if(FAILED(D3DReflect(blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&reflection))))return names;
+    D3D12_SHADER_DESC desc{};
+    if(FAILED(reflection->GetDesc(&desc)))return names;
+    for(UINT index=0;index<desc.BoundResources;++index){
+        D3D12_SHADER_INPUT_BIND_DESC bind{};
+        if(SUCCEEDED(reflection->GetResourceBindingDesc(index,&bind)))
+            names.push_back(std::string(bind.Name)+"@"+std::to_string(bind.BindPoint));
+    }
+    std::sort(names.begin(),names.end());
+    return names;
+}
+
+void compare_compositor_stays_out_of_the_capture_program_test()
+{
+    CHECK((present_program_bindings("PSPresent")==std::vector<std::string>{"Params@0","Ref@1","S@0","T@0"}));
+    for(const char* entry:{"PSConvert","PSCaptureLuma","PSCaptureChroma"}){
+        const auto bound=present_program_bindings(entry);
+        CHECK(!bound.empty());
+        for(const std::string& name:bound)CHECK(name.rfind("Compose@",0)!=0&&name.rfind("Labels@",0)!=0);
+    }
+    const auto scaled=present_program_bindings("PSPresentScaled");
+    CHECK(std::find(scaled.begin(),scaled.end(),"Compose@1")!=scaled.end());
+    CHECK(std::find(scaled.begin(),scaled.end(),"Labels@4")!=scaled.end());
+    // The window compositor takes over at 1:1 only for what PSPresent cannot draw.
+    using present_scale::Choose;
+    CHECK(!Choose(true,true,1920,1080,1920,1080,false).scaled);
+    auto target=Choose(true,true,1920,1080,1920,1080,true);
+    CHECK(target.scaled);CHECK_EQ(1920u,target.width);CHECK_EQ(1080u,target.height);
+    // Never for the offline carrier, which has no compositor and no window to follow.
+    CHECK(!Choose(false,false,1920,1080,1920,1080,true).scaled);
+    CHECK(!Choose(true,false,1920,1080,1920,1080,true).scaled);
+    ComparisonSettings comparison;
+    CHECK(!ComparisonNeedsCompositor(comparison));
+    comparison.mode=ComparisonMode::Blend;CHECK(!ComparisonNeedsCompositor(comparison));
+    for(const ComparisonMode mode:{ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe}){
+        comparison.mode=mode;CHECK(ComparisonNeedsCompositor(comparison));
+    }
+}
+
+// Press, drag and hold on the picture are three gestures that share one button.
+void compare_gesture_tells_press_drag_and_hold_apart_test()
+{
+    using namespace compare_gesture;
+    State state;
+    // A click in split or wipe puts the divider under the pointer at once, as always.
+    Step step=Press(state,POINT{100,100},true,false);
+    CHECK(step.setDivider);CHECK(!step.startPeek);
+    // Small moves still drag the divider, but it is not yet a drag...
+    step=Move(state,POINT{102,101},4);
+    CHECK(step.setDivider);CHECK(state.phase==Phase::Pressed);
+    // ...so holding still after them is a peek.
+    step=HoldElapsed(state);
+    CHECK(step.startPeek);CHECK(state.phase==Phase::Peeking);
+    // Wobble inside the slop keeps the peek; moving past it turns it into the drag.
+    CHECK(!Move(state,POINT{104,103},4).endPeek);
+    step=Move(state,POINT{120,100},4);
+    CHECK(step.endPeek);CHECK(step.setDivider);CHECK(state.phase==Phase::Dragging);
+    step=Release(state);
+    CHECK(!step.endPeek);CHECK(state.phase==Phase::Idle);
+    // A drag that pauses is still a drag: the hold timer firing late does nothing.
+    Press(state,POINT{0,0},true,false);
+    Move(state,POINT{30,0},4);
+    CHECK(!HoldElapsed(state).startPeek);
+    Release(state);
+    // Outside the divider modes a press sets nothing, and a hold is a peek that the
+    // release ends.
+    step=Press(state,POINT{50,50},false,false);
+    CHECK(!step.setDivider);
+    CHECK(HoldElapsed(state).startPeek);
+    CHECK(Release(state).endPeek);
+    // With a pan available a drag outside the divider modes pans.
+    Press(state,POINT{50,50},false,true);
+    step=Move(state,POINT{80,50},4);
+    CHECK(step.pan);CHECK(!step.setDivider);
+    // In a divider mode the drag is the divider's, never a pan.
+    Press(state,POINT{50,50},true,true);
+    step=Move(state,POINT{80,50},4);
+    CHECK(!step.pan);CHECK(step.setDivider);
+    Release(state);
+    // Nothing happens to an idle state.
+    CHECK(!Move(state,POINT{1,1},4).setDivider);CHECK(!HoldElapsed(state).startPeek);CHECK(!Release(state).endPeek);
+}
+
+// The strength dial and Blend were two controls for one lerp; a file written by
+// either becomes the one Mix without the picture changing.
+void compare_settings_migrate_strength_and_blend_to_the_mix_test()
+{
+    using namespace compare_settings;
+    const std::array<int,4> known{kNeural,kOriginal,kSplit,kWipe};
+    // Written by this build: the Mix wins, clamped, and the mode survives.
+    auto loaded=Migrate(1.4f,kWipe,0.3f,0.2f,known);
+    CHECK_EQ(1.4f,loaded.mix);CHECK_EQ(kWipe,loaded.mode);
+    CHECK_EQ(2.0f,Migrate(9.0f,kNeural,0.5f,1.0f,known).mix);
+    // An older file: the neural view keeps its strength.
+    loaded=Migrate(std::nullopt,kSplit,0.5f,0.4f,known);
+    CHECK_EQ(0.4f,loaded.mix);CHECK_EQ(kSplit,loaded.mode);
+    // Blend at 0.3 over a strength of 1 is the neural view at a Mix of 0.3...
+    loaded=Migrate(std::nullopt,kBlend,0.3f,1.0f,known);
+    CHECK(std::abs(loaded.mix-0.3f)<1e-6f);CHECK_EQ(kNeural,loaded.mode);
+    // ...and over a lower strength it is their product, which is the same lerp of lerps.
+    CHECK(std::abs(Migrate(std::nullopt,kBlend,0.5f,0.6f,known).mix-0.3f)<1e-6f);
+    // Above 1 the extension cannot be blended by one dial; the amount is kept.
+    CHECK(std::abs(Migrate(std::nullopt,kBlend,0.5f,1.6f,known).mix-0.5f)<1e-6f);
+    // Original is a view, not a mode to reopen in; an unknown number reads as Neural.
+    CHECK_EQ(kNeural,Migrate(1.0f,kOriginal,0.5f,1.0f,known).mode);
+    CHECK_EQ(kNeural,Migrate(1.0f,77,0.5f,1.0f,known).mode);
+    CHECK_EQ(kNeural,Migrate(1.0f,kBlend,0.5f,1.0f,known).mode);
+    // Garbage in either old key reads as its default.
+    CHECK_EQ(1.0f,Migrate(std::nullopt,kNeural,0.5f,std::numeric_limits<float>::quiet_NaN(),known).mix);
+    // [ and ] step by a tenth on the 0.05 grid and stop at both ends.
+    CHECK(std::abs(StepMix(1.0f,0.1f)-1.1f)<1e-6f);
+    CHECK_EQ(0.0f,StepMix(0.05f,-0.1f));
+    CHECK_EQ(2.0f,StepMix(1.95f,0.1f));
+    CHECK(std::abs(StepMix(0.33f,0.1f)-0.45f)<1e-6f);
+}
+
+// GDI draws the tags opaque; the compositor needs them premultiplied over a plate
+// that is only partly opaque, and the two must agree over any background.
+void compare_label_premultiply_matches_the_gdi_composite_test()
+{
+    using compare_labels::Bgra;
+    const Bgra plate{6,5,5,255},text{232,235,236,255};
+    constexpr float plateAlpha=0.78f;
+    // Plate only: the plate's colour at its own alpha.
+    Bgra texel=compare_labels::Premultiply(plate,plate,text,plateAlpha);
+    CHECK_EQ(int(std::lround(0.78*255.0)),int(texel.a));
+    CHECK(texel.g<=5);
+    // Solid text: opaque text.
+    texel=compare_labels::Premultiply(text,plate,text,plateAlpha);
+    CHECK_EQ(255,int(texel.a));CHECK_EQ(235,int(texel.g));
+    // An antialiased edge composited over black and over white lands where GDI would
+    // have put the same edge drawn over the plate composited over that background.
+    const float t=0.5f;
+    const Bgra edge{uint8_t(std::lround(t*232+(1-t)*6)),uint8_t(std::lround(t*235+(1-t)*5)),uint8_t(std::lround(t*236+(1-t)*5)),255};
+    texel=compare_labels::Premultiply(edge,plate,text,plateAlpha);
+    for(const float background:{0.0f,255.0f}){
+        const float composed=float(texel.g)+background*(1.0f-float(texel.a)/255.0f);
+        const float expected=t*235.0f+(1.0f-t)*(plateAlpha*5.0f+(1.0f-plateAlpha)*background);
+        CHECK(std::abs(composed-expected)<2.0f);
+    }
+}
+
+// The compare bar's layout, hit testing and the Mix track's mapping.
+void compare_bar_lays_out_and_hit_tests_test()
+{
+    using namespace compare_bar;
+    const auto layout=LayoutBar(1440,700,96,4,false);
+    CHECK_EQ(700L,layout.bar.top);CHECK_EQ(700L+kBarHeightDip,layout.bar.bottom);
+    CHECK(!layout.compact);
+    size_t modes=0;
+    for(const Item& item:layout.items)if(item.part==Part::Mode)++modes;
+    CHECK_EQ(size_t{4},modes);
+    // Every item lies inside the bar, left to right, without overlapping.
+    LONG previous=0;
+    for(const Item& item:layout.items){
+        CHECK(item.bounds.left>=previous);CHECK(item.bounds.right<=1440);
+        CHECK(item.bounds.top>=layout.bar.top);CHECK(item.bounds.bottom<=layout.bar.bottom);
+        previous=item.bounds.right;
+    }
+    CHECK(layout.hint.right>layout.hint.left);
+    // A point hits the item under it; the Mix track answers across the whole bar height.
+    const Item& second=layout.items[1];
+    const Item* hit=HitTest(layout,POINT{(second.bounds.left+second.bounds.right)/2,(second.bounds.top+second.bounds.bottom)/2});
+    CHECK(hit!=nullptr);if(hit){CHECK(hit->part==Part::Mode);CHECK_EQ(1,hit->index);}
+    hit=HitTest(layout,POINT{(layout.mixTrack.left+layout.mixTrack.right)/2,layout.bar.top+1});
+    CHECK(hit!=nullptr&&hit->part==Part::MixTrack);
+    CHECK(HitTest(layout,POINT{2,layout.bar.top+10})==nullptr);
+    // The track spans 0..200% with 100% at the centre, and snaps to it nearby.
+    const RECT track{100,0,300,10};
+    CHECK_EQ(0.0f,MixFromX(track,90));CHECK_EQ(2.0f,MixFromX(track,400));
+    CHECK_EQ(1.0f,MixFromX(track,202));
+    CHECK(std::abs(MixFromX(track,150)-0.5f)<1e-6f);
+    CHECK_EQ(200L,LONG(XFromMix(track,1.0f)));CHECK_EQ(100L,LONG(XFromMix(track,-1.0f)));
+    // A narrow window gets the compact widths, and a narrower one drops the hint.
+    const auto narrow=LayoutBar(700,0,96,4,true);
+    CHECK(narrow.compact);CHECK(narrow.hint.right<=narrow.hint.left);
+    // Scaled with the DPI.
+    const auto large=LayoutBar(2880,0,192,4,false);
+    CHECK_EQ(LONG(2*kBarHeightDip),large.bar.bottom-large.bar.top);
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -11081,6 +11295,11 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(source_nv12_conversion_constants_are_the_shipped_coefficients_test),
     TEST_CASE(source_nv12_conversion_compiles_a_distinct_program_per_arm_test),
     TEST_CASE(present_scale_follows_the_window_only_where_it_should_test),
+    TEST_CASE(compare_compositor_stays_out_of_the_capture_program_test),
+    TEST_CASE(compare_gesture_tells_press_drag_and_hold_apart_test),
+    TEST_CASE(compare_settings_migrate_strength_and_blend_to_the_mix_test),
+    TEST_CASE(compare_label_premultiply_matches_the_gdi_composite_test),
+    TEST_CASE(compare_bar_lays_out_and_hit_tests_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
     TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),

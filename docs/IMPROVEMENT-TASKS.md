@@ -66,7 +66,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.12](#p212) | Scene-cut controls and duplicate-frame handling | S / M | Pipeline | |
 | [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
-| [P2.15](#p215) | An on-screen compare bar with press-and-hold A/B | S | Player | |
 | [P2.16](#p216) | Zoom, pan and a synced magnifier | M | Player | |
 | [P2.17](#p217) | A difference view | S-M | Player | |
 | [P2.21](#p221) | Export the comparison itself | S / M | Player | |
@@ -344,23 +343,6 @@ RTX VSR at 1× as a cleanup step. Measure first whether the neural pass
 amplifies banding; P2.11's metrics are the tool.
 
 ## Player UX
-
-<a id="p215"></a>
-### P2.15 · An on-screen compare bar with press-and-hold A/B
-
-`S` · **Player**
-
-Comparison is the product, and today it sits behind Video > Compare. The
-split and wipe modes draw no labels (`D3D12Renderer.cpp:284`). Neural strength
-is the seventh slider in Image adjustments, and it overlaps conceptually with
-Compare > Blend.
-
-**Do** — a compact bar holding mode, blend or strength, zoom and swap, with
-"Original" and "DLSS 5" labels drawn on the image. Holding the mouse on the
-picture shows the original, as Topaz and NVIDIA ICAT do. Merge strength and
-blend into one control.
-
----
 
 <a id="p216"></a>
 ### P2.16 · Zoom, pan and a synced magnifier
