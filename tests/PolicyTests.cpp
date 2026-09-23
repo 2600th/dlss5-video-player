@@ -9314,6 +9314,27 @@ void audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test()
     plain->Stop();
 }
 
+// A track change and a device restart both respawn the child at the last
+// position the clock reported - and the clock is not read while paused. So
+// play to 60 s, pause, seek to 10 s, then pick another track: audio came back
+// at 60 s, and on resume the audio master clock dragged video forward 50 s
+// through a drop loop that decoded ~1,500 frames in one tick.
+void audio_restarts_at_a_paused_seek_rather_than_the_last_clock_reading_test()
+{
+    MediaFixture fixture;
+    auto audio = AudioPlayerTestAccess::Create(fixture.directory);
+    CHECK(audio->Start(L"trackpick_commentary", 60.0, AudioStartState::Playing));
+    audio->Pause(true);
+    // The player's paused seek: a fresh start at the target, still paused.
+    CHECK(audio->Start(L"trackpick_commentary", 10.0, AudioStartState::Paused));
+    CHECK_EQ(10.0, AudioPlayerTestAccess::SeekBase(*audio));
+    CHECK_EQ(1, audio->SelectedAudioTrack());
+    CHECK(audio->SelectAudioTrack(0));
+    CHECK_EQ(10.0, AudioPlayerTestAccess::SeekBase(*audio));
+    CHECK(audio->Paused());
+    audio->Stop();
+}
+
 // A track list a viewer cannot reach is not a fix. The menu carries the
 // labels, marks which one is playing, and disables itself when there is
 // nothing to choose between.
@@ -9822,6 +9843,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_track_selection_skips_the_tracks_nobody_asked_for_test),
     TEST_CASE(audio_track_labels_say_what_distinguishes_the_tracks_test),
     TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
+    TEST_CASE(audio_restarts_at_a_paused_seek_rather_than_the_last_clock_reading_test),
     TEST_CASE(audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test),
     TEST_CASE(youtube_helper_refusals_each_say_which_one_happened_test),
     TEST_CASE(source_digest_is_computed_once_per_file_and_never_survives_a_change_test),

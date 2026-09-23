@@ -187,6 +187,12 @@ bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, Audio
     Stop();
     m_seekBaseSec = std::max(0.0, seekSeconds);
     { std::lock_guard<std::mutex> lock(m_clockMutex); audio_clock::Reset(m_clock); m_clockStalled = false; }
+    // Where this start begins is the newest position there is. The clock only
+    // refreshes this while it is being read, which it is not while paused, so
+    // a paused seek from 60 s to 10 s left 60 behind: a track change or a
+    // device restart then resumed audio at 60, and on resume the audio clock
+    // dragged video forward 50 s through a drop loop that froze the UI.
+    m_lastKnownPosition.store(m_seekBaseSec);
     m_path = videoPath;
     m_ffmpeg = FindFFmpeg();
     if (m_ffmpeg.empty()) { LOG("Audio: ffmpeg.exe not found."); return false; }

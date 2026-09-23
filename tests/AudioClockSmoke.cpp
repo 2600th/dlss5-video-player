@@ -301,6 +301,28 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // ---- a restart after a paused seek resumes at the seek -----------------
+    // The clock is not read while paused, so the last position it reported
+    // is the one from before the seek. A device restart used that and put
+    // audio back where the viewer had left, not where they had gone.
+    {
+        Check(audio.Seek(15.0), "Seek to 15 s before pausing");
+        if (WaitForClock(audio, 5s) >= 0.0) {
+            std::this_thread::sleep_for(300ms);
+            Check(audio.PositionSeconds() >= 15.0, "the clock reads past 15 s before the pause");
+            audio.Pause(true);
+            // The player's paused seek: a fresh start at the target, paused.
+            Check(audio.Start(clip.wstring(), 4.0, AudioStartState::Paused), "paused seek to 4 s");
+            Check(audio.DeliverDefaultEndpointChange(L"{0.0.0.00000000}.{not-the-one-we-are-on}"),
+                  "the notification reached the paused renderer");
+            Check(audio.ServiceDeviceChanges(), "the default-endpoint change restarts paused audio");
+            CheckNear(4.0, audio.SeekBaseSeconds(), 1e-9,
+                      "the restart resumes at the paused seek, not the last clock reading");
+            Check(audio.Paused(), "the restart keeps audio paused");
+            audio.Pause(false);
+        }
+    }
+
     // ---- end of stream -----------------------------------------------------
     // The clock must never run backwards as the queue drains. Resetting the
     // device at EOF would snap the played-sample count to zero and make the

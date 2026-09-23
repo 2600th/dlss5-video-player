@@ -53,7 +53,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | --- | --- | :---: | --- | :---: |
 | **P0** | | | | |
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
-| [P0.2](#p02) | Audio restarts at a stale position after a paused seek | XS | Player | ✅ |
 | [P0.3](#p03) | WASAPI teardown races the endpoint callbacks | S | Player | ✅ |
 | [P0.4](#p04) | YouTube: the cache manager is still built on every paint | S | Player | ✅ |
 | [P0.5](#p05) | The software-encoder retry cannot pass the receipt gate | S | Pipeline | ✅ |
@@ -141,30 +140,6 @@ nobody can verify what they downloaded.
 **Fix** — add a package mode that takes the version from `PACKAGE_MANIFEST.txt`
 or the folder name, and checks against the manifest's hashes. Have CI run it
 from an extracted zip with no repository around it. Correct the README command.
-
----
-
-<a id="p02"></a>
-### P0.2 · Audio restarts at a stale position after a paused seek
-
-`XS` · **Player** · ✅
-
-**Where** — `AudioPlayer.cpp:182` (`SelectAudioTrack`), `:527`
-(`ServiceDeviceChanges`), `:186` (`Start`), `:459`
-
-`m_lastKnownPosition` is written only by `PositionSeconds`, which is not
-called while paused. `Start()` never resets it.
-
-**Scenario** — play to 60 s, pause, seek to 10 s, then change the audio track
-or unplug the headphones. Audio restarts at 60 s. On resume the audio clock
-pulls video forward to 60 s. On a local file the drop loop (`main.cpp:1354`)
-decodes about 1,500 frames in one Tick and the UI freezes.
-
-**Impact** — Player: the seek is lost, followed by a multi-second freeze.
-Pipeline: none.
-
-**Fix** — `m_lastKnownPosition.store(seekSeconds)` in `Start()`. Add a policy
-test for the sequence pause → seek → change track.
 
 ---
 
