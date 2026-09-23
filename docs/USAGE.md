@@ -126,7 +126,18 @@ The timeline shows both states at once: the marked range is a solid violet block
 between a green In tick and an orange Out tick, played progress is blue, and
 teal stripes along the bottom name the parts of the source that already have
 neural frames. A session that has been seeked around shows several of them, with
-the gaps between them being what it has still to render.
+the gaps between them being what it has still to render, and a hatched teal
+stretch marks where the render is working right now. Chapters, when the file
+has them, cut thin gaps through the bar.
+
+Hovering the timeline shows a preview above it: the time, the chapter, whether
+that moment is already rendered and, while a session runs, how long until all
+of it is. A local file (or a stream's local copy) also shows a thumbnail there -
+the finished neural render's frame where one exists, the original otherwise -
+decoded in the background by the bundled FFmpeg, so it appears a fraction of a
+second after the text. A video that reports no length, such as a
+browser-recorded WebM, greys the bar out: it takes no clicks, and `Left` and
+`Right` still seek 10 seconds.
 
 Marking a range on a YouTube stream, or turning neural rendering on, starts
 downloading that source in the background, because a render always works from a

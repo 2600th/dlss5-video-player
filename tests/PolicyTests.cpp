@@ -52,6 +52,7 @@
 #include "MediaTools.h"
 #include "Utf8Text.h"
 #include "StatusChipPolicy.h"
+#include "TimelinePolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -849,6 +850,137 @@ void dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test()
     CHECK_EQ(alreadyLarge.top, unchanged.top);
     CHECK_EQ(alreadyLarge.right, unchanged.right);
     CHECK_EQ(alreadyLarge.bottom, unchanged.bottom);
+}
+
+void timeline_reads_chapters_the_way_ffprobe_prints_them_test()
+{
+    // Captured from the staged ffprobe on a Matroska file with two chapters,
+    // one of them with a comma in its title - the reason this is not CSV.
+    const std::string output =
+        "start_time=20.000000\r\nend_time=60.000000\r\nTAG:title=Main\r\n"
+        "start_time=0.000000\r\nend_time=20.000000\r\nTAG:title=Intro, part one\r\n"
+        "start_time=N/A\r\nend_time=70.000000\r\n"
+        "start_time=65.500000\r\nend_time=70.000000\r\n";
+    const auto chapters = timeline::ParseFfprobeChapters(output);
+    REQUIRE(chapters.size() == 3);
+    // Sorted by start; the one with an unreadable start is dropped rather
+    // than drawn somewhere made up; a missing title stays empty.
+    CHECK_EQ(0.0, chapters[0].startSeconds);
+    CHECK(chapters[0].title == L"Intro, part one");
+    CHECK_EQ(20.0, chapters[1].startSeconds);
+    CHECK_EQ(60.0, chapters[1].endSeconds);
+    CHECK(chapters[1].title == L"Main");
+    CHECK_EQ(65.5, chapters[2].startSeconds);
+    CHECK(chapters[2].title.empty());
+    CHECK(timeline::ParseFfprobeChapters("").empty());
+    CHECK(timeline::ParseFfprobeChapters("garbage\n=\n").empty());
+    // UTF-8 titles come back as the characters they are.
+    const auto accented = timeline::ParseFfprobeChapters("start_time=1.0\nTAG:title=Caf\xc3\xa9\n");
+    REQUIRE(accented.size() == 1);
+    CHECK(accented[0].title == L"Caf\u00e9");
+
+    CHECK(timeline::ChapterAt(chapters, 10.0) == &chapters[0]);
+    CHECK(timeline::ChapterAt(chapters, 20.0) == &chapters[1]);
+    CHECK(timeline::ChapterAt(chapters, 99.0) == &chapters[2]);
+    const std::vector<timeline::Chapter> late{{5.0, 9.0, L"Late"}};
+    CHECK(timeline::ChapterAt(late, 1.0) == nullptr);
+    const auto arguments = timeline::ChapterProbeArguments(L"C:\\media\\a b.mkv");
+    CHECK(std::find(arguments.begin(), arguments.end(), L"default=noprint_wrappers=1") != arguments.end());
+    CHECK(arguments.back() == L"C:\\media\\a b.mkv");
+}
+
+void timeline_hover_says_where_and_what_the_render_map_says_there_test()
+{
+    timeline::HoverFacts facts{};
+    facts.seconds = 83.9;
+    // An ordinary video: only the time.
+    CHECK(timeline::HoverText(facts) == L"1:23");
+    facts.chapter = L"Main";
+    facts.rendered = false;
+    facts.secondsToFullCoverage = 129.2;
+    CHECK(timeline::HoverText(facts) == L"1:23 \u00b7 Main \u00b7 Not rendered yet \u00b7 All rendered in 2:10");
+    facts.rendered = true;
+    facts.secondsToFullCoverage.reset();
+    facts.seconds = 3723.0;
+    CHECK(timeline::HoverText(facts) == L"1:02:03 \u00b7 Main \u00b7 Rendered");
+    // A source with no length says how to seek instead of a position it cannot have.
+    facts.durationKnown = false;
+    CHECK(timeline::HoverText(facts).find(L"Length unknown") == 0);
+
+    // The hatched head: capped, floored, and nothing off the track.
+    const auto span = timeline::RenderingNowSpan(0, 1000, 400, 900, 4, 28);
+    REQUIRE(span.has_value());
+    CHECK_EQ(400L, span->first);
+    CHECK_EQ(428L, span->second);
+    const auto atHoleEnd = timeline::RenderingNowSpan(0, 1000, 400, 401, 4, 28);
+    REQUIRE(atHoleEnd.has_value());
+    CHECK_EQ(404L, atHoleEnd->second);
+    const auto atTrackEnd = timeline::RenderingNowSpan(0, 1000, 998, 1200, 4, 28);
+    REQUIRE(atTrackEnd.has_value());
+    CHECK_EQ(1000L, atTrackEnd->second);
+    CHECK(!timeline::RenderingNowSpan(0, 1000, 1000, 1200, 4, 28).has_value());
+    CHECK(!timeline::RenderingNowSpan(0, 1000, -5, 1200, 4, 28).has_value());
+}
+
+void timeline_thumbnails_are_bucketed_cached_and_cheap_to_ask_for_test()
+{
+    // 200 buckets over a long video, never finer than a second over a short one.
+    CHECK_EQ(int64_t{0}, timeline::ThumbnailBucket(4.9, 1000.0));
+    CHECK_EQ(int64_t{1}, timeline::ThumbnailBucket(5.0, 1000.0));
+    CHECK_EQ(int64_t{199}, timeline::ThumbnailBucket(999.9, 1000.0));
+    CHECK_EQ(int64_t{200}, timeline::ThumbnailBucket(1000.0, 1000.0));
+    CHECK_EQ(int64_t{12}, timeline::ThumbnailBucket(12.5, 60.0));
+    CHECK_EQ(12.5, timeline::ThumbnailBucketSeconds(12, 60.0));
+    CHECK_EQ(1000.0, timeline::ThumbnailBucketSeconds(200, 1000.0));
+    CHECK_EQ(int64_t{0}, timeline::ThumbnailBucket(5.0, 0.0));
+    const SIZE wide = timeline::ThumbnailSize(16.0 / 9.0, 176);
+    CHECK_EQ(176L, wide.cx);
+    CHECK_EQ(98L, wide.cy);
+    const SIZE odd = timeline::ThumbnailSize(4.0 / 3.0, 175);
+    CHECK_EQ(174L, odd.cx);
+    CHECK_EQ(130L, odd.cy);
+    CHECK_EQ(98L, timeline::ThumbnailSize(0.0, 176).cy);
+    // A keyframe seek, one frame, raw BGRA at exactly the size asked for: the
+    // reader checks the byte count against that size.
+    const auto arguments = timeline::ThumbnailArguments(L"C:\\v.mkv", 12.5, SIZE{176, 98});
+    const auto has = [&](std::wstring_view value) {
+        return std::find(arguments.begin(), arguments.end(), value) != arguments.end();
+    };
+    CHECK(has(L"-noaccurate_seek"));
+    CHECK(has(L"12.500"));
+    CHECK(has(L"scale=176:98:flags=bilinear"));
+    CHECK(has(L"bgra"));
+    CHECK(arguments.back() == L"pipe:1");
+
+    timeline::LruCache<int> cache(2);
+    cache.Insert(1, 10);
+    cache.Insert(2, 20);
+    REQUIRE(cache.Find(1) != nullptr);
+    cache.Insert(3, 30);
+    // 2 was the least recently used once 1 was read.
+    CHECK(cache.Find(2) == nullptr);
+    CHECK_EQ(10, *cache.Find(1));
+    CHECK_EQ(30, *cache.Find(3));
+    cache.Insert(3, 31);
+    CHECK_EQ(size_t{2}, cache.Size());
+    CHECK_EQ(31, *cache.Find(3));
+    cache.Clear();
+    CHECK_EQ(size_t{0}, cache.Size());
+
+    // The preview stands on the track, centred on the cursor, inside the work area.
+    const RECT work{0, 0, 1920, 1040};
+    const auto centred = timeline::LayoutPreview(POINT{960, 1000}, SIZE{176, 98}, SIZE{120, 18}, 5, 10, work);
+    CHECK_EQ(990L, centred.window.bottom);
+    CHECK_EQ(LONG(960 - (176 + 10) / 2), centred.window.left);
+    CHECK_EQ(LONG(98 + 18 + 15), centred.window.bottom - centred.window.top);
+    CHECK_EQ(5L, centred.thumbnail.top);
+    CHECK_EQ(centred.thumbnail.bottom + 5, centred.text.top);
+    const auto edge = timeline::LayoutPreview(POINT{3, 1000}, SIZE{}, SIZE{300, 18}, 5, 10, work);
+    CHECK_EQ(0L, edge.window.left);
+    CHECK(edge.thumbnail.right == edge.thumbnail.left);
+    CHECK_EQ(5L, edge.text.top);
+    const auto right = timeline::LayoutPreview(POINT{1918, 1000}, SIZE{}, SIZE{300, 18}, 5, 10, work);
+    CHECK_EQ(1920L, right.window.right);
 }
 
 void status_chips_carry_the_rate_the_drops_and_the_render_test()
@@ -10356,6 +10488,9 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),
     TEST_CASE(status_chips_keep_fixed_places_and_give_the_line_the_rest_test),
     TEST_CASE(feature_pills_shrink_before_the_bar_goes_compact_test),
+    TEST_CASE(timeline_reads_chapters_the_way_ffprobe_prints_them_test),
+    TEST_CASE(timeline_hover_says_where_and_what_the_render_map_says_there_test),
+    TEST_CASE(timeline_thumbnails_are_bucketed_cached_and_cheap_to_ask_for_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),
     TEST_CASE(long_media_title_is_bounded_with_a_real_ellipsis_test),

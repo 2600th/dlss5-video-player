@@ -26,6 +26,7 @@
 #include <functional>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <system_error>
 #include "VideoDecoder.h"
 #include "PlatformPaths.h"
@@ -105,6 +106,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "UpdateCheck.h"
 #include "SynchronizedPlayback.h"
 #include "StatusChipPolicy.h"
+#include "TimelinePolicy.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -352,6 +354,7 @@ static constexpr UINT WM_UPDATE_CHECKED = WM_APP + 45;
 static constexpr UINT WM_FRAMEGEN_PROGRESS = WM_APP + 46;
 static constexpr UINT WM_STAGE_EXPORT_PROGRESS = WM_APP + 48;
 static constexpr UINT WM_FRAMEGEN_COMPLETE = WM_APP + 47;
+static constexpr UINT WM_TIMELINE_MEDIA = WM_APP + 49;
 
 struct YouTubeUrlDialogState {
     const Localizer* localizer{};
@@ -1190,6 +1193,152 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
 // playback, a live session renders behind it, and a preview re-renders the one
 // frame the player is paused on.
 enum class NeuralJobKind { Offline, Live, Preview };
+
+// Runs one of the staged FFmpeg tools and hands back what it wrote to stdout,
+// or nothing when it could not start, failed, overran `limit` bytes or ran past
+// `timeout`. For the timeline's two small questions only - a chapter list and
+// one thumbnail - so it holds the whole answer in memory and never asks the
+// user anything. The child is in a kill-on-close job, so a player that goes
+// away mid-question takes it along.
+static std::optional<std::string> RunToolCapture(const std::filesystem::path& executable,
+                                                 const std::vector<std::wstring>& arguments,
+                                                 std::stop_token stop, std::chrono::milliseconds timeout,
+                                                 size_t limit)
+{
+    SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};
+    HANDLE readPipe=nullptr,writePipe=nullptr;
+    if(!CreatePipe(&readPipe,&writePipe,&security,0))return std::nullopt;
+    SetHandleInformation(readPipe,HANDLE_FLAG_INHERIT,0);
+    HANDLE job=CreateJobObjectW(nullptr,nullptr);
+    if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits));}
+    STARTUPINFOW startup{sizeof(startup)};startup.dwFlags=STARTF_USESTDHANDLES;startup.hStdOutput=writePipe;
+    PROCESS_INFORMATION process{};
+    std::wstring commandLine=BuildWindowsCommandLine(executable.native(),arguments);
+    BOOL created=FALSE;
+    {const ScopedHardErrorSuppression noHardErrorDialog;
+     created=CreateProcessW(executable.c_str(),commandLine.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW|CREATE_SUSPENDED,
+                            nullptr,executable.parent_path().c_str(),&startup,&process);}
+    CloseHandle(writePipe);
+    if(!created){CloseHandle(readPipe);if(job)CloseHandle(job);return std::nullopt;}
+    if(job&&!AssignProcessToJobObject(job,process.hProcess)){CloseHandle(job);job=nullptr;}
+    ResumeThread(process.hThread);CloseHandle(process.hThread);
+    std::string output;bool failed=false;
+    const auto deadline=std::chrono::steady_clock::now()+timeout;
+    char buffer[16384];
+    for(bool exited=false;;){
+        DWORD available=0;
+        while(PeekNamedPipe(readPipe,nullptr,0,nullptr,&available,nullptr)&&available){
+            DWORD read=0;
+            if(!ReadFile(readPipe,buffer,std::min<DWORD>(available,DWORD(sizeof(buffer))),&read,nullptr)||!read)break;
+            if(output.size()+read>limit){failed=true;break;}
+            output.append(buffer,read);
+        }
+        if(failed||exited)break;
+        exited=WaitForSingleObject(process.hProcess,10)==WAIT_OBJECT_0;
+        if(!exited&&(stop.stop_requested()||std::chrono::steady_clock::now()>=deadline)){failed=true;break;}
+    }
+    DWORD exitCode=1;
+    if(failed){if(job)TerminateJobObject(job,1);else TerminateProcess(process.hProcess,1);WaitForSingleObject(process.hProcess,2000);}
+    else GetExitCodeProcess(process.hProcess,&exitCode);
+    CloseHandle(process.hProcess);CloseHandle(readPipe);if(job)CloseHandle(job);
+    if(failed||exitCode!=0)return std::nullopt;
+    return output;
+}
+
+// The timeline's two background questions about the loaded file: its chapter
+// list, asked once per file, and a thumbnail for wherever the cursor rests.
+// One thread, one question at a time, and the NEWEST thumbnail request wins:
+// a sweep across the bar asks for dozens, and only the one under the cursor
+// when the thread comes free is worth a process. So the cost is bounded to one
+// short FFmpeg run at a time however fast the cursor moves. Measured here on a
+// 1080p30 H.264 file with a 250-frame GOP: 0.38-0.43 s per thumbnail, 48 ms
+// of it starting the process, and 51 ms for the chapter list.
+class TimelineMediaWorker {
+public:
+    struct Thumbnail{uint64_t generation{};int64_t key{};SIZE size{};std::vector<uint8_t> bgra;};
+    struct Chapters{uint64_t generation{};std::vector<timeline::Chapter> chapters;};
+
+    explicit TimelineMediaWorker(std::filesystem::path toolDirectory={}):m_toolDirectory(std::move(toolDirectory)){}
+    ~TimelineMediaWorker(){if(m_thread.joinable()){m_thread.request_stop();m_wake.notify_all();m_thread.join();}}
+    TimelineMediaWorker(const TimelineMediaWorker&)=delete;
+    TimelineMediaWorker& operator=(const TimelineMediaWorker&)=delete;
+
+    // Results arrive as `message` posted to `window`, with nothing in it: the
+    // taker drains whatever is ready and drops what belongs to another file.
+    void RequestChapters(HWND window,UINT message,uint64_t generation,std::filesystem::path media){
+        if(!Available(L"ffprobe.exe"))return;
+        {std::scoped_lock lock(m_mutex);m_chapterRequest=Request{window,message,generation,0,std::move(media),0.0,{}};}
+        Wake();
+    }
+    void RequestThumbnail(HWND window,UINT message,uint64_t generation,int64_t key,std::filesystem::path media,double seconds,SIZE size){
+        if(!Available(L"ffmpeg.exe"))return;
+        {std::scoped_lock lock(m_mutex);m_thumbnailRequest=Request{window,message,generation,key,std::move(media),seconds,size};}
+        Wake();
+    }
+    std::vector<Thumbnail> TakeThumbnails(){std::scoped_lock lock(m_mutex);return std::exchange(m_thumbnails,{});}
+    std::optional<Chapters> TakeChapters(){std::scoped_lock lock(m_mutex);return std::exchange(m_chapters,std::nullopt);}
+
+private:
+    struct Request{HWND window{};UINT message{};uint64_t generation{};int64_t key{};std::filesystem::path media;double seconds{};SIZE size{};};
+
+    std::filesystem::path Tool(const wchar_t* name)const{
+        if(!m_toolDirectory.empty())return m_toolDirectory/name;
+        const auto directory=platform_paths::ModuleDirectory();
+        return directory?*directory/name:std::filesystem::path{};
+    }
+    bool Available(const wchar_t* name)const{
+        const auto tool=Tool(name);std::error_code error;
+        return !tool.empty()&&std::filesystem::is_regular_file(tool,error);
+    }
+    void Wake(){
+        if(!m_thread.joinable())m_thread=std::jthread([this](std::stop_token stop){Run(stop);});
+        m_wake.notify_all();
+    }
+    void Run(std::stop_token stop){
+        while(!stop.stop_requested()){
+            std::optional<Request> chapters,thumbnail;
+            {
+                std::unique_lock lock(m_mutex);
+                m_wake.wait(lock,stop,[&]{return m_chapterRequest||m_thumbnailRequest;});
+                if(stop.stop_requested())return;
+                // The chapter list first: it is one question per file and the
+                // markers it draws are on screen for the whole video.
+                if(m_chapterRequest)chapters=std::exchange(m_chapterRequest,std::nullopt);
+                else thumbnail=std::exchange(m_thumbnailRequest,std::nullopt);
+            }
+            if(chapters){
+                const auto output=RunToolCapture(Tool(L"ffprobe.exe"),timeline::ChapterProbeArguments(chapters->media),
+                                                 stop,std::chrono::seconds(10),1u<<20);
+                {std::scoped_lock lock(m_mutex);
+                 m_chapters=Chapters{chapters->generation,output?timeline::ParseFfprobeChapters(*output):std::vector<timeline::Chapter>{}};}
+                PostMessageW(chapters->window,chapters->message,0,0);
+            }
+            if(thumbnail){
+                const size_t bytes=size_t(thumbnail->size.cx)*size_t(thumbnail->size.cy)*4u;
+                auto output=RunToolCapture(Tool(L"ffmpeg.exe"),
+                    timeline::ThumbnailArguments(thumbnail->media,thumbnail->seconds,thumbnail->size),
+                    stop,std::chrono::seconds(5),bytes);
+                // A short frame is a failed decode, not a smaller picture.
+                if(output&&output->size()==bytes){
+                    {std::scoped_lock lock(m_mutex);
+                     m_thumbnails.push_back(Thumbnail{thumbnail->generation,thumbnail->key,thumbnail->size,
+                                                      std::vector<uint8_t>(output->begin(),output->end())});}
+                    PostMessageW(thumbnail->window,thumbnail->message,0,0);
+                }
+            }
+        }
+    }
+
+    std::filesystem::path m_toolDirectory;
+    std::mutex m_mutex;
+    std::condition_variable_any m_wake;
+    std::optional<Request> m_chapterRequest,m_thumbnailRequest;
+    std::vector<Thumbnail> m_thumbnails;
+    std::optional<Chapters> m_chapters;
+    // Last, so it is joined before anything it reads is destroyed.
+    std::jthread m_thread;
+};
 
 class PlayerApp {
 #ifdef PLAYER_APP_TESTING
@@ -2496,7 +2645,8 @@ private:
         if(!m_activityTimer)return;
         // An active session keeps the player on screen: only the buffering panel
         // and the status line animate, never the full-window pre-render surface.
-        if(JobBehindPlayback()){RefreshBufferOverlay();const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);return;}
+        if(JobBehindPlayback()){RefreshBufferOverlay();const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);
+            if(m_liveSession&&m_activityMotionEnabled){RECT timeline=TimelineRect();InflateRect(&timeline,0,Dip(2));InvalidateRect(m_hwnd,&timeline,FALSE);}return;}
         if(m_loaded&&!NeuralJobActive()){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);return;}
         RECT c{};GetClientRect(m_hwnd,&c);
         const auto surface=LayoutPreRenderSurface(c.right-c.left,c.bottom-c.top,ActiveWindowDpi(m_hwnd));
@@ -4783,7 +4933,164 @@ private:
         ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateRect(m_viewport,nullptr,FALSE);InvalidateControls();
     }
 
-    RECT TimelineRect()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(28),c.right-Dip(18),c.bottom-Dip(14)};}
+    // 18 dip, up from 14, so the coverage lane along its bottom can be 7 dip
+    // instead of 3: that lane is the render map, the one thing on this bar no
+    // other player has, and at 3 dip it read as a hairline.
+    RECT TimelineRect()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(30),c.right-Dip(18),c.bottom-Dip(12)};}
+    // ---- The timeline's render map: chapters, the hover preview ----------
+    //
+    // The file the timeline asks about: the loaded local file, or the local
+    // copy of a stream once there is one. A stream still on the network has
+    // neither chapters nor a cheap frame to show, and asking would be a second
+    // network open behind playback's back.
+    std::filesystem::path TimelineMediaFile()const{return m_loaded?ExportSourceFile():std::filesystem::path{};}
+    // Runs with the status line, which every load, unload and state change
+    // reaches: a different file is a new generation, which drops the chapters
+    // and thumbnails of the old one and asks for the new one's chapter list.
+    void SyncTimelineMedia(){
+        const std::filesystem::path file=TimelineMediaFile();
+        if(file==m_timelineFile)return;
+        m_timelineFile=file;++m_timelineGeneration;
+        m_chapters.clear();m_thumbnails.Clear();ClearTimelineHover();
+        if(!file.empty()&&m_hwnd)m_timelineWorker.RequestChapters(m_hwnd,WM_TIMELINE_MEDIA,m_timelineGeneration,file);
+    }
+    void CompleteTimelineMedia(){
+        if(auto chapters=m_timelineWorker.TakeChapters();chapters&&chapters->generation==m_timelineGeneration){
+            if(!chapters->chapters.empty())LOG("Timeline: "<<chapters->chapters.size()<<" chapter(s) in the loaded file.");
+            m_chapters=std::move(chapters->chapters);InvalidatePlaybackProgress();
+        }
+        bool shown=false;
+        for(auto& thumbnail:m_timelineWorker.TakeThumbnails()){
+            if(thumbnail.generation!=m_timelineGeneration)continue;
+            shown=shown||(m_previewKey&&*m_previewKey==thumbnail.key);
+            const int64_t key=thumbnail.key;m_thumbnails.Insert(key,std::move(thumbnail));
+        }
+        if(shown&&m_timelineHoverX)ShowTimelinePreview();
+    }
+    // What the hover says about the moment under the cursor, from the same
+    // coverage the lanes are painted from.
+    timeline::HoverFacts TimelineHoverFacts(double seconds)const{
+        timeline::HoverFacts facts{};facts.seconds=seconds;facts.durationKnown=m_decoder.DurationSeconds()>0.0;
+        const int64_t at=static_cast<int64_t>(std::llround(seconds*1e7));
+        if(m_liveSession){
+            facts.rendered=SpanContaining(LiveCoverage(),at).has_value();
+            const auto progress=RenderChipProgress();
+            if(progress.active&&progress.fraction<1.0)facts.secondsToFullCoverage=progress.etaSeconds;
+        }else if(m_cachedPlayback)facts.rendered=m_cachedRange.Whole()||(at>=m_cachedRange.start100ns&&at<m_cachedRange.end100ns);
+        if(const timeline::Chapter* chapter=timeline::ChapterAt(m_chapters,seconds)){
+            facts.chapter=chapter->title.empty()?L"Chapter "+std::to_wstring((chapter-m_chapters.data())+1):chapter->title;
+        }
+        return facts;
+    }
+    // Where a hover thumbnail comes from: the finished neural render when the
+    // moment is inside one - that is the picture this player exists to show -
+    // otherwise the original. A live session's segments are not used: they
+    // are still being written and are deleted with the session.
+    struct ThumbnailSource{std::filesystem::path file;double seconds{};int64_t key{};};
+    std::optional<ThumbnailSource> TimelineThumbnailSource(double seconds)const{
+        const double duration=m_decoder.DurationSeconds();
+        if(!(duration>0.0)||m_timelineFile.empty())return std::nullopt;
+        const int64_t bucket=timeline::ThumbnailBucket(seconds,duration);
+        const double at=timeline::ThumbnailBucketSeconds(bucket,duration);
+        const int64_t at100ns=static_cast<int64_t>(std::llround(at*1e7));
+        if(m_cachedPlayback&&!m_liveSession&&!m_neuralPath.empty()&&
+           (m_cachedRange.Whole()||(at100ns>=m_cachedRange.start100ns&&at100ns<m_cachedRange.end100ns)))
+            return ThumbnailSource{m_neuralPath,std::max(0.0,at-double(m_cachedRange.start100ns)*1e-7),bucket*2+1};
+        return ThumbnailSource{m_timelineFile,at,bucket*2};
+    }
+    SIZE TimelineThumbnailSize()const{return timeline::ThumbnailSize(m_dar,Dip(176));}
+    void UpdateTimelineHover(int x,int y){
+        if(!m_loaded||!ControlsVisible()){ClearTimelineHover();return;}
+        RECT zone=TimelineRect();InflateRect(&zone,0,Dip(6));
+        if(!m_dragSeek&&!PtIn(zone,x,y)){ClearTimelineHover();return;}
+        const RECT track=TimelineRect();
+        const int clamped=std::clamp(x,int(track.left),int(std::max(track.left,track.right-1)));
+        if(m_timelineHoverX&&*m_timelineHoverX==clamped)return;
+        m_timelineHoverX=clamped;ShowTimelinePreview();
+    }
+    void ClearTimelineHover(){
+        m_timelineHoverX.reset();m_previewKey.reset();m_previewText.clear();
+        if(m_previewWnd&&IsWindowVisible(m_previewWnd))ShowWindow(m_previewWnd,SW_HIDE);
+    }
+    // The label is immediate; the thumbnail is asked for and appears when it
+    // arrives, so a hover never waits on a decode.
+    void ShowTimelinePreview(){
+        if(!m_timelineHoverX)return;
+        const double duration=m_decoder.DurationSeconds();
+        const double seconds=duration>0.0?SecondsFromX(*m_timelineHoverX):0.0;
+        m_previewText=timeline::HoverText(TimelineHoverFacts(seconds));
+        m_previewKey.reset();
+        const SIZE thumbSize=TimelineThumbnailSize();
+        if(const auto source=TimelineThumbnailSource(seconds)){
+            m_previewKey=source->key;
+            if(!m_thumbnails.Find(source->key))
+                m_timelineWorker.RequestThumbnail(m_hwnd,WM_TIMELINE_MEDIA,m_timelineGeneration,source->key,source->file,source->seconds,thumbSize);
+        }
+        // Painted only for a window someone can see; the regression suite
+        // drives all of the above against hidden windows.
+        if(!m_hwnd||!IsWindowVisible(m_hwnd))return;
+        if(!m_previewWnd){
+            static constexpr const wchar_t* kClassName=L"DLSSVideoTimelinePreviewV1";
+            WNDCLASSW preview{};preview.lpfnWndProc=PreviewWndProcStatic;preview.hInstance=GetModuleHandleW(nullptr);preview.lpszClassName=kClassName;preview.hCursor=LoadCursor(nullptr,IDC_ARROW);
+            if(!RegisterClassW(&preview)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
+            m_previewWnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,kClassName,nullptr,WS_POPUP,0,0,1,1,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
+            if(!m_previewWnd)return;
+        }
+        const auto* thumbnail=m_previewKey?m_thumbnails.Find(*m_previewKey):nullptr;
+        SIZE textSize{};
+        if(HDC dc=GetDC(m_previewWnd)){const HGDIOBJ old=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);GetTextExtentPoint32W(dc,m_previewText.c_str(),int(m_previewText.size()),&textSize);SelectObject(dc,old);ReleaseDC(m_previewWnd,dc);}
+        textSize.cy=std::max<LONG>(textSize.cy,Dip(18));
+        POINT anchor{*m_timelineHoverX,TimelineRect().top};ClientToScreen(m_hwnd,&anchor);
+        MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(m_hwnd,MONITOR_DEFAULTTONEAREST),&monitor);
+        const auto layout=timeline::LayoutPreview(anchor,thumbnail?thumbnail->size:SIZE{},textSize,Dip(5),Dip(10),monitor.rcWork);
+        m_previewLayout=layout;
+        SetWindowPos(m_previewWnd,HWND_TOP,layout.window.left,layout.window.top,layout.window.right-layout.window.left,
+                     layout.window.bottom-layout.window.top,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+        InvalidateRect(m_previewWnd,nullptr,FALSE);
+    }
+    void PaintTimelinePreview(HWND window){
+        PAINTSTRUCT paint{};HDC dc=BeginPaint(window,&paint);if(!dc)return;
+        RECT client{};GetClientRect(window,&client);
+        HBRUSH background=CreateSolidBrush(ui_palette::Window);FillRect(dc,&client,background);DeleteObject(background);
+        HBRUSH border=CreateSolidBrush(RGB(62,65,70));FrameRect(dc,&client,border);DeleteObject(border);
+        if(const auto* thumbnail=m_previewKey?m_thumbnails.Find(*m_previewKey):nullptr;thumbnail&&m_previewLayout.thumbnail.right>m_previewLayout.thumbnail.left){
+            BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=thumbnail->size.cx;
+            info.bmiHeader.biHeight=-thumbnail->size.cy;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+            const RECT& target=m_previewLayout.thumbnail;
+            StretchDIBits(dc,target.left,target.top,target.right-target.left,target.bottom-target.top,0,0,thumbnail->size.cx,thumbnail->size.cy,
+                          thumbnail->bgra.data(),&info,DIB_RGB_COLORS,SRCCOPY);
+        }
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,ui_palette::PrimaryText);
+        const HGDIOBJ old=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);RECT text=m_previewLayout.text;
+        DrawTextW(dc,m_previewText.c_str(),-1,&text,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        SelectObject(dc,old);EndPaint(window,&paint);
+    }
+    static LRESULT CALLBACK PreviewWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(m==WM_NCCREATE){SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));return DefWindowProcW(h,m,w,l);}
+        auto* self=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+        switch(m){
+        // Looked at, never touched: the cursor under it belongs to the bar.
+        case WM_NCHITTEST:return HTTRANSPARENT;
+        case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
+        case WM_ERASEBKGND:return 1;
+        case WM_PAINT:if(self){self->PaintTimelinePreview(h);return 0;}break;
+        case WM_NCDESTROY:if(self&&self->m_previewWnd==h)self->m_previewWnd=nullptr;break;
+        }
+        return DefWindowProcW(h,m,w,l);
+    }
+    // The hatched stretch the render is filling right now, animated with the
+    // activity timer that is already running while a job is.
+    void DrawRenderingNow(HDC dc,const RECT& lane,LONG left,LONG right){
+        const int saved=SaveDC(dc);if(!saved)return;
+        IntersectClipRect(dc,left,lane.top,right,lane.bottom);
+        const RECT area{left,lane.top,right,lane.bottom};
+        HBRUSH base=CreateSolidBrush(RGB(30,74,68));FillRect(dc,&area,base);DeleteObject(base);
+        HPEN pen=CreatePen(PS_SOLID,std::max(1,Dip(2)),ui_palette::NeuralCoverage);SelectObject(dc,pen);
+        const LONG height=lane.bottom-lane.top,period=std::max<LONG>(4,Dip(6));
+        const LONG phase=m_activityMotionEnabled?LONG((ActivityElapsedMs()/60)%uint64_t(period)):0;
+        for(LONG x=left-height-period+phase;x<right+period;x+=period){MoveToEx(dc,x,lane.bottom,nullptr);LineTo(dc,x+height,lane.top);}
+        RestoreDC(dc,saved);DeleteObject(pen);
+    }
     IdleSurfaceLayout IdleLayout()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutIdleSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> ToolbarItems()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
@@ -4817,7 +5124,7 @@ private:
         for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);return;}
     }
     void UpdateCachedStatus(){
-        UpdateStatusChips();
+        UpdateStatusChips();SyncTimelineMedia();
         const std::wstring status=BuildStatusText();if(status==m_cachedStatus)return;
         m_cachedStatus=status;if(m_hwnd){if(m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}else InvalidateRect(m_hwnd,nullptr,FALSE);}
     }
@@ -5137,13 +5444,18 @@ private:
         const auto toolbarItems=ToolbarItems();
         for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,item.compact,content.working);}
         const auto volumeRect=LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),toolbarItems);if(volumeRect){const RECT& vr=*volumeRect;HPEN vp=CreatePen(PS_SOLID,std::max(1,Dip(4)),RGB(94,98,105));op=SelectObject(dc,vp);MoveToEx(dc,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(dc,vr.right,(vr.top+vr.bottom)/2);SelectObject(dc,op);DeleteObject(vp);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));const int knob=std::max(3,Dip(5));DrawSolidEllipse(dc,RECT{vx-knob,(vr.top+vr.bottom)/2-knob,vx+knob,(vr.top+vr.bottom)/2+knob},RGB(230,232,235),"Volume knob");}
-        double shown=playback_timing::TimelinePosition(m_dragSeek,m_seekPreview,m_seekPending,m_pendingSeekSec,m_currentSec);RECT tr=TimelineRect();HBRUSH tb=CreateSolidBrush(RGB(68,71,77));FillRect(dc,&tr,tb);DeleteObject(tb);double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;
+        double shown=playback_timing::TimelinePosition(m_dragSeek,m_seekPreview,m_seekPending,m_pendingSeekSec,m_currentSec);RECT tr=TimelineRect();double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;
+        // A source that reports no length (a browser-recorded WebM) greys the
+        // bar: there is nothing to scale a position against, so it shows no
+        // progress, takes no click, and its hover says how to seek instead.
+        const bool lengthKnown=d>0;
+        HBRUSH tb=CreateSolidBrush(lengthKnown?RGB(68,71,77):ui_palette::Inactive);FillRect(dc,&tr,tb);DeleteObject(tb);
         const auto markerX=[&](int64_t pts){return tr.left+int(std::lround((tr.right-tr.left)*(d>0?std::clamp(double(pts)*1e-7/d,0.0,1.0):0.0)));};
         // Three lanes in one track, so no state hides another: the In/Out
         // selection on top (violet, the loudest because it is what the render
         // acts on), played progress in the middle, and the part of the source
         // that already has cached neural frames along the bottom (teal).
-        const LONG height=tr.bottom-tr.top,coverageLane=std::max<LONG>(2,height/4);
+        const LONG height=tr.bottom-tr.top,coverageLane=std::max<LONG>(Dip(3),height*2/5);
         // A session's coverage is a set of rendered regions, so each one is
         // painted on its own. One band from the session's start to its newest
         // frame would claim the holes between them as rendered, and those holes
@@ -5169,12 +5481,20 @@ private:
             else{RECT band{rendered.left,tr.bottom-coverageLane,rendered.right,tr.bottom};FillRect(dc,&band,nb);}
             DeleteObject(nb);
         }
+        // Where the render is working right now, hatched, from the head of
+        // the hole the running job is filling: the band says what is done,
+        // this says where it is growing.
+        if(m_liveSession&&NeuralJobActive()&&m_liveTarget.end100ns>m_liveTarget.start100ns&&lengthKnown){
+            const LONG head=markerX(static_cast<int64_t>(std::llround(LiveJobReachSeconds()*1e7)));
+            if(const auto span=timeline::RenderingNowSpan(tr.left,tr.right,head,markerX(m_liveTarget.end100ns),Dip(4),Dip(28)))
+                DrawRenderingNow(dc,RECT{tr.left,tr.bottom-coverageLane,tr.right,tr.bottom},span->first,span->second);
+        }
         // A live session plays the original inside its holes, so progress is not
         // confined to the rendered regions; a cache entry's playback is.
         const bool clampProgress=m_cachedPlayback&&!m_liveSession;
         RECT done{clampProgress?rendered.left:tr.left,tr.top,0,renderedSpan?tr.bottom-coverageLane:tr.bottom};
         done.right=std::clamp<LONG>(static_cast<LONG>(tr.left+std::lround((tr.right-tr.left)*f)),done.left,clampProgress?rendered.right:tr.right);
-        HBRUSH db=CreateSolidBrush(ui_palette::PrimaryBlue);FillRect(dc,&done,db);DeleteObject(db);
+        if(lengthKnown){HBRUSH db=CreateSolidBrush(ui_palette::PrimaryBlue);FillRect(dc,&done,db);DeleteObject(db);}
         // One pair of edge ticks per rendered region, so a hole reads as a gap
         // between two regions instead of being hidden inside one long band.
         if(renderedSpan&&m_liveSession){
@@ -5195,11 +5515,24 @@ private:
             HBRUSH sb=CreateSolidBrush(ui_palette::MarkedRange);FillRect(dc,&span,sb);DeleteObject(sb);
             RECT rail{span.left,tr.top,span.right,tr.top+std::max<LONG>(1,Dip(2))};HBRUSH rb=CreateSolidBrush(ui_palette::MarkedRangeEdge);FillRect(dc,&rail,rb);DeleteObject(rb);
         }
+        // Chapter boundaries as gaps cut through the bar, the way a video site
+        // draws them, so they read as divisions of the video rather than as
+        // one more coloured tick among the In/Out markers. The hover names the
+        // chapter.
+        if(lengthKnown&&!m_chapters.empty()){
+            HBRUSH gap=CreateSolidBrush(ui_palette::ControlSurface);
+            for(const timeline::Chapter& chapter:m_chapters){
+                if(chapter.startSeconds<=0.0||chapter.startSeconds>=d)continue;
+                const LONG x=markerX(static_cast<int64_t>(std::llround(chapter.startSeconds*1e7)));
+                RECT cut{x-std::max(1,Dip(1)),tr.top,x+std::max(1,Dip(1)),tr.bottom};FillRect(dc,&cut,gap);
+            }
+            DeleteObject(gap);
+        }
         const int tickWidth=std::max(2,Dip(3)),tickRise=Dip(8);
         const auto markerTick=[&](int64_t pts,COLORREF color){const int x=markerX(pts);RECT tick{x-tickWidth/2,tr.top-tickRise,x-tickWidth/2+tickWidth,tr.bottom+std::max(1,Dip(2))};HBRUSH mb=CreateSolidBrush(color);FillRect(dc,&tick,mb);DeleteObject(mb);};
         if(m_markers.in100ns)markerTick(*m_markers.in100ns,RGB(96,220,130));if(m_markers.out100ns)markerTick(*m_markers.out100ns,RGB(255,168,64));
-        const int knobR=std::max(4,Dip(6));int kx=done.right;DrawSolidEllipse(dc,RECT{kx-knobR,tr.top-Dip(2),kx+knobR,tr.bottom+Dip(2)},RGB(246,246,248),"Timeline knob");
-        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(206,208,212));auto of=SelectObject(dc,m_fontSmall);std::wstring time=TimeText(shown)+L" / "+TimeText(d);TextOutW(dc,Dip(18),c.bottom-Dip(50),time.c_str(),int(time.size()));
+        const int knobR=std::max(4,Dip(6));int kx=done.right;if(lengthKnown)DrawSolidEllipse(dc,RECT{kx-knobR,tr.top-Dip(2),kx+knobR,tr.bottom+Dip(2)},RGB(246,246,248),"Timeline knob");
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(206,208,212));auto of=SelectObject(dc,m_fontSmall);std::wstring time=TimeText(shown)+L" / "+(lengthKnown?TimeText(d):std::wstring(L"--:--"));TextOutW(dc,Dip(18),c.bottom-Dip(50),time.c_str(),int(time.size()));
         const status_chips::RowLayout statusRow=StatusRowLayout();
         {
             const auto now=Clock::now();
@@ -7623,7 +7956,10 @@ private:
         if(ActivityBusy()&&PtIn(m_neuralCancelBounds,x,y)){if(m_liveSession)StopLiveNeuralSession(true);else if(NeuralJobActive())CancelNeuralJob();else CancelYouTubeResolution();return;}
         if(!ControlsVisible())return;
         if(!m_loaded){const auto items=FocusableItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);break;}}return;}
-        if(!m_seeking){RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_dragWasPlaying=m_playing;m_lastScrubSeek={};m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateControls();return;}const auto vr=VolumeRect();if(vr&&PtIn(*vr,x,y)){m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}}
+        // A source with no length has no position to map a click to - every
+        // click would seek to the start - so its bar is greyed and inert;
+        // Left and Right still seek, which is what the hover says.
+        if(!m_seeking){RECT tr=TimelineRect();if(PtIn(tr,x,y)&&m_decoder.DurationSeconds()>0.0){m_dragSeek=true;m_dragWasPlaying=m_playing;m_lastScrubSeek={};m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateControls();return;}const auto vr=VolumeRect();if(vr&&PtIn(*vr,x,y)){m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}}
         const auto items=ToolbarItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);InvalidateControls();}
     }
 
@@ -7748,10 +8084,11 @@ private:
         if(Clock::now()-m_fullscreenLastInput<kFullscreenIdleDelay)return;
         m_fullscreenControlsHidden=true;m_focusedToolbarAction=ToolbarAction::None;
         m_hoverAction=ToolbarAction::None;m_pressedToolbarAction=ToolbarAction::None;
-        StopFullscreenTimer();SetMenu(m_hwnd,nullptr);DrawMenuBar(m_hwnd);
+        StopFullscreenTimer();SetMenu(m_hwnd,nullptr);DrawMenuBar(m_hwnd);ClearTimelineHover();
         Layout();InvalidateRect(m_hwnd,nullptr,FALSE);
     }
     void ToggleFullscreen(){
+        ClearTimelineHover();
         if(!m_fullscreen){
             m_savedStyle=GetWindowLongW(m_hwnd,GWL_STYLE);GetWindowRect(m_hwnd,&m_savedRect);
             m_fullscreenMenu=GetMenu(m_hwnd);m_fullscreen=true;m_fullscreenControlsHidden=true;
@@ -7795,6 +8132,7 @@ private:
         case WM_FRAMEGEN_PROGRESS:CompleteFrameGenerationProgress(static_cast<uint64_t>(w));return 0;
         case WM_FRAMEGEN_COMPLETE:CompleteFrameGeneration(static_cast<uint64_t>(w));return 0;
         case WM_UPDATE_CHECKED:CompleteUpdateCheck(static_cast<uint64_t>(w));return 0;
+        case WM_TIMELINE_MEDIA:CompleteTimelineMedia();return 0;
         case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
@@ -7835,11 +8173,11 @@ private:
             if(ScreenToClient(h,&point))FullscreenPointerMoved(h,MAKELPARAM(point.x,point.y));
             break;
         }
-        case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();ScrubToPreview();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));return 0;}
-        case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);return 0;
+        case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();ScrubToPreview();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));UpdateTimelineHover(m_mouseX,m_mouseY);return 0;}
+        case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);if(!m_dragSeek)ClearTimelineHover();return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
-        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();}if(m_dragVolume)m_dragVolume=false;if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
+        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();UpdateTimelineHover(m_mouseX,m_mouseY);}if(m_dragVolume)m_dragVolume=false;if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
         case WM_SETFOCUS:InvalidateControls();return 0;
         case WM_KILLFOCUS:InvalidateControls();return 0;
         case WM_DROPFILES:{
@@ -8095,6 +8433,13 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // The status chips as last painted, what each last flashed on, and the
     // repaint timer that runs only while one is still fading.
     status_chips::Snapshot m_cachedChips{};status_chips::Flash m_chipFlash;UINT_PTR m_chipFlashTimer=0;
+    // The timeline's render map: the file it describes and a generation that
+    // retires answers about a previous one, that file's chapters, the hover
+    // thumbnails already decoded, and the hover preview popup.
+    TimelineMediaWorker m_timelineWorker;uint64_t m_timelineGeneration=0;std::filesystem::path m_timelineFile;
+    std::vector<timeline::Chapter> m_chapters;timeline::LruCache<TimelineMediaWorker::Thumbnail> m_thumbnails{24};
+    std::optional<int> m_timelineHoverX;std::optional<int64_t> m_previewKey;std::wstring m_previewText;
+    timeline::PreviewLayout m_previewLayout{};HWND m_previewWnd=nullptr;
     // Drives Tick while a modal loop owns the thread; see StartModalTick.
     UINT_PTR m_modalTickTimer=0;bool m_inTick=false;
     // The paused frame needs presenting again: the window under it was resized

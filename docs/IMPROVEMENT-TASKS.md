@@ -72,7 +72,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.15](#p215) | An on-screen compare bar with press-and-hold A/B | S | Player | |
 | [P2.16](#p216) | Zoom, pan and a synced magnifier | M | Player | |
 | [P2.17](#p217) | A difference view | S-M | Player | |
-| [P2.18](#p218) | The timeline as a render map | S / M | Player | |
 | [P2.20](#p220) | A start screen with a capability check and tiles | M | Player | |
 | [P2.21](#p221) | Export the comparison itself | S / M | Player | |
 | [P2.22](#p222) | Dark, DPI-aware menus and dialogs | M | Player | |
@@ -436,24 +435,6 @@ on P0.10 for a true 1:1.
 existing compare shader, optionally with an SSIM map. It answers *where did
 the model change the picture*, which is the question visitors ask, and it is
 the natural authoring view for P2.6's masks.
-
----
-
-<a id="p218"></a>
-### P2.18 · The timeline as a render map
-
-`S` band · `M` thumbnails · **Player**
-
-Progressive whole-video coverage is the project's real advantage, yet on
-screen it is a thin teal line (`neural-playback.jpg`).
-
-**Also** — when the duration is unknown (browser-recorded WebM), grey out
-the timeline: seeking itself works since P1.6, but the bar shows nothing.
-
-**Do** — a thicker coverage band with a hatched "rendering now" segment at
-the render head, the time on hover, time-to-full-coverage, and chapter
-markers. Then hover thumbnails: the cached neural frame where one exists,
-otherwise the original. uosc with thumbfast is the model.
 
 ---
 

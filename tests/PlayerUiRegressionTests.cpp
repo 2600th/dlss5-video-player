@@ -894,6 +894,134 @@ struct PlayerAppTestAccess {
         CHECK(DeleteDC(dc));
     }
 
+    // Drains the worker's answers until `done` holds or ten seconds pass; the
+    // worker posts a bare message and the player takes what is ready.
+    static bool PumpTimelineMedia(PlayerApp& app, const std::function<bool()>& done)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!done() && std::chrono::steady_clock::now() < deadline) {
+            MSG message{};
+            if (PeekMessageW(&message, app.m_hwnd, WM_TIMELINE_MEDIA, WM_TIMELINE_MEDIA, PM_REMOVE)) app.CompleteTimelineMedia();
+            else Sleep(10);
+        }
+        return done();
+    }
+
+    // The render map end to end on real files: the greyed bar of a source with
+    // no length, the hover facts of a cached render, a thumbnail and a chapter
+    // list fetched by the staged FFmpeg tools off the UI thread.
+    static void timeline_render_map_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, hadRenderer = app.m_renderer != nullptr;
+        const auto range = app.m_cachedRange;
+        const auto kind = app.m_sourceKind;
+        const std::wstring path = app.m_path;
+        const NeuralPlaybackLifecycle lifecycle = app.m_neuralLifecycle;
+        app.m_neuralLifecycle.state = NeuralPlaybackState::Idle;
+        if (!hadRenderer) app.m_renderer = MakeD3D12Renderer();
+        app.m_loaded = true;
+        app.m_cachedPlayback = false;
+
+        // No length: the bar takes no click, and the hover says how to seek.
+        // A closed decoder still remembers what it last described, so the
+        // fixture's is set aside for an empty one and put back at the end.
+        VideoDecoder saved;
+        saved.Swap(app.m_decoder);
+        const RECT track = app.TimelineRect();
+        CHECK_EQ(LONG(app.Dip(18)), track.bottom - track.top);
+        const POINT middle{(track.left + track.right) / 2, (track.top + track.bottom) / 2};
+        app.MouseDown(middle.x, middle.y);
+        CHECK(!app.m_dragSeek);
+        app.MouseUp(middle.x, middle.y);
+        app.UpdateTimelineHover(middle.x, middle.y);
+        CHECK(app.m_previewText.find(L"Length unknown") == 0);
+        CHECK(!app.m_previewKey.has_value());
+        app.UpdateTimelineHover(middle.x, track.top - app.Dip(20));
+        CHECK(!app.m_timelineHoverX.has_value());
+
+        const auto directory = app.SettingsPath().parent_path();
+        const auto avi = directory / L"timeline-64x48.avi";
+        WriteTinyAvi(avi, 64, 48, 30);
+        app.m_sourceKind = MediaSourceKind::LocalFile;
+        app.m_path = avi.wstring();
+        REQUIRE(app.m_decoder.OpenMetadata(avi.wstring()));
+        REQUIRE(app.m_decoder.DurationSeconds() > 0.0);
+        // The file stands in for its own neural render: what is checked is
+        // that a moment inside a cached range asks the render, not the source.
+        app.m_cachedPlayback = true;
+        app.m_cachedRange = {};
+        app.m_neuralPath = avi;
+        app.SyncTimelineMedia();
+        CHECK(app.m_timelineFile == avi);
+        app.UpdateTimelineHover(middle.x, middle.y);
+        CHECK(app.m_previewText.find(L" · Rendered") != std::wstring::npos);
+        REQUIRE(app.m_previewKey.has_value());
+        CHECK_EQ(int64_t{1}, *app.m_previewKey % 2);
+        const bool haveTools = std::filesystem::exists(PlayerApp::ExecutableDirectory() / L"ffmpeg.exe") &&
+                               std::filesystem::exists(PlayerApp::ExecutableDirectory() / L"ffprobe.exe");
+        if (haveTools) {
+            const int64_t key = *app.m_previewKey;
+            CHECK(PumpTimelineMedia(app, [&] { return app.m_thumbnails.Find(key) != nullptr; }));
+            if (const auto* thumbnail = app.m_thumbnails.Find(key)) {
+                const SIZE expected = app.TimelineThumbnailSize();
+                CHECK_EQ(expected.cx, thumbnail->size.cx);
+                CHECK_EQ(expected.cy, thumbnail->size.cy);
+                CHECK_EQ(size_t(expected.cx) * size_t(expected.cy) * 4u, thumbnail->bgra.size());
+            }
+
+            // A chaptered copy, made by the same ffmpeg: two chapters of 50 ms.
+            const auto meta = directory / L"timeline-chapters.txt";
+            {
+                std::ofstream out(meta, std::ios::binary);
+                out << ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=50\ntitle=Opening, cold\n"
+                       "[CHAPTER]\nTIMEBASE=1/1000\nSTART=50\nEND=100\ntitle=Credits\n";
+            }
+            const auto chaptered = directory / L"timeline-chapters.mkv";
+            std::filesystem::remove(chaptered);
+            CHECK(RunToolCapture(PlayerApp::ExecutableDirectory() / L"ffmpeg.exe",
+                                 {L"-v", L"error", L"-nostdin", L"-y", L"-i", avi.wstring(), L"-i", meta.wstring(),
+                                  L"-map", L"0:v", L"-map_metadata", L"1", L"-map_chapters", L"1", L"-c:v", L"ffv1",
+                                  chaptered.wstring()},
+                                 {}, std::chrono::seconds(20), 1u << 20).has_value());
+            app.m_path = chaptered.wstring();
+            REQUIRE(app.m_decoder.OpenMetadata(chaptered.wstring()));
+            app.m_cachedPlayback = false;
+            app.SyncTimelineMedia();
+            CHECK(app.m_chapters.empty());
+            CHECK(PumpTimelineMedia(app, [&] { return app.m_chapters.size() == 2; }));
+            if (app.m_chapters.size() == 2) {
+                CHECK(app.m_chapters[0].title == L"Opening, cold");
+                CHECK(app.m_chapters[1].title == L"Credits");
+                CHECK(app.TimelineHoverFacts(0.07).chapter == L"Credits");
+                CHECK(!app.TimelineHoverFacts(0.07).rendered.has_value());
+            }
+            // Another file retires the old one's chapters and thumbnails.
+            const uint64_t generation = app.m_timelineGeneration;
+            app.m_path.clear();
+            app.SyncTimelineMedia();
+            CHECK(app.m_timelineGeneration != generation);
+            CHECK(app.m_chapters.empty());
+            CHECK_EQ(size_t{0}, app.m_thumbnails.Size());
+            std::filesystem::remove(chaptered);
+            std::filesystem::remove(meta);
+        }
+
+        app.ClearTimelineHover();
+        app.m_decoder.Close();
+        app.m_decoder.Swap(saved);
+        std::filesystem::remove(avi);
+        app.m_neuralPath.clear();
+        app.m_path = path;
+        app.m_sourceKind = kind;
+        app.m_cachedRange = range;
+        app.m_cachedPlayback = cached;
+        app.m_loaded = loaded;
+        app.m_neuralLifecycle = lifecycle;
+        if (!hadRenderer) app.m_renderer.reset();
+        app.SyncTimelineMedia();
+    }
+
     static void source_menus_are_disabled_without_media_test()
     {
         PlayerApp& app = fixture->app;
@@ -1322,6 +1450,7 @@ struct PlayerAppTestAccess {
         UI_CASE(live_pace_confirmation_test),
         UI_CASE(toolbar_pills_and_progress_panel_test),
         UI_CASE(status_chips_and_narrow_pills_fit_test),
+        UI_CASE(timeline_render_map_test),
         UI_CASE(source_menus_are_disabled_without_media_test),
         UI_CASE(source_menus_return_after_a_cancelled_job_test),
         UI_CASE(loading_feedback_test),
