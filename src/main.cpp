@@ -160,6 +160,33 @@ static UINT ActiveWindowDpi(HWND window)
     return dpi > 0 ? static_cast<UINT>(dpi) : USER_DEFAULT_SCREEN_DPI;
 }
 
+// Popup menus - File under the dark menu bar, the compare bar's mode menu, an edit
+// box's context menu - were drawn light, because only the bar itself is owner-drawn
+// (WM_UAHDRAWMENU, DarkModePolicy.h). uxtheme's SetPreferredAppMode(ForceDark),
+// ordinal 135 since Windows 10 1903 with FlushMenuThemes at 136, is the switch
+// Explorer and Notepad++ use for them. Undocumented like the bar messages, and
+// guarded the same way: only on a build that has it, found by ordinal, and a
+// failure anywhere leaves light menus and nothing else.
+static void EnableDarkPopupMenus()
+{
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    const auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    OSVERSIONINFOW version{};
+    version.dwOSVersionInfoSize = sizeof(version);
+    if (!rtlGetVersion || rtlGetVersion(&version) != 0 || version.dwMajorVersion < 10 || version.dwBuildNumber < 18362) return;
+    const HMODULE uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!uxtheme) return;
+    using SetPreferredAppModeFn = int(WINAPI*)(int);
+    using FlushMenuThemesFn = void(WINAPI*)();
+    const auto setPreferredAppMode = reinterpret_cast<SetPreferredAppModeFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(135)));
+    const auto flushMenuThemes = reinterpret_cast<FlushMenuThemesFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(136)));
+    if (!setPreferredAppMode) return;
+    constexpr int kForceDark = 2;
+    setPreferredAppMode(kForceDark);
+    if (flushMenuThemes) flushMenuThemes();
+}
+
 // The shipped exe declares per-monitor v2 in its manifest (DLSSVideoPlayer.manifest),
 // and then this call is refused as already set; it matters for a binary without one.
 static void EnablePerMonitorDpiAwareness()
@@ -10842,6 +10869,7 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
     // beside the log rather than nothing at all.
     crash_dump::Install();
     EnablePerMonitorDpiAwareness();
+    EnableDarkPopupMenus();
     AppOptions options=ParseArgs();
     // --render and --help run headless and never reach the player, its
     // bootstrap or a window. ParseRuntimeArguments has already run, so the
