@@ -442,6 +442,19 @@ void deband_changes_the_render_key_on_every_rung()
     }
 }
 
+void supplied_exposure_changes_the_render_key()
+{
+    CaptureQualityTerms exposed;
+    exposed.suppliedExposure = true;
+    CHECK_EQ(std::string("|exposure-key018-p20-cut-v1"), CaptureQualityIdentityTerm(exposed));
+    // Last of the four, whatever else is set, so the order stays stable.
+    CaptureQualityTerms all{true, EncoderQuality::Lossless, true, true};
+    CHECK_EQ(std::string("|lossless-ffv1-10bit-v1|deband-i1t3r16g4-static-v1|exposure-key018-p20-cut-v1"),
+             CaptureQualityIdentityTerm(all));
+    all.suppliedExposure = false;
+    CHECK(CaptureQualityIdentityTerm(all) != CaptureQualityIdentityTerm({true, EncoderQuality::Lossless, true, true}));
+}
+
 void schema_three_manifests_parse_with_defaults_and_stay_reusable()
 {
     // Byte-exact schema-3 manifest as written by the previous release.
@@ -907,6 +920,7 @@ int main()
     capture_dither_changes_the_render_key_and_names_its_map();
     quality_rung_changes_the_render_key_and_drops_the_switches_it_makes_inert();
     deband_changes_the_render_key_on_every_rung();
+    supplied_exposure_changes_the_render_key();
     schema_three_manifests_parse_with_defaults_and_stay_reusable();
     current_schema_manifest_round_trips_with_receipt_digest();
     receipt_is_authenticated_on_promotion_and_lookup();

@@ -1,3 +1,4 @@
+#include "ExposurePolicy.h"
 #include "SceneCut.h"
 #include "SynchronizedPlayback.h"
 #include "TemporalGuides.h"
@@ -1286,6 +1287,79 @@ void render_metrics_report_colour_in_one_scale_for_both_layouts_test()
     CHECK(!temporal_metrics::Sample(std::span<const uint8_t>(nv12), PixelLayout::Bgra, kW, kH, kGridW, kGridH, fromBgra));
 }
 
+// The supplied exposure's arithmetic: middle grey over the log-average luminance,
+// bounded, and a one-pole low-pass in log units that a reset restarts and a
+// re-submitted frame leaves alone.
+void exposure_meter_and_smoother_follow_the_policy_test()
+{
+    // A uniform grid meters to its own linear luminance, and grey 0.18 needs no push.
+    const std::vector<float> grey(64, 0.5f);
+    const float greyMeter = exposure::MeterLogAverage(grey.data(), grey.size());
+    CHECK(std::abs(greyMeter - exposure::LinearFromEncoded(0.5f)) < 1e-5f);
+    CHECK(std::abs(exposure::ExposureFor(exposure::kKey) - 1.0f) < 1e-6f);
+    // A black frame asks for the ceiling, not for infinity; white for the floor's
+    // counterpart.
+    const std::vector<float> black(64, 0.0f), white(64, 1.0f);
+    CHECK_EQ(exposure::kMaxExposure, exposure::ExposureFor(exposure::MeterLogAverage(black.data(), black.size())));
+    CHECK(exposure::ExposureFor(exposure::MeterLogAverage(white.data(), white.size())) < 0.2f);
+    CHECK_EQ(exposure::kFloor, exposure::MeterLogAverage(nullptr, 0));
+    // The geometric mean: one bright cell among dark ones moves it far less than the
+    // arithmetic mean would.
+    std::vector<float> mostlyDark(64, 0.1f);
+    mostlyDark[0] = 1.0f;
+    const float dark = exposure::LinearFromEncoded(0.1f);
+    CHECK(exposure::MeterLogAverage(mostlyDark.data(), mostlyDark.size()) < dark * 1.2f);
+
+    exposure::Smoother smoother;
+    CHECK_EQ(1.0f, smoother.Exposure());
+    // The first reading is taken as it is.
+    CHECK(std::abs(smoother.Update(0.05f, 1, false) - exposure::ExposureFor(0.05f)) < 1e-5f);
+    // A step to a brighter shot without a reset moves a fraction of the way...
+    const float after = smoother.Update(0.4f, 2, false);
+    CHECK(after < exposure::ExposureFor(0.05f));
+    CHECK(after > exposure::ExposureFor(0.4f));
+    const double expectedLog = std::log(0.05) + exposure::SmoothingWeight() * (std::log(0.4) - std::log(0.05));
+    CHECK(std::abs(after - exposure::ExposureFor(float(std::exp(expectedLog)))) < 1e-4f);
+    // ...a re-submission of the same frame does not move it again...
+    CHECK_EQ(after, smoother.Update(0.4f, 2, false));
+    // ...one smoothing period of frames gets it about 63 % of the way in log units...
+    float value = after;
+    for (uint64_t frame = 3; frame < 2 + uint64_t(exposure::kSmoothingPeriodFrames); ++frame)
+        value = smoother.Update(0.4f, frame, false);
+    const double reached = std::log(double(exposure::kKey) / value);
+    const double fraction = (reached - std::log(0.05)) / (std::log(0.4) - std::log(0.05));
+    CHECK(fraction > 0.6 && fraction < 0.67);
+    // ...and a reset lands on the new shot's own reading at once.
+    CHECK(std::abs(smoother.Update(0.01f, 100, true) - exposure::ExposureFor(0.01f)) < 1e-5f);
+}
+
+// The guide generator meters every frame it builds, and a cut it classifies is what
+// restarts the supplied exposure: fed through the generator's own resets, the smoother
+// holds its value across a continuing shot and jumps at the cut.
+void guide_meter_restarts_the_exposure_at_a_cut_test()
+{
+    TemporalGuideGenerator guides;
+    exposure::Smoother smoother;
+    GuideFrame out;
+    float before = 0.0f;
+    for (uint64_t frame = 1; frame <= 6; ++frame) {
+        // A dim textured shot, panning.
+        CHECK(Generate(guides, TexturedFrame(int(frame) * 2, int(frame), -0.3), Frame(frame), out));
+        CHECK(out.luminanceMeter > 0.0f);
+        before = smoother.Update(out.luminanceMeter, frame, out.id.reset != HistoryReset::None);
+    }
+    CHECK(out.id.reset == HistoryReset::None);
+    // The continuing shot meters about the same each frame, so the value settled.
+    CHECK(std::abs(before - exposure::ExposureFor(out.luminanceMeter)) < 0.05f * before);
+    // A different, brighter shot: the generator calls it a cut, and the exposure is the
+    // new shot's own rather than a blend with the old one.
+    CHECK(Generate(guides, NoiseFrame(3), Frame(7), out));
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
+    const float cut = smoother.Update(out.luminanceMeter, 7, out.id.reset != HistoryReset::None);
+    CHECK(std::abs(cut - exposure::ExposureFor(out.luminanceMeter)) < 1e-5f);
+    CHECK(cut < before);
+}
+
 int main()
 {
     reused_guide_storage_reports_what_fresh_storage_does_test();
@@ -1316,5 +1390,7 @@ int main()
     render_metrics_see_flicker_the_source_did_not_have_test();
     render_metrics_follow_the_flow_and_stop_at_a_cut_test();
     render_metrics_report_colour_in_one_scale_for_both_layouts_test();
+    exposure_meter_and_smoother_follow_the_policy_test();
+    guide_meter_restarts_the_exposure_at_a_cut_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

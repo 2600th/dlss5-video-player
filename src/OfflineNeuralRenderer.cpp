@@ -2045,6 +2045,10 @@ struct ProductionEvaluatorAdapter {
     // The deband pre-pass, compiled into the colour conversion at bring-up.
     bool sourceDeband{false};
     bool builtSourceDeband{false};
+    // The supplied exposure; it decides the feature's creation flags, so a job that
+    // differs rebuilds the device rather than inheriting a feature made the other way.
+    bool suppliedExposure{false};
+    bool builtSuppliedExposure{false};
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
     // Which conversion the live renderer's source pass was COMPILED for, which is
@@ -2097,7 +2101,8 @@ struct ProductionEvaluatorAdapter {
                sourceLayout==layout&&sourceConversion==conversion&&
                builtGpuColorConversion==gpuColorConversion&&
                builtSuperResolutionCarrier==superResolutionCarrier&&builtCaptureDither==captureDither&&
-               builtTenBitCapture==tenBitCapture&&builtSourceDeband==sourceDeband;
+               builtTenBitCapture==tenBitCapture&&builtSourceDeband==sourceDeband&&
+               builtSuppliedExposure==suppliedExposure;
         // Answered, so spent: this job either re-arms the released feature or
         // rebuilds the device, and either way the next Initialize must judge
         // the feature on what it can see rather than on a stale promise.
@@ -2114,8 +2119,9 @@ struct ProductionEvaluatorAdapter {
         if(!renderer)return false;
         builtGpuColorConversion=gpuColorConversion;builtCaptureDither=captureDither;builtTenBitCapture=tenBitCapture;
         builtSuperResolutionCarrier=superResolutionCarrier;
-        builtSourceDeband=sourceDeband;
+        builtSourceDeband=sourceDeband;builtSuppliedExposure=suppliedExposure;
         renderer->SetSourceDeband(sourceDeband);
+        renderer->SetSuppliedExposure(suppliedExposure);
         renderer->SetCaptureFormat(tenBitCapture?CaptureFormat::P010:gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
         renderer->SetCaptureDither(captureDither&&!tenBitCapture);
         renderer->SetSourceLayout(layout);
@@ -2919,6 +2925,7 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     state.evaluator.tenBitCapture=EncoderQualityIsTenBit(request.quality);
     state.evaluator.captureDither=request.captureDither&&!state.evaluator.tenBitCapture;
     state.evaluator.sourceDeband=request.sourceDeband;
+    state.evaluator.suppliedExposure=request.suppliedExposure;
     // Read before the reset, because the reset is allowed to drop the feature.
     const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();
     state.evaluator.ResetForJob(request.guides);

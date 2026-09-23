@@ -251,8 +251,10 @@ void DLSSBackend::FillCreateParameters() {
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_OutHeight, m_outputH);
     NVSDK_NGX_Parameter_SetI(m_params, NVSDK_NGX_Parameter_PerfQualityValue, m_quality);
 
+    // AutoExposure unless the renderer supplies the exposure itself; the two are
+    // exclusive, and the supplied one is what the SetExposureTexture caller asked for.
     const int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                      NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
+                      (m_exposure ? 0 : NVSDK_NGX_DLSS_Feature_Flags_AutoExposure);
     // Depth is conventional HW depth: 0 = near, 1 = far, so no DepthInverted.
     // Motion vectors are generated without camera-jitter baked in, so no MVJittered.
     NVSDK_NGX_Parameter_SetI(m_params, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, flags);
@@ -276,7 +278,8 @@ bool DLSSBackend::CreateFeature(ID3D12GraphicsCommandList* cmd) {
     LOG("RAW NGX D3D12 CreateFeature SUCCESS: feature=SuperSampling input="
         << std::dec << m_renderW << "x" << m_renderH << " output="
         << m_outputW << "x" << m_outputH
-        << " flags=MVLowRes|AutoExposure; direct hook-visible contract");
+        << (m_exposure ? " flags=MVLowRes, supplied exposure" : " flags=MVLowRes|AutoExposure")
+        << "; direct hook-visible contract");
     return true;
 }
 
@@ -358,8 +361,9 @@ void DLSSBackend::FillEvaluateParameters(ID3D12Resource* color,
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, 0);
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, 0);
 
-    // SDR video is converted to linear FP16 before DLSS. AutoExposure is enabled,
-    // so no external exposure texture is necessary; these values define the color scale.
+    // SDR video is converted to linear FP16 before DLSS. By default AutoExposure is
+    // enabled and no exposure texture is bound; with a supplied one (ExposurePolicy.h)
+    // it is bound below. These values define the colour scale either way.
     NVSDK_NGX_Parameter_SetF(m_params, NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.0f);
     NVSDK_NGX_Parameter_SetF(m_params, NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.0f);
     NVSDK_NGX_Parameter_SetF(m_params, NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, frameTimeMs);
@@ -375,7 +379,7 @@ void DLSSBackend::FillEvaluateParameters(ID3D12Resource* color,
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_DLSS_TransparencyLayerOpacity, nullptr);
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_DLSS_TransparencyLayerMvecs, nullptr);
 #endif
-    NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_ExposureTexture, nullptr);
+    NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_ExposureTexture, m_exposure);
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Input_Translucency_SubrectBase_X, 0);
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Input_Translucency_SubrectBase_Y, 0);
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_GBuffer_Albedo, nullptr);

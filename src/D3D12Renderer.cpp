@@ -149,6 +149,8 @@ D3D12Renderer::~D3D12Renderer() {
     }
     if (m_timestampReadback && m_timestampMapped) m_timestampReadback->Unmap(0,nullptr);
     m_timestampMapped=nullptr;
+    if (m_exposureUpload && m_exposureUploadMapped) m_exposureUpload->Unmap(0,nullptr);
+    m_exposureUploadMapped=nullptr;
     LOG("Renderer teardown: buffers unmapped");
     m_dlss.Shutdown();
     LOG("Renderer teardown: NGX released");
@@ -162,6 +164,8 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
     // place of the plain ones. A renderer with no capture ring has nothing to dither.
     m_captureDither=m_requestedCaptureDither&&captureOutput;
     m_sourceDeband=m_requestedSourceDeband;
+    m_suppliedExposure=m_requestedSuppliedExposure;
+    m_exposureSmoother.Reset();
     m_hwnd=hwnd; m_sourceW=sourceW; m_sourceH=sourceH; m_outputW=outputW; m_outputH=outputH; m_gridW=gridW; m_gridH=gridH; m_quality=quality;
     if(!m_gridW||!m_gridH)return false;
     // NV12 planes need even dimensions, so an odd source keeps the BGRA upload
@@ -1235,6 +1239,26 @@ bool D3D12Renderer::CreateVideoResources(){
             "Map persistent cache readback buffer"))return false;
     }
 
+    // The supplied exposure: a 1x1 R32_FLOAT the evaluate binds in place of the
+    // feature's own meter, and one placed footprint of upload per frame slot.
+    m_exposureTexture.Reset();m_exposureUpload.Reset();m_exposureUploadMapped=nullptr;m_exposureInCopyDest=true;
+    if(m_suppliedExposure){
+        auto exposureDesc=Tex2D(DXGI_FORMAT_R32_FLOAT,1,1,D3D12_RESOURCE_FLAG_NONE);
+        if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&exposureDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_exposureTexture)),"Create exposure texture"))return false;
+        m_exposureTexture->SetName(L"DLSS_Exposure_R32F");
+        auto uploadHeap=HeapProps(D3D12_HEAP_TYPE_UPLOAD);
+        D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width=uint64_t(FrameCount)*D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;buffer.Height=1;buffer.DepthOrArraySize=1;
+        buffer.MipLevels=1;buffer.SampleDesc={1,0};buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if(!HR(m_device->CreateCommittedResource(&uploadHeap,D3D12_HEAP_FLAG_NONE,&buffer,
+            D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&m_exposureUpload)),"Create exposure upload"))return false;
+        D3D12_RANGE none{0,0};
+        if(!HR(m_exposureUpload->Map(0,&none,reinterpret_cast<void**>(&m_exposureUploadMapped)),"Map exposure upload"))return false;
+        m_dlss.SetExposureTexture(m_exposureTexture.Get());
+        LOG("Supplied exposure armed: the feature is created without AutoExposure and every evaluate binds a smoothed meter.");
+    }
+
     // Comparison reference: allocated by the first UploadReferenceFrame, not here. It
     // is a source-size texture plus its uploads - 103 MB at 1440p and 232 MB at 4K
     // with the six uploads it used to have - and only a comparison or a strength dial
@@ -1320,6 +1344,9 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const FrameIdent
             <<" src="<<guide.id.sourceGeneration<<" job="<<guide.id.jobId);
         return false;
     }
+    // The supplied exposure is metered off this frame's guide grid, and restarts with
+    // the guide's own history: a cut, a seek or a first frame meters itself afresh.
+    if(m_suppliedExposure)m_exposureSmoother.Update(guide.luminanceMeter,frame.frameNumber,guide.id.reset!=HistoryReset::None);
     if(!RenderFrameInternal(bgra,bytes,guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
         guide.gridW,guide.gridH,guide.id.reset!=HistoryReset::None,guide.motionVectors,frameTimeMs,&guide.id))return false;
     m_lastRenderedId=guide.id;
@@ -1356,6 +1383,10 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         CopyMappedRows(m_uploadMapped[slot],m_sourceChromaFootprint,bgra+size_t(m_sourceW)*m_sourceH,size_t(m_sourceW),m_sourceH/2u);
     }else CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
     if(guidesUsed)CopyMappedRows(m_guideMapped[slot],m_guideFootprint,guideGridRGBA32F,guideRow,m_gridH);
+    if(m_exposureUploadMapped){
+        const float value=m_exposureSmoother.Exposure();
+        std::memcpy(m_exposureUploadMapped+size_t(slot)*D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,&value,sizeof(value));
+    }
     if(!DeviceHR(m_allocators[slot]->Reset(),"Reset frame allocator")) return false;
     if(!DeviceHR(m_uploadAllocators[slot]->Reset(),"Reset frame upload allocator")) return false;
     auto* cmd=m_cmds[slot].Get();
@@ -1392,6 +1423,17 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         d.pResource=m_decodedTexture.Get();s.PlacedFootprint=m_uploadFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
     }
 
+    if(m_exposureTexture&&m_exposureUpload){
+        // The value written into this slot's footprint above, into the texture the
+        // evaluate binds, back in the state NGX requires before this list ends.
+        if(!m_exposureInCopyDest)Barrier(pre,m_exposureTexture.Get(),GuideReadState,D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION ed{};ed.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;ed.pResource=m_exposureTexture.Get();
+        D3D12_TEXTURE_COPY_LOCATION es{};es.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;es.pResource=m_exposureUpload.Get();
+        es.PlacedFootprint.Offset=uint64_t(slot)*D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+        es.PlacedFootprint.Footprint={DXGI_FORMAT_R32_FLOAT,1,1,1,D3D12_TEXTURE_DATA_PITCH_ALIGNMENT};
+        pre->CopyTextureRegion(&ed,0,0,0,&es,nullptr);
+        Barrier(pre,m_exposureTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,GuideReadState);m_exposureInCopyDest=false;
+    }
     if(guidesUsed){
         if(!m_gridInCopyDest)Barrier(pre,m_guideGrid.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
         d.pResource=m_guideGrid.Get();s.pResource=m_guideUpload[slot].Get();s.PlacedFootprint=m_guideFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);

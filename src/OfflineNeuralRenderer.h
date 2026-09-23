@@ -127,6 +127,10 @@ struct NeuralRenderRequest {
     // The deband pre-pass on the decoded source ahead of the model (DebandPolicy.h).
     // Off by default and a cache-key term: it changes what the model is shown.
     bool sourceDeband{false};
+    // Supply DLSS a smoothed, metered exposure instead of its AutoExposure
+    // (ExposurePolicy.h). A cache-key term; the default follows the A/B in
+    // docs/measurements/exposure-ab-20260923/.
+    bool suppliedExposure{false};
 };
 
 struct NeuralRenderProgress {

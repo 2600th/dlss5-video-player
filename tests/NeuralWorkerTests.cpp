@@ -1082,6 +1082,23 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     }
     const auto badDebandView = view(badDeband);
     CHECK(!neural_worker_detail::ParseWorkerArguments(badDebandView).has_value());
+    // The supplied exposure changes the feature's creation flags and what the model
+    // produces; absent means DLSS meters its own, as every earlier helper let it.
+    for (const auto& argument : normal) CHECK(argument != L"--supplied-exposure");
+    if (parsedNormal) CHECK(!parsedNormal->request.suppliedExposure);
+    NeuralRenderRequest exposed = request;
+    exposed.suppliedExposure = true;
+    const auto exposedArguments = neural_worker_detail::BuildWorkerArguments(exposed, metadata, pause, false);
+    const auto exposedView = view(exposedArguments);
+    const auto parsedExposed = neural_worker_detail::ParseWorkerArguments(exposedView);
+    CHECK(parsedExposed.has_value());
+    if (parsedExposed) CHECK(parsedExposed->request.suppliedExposure);
+    auto badExposure = exposedArguments;
+    for (size_t index = 0; index + 1 < badExposure.size(); ++index) {
+        if (badExposure[index] == L"--supplied-exposure") badExposure[index + 1] = L"2";
+    }
+    const auto badExposureView = view(badExposure);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badExposureView).has_value());
     // The quality rung travels by name, absent meaning Standard - the only rung an
     // older parent can ask for - and a name this build does not know is refused
     // rather than read as the default the parent did not key for.

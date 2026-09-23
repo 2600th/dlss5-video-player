@@ -57,6 +57,10 @@ struct GuideFrame {
     bool sceneCutSuppressed = false;
     float sceneCutResidual = 0.0f;
     float sceneCutHistogramOverlap = 1.0f;
+    // Log-average linear luminance of this frame's analysis grid (ExposurePolicy.h):
+    // what a supplied exposure is metered from, read off the same cells the scene-cut
+    // test used. Filled for every frame, reset or not.
+    float luminanceMeter = 0.0f;
     // Source identity of the frame these guides were built from, stamped with
     // the generator's history generation and the reset reason (None when the
     // guides continue the previous frame's history; hasHistory == !reset).

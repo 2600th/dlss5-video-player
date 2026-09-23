@@ -526,6 +526,14 @@ already has:
   the pre-pass has little left to do and costs some fine texture; see
   `docs/measurements/deband-20260923/`. The key carries
   `deband-i1t3r16g4-static-v1` while it is on.
+- `SuppliedExposure` (default off). Creates the DLSS feature without
+  AutoExposure and hands it a metered exposure instead: middle grey over the
+  frame's log-average luminance, smoothed over about 20 frames and restarted
+  at every scene cut the temporal guides classify. Measured on 13 clips it
+  changed nothing on real footage (bit-identical renders) and made the
+  synthetic clips it did change very slightly worse, so it is off; see
+  `docs/measurements/exposure-ab-20260923/`. The key carries
+  `exposure-key018-p20-cut-v1` while it is on.
 - `CaptureDither` (default off). Dithers each rendered frame against a static
   8x8 ordered map where it is cut to 8 bits for the cache, so a smooth dark
   gradient is written as a fine mix of two levels instead of flat bands.

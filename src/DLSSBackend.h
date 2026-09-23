@@ -46,6 +46,11 @@ public:
                   bool reset,
                   float frameTimeMs);
     void Shutdown();
+    // A 1x1 exposure the evaluate reads instead of metering its own (ExposurePolicy.h).
+    // Set before the feature is created: with one, the feature is created without
+    // AutoExposure and every evaluate binds it; without one - the default - nothing
+    // changes. The resource must be in NON_PIXEL_SHADER_RESOURCE at evaluate time.
+    void SetExposureTexture(ID3D12Resource* exposure) { m_exposure = exposure; }
 
     bool Available() const { return m_available && m_initialized && m_params != nullptr; }
     uint32_t RenderWidth() const { return m_renderW; }
@@ -85,4 +90,5 @@ private:
     bool m_sourceOutsideRange = false;
     ngx_session_detail::FeatureCreateGate m_featureCreateGate;
     uint64_t m_evaluations = 0;
+    ID3D12Resource* m_exposure = nullptr;  // owned by the renderer
 };

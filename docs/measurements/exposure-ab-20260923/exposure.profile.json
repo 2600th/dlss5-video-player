@@ -1,0 +1,39 @@
+{
+  "x-auto": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "exposure A/B, auto arm: shipped state, DLSS AutoExposure (identical to q-standard)",
+    "worker_flags": []
+  },
+  "x-supplied": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "exposure A/B, supplied arm: shipped state plus the smoothed metered exposure",
+    "worker_flags": [
+      "--supplied-exposure",
+      "1"
+    ]
+  }
+}

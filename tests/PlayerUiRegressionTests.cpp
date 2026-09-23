@@ -3488,7 +3488,13 @@ struct PlayerAppTestAccess {
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_DEBAND, BN_CLICKED), 0);
         CHECK(app.m_sourceDeband);
         CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"SourceDeband", 0, app.SettingsPath().c_str()), UINT{1});
+        CHECK(GetDlgItem(dialog, IDC_ES_EXPOSURE) != nullptr);
+        SendMessageW(GetDlgItem(dialog, IDC_ES_EXPOSURE), BM_SETCHECK, BST_CHECKED, 0);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_EXPOSURE, BN_CLICKED), 0);
+        CHECK(app.m_suppliedExposure);
+        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"SuppliedExposure", 0, app.SettingsPath().c_str()), UINT{1});
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_RESET, BN_CLICKED), 0);
+        CHECK(!app.m_suppliedExposure);
         CHECK(!app.m_sourceDeband);
         CHECK(app.m_cacheQuality == EncoderQuality::Standard);
         CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_ES_CAPTURE_DITHER)));

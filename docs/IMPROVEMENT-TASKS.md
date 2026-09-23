@@ -54,7 +54,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P0** | | | | |
 | **P1** | | | | |
 | **P2** | | | | |
-| [P2.1](#p21) | Supply a smoothed exposure instead of auto-exposure | S | Pipeline | ✅ |
 | [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
 | **P3** | | | | |
@@ -89,32 +88,6 @@ Each of these is quality-first. Anything that changes pixels becomes a
 cache-key term, and any trade-off ships as a ladder with a labelled default.
 
 ## Pipeline quality
-
-<a id="p21"></a>
-### P2.1 · Supply a smoothed exposure instead of auto-exposure
-
-`S` · **Pipeline** · ✅ current state
-
-`DLSSBackend.cpp:254` sets `AutoExposure`, and `:377` passes a null exposure
-texture. NVIDIA's guide says to supply exposure whenever it is known. An
-OptiScaler-DLSSNR PR found that the neural renderer's white point drifts under
-lighting changes without it. On video, auto-exposure is a likely cause of
-brightness pumping and of slow recovery after a cut.
-
-**Do** — a GPU luminance meter, temporally smoothed (libplacebo's
-`peak_smoothing_period` is the model), reset on `ClassifySceneCut`, written to
-a 1×1 exposure texture. **Measure first**: `docs/BENCHMARK.md` already lists
-this A/B as undecided. Ship it only if the benchmark's added-sigma and
-flicker numbers improve.
-
-Refs: [DLSS guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS.md) ·
-[OptiScaler PR #77](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/pull/77) ·
-[libplacebo options](https://libplacebo.org/options/)
-
-**Impact** — Pipeline: steadier tone across cuts and lighting changes.
-Player: less visible pumping.
-
----
 
 <a id="p24"></a>
 ### P2.4 · Evaluate Video Depth Anything through the guide harness

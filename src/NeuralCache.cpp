@@ -934,6 +934,8 @@ std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms)
     else if (terms.quality == EncoderQuality::Lossless)
         term += "|lossless-ffv1-10bit-v1";
     if (terms.sourceDeband != kDefaultSourceDeband) term += "|deband-i1t3r16g4-static-v1";
+    // The key, the bounds and the smoothing period are the meter's whole definition.
+    if (terms.suppliedExposure != kDefaultSuppliedExposure) term += "|exposure-key018-p20-cut-v1";
     return term;
 }
 

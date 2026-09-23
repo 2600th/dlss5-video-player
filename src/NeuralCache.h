@@ -196,14 +196,19 @@ inline constexpr bool kDefaultGpuColorConversion = false;
 // `sourceDeband` is the deband pre-pass on the decoded source (DebandPolicy.h),
 // which changes what the model is shown; the term spells out its parameters and
 // its fixed pattern, so a change to either is a new term.
+//
+// `suppliedExposure` replaces the feature's AutoExposure with a smoothed meter
+// (ExposurePolicy.h), which changes what the model produces.
 struct CaptureQualityTerms {
     bool captureDither{false};
     EncoderQuality quality{EncoderQuality::Standard};
     bool sourceDeband{false};
+    bool suppliedExposure{false};
 };
 inline constexpr bool kDefaultCaptureDither = false;
 inline constexpr EncoderQuality kDefaultCacheQuality = EncoderQuality::Standard;
 inline constexpr bool kDefaultSourceDeband = false;
+inline constexpr bool kDefaultSuppliedExposure = false;
 std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms);
 
 // The encoder switches a rung makes inert, as the key should see them: a 10-bit rung

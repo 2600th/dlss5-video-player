@@ -1,4 +1,5 @@
 #include "TemporalGuides.h"
+#include "ExposurePolicy.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -644,6 +645,7 @@ bool TemporalGuideGenerator::Generate(const uint8_t* pixels, size_t pixelBytes,
     out.sceneCutSuppressed = cutSuppressed;
     out.sceneCutResidual = globalCost;
     out.sceneCutHistogramOverlap = histogramOverlap;
+    out.luminanceMeter = exposure::MeterLogAverage(cur.data(), cur.size());
     out.id = frame;
     out.id.historyGeneration = m_historyGeneration;
     out.id.reset = reset;

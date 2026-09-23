@@ -19,6 +19,7 @@
 #include "PresentScalePolicy.h"
 #include "TemporalStabilityPolicy.h"
 #include "UpscalingPolicy.h"
+#include "ExposurePolicy.h"
 
 #include <functional>
 
@@ -367,6 +368,16 @@ public:
     // the model is shown.
     void SetSourceDeband(bool deband) { m_requestedSourceDeband = deband; }
     bool ActiveSourceDeband() const { return m_sourceDeband; }
+    // Supply DLSS a smoothed, metered exposure instead of letting the feature meter its
+    // own (ExposurePolicy.h): each identity-checked frame meters its guide's analysis
+    // grid, the smoother restarts on the guide's history reset, and the value is
+    // uploaded into a 1x1 texture the evaluate binds. Selected before Initialize, which
+    // creates the texture; the feature is then created without AutoExposure. Off by
+    // default, and a cache-key term because it changes what the model produces.
+    void SetSuppliedExposure(bool supplied) { m_requestedSuppliedExposure = supplied; }
+    bool ActiveSuppliedExposure() const { return m_suppliedExposure; }
+    // The exposure the last identity-checked frame was given; 1 without one.
+    float LastSuppliedExposure() const { return m_exposureSmoother.Exposure(); }
 
     // Layout of the bytes RenderFrame/RenderFrameForCache receive. Selected before
     // Initialize like the capture format, and likewise downgraded to Bgra when the source
@@ -917,6 +928,15 @@ private:
     bool m_captureDither = false;
     bool m_requestedSourceDeband = false;
     bool m_sourceDeband = false;
+    bool m_requestedSuppliedExposure = false;
+    bool m_suppliedExposure = false;
+    exposure::Smoother m_exposureSmoother;
+    // 1x1 R32_FLOAT the evaluate reads, and its upload: one 512-byte placed footprint
+    // per frame slot, so a slot's value is never overwritten under a copy in flight.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_exposureTexture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_exposureUpload;
+    uint8_t* m_exposureUploadMapped = nullptr;
+    bool m_exposureInCopyDest = true;
     // NV12 source: both planes in one upload buffer per slot, chroma at an aligned offset.
     // m_uploadFootprint keeps describing the BGRA layout, which the reference upload shares.
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_sourceLumaFootprint{};
