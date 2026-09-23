@@ -823,6 +823,83 @@ struct PlayerAppTestAccess {
         CheckLoadingFeedback(app);
     }
 
+    // A live retarget stops the running job and returns: the worker is retired
+    // by its own completion message rather than joined on the UI thread, and
+    // nothing else starts until it has gone.
+    static void retarget_retires_the_worker_test()
+    {
+        PlayerApp& app = fixture->app;
+        CHECK(!app.NeuralJobActive());
+        std::atomic<bool> release{false};
+        const auto startWorker = [&] {
+            // A helper slow to notice the token: it runs until released.
+            app.m_neuralWorker = std::jthread([&release](std::stop_token) {
+                while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            });
+        };
+        const uint64_t generation = app.m_neuralLifecycle.Begin();
+        startWorker();
+        app.CancelNeuralJob(false, true);
+        CHECK(!app.NeuralJobActive());
+        CHECK(!app.m_neuralWorker.joinable());
+        CHECK(app.NeuralWorkerRetiring());
+        // The next render is held back while it winds down.
+        const bool loaded = app.m_loaded; app.m_loaded = true;
+        CHECK(!app.RangeRenderAvailable());
+        app.m_loaded = loaded;
+        // A completion from some other job does not retire it.
+        CompleteStale(app, generation + 1000);
+        CHECK(app.NeuralWorkerRetiring());
+        release = true;
+        app.CompleteNeuralJob(QueueCompletion(app, generation, true));
+        CHECK(!app.NeuralWorkerRetiring());
+        CHECK(!app.NeuralJobActive());
+
+        // A cancel that waits joins a retiring worker first, whatever is active.
+        release = false;
+        app.m_neuralLifecycle.Begin();
+        startWorker();
+        app.CancelNeuralJob(false, true);
+        CHECK(app.NeuralWorkerRetiring());
+        std::jthread releaser([&release] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            release = true;
+        });
+        app.CancelNeuralJob(false);
+        CHECK(!app.NeuralWorkerRetiring());
+        app.DrainNeuralMessages();
+    }
+
+    // A paused frame is presented when something invalidated it, not at 60 Hz.
+    static void paused_frame_presents_on_invalidation_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded, playing = app.m_playing, seeking = app.m_seeking;
+        const bool seekPending = app.m_seekPending;
+        if (!app.m_renderer) app.m_renderer = MakeD3D12Renderer();
+        app.m_loaded = true; app.m_playing = false; app.m_seeking = false; app.m_seekPending = false;
+        app.Tick();
+        const uint64_t presents = app.m_staticPresents;
+        for (int tick = 0; tick < 4; ++tick) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            app.Tick();
+        }
+        CHECK_EQ(presents, app.m_staticPresents);
+        // A setting the present pass reads...
+        app.m_renderer->SetComparison(app.m_renderer->GetComparison());
+        app.Tick();
+        CHECK_EQ(presents + 1, app.m_staticPresents);
+        app.Tick();
+        CHECK_EQ(presents + 1, app.m_staticPresents);
+        // ...and the window under the frame.
+        app.m_staticPresentPending = true;
+        app.Tick();
+        CHECK_EQ(presents + 2, app.m_staticPresents);
+        app.Tick();
+        CHECK_EQ(presents + 2, app.m_staticPresents);
+        app.m_loaded = loaded; app.m_playing = playing; app.m_seeking = seeking; app.m_seekPending = seekPending;
+    }
+
     // A menu, a window drag and a message box each run a modal loop that never
     // returns to the main pump, so Tick stopped and the video froze under a
     // playing audio track. A timer the modal loop dispatches drives Tick until
@@ -1066,6 +1143,8 @@ struct PlayerAppTestAccess {
         UI_CASE(source_menus_return_after_a_cancelled_job_test),
         UI_CASE(loading_feedback_test),
         UI_CASE(modal_loops_keep_ticking_test),
+        UI_CASE(retarget_retires_the_worker_test),
+        UI_CASE(paused_frame_presents_on_invalidation_test),
         UI_CASE(window_and_menu_teardown_test),
         UI_CASE(fullscreen_lifecycle_test),
     };
@@ -2572,6 +2651,11 @@ struct PlayerAppTestAccess {
         CHECK(app.m_neuralCompletions.RegisterAndPost(std::move(completion),
             [&](uint64_t registered) { token = registered; return true; }));
         return token;
+    }
+
+    static void CompleteStale(PlayerApp& app, uint64_t generation)
+    {
+        app.CompleteNeuralJob(QueueCompletion(app, generation, true));
     }
 
     static void QueueProgress(PlayerApp& app, NeuralRenderPhase phase,

@@ -448,9 +448,12 @@ struct SynchronizedPlayback::Impl {
         // the file already open; serving it beats reopening it every frame.
         if(segmentSource&&SameSegment(segment,wanted))return SynchronizedReadResult::PairReady;
         // The boundary arrived before the background open finished: wait for it
-        // rather than starting a second process for the same file.
-        if(pendingOpen&&SameSegment(pendingOpen->segment,wanted)&&pendingOpen->future.valid())
-            pendingOpen->future.wait();
+        // rather than starting a second process for the same file - but only
+        // briefly. This runs on the UI thread, and the open behind it can be two
+        // 15 s probes; NotReady brings the read back next Tick instead.
+        if(pendingOpen&&SameSegment(pendingOpen->segment,wanted)&&pendingOpen->future.valid()&&
+           pendingOpen->future.wait_for(std::chrono::milliseconds(4))!=std::future_status::ready)
+            return SynchronizedReadResult::NotReady;
         HarvestAsyncOpen();
         // The boundary is free when prefetch already opened and warmed the file.
         if(prefetchSource&&SameSegment(prefetchSegment,wanted)){

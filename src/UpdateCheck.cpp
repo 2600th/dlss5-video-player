@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <winhttp.h>
 
+#include <atomic>
 #include <charconv>
 
 #ifndef DLSS_VIDEO_PLAYER_VERSION
@@ -153,6 +154,27 @@ std::wstring HexValue(DWORD value)
     }
     return std::wstring(buffer, 10);
 }
+
+// The request handle, closed exactly once by whichever thread gets there
+// first. Closing a WinHTTP request handle is the documented way to abandon a
+// synchronous call blocked on it, and every stage here may block for the full
+// 8 s timeout - which the window's close used to wait out while joining this
+// thread. The stop callback closes it from the stopping thread; the fetch
+// thread closes it on the way out otherwise.
+class CancellableRequest {
+public:
+    explicit CancellableRequest(InternetHandle handle) : handle_(handle.release()) {}
+    ~CancellableRequest() { Close(); }
+    CancellableRequest(const CancellableRequest&) = delete;
+    CancellableRequest& operator=(const CancellableRequest&) = delete;
+    void Close()
+    {
+        if (HINTERNET handle = handle_.exchange(nullptr)) WinHttpCloseHandle(handle);
+    }
+
+private:
+    std::atomic<HINTERNET> handle_;
+};
 
 UpdateFetchResult TransportFailure(std::wstring_view stage)
 {
@@ -322,21 +344,32 @@ UpdateFetchResult FetchLatestReleaseTag(std::stop_token stop)
         return TransportFailure(L"WinHttpAddRequestHeaders");
     }
 
+    // From here every call can block on the network. A stop closes the request
+    // handle under it, the call fails, and the failure reads as a cancel.
+    const HINTERNET requestHandle = request.get();
+    CancellableRequest cancellable(std::move(request));
+    const std::stop_callback closeOnStop(stop, [&cancellable] { cancellable.Close(); });
+    const auto failure = [&stop](std::wstring_view stage) {
+        return stop.stop_requested() ? UpdateFetchResult{} : TransportFailure(stage);
+    };
+
     if (stop.stop_requested()) return result;
-    if (!WinHttpSendRequest(request.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+    if (!WinHttpSendRequest(requestHandle, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                             WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-        return TransportFailure(L"WinHttpSendRequest");
+        return failure(L"WinHttpSendRequest");
     }
-    if (!WinHttpReceiveResponse(request.get(), nullptr)) {
-        return TransportFailure(L"WinHttpReceiveResponse");
+    if (stop.stop_requested()) return result;
+    if (!WinHttpReceiveResponse(requestHandle, nullptr)) {
+        return failure(L"WinHttpReceiveResponse");
     }
 
     DWORD status = 0;
     DWORD statusSize = static_cast<DWORD>(sizeof(status));
-    if (!WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+    if (stop.stop_requested()) return result;
+    if (!WinHttpQueryHeaders(requestHandle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                              WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
                              WINHTTP_NO_HEADER_INDEX)) {
-        return TransportFailure(L"WinHttpQueryHeaders");
+        return failure(L"WinHttpQueryHeaders");
     }
     if (status != HTTP_STATUS_OK) {
         result.error = L"GitHub returned HTTP status " + std::to_wstring(status) + L".";
@@ -347,8 +380,8 @@ UpdateFetchResult FetchLatestReleaseTag(std::stop_token stop)
     for (;;) {
         if (stop.stop_requested()) return result;
         DWORD available = 0;
-        if (!WinHttpQueryDataAvailable(request.get(), &available)) {
-            return TransportFailure(L"WinHttpQueryDataAvailable");
+        if (!WinHttpQueryDataAvailable(requestHandle, &available)) {
+            return failure(L"WinHttpQueryDataAvailable");
         }
         if (available == 0) break;
         if (body.size() + available > kMaximumBodyBytes) {
@@ -358,8 +391,9 @@ UpdateFetchResult FetchLatestReleaseTag(std::stop_token stop)
         const size_t offset = body.size();
         body.resize(offset + available);
         DWORD read = 0;
-        if (!WinHttpReadData(request.get(), body.data() + offset, available, &read)) {
-            return TransportFailure(L"WinHttpReadData");
+        if (stop.stop_requested()) return result;
+        if (!WinHttpReadData(requestHandle, body.data() + offset, available, &read)) {
+            return failure(L"WinHttpReadData");
         }
         body.resize(offset + read);
         if (read == 0) break;

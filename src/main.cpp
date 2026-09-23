@@ -1381,12 +1381,14 @@ public:
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
         }
-        if(m_loaded&&!m_playing&&!m_seeking&&m_renderer){
-            const auto nowClock=Clock::now();
-            if(std::chrono::duration<double>(nowClock-m_lastStaticPresent).count()>=1.0/60.0){
-                if(!m_renderer->PresentCurrent()&&RecoverUnusableRenderer())return;
-                m_lastStaticPresent=nowClock;
-            }
+        // A paused frame is presented when something invalidated it - a window
+        // resize or repaint, or a renderer setting the present pass reads - and
+        // not otherwise. It used to be re-presented at 60 Hz whether or not
+        // anything had changed: a full-screen draw and a Present per 16 ms of
+        // every pause, for an image the compositor already holds.
+        if(m_loaded&&!m_playing&&!m_seeking&&m_renderer&&(m_staticPresentPending||m_renderer->PresentationStale())){
+            m_staticPresentPending=false;++m_staticPresents;
+            if(!m_renderer->PresentCurrent()&&RecoverUnusableRenderer())return;
         }
         // Before every early return below, because the state worth reporting is
         // the one where nothing is reaching the screen. Reporting from the
@@ -2782,7 +2784,7 @@ private:
     // m_havePresentedPair or checks for null.
     const VideoFrame* LastOriginalFrame()const{return m_lastPair?&m_lastPair->original:nullptr;}
     const VideoFrame* LastNeuralFrame()const{return m_previewNeuralValid?&m_previewNeuralFrame:(m_lastPair?&m_lastPair->neural:nullptr);}
-    void ForgetRenderedCachedPair(){m_lastPair.reset();m_previewNeuralValid=false;m_previewNeuralFrame=VideoFrame{};}
+    void ForgetRenderedCachedPair(){m_lastPair.reset();m_referencePair.reset();m_referenceRenderer=nullptr;m_previewNeuralValid=false;m_previewNeuralFrame=VideoFrame{};}
     NetworkReadAction ApplyNetworkRead(VideoReadResult result,NetworkReadPosition position){
         const NetworkReadDecision decision=m_networkReadState.Resolve(result,position);
         switch(decision.action){
@@ -3084,27 +3086,41 @@ private:
     // Uploads the original member the presentation shader compares against.
     // Only modes that read the reference pay for the source-size copy, plus a strength
     // dial off its default, which composites against that same original.
-    void UploadComparisonReference(const VideoFrame& original){
-        if(!m_renderer||original.bgra.empty())return;
+    // True when the reference was handed to the renderer.
+    bool UploadComparisonReference(const VideoFrame& original){
+        // Whatever the renderer held is replaced below, or the attempt failed:
+        // either way it is no longer known to be the remembered pair's.
+        m_referencePair.reset();m_referenceRenderer=nullptr;
+        if(!m_renderer||original.bgra.empty())return false;
         const ComparisonSettings effective=EffectiveComparison();
         // The early-out below is also what makes an NV12 source cheap: the pure
         // neural view needs no reference at all, so the conversion under it runs
         // only while someone is actually comparing - a paused inspection, where
         // a CPU pass over one frame costs nothing anyone can perceive.
-        if(effective.mode==ComparisonMode::Neural&&effective.strength==1.0f)return;
+        if(effective.mode==ComparisonMode::Neural&&effective.strength==1.0f)return false;
         if(original.layout==VideoPixelLayout::Nv12){
             Nv12ToBgraBt709Limited(original.bgra.data(),m_decoder.Width(),m_decoder.Height(),
                                    m_referenceBgra);
-            if(m_referenceBgra.empty())return;
-            m_renderer->UploadReferenceFrame(m_referenceBgra.data(),m_referenceBgra.size());
-            return;
+            if(m_referenceBgra.empty())return false;
+            return m_renderer->UploadReferenceFrame(m_referenceBgra.data(),m_referenceBgra.size());
         }
-        m_renderer->UploadReferenceFrame(original.bgra.data(),original.bgra.size());
+        return m_renderer->UploadReferenceFrame(original.bgra.data(),original.bgra.size());
+    }
+    // The paused path's reference, uploaded only when the pair changed. Dragging
+    // the split while paused ran ApplyComparison per mouse move, and each one
+    // converted the whole original from NV12 and copied it into an upload
+    // buffer - a full frame of CPU work for a divider that moved a pixel. The
+    // renderer is compared as well as the pair: a rebuilt renderer starts with
+    // no reference, whatever the pair was.
+    void UploadPausedComparisonReference(){
+        if(!m_havePresentedPair||!m_lastPair||!m_renderer)return;
+        if(m_referencePair==m_lastPair&&m_referenceRenderer==m_renderer.get()&&m_renderer->HasReference())return;
+        if(UploadComparisonReference(m_lastPair->original)){m_referencePair=m_lastPair;m_referenceRenderer=m_renderer.get();}
     }
     void ApplyComparison(bool refreshPaused=true){
         if(m_renderer){
             m_renderer->SetComparison(EffectiveComparison());
-            if(refreshPaused&&!m_playing&&!m_seeking){if(m_havePresentedPair){if(const VideoFrame* original=LastOriginalFrame())UploadComparisonReference(*original);}if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
+            if(refreshPaused&&!m_playing&&!m_seeking){UploadPausedComparisonReference();if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
         }
         SyncFeatureMenuState();
     }
@@ -4117,7 +4133,8 @@ private:
         else a=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
         if(a){
             if(m==WM_ERASEBKGND)return 1;
-            if(m==WM_PAINT){PAINTSTRUCT ps{};BeginPaint(h,&ps);EndPaint(h,&ps);return 0;}
+            if(m==WM_PAINT){PAINTSTRUCT ps{};BeginPaint(h,&ps);EndPaint(h,&ps);a->m_staticPresentPending=true;return 0;}
+            if(m==WM_SIZE){a->m_staticPresentPending=true;return 0;}
             if(m==WM_MOUSEMOVE){a->RenderMouseMove(h,l);return 0;}
             if(m==WM_LBUTTONDOWN){a->RenderMouseDown(h,l);return 0;}
             if(m==WM_LBUTTONUP){a->RenderMouseUp(h);return 0;}
@@ -5386,7 +5403,7 @@ private:
         // GPU jobs in one process contend, and starting a range render mid
         // conversion greys the frame-generation item while its cancel item
         // stays live - a half state with no explanation.
-        if(!m_loaded||NeuralJobActive()||m_youtubeLifecycle.IsResolving()||!NeuralPreRenderEnabled()||m_path.empty()||m_frameGenWorker.joinable())return false;
+        if(!m_loaded||NeuralJobActive()||NeuralWorkerRetiring()||m_youtubeLifecycle.IsResolving()||!NeuralPreRenderEnabled()||m_path.empty()||m_frameGenWorker.joinable())return false;
         if(m_sourceKind!=MediaSourceKind::YouTube)return true;
         // A stream is rendered from its own acquired copy: either the cached one
         // or a fresh acquisition, which needs the page URL and a real duration.
@@ -5730,6 +5747,8 @@ private:
     // Drops the session state. Rendered segments are kept for the next toggle
     // unless the caller says the frames can no longer be trusted.
     void ReleaseLiveSession(bool retainSegments=false){
+        // A retired job may still be writing into this session's directory.
+        JoinRetiringNeuralWorker();
         const bool retain=retainSegments&&m_liveSegments&&!m_liveSegments->Empty()&&!m_liveDirectory.empty();
         if(retain){
             m_retainedSegments=m_liveSegments;m_retainedDirectory=m_liveDirectory;m_retainedRange=m_liveRange;m_retainedKey=LiveRetentionKey();
@@ -6029,7 +6048,9 @@ private:
                 <<double(m_liveTarget.end100ns)*1e-7<<") to ["<<double(wanted->start100ns)*1e-7<<","
                 <<double(wanted->end100ns)*1e-7<<") s for the playhead at "<<Position()<<" s; keeping "
                 <<m_liveSegments->Count()<<" rendered segments.");
-            CancelNeuralJob(false);
+            // Not joined: the new target starts once the retired job's
+            // completion arrives, a Tick or two later.
+            CancelNeuralJob(false,true);
         }
         if(!wanted){
             // Every frame of the range is rendered: nothing more to start, and
@@ -6112,7 +6133,7 @@ private:
                 // the coverage on disk is still playable everywhere else in the
                 // video, and re-rendering it is what made this loop expensive.
                 if(const auto hole=WantedLiveTarget()){
-                    CancelNeuralJob(false);
+                    CancelNeuralJob(false,true);
                     // Same rule as above: a refusal that only means "not right
                     // now" is not a job that rendered nothing.
                     if(RangeRenderAvailable()&&!StartLiveRenderTarget(*hole))++m_liveRenderFailures;
@@ -6311,14 +6332,31 @@ private:
         m_coldStart->Presented();
         ReportNeuralColdStart();
     }
-    void CancelNeuralJob(bool updateUi=true){
+    // `retire` requests the stop and returns without joining: the worker is
+    // parked in m_retiringNeuralWorker and joined when its own completion
+    // message arrives, as frame generation does. A live retarget used to join
+    // here on the UI thread, so playback froze for as long as the helper took
+    // to notice the token. Every other caller still waits, and joins a
+    // retiring worker first, because the resident helper and the preflight
+    // latch belong to one job thread at a time.
+    void CancelNeuralJob(bool updateUi=true,bool retire=false){
+        if(!retire)JoinRetiringNeuralWorker();
         if(!NeuralJobActive())return;
         // A preview renders behind the paused frame; an offline job replaced
         // the media and has an original to hand back. Read before the flags
         // below are dropped.
         const bool behindPlayback=JobBehindPlayback();
+        const uint64_t cancelledGeneration=m_neuralLifecycle.generation;
         m_neuralLifecycle.Transition(NeuralPlaybackState::Cancelling);if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
-        if(m_neuralWorker.joinable()){m_neuralWorker.request_stop();m_neuralWorker.join();m_neuralWorker=std::jthread{};}
+        if(m_neuralWorker.joinable()){
+            m_neuralWorker.request_stop();
+            if(retire){
+                JoinRetiringNeuralWorker();
+                m_retiringNeuralWorker=std::move(m_neuralWorker);m_retiringNeuralGeneration=cancelledGeneration;
+                LOG("Neural job "<<cancelledGeneration<<" asked to stop; it is retired by its completion message.");
+            }else m_neuralWorker.join();
+            m_neuralWorker=std::jthread{};
+        }
         std::unique_ptr<NeuralJobCompletion> cancelledCompletion;
         if(m_hwnd){MSG message{};while(PeekMessageW(&message,m_hwnd,WM_NEURAL_PROGRESS,WM_NEURAL_COMPLETE,PM_REMOVE)){
             if(message.message==WM_NEURAL_PROGRESS)m_neuralProgressMessages.Remove(static_cast<uint64_t>(message.wParam));
@@ -6830,8 +6868,24 @@ private:
             SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         }
     }
+    // The worker a live retarget stopped without waiting for. It must be gone
+    // before another job starts - RangeRenderAvailable says so - or before the
+    // session's directory is removed.
+    bool NeuralWorkerRetiring()const{return m_retiringNeuralWorker.joinable();}
+    void JoinRetiringNeuralWorker(){
+        if(!m_retiringNeuralWorker.joinable())return;
+        m_retiringNeuralWorker.join();m_retiringNeuralWorker=std::jthread{};m_retiringNeuralGeneration=0;
+    }
     void CompleteNeuralJob(uint64_t token){
-        auto completion=m_neuralCompletions.Take(token);if(!completion||!m_neuralLifecycle.Accept(completion->generation))return;
+        auto completion=m_neuralCompletions.Take(token);
+        // The retired worker's last act is posting this, so the join is immediate.
+        if(completion&&m_retiringNeuralWorker.joinable()&&completion->generation==m_retiringNeuralGeneration){
+            JoinRetiringNeuralWorker();
+            LOG("Retired neural job "<<completion->generation<<" finished.");
+            // The next render was held back for it (RangeRenderAvailable).
+            SyncSourceActionAvailability();InvalidateControls();
+        }
+        if(!completion||!m_neuralLifecycle.Accept(completion->generation))return;
         // A render that publishes no segments has its first playable output
         // here, and this is the last moment a picture could appear for it.
         if(m_coldStart)m_coldStart->Ready();
@@ -7787,7 +7841,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // The loaded source's cache manager; see SourceCache(). The build count is
     // what the regression suite reads to prove a paint builds none.
     mutable std::unique_ptr<NeuralCacheManager> m_sourceCache;mutable std::filesystem::path m_sourceCacheRequestedRoot;mutable uint64_t m_sourceCacheBuilds=0;
-    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_youtubeAudioUrl,m_youtubePageUrl,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle,m_pendingNeuralTitle;YouTubeSourceQuality m_youtubeSourceQuality=YouTubeSourceQuality::P1080;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;D3D12RendererOwner m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;std::unique_ptr<AudioPlayer>m_networkAudio;NetworkReadState m_networkReadState;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;CompletionRegistry<YouTubeCompletion>m_youtubeCompletions;std::jthread m_youtubeWorker;
+    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_youtubeAudioUrl,m_youtubePageUrl,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle,m_pendingNeuralTitle;YouTubeSourceQuality m_youtubeSourceQuality=YouTubeSourceQuality::P1080;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;D3D12RendererOwner m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;std::unique_ptr<AudioPlayer>m_networkAudio;NetworkReadState m_networkReadState;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;CompletionRegistry<YouTubeCompletion>m_youtubeCompletions;std::jthread m_youtubeWorker;
     // The loaded source's digest, so a second job against the same file does
     // not pay for a second full hash. Read from job threads.
     // Shared with the job thread by value, never through `this`: the neural
@@ -7800,6 +7854,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // neural frame that does NOT come from a pair (a paused settings preview), so
     // it keeps its own storage and supersedes the pair's neural member while set.
     std::shared_ptr<const SynchronizedFramePair> m_lastPair;VideoFrame m_previewNeuralFrame;bool m_previewNeuralValid=false;RECT m_neuralCancelBounds{};uint32_t m_neuralSourceWidth=0,m_neuralSourceHeight=0;
+    // A worker a live retarget asked to stop, until its completion arrives.
+    // Declared after m_residentHelper for the reason m_neuralWorker is.
+    std::jthread m_retiringNeuralWorker;uint64_t m_retiringNeuralGeneration=0;
     // Progress-watchdog state: the last progress the job reported and when it
     // moved, so a phase that stops reporting can be told from a slow one.
     Clock::time_point m_neuralProgressAt{};NeuralRenderPhase m_watchedPhase{};uint64_t m_watchedFrames=0,m_watchedBytes=0;
@@ -7824,6 +7881,13 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     UINT_PTR m_activityTimer=0;
     // Drives Tick while a modal loop owns the thread; see StartModalTick.
     UINT_PTR m_modalTickTimer=0;bool m_inTick=false;
+    // The paused frame needs presenting again: the window under it was resized
+    // or repainted. Renderer-side changes answer PresentationStale instead. The
+    // count is what the regression suite reads.
+    bool m_staticPresentPending=false;uint64_t m_staticPresents=0;
+    // Which pair's original the renderer's comparison reference holds, so a
+    // paused split drag re-uploads only when the pair changes.
+    std::shared_ptr<const SynchronizedFramePair> m_referencePair;const D3D12Renderer* m_referenceRenderer=nullptr;
     bool m_activityBusy=false,m_activityMotionEnabled=true;
     Clock::time_point m_activityStarted=Clock::now();
     // The manual rung, only consulted when m_upscaleAuto is false. Auto is the

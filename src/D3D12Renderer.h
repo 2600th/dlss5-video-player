@@ -320,7 +320,7 @@ public:
     uint32_t DLSSInputH() const { return m_renderH; }
     uint32_t OutputW() const { return m_outputW; }
     uint32_t OutputH() const { return m_outputH; }
-    void SetDebugView(DebugView v) { m_debugView = v; }
+    void SetDebugView(DebugView v) { m_debugView = v; m_presentStale = true; }
     DebugView GetDebugView() const { return m_debugView; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
     bool DLSSFeatureCreated() const { return m_dlss.FeatureCreated(); }
@@ -331,12 +331,18 @@ public:
     d3d12_renderer_detail::FenceWaitResult WaitGPU(
         DWORD budgetMilliseconds = d3d12_renderer_detail::TeardownFenceWaitMilliseconds);
     bool PresentCurrent();
-    void SetColorSettings(const ColorSettings& settings) { m_colorSettings = settings; }
-    void SetComparison(const ComparisonSettings& settings) { m_comparison = settings; }
+    void SetColorSettings(const ColorSettings& settings) { m_colorSettings = settings; m_presentStale = true; }
+    void SetComparison(const ComparisonSettings& settings) { m_comparison = settings; m_presentStale = true; }
     const ComparisonSettings& GetComparison() const { return m_comparison; }
     // Source-size BGRA reference (the original member of the current pair). May be
     // called before RenderFrame or PresentCurrent; the copy rides on that submission.
     bool UploadReferenceFrame(const uint8_t* bgra, size_t bytes);
+    // A reference has been uploaded, or is queued behind the next submission.
+    bool HasReference() const { return m_hasReference || m_referencePending; }
+    // Something the present pass reads - colours, comparison, debug view, the
+    // reference - changed since the last present was attempted. A paused player
+    // presents only then, instead of re-presenting the same image at 60 Hz.
+    bool PresentationStale() const { return m_presentStale; }
 
     d3d12_renderer_detail::FenceWaitResult LastFenceWaitResult() const { return m_lastFenceWaitResult; }
     bool GpuUnusable() const { return m_gpuUnusable; }
@@ -583,6 +589,7 @@ private:
     bool m_referenceInCopyDest = true;
     bool m_referencePending = false;   // upload slot holds pixels not yet copied
     bool m_hasReference = false;       // a reference copy has been submitted
+    bool m_presentStale = false;       // see PresentationStale
     uint32_t m_referenceUploadSlot = 0;
     bool m_neuralTimingPending[FrameCount]{};
     uint64_t m_timestampFrequency = 0;

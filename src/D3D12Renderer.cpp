@@ -1141,7 +1141,7 @@ bool D3D12Renderer::UploadReferenceFrame(const uint8_t*bgra,size_t bytes){
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot))return false;
     CopyMappedRows(m_referenceMapped[slot],m_uploadFootprint,bgra,row,m_sourceH);
-    m_referenceUploadSlot=slot;m_referencePending=true;
+    m_referenceUploadSlot=slot;m_referencePending=true;m_presentStale=true;
     return true;
 }
 
@@ -1360,6 +1360,9 @@ bool D3D12Renderer::ResolveOldestCapture(CapturedVideoFrame&capture){
 }
 
 bool D3D12Renderer::PresentCurrent(){
+    // Cleared on the attempt, not the success: a present that fails is either a
+    // device loss the caller recovers from or nothing a retry per Tick would fix.
+    m_presentStale=false;
     if(m_gpuUnusable||!m_swapchain||!m_queue||!m_rootSig)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot, &m_presentSlotWaitNanos))return false;
@@ -1495,6 +1498,7 @@ void D3D12Renderer::LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult resu
     }
 }
 bool D3D12Renderer::PresentSwapchain(const char*what){
+    m_presentStale=false;
     const auto presented=std::chrono::steady_clock::now();
     const HRESULT hr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
     m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
