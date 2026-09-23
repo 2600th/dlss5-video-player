@@ -26,6 +26,7 @@ permissions:
 jobs:
   redeploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Rebuild the site from main
         env:

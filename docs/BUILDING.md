@@ -57,6 +57,24 @@ so delete `build-upscaling` after switching toolchains. `build_windows.bat`
 detects the edition itself; 2026 installs under
 `...\Microsoft Visual Studio\18\<Edition>`, not under the year.
 
+`CMakePresets.json` holds the configuration CI uses: Visual Studio 2022, x64,
+the MSVC 14.44 toolset pinned so a rebuild uses the compiler that built the
+release, and the same `build-upscaling` directory. With that toolset installed:
+
+```powershell
+cmake --preset vs2022
+cmake --build --preset vs2022 --parallel
+ctest --preset portable
+```
+
+Two more presets reproduce CI's quality job. `analyze` runs the MSVC code
+analyzer on the two shipped targets, and `asan` builds the portable suites with
+AddressSanitizer into `build-asan`; run them with
+`cmake --preset asan`, `cmake --build --preset asan --parallel` and
+`ctest --preset asan`. Every target builds at `/W4 /WX`, and an analyzer
+finding fails the `analyze` build the same way; the suppressions it has are
+listed, each with its reason, in `CMakeLists.txt`.
+
 If `cmake` or `ctest` is not on PATH, use the CMake `bin` directory in your
 Visual Studio installation under
 `Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin`.

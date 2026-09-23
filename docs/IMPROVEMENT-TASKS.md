@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P1** | | | | |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
-| [P1.20](#p120) | CI hardening | M | Release | 🔍 |
 | [P1.21](#p121) | Build structure: one set of objects, one set of flags | M | Release | 🔍 |
 | [P1.22](#p122) | Test hygiene and coverage gaps | M | Release | 🔍 |
 | [P1.23](#p123) | Docs, screenshots and positioning drift | S | Docs, Site | ✅ |
@@ -151,31 +150,6 @@ These matter because the copies **disagree**, not because they are repeated.
 implementation.
 
 ## Release and CI
-
-<a id="p120"></a>
-### P1.20 · CI hardening
-
-`M` · **Release** · 🔍 · _old 2.17, plus new items_
-
-- [ ] **Split permissions.** `release.yml` gives `contents: write` and
-      `id-token: write` to the job that builds and runs the fetch scripts, and
-      `pages.yml` grants `pages`/`id-token` to the whole workflow. Separate a
-      read-only build job from a small publish job.
-- [ ] Set `timeout-minutes` on build, release and pages; today only
-      gpu-tests has one, and the rest get the 6-hour default.
-- [ ] Add `.github/dependabot.yml` for `github-actions`, so the SHA pins can
-      be refreshed.
-- [ ] **Turn on `/WX`.** The /W4 count is now 0, so this is free.
-- [ ] Run `/analyze` on `DLSSVideoPlayer` and `NeuralWorker`, and
-      `/fsanitize=address` on the device-free suites, in a separate quality job.
-- [ ] Cache the pinned downloads (about 300 MB per run), keyed on
-      `tool-lock.json`.
-- [ ] Add a `pull_request` trigger to `pages.yml`, so the 31 site tests run
-      on PRs.
-- [ ] Set `persist-credentials: false` on `actions/checkout`.
-- [ ] Add a `CMakePresets.json` and pin the MSVC toolset version.
-
----
 
 <a id="p121"></a>
 ### P1.21 · Build structure: one set of objects, one set of flags

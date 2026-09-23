@@ -1,0 +1,16 @@
+# Every action in .github/workflows is pinned to a full commit SHA with its
+# version in a trailing comment, so nothing moves on its own. That also means
+# nothing is ever updated unless something proposes it: this opens one pull
+# request a week that bumps the SHA and the comment together, which the build
+# workflow then runs like any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

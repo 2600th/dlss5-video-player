@@ -16,28 +16,49 @@ on:
   # pages-on-release.yml catches the publish and dispatches this workflow on
   # main instead.
 
+  # The 31 site tests and the build, with no deploy: the deploy job below is
+  # skipped for pull requests.
+  pull_request:
+    paths:
+      - "site/**"
+      - "VERSION"
+      - "docs/screenshots/current/**"
+      - "docs/media/**"
+      - ".github/workflows/pages.yml"
+
   # Used after setting or changing GA_MEASUREMENT_ID: the measurement id is
   # baked into the page at build time, so the variable alone changes nothing
   # until the site is rebuilt.
   workflow_dispatch:
 
+# Only the deploy job can publish. The build job runs the site's scripts and
+# needs nothing but read access; it used to hold pages: write and the OIDC
+# token as well, because they were granted to the whole workflow.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # A deploy that is publishing should finish rather than be cancelled by a later
-# push; two runs queue instead of racing on the same Pages deployment.
+# push; two runs queue instead of racing on the same Pages deployment. A pull
+# request deploys nothing, so it gets its own group and does not wait on them.
 concurrency:
-  group: pages
+  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.ref) || 'pages' }}
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # configure-pages reads the site's settings; reading is all it needs.
+      pages: read
     steps:
+      # site/build.ps1 reads the release through the API with the token it is
+      # handed below; nothing uses git credentials.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Every script targets Windows PowerShell 5.1 so the maintainer can run
       # them on Windows with nothing installed; pwsh 7 on the runner executes
@@ -64,9 +85,13 @@ jobs:
   deploy:
     needs: build
     # A fork gets the build as ordinary CI, but does not try to deploy to a
-    # Pages site it has not enabled.
-    if: github.repository_owner == '2600th'
+    # Pages site it has not enabled; nor does a pull request.
+    if: github.repository_owner == '2600th' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -48,6 +48,25 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
 # projects.
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/MP>)
 
+# Every target is at zero warnings under /W4, so a new one is an error rather
+# than a line nobody reads in a green build log.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/WX>)
+
+# The quality job in build.yml builds two more configurations of this tree.
+# Neither is for shipping: ASan instruments every object, and /analyze only
+# adds diagnostics.
+option(DLSS_VIDEO_PLAYER_ASAN "Build with AddressSanitizer, for the device-free test suites" OFF)
+option(DLSS_VIDEO_PLAYER_ANALYZE "Run the MSVC code analyzer (/analyze) on the two shipped targets" OFF)
+if(DLSS_VIDEO_PLAYER_ASAN)
+    # /Zi so ASan reports carry file and line. The shipped targets' /guard:cf
+    # and /INCREMENTAL-free Release link are compatible with it.
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/fsanitize=address> $<$<COMPILE_LANGUAGE:CXX>:/Zi>)
+    add_link_options(/DEBUG)
+    # The instrumented executables load clang_rt.asan_dynamic-x86_64.dll, which
+    # lives beside cl.exe rather than on PATH; every test gets that directory.
+    get_filename_component(DLSS_VIDEO_PLAYER_ASAN_RUNTIME_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+endif()
+
 set(DLSS_SDK "${CMAKE_SOURCE_DIR}/external/DLSS" CACHE PATH "Path to NVIDIA/DLSS SDK checkout")
 if(NOT EXISTS "${DLSS_SDK}/include/nvsdk_ngx.h")
     message(FATAL_ERROR "NVIDIA DLSS SDK not found at ${DLSS_SDK}. Provide the pinned official NVIDIA/DLSS checkout documented in docs/BUILDING.md.")
@@ -117,6 +136,38 @@ function(dlss_video_player_symbols target)
     target_link_options(${target} PRIVATE /DEBUG /PDBALTPATH:$<TARGET_PDB_FILE_NAME:${target}>
         "$<$<NOT:$<CONFIG:Debug>>:/OPT:REF;/OPT:ICF;/Brepro>")
 endfunction()
+
+# The code analyzer, on the code that ships. Findings in the SDK and Windows
+# headers are not this project's to fix, so external headers are excluded.
+# Under /WX every finding fails the build, so each one below was read and is
+# suppressed for a stated reason (first run, 2026-09-23, 11 findings):
+#   C6262 x6   stack frames of 21-66 KiB: 32K-wchar long-path buffers and the
+#              one-time initializer-list of the English string table, on
+#              threads with the default 1 MiB stack. The 16 KiB threshold is
+#              raised to 128 KiB rather than the warning switched off, so a
+#              frame twice the largest of these still fails.
+#   C28251     wWinMain's definition does not repeat the SDK's SAL
+#              annotations; cosmetic.
+#   C6336      main.cpp `size()%2?a:b` in MedianMsPerFrame: the precedence is
+#              the intended one.
+#   C6387 x2   main.cpp DrawButton and Paint select an HFONT/HBITMAP that the
+#              analyzer cannot see is non-null: showIcon requires m_iconFont,
+#              and failedStage is set whenever the bitmap is null.
+#   C28020     NeuralWorker.cpp StartHelper fills a 4-slot handle array from at
+#              most four sources; the analyzer cannot bound the counter.
+# The last three are scoped to their files and belong in the source as
+# `#pragma warning(suppress: ...)` next to each line when those files are next
+# edited.
+function(dlss_video_player_analyze target)
+    if(DLSS_VIDEO_PLAYER_ANALYZE)
+        target_compile_options(${target} PRIVATE /analyze /analyze:external- /external:anglebrackets /external:W0
+            "SHELL:/analyze:stacksize 131072" /wd28251)
+    endif()
+endfunction()
+if(DLSS_VIDEO_PLAYER_ANALYZE)
+    set_property(SOURCE src/main.cpp APPEND PROPERTY COMPILE_OPTIONS /wd6336 /wd6387)
+    set_property(SOURCE src/NeuralWorker.cpp APPEND PROPERTY COMPILE_OPTIONS /wd28020)
+endif()
 
 # The packaging lock is embedded so the player and helper verify the exact
 # runtime files at run time, not only at packaging time.
@@ -231,6 +282,7 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
 dlss_video_player_use_nvof(DLSSVideoPlayer)
 dlss_video_player_harden(DLSSVideoPlayer)
 dlss_video_player_symbols(DLSSVideoPlayer)
+dlss_video_player_analyze(DLSSVideoPlayer)
 
 # Only the offline helper loads the experimental proxy/add-on. The player root
 # stays hook-free for its independent runtime Super Resolution feature.
@@ -249,6 +301,7 @@ target_link_libraries(NeuralWorker PRIVATE ${player_libraries})
 dlss_video_player_use_nvof(NeuralWorker)
 dlss_video_player_harden(NeuralWorker)
 dlss_video_player_symbols(NeuralWorker)
+dlss_video_player_analyze(NeuralWorker)
 set_target_properties(NeuralWorker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/neural-runtime")
 add_dependencies(DLSSVideoPlayer NeuralWorker)
 
@@ -875,4 +928,10 @@ int main() { auto resolver = YouTubeResolverTestAccess::Create(); (void)resolver
     unset(CMAKE_REQUIRED_INCLUDES)
     unset(CMAKE_REQUIRED_DEFINITIONS)
     unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+
+    if(DLSS_VIDEO_PLAYER_ASAN)
+        get_property(asan_tests DIRECTORY PROPERTY TESTS)
+        set_property(TEST ${asan_tests} APPEND PROPERTY
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${DLSS_VIDEO_PLAYER_ASAN_RUNTIME_DIR}")
+    endif()
 endif()

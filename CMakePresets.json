@@ -1,0 +1,78 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "vs2022",
+      "displayName": "Visual Studio 2022, x64, MSVC 14.44",
+      "description": "The configuration CI builds, tests and packages. The toolset is pinned so a rebuild of a published package uses the compiler that built it; with /Brepro, the same source, toolset and build path give the same bytes.",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "toolset": { "value": "v143,host=x64,version=14.44", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build-upscaling",
+      "cacheVariables": { "BUILD_TESTING": "ON" }
+    },
+    {
+      "name": "asan",
+      "inherits": "vs2022",
+      "displayName": "AddressSanitizer",
+      "description": "Every object instrumented with /fsanitize=address, for the device-free suites. Not for shipping.",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": { "DLSS_VIDEO_PLAYER_ASAN": "ON" }
+    },
+    {
+      "name": "analyze",
+      "inherits": "vs2022",
+      "displayName": "Code analysis",
+      "description": "/analyze on the two shipped targets; a finding fails the build.",
+      "binaryDir": "${sourceDir}/build-analyze",
+      "cacheVariables": { "BUILD_TESTING": "OFF", "DLSS_VIDEO_PLAYER_ANALYZE": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "vs2022", "configurePreset": "vs2022", "configuration": "Release" },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "configuration": "Release",
+      "targets": [
+        "RecentMediaTests", "RenderSettingsTests", "CachedExportTests", "RuntimeLockTests",
+        "RangeSelectionTests", "FrameIdentityTests", "NeuralWorkerTests", "UpscalingTests",
+        "UpdateCheckTests", "PolicyTests", "ReleaseApiCompileTests", "NeuralPrerenderTests",
+        "PlayerUiRegressionTests"
+      ]
+    },
+    {
+      "name": "analyze",
+      "configurePreset": "analyze",
+      "configuration": "Release",
+      "targets": [ "DLSSVideoPlayer", "NeuralWorker" ]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "portable",
+      "displayName": "Device-free suites",
+      "configurePreset": "vs2022",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "gpu|audio" } }
+    },
+    {
+      "name": "hardware",
+      "displayName": "GPU and audio suites",
+      "configurePreset": "vs2022",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "label": "gpu|audio" } }
+    },
+    {
+      "name": "asan",
+      "displayName": "Device-free suites under AddressSanitizer",
+      "configurePreset": "asan",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "gpu|audio" } }
+    }
+  ]
+}

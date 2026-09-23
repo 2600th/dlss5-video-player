@@ -11,15 +11,27 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+# Nothing here writes to the repository; each job states the same again so a
+# job added later starts from nothing rather than inheriting a grant.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-2022
+    # Several times a clean run; the 6-hour default only hides a hang.
+    timeout-minutes: 60
     permissions:
       contents: read
 
     steps:
+      # No job pushes, so none keeps the token in .git/config where every later
+      # step - and every script it runs - could read it. The one fetch below is
+      # of this public repository and needs no credentials.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Require CHANGELOG and README entries when VERSION changes
         if: github.event_name == 'pull_request'
@@ -47,24 +59,57 @@ jobs:
           git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
           git -C external\DLSS checkout --detach FETCH_HEAD
 
-      - name: Fetch pinned UI assets and media helpers
+      # FFmpeg, FFprobe, yt-dlp and Deno are the bulk of every run's downloads.
+      # The key is the lock that pins their bytes, and a restored copy is held
+      # to that lock below exactly as a fresh download would be.
+      - name: Restore the pinned media helpers
+        id: helpers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            external/ffmpeg/bin
+            external/youtube/yt-dlp.exe
+            external/youtube/deno.exe
+          key: pinned-helpers-${{ runner.os }}-${{ hashFiles('packaging/tool-lock.json') }}
+
+      - name: Fetch pinned UI assets
+        shell: powershell
+        run: .\tools\fetch_ui_assets.ps1
+
+      - name: Fetch pinned media helpers
+        if: steps.helpers.outputs.cache-hit != 'true'
         shell: powershell
         run: |
-          .\tools\fetch_ui_assets.ps1
           .\tools\fetch_youtube_helpers.ps1
           .\tools\fetch_ffmpeg_helpers.ps1
 
+      - name: Check the restored media helpers against the lock
+        if: steps.helpers.outputs.cache-hit == 'true'
+        shell: powershell
+        run: |
+          $lock = Get-Content -LiteralPath packaging\tool-lock.json -Raw | ConvertFrom-Json
+          foreach ($entry in $lock.entries) {
+            $folder = if ([string]$entry.name -in @('ffmpeg.exe', 'ffprobe.exe')) { 'external\ffmpeg\bin' } else { 'external\youtube' }
+            $path = Join-Path $folder ([string]$entry.name)
+            if ((Get-Item -LiteralPath $path).Length -ne [int64]$entry.size -or
+                (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne [string]$entry.sha256) {
+              throw "The cached $($entry.name) does not match packaging/tool-lock.json."
+            }
+          }
+          Write-Host "Restored media helpers match the lock."
+
+      # CMakePresets.json pins the generator, the platform and the MSVC toolset.
       - name: Configure
         shell: cmd
-        run: cmake -S . -B build-upscaling -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+        run: cmake --preset vs2022
 
       - name: Build Release
         shell: cmd
-        run: cmake --build build-upscaling --config Release --parallel
+        run: cmake --build --preset vs2022 --parallel
 
       - name: Test Release
         shell: cmd
-        run: ctest --test-dir build-upscaling -C Release -LE "gpu|audio" --output-on-failure
+        run: ctest --preset portable
 
       # Symbols for the minidumps CrashDump.h writes from both processes. The
       # PDBs never enter a zip (the packager copies an explicit list and the
@@ -124,3 +169,81 @@ jobs:
           path: dist/DLSSVideoPlayer-v*-core-win64.zip
           archive: false
           if-no-files-found: error
+
+  # Two configurations nothing ships: the MSVC code analyzer over the two
+  # shipped targets, and AddressSanitizer over every device-free suite. Both
+  # compile under /WX, so an analyzer finding or a sanitizer report fails the
+  # run. A separate job, so its extra builds do not lengthen the one above.
+  quality:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Clone NVIDIA DLSS SDK
+        shell: cmd
+        run: |
+          git init external\DLSS
+          git -C external\DLSS remote add origin https://github.com/NVIDIA/DLSS.git
+          git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
+          git -C external\DLSS checkout --detach FETCH_HEAD
+
+      - name: Restore the pinned media helpers
+        id: helpers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            external/ffmpeg/bin
+            external/youtube/yt-dlp.exe
+            external/youtube/deno.exe
+          key: pinned-helpers-${{ runner.os }}-${{ hashFiles('packaging/tool-lock.json') }}
+
+      - name: Fetch pinned UI assets
+        shell: powershell
+        run: .\tools\fetch_ui_assets.ps1
+
+      - name: Fetch pinned media helpers
+        if: steps.helpers.outputs.cache-hit != 'true'
+        shell: powershell
+        run: |
+          .\tools\fetch_youtube_helpers.ps1
+          .\tools\fetch_ffmpeg_helpers.ps1
+
+      - name: Check the restored media helpers against the lock
+        if: steps.helpers.outputs.cache-hit == 'true'
+        shell: powershell
+        run: |
+          $lock = Get-Content -LiteralPath packaging\tool-lock.json -Raw | ConvertFrom-Json
+          foreach ($entry in $lock.entries) {
+            $folder = if ([string]$entry.name -in @('ffmpeg.exe', 'ffprobe.exe')) { 'external\ffmpeg\bin' } else { 'external\youtube' }
+            $path = Join-Path $folder ([string]$entry.name)
+            if ((Get-Item -LiteralPath $path).Length -ne [int64]$entry.size -or
+                (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne [string]$entry.sha256) {
+              throw "The cached $($entry.name) does not match packaging/tool-lock.json."
+            }
+          }
+          Write-Host "Restored media helpers match the lock."
+
+      - name: Code analysis of the shipped targets
+        shell: cmd
+        run: |
+          cmake --preset analyze
+          if errorlevel 1 exit /b 1
+          cmake --build --preset analyze --parallel
+
+      - name: Build the device-free suites with AddressSanitizer
+        shell: cmd
+        run: |
+          cmake --preset asan
+          if errorlevel 1 exit /b 1
+          cmake --build --preset asan --parallel
+
+      - name: Run the device-free suites under AddressSanitizer
+        shell: cmd
+        run: ctest --preset asan

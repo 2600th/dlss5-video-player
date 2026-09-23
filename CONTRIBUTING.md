@@ -8,7 +8,8 @@ and the canonical `build-upscaling` commands.
 ## Development guidelines
 
 - Keep Windows x64 / D3D12 behavior working.
-- Build with Visual Studio 2022 or newer and keep `/W4` output clean when possible.
+- Build with Visual Studio 2022 or newer. Every target compiles at `/W4 /WX`, so a new
+  warning fails the build.
 - Do not commit NVIDIA SDK checkouts, FFmpeg binaries, ReShade binaries, experimental DLSS 5 DLLs or other third-party runtime packages.
 - Keep temporal-resource state transitions explicit and documented.
 - Avoid adding a per-frame `WaitGPU()` to the normal playback path.
@@ -23,7 +24,10 @@ rather than reporting itself skipped. For rendering, timing or decoding changes
 also run the hardware smokes on an RTX card with an audio endpoint
 (`ctest -L "gpu|audio"`); for
 renderer, swapchain or helper changes `NeuralRangeRenderSmoke` is the one that
-catches a dead neural path. Keep automated results
+catches a dead neural path. CI also runs the MSVC code analyzer on the shipped
+targets and the portable suites under AddressSanitizer; `cmake --preset analyze`
+and `cmake --preset asan` reproduce those builds (see
+[Building and testing](docs/BUILDING.md)). Keep automated results
 separate from GPU and visual-quality claims.
 
 Check the behavior affected by the change: MP4/MKV playback, play/pause and

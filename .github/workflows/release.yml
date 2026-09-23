@@ -23,21 +23,27 @@ concurrency:
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
+# The job that compiles, tests and runs the fetch scripts used to hold
+# contents: write and the OIDC token as well, so every downloaded helper and
+# every build step ran next to the power to publish a release. Building is
+# now read-only; only the short job at the end, which runs no code from the
+# repository, can write.
+permissions:
+  contents: read
+
 jobs:
-  release:
+  build:
     runs-on: windows-2022
+    timeout-minutes: 60
     permissions:
-      contents: write
-      # The provenance attestation of the core zip signs with the job's OIDC
-      # token; no repository secret is involved.
-      id-token: write
-      attestations: write
+      contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
 
       - name: Require tag to match VERSION
         shell: powershell
@@ -57,6 +63,8 @@ jobs:
           git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
           git -C external\DLSS checkout --detach FETCH_HEAD
 
+      # Always fetched fresh here, never from build.yml's cache: what a release
+      # is built from should not depend on what an earlier run left behind.
       - name: Fetch pinned UI assets and media helpers
         shell: powershell
         run: |
@@ -64,17 +72,18 @@ jobs:
           .\tools\fetch_youtube_helpers.ps1
           .\tools\fetch_ffmpeg_helpers.ps1
 
+      # CMakePresets.json pins the generator, the platform and the MSVC toolset.
       - name: Configure
         shell: cmd
-        run: cmake -S . -B build-upscaling -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+        run: cmake --preset vs2022
 
       - name: Build Release
         shell: cmd
-        run: cmake --build build-upscaling --config Release --parallel
+        run: cmake --build --preset vs2022 --parallel
 
       - name: Test Release
         shell: cmd
-        run: ctest --test-dir build-upscaling -C Release -LE "gpu|audio" --output-on-failure
+        run: ctest --preset portable
 
       # Symbols for the minidumps CrashDump.h writes from both processes. The
       # PDBs never enter a zip (the packager copies an explicit list and the
@@ -111,26 +120,58 @@ jobs:
           # would append CRLF and make the line unreadable to coreutils.
           [System.IO.File]::WriteAllText("$($zip[0].FullName).sha256", "$hash  $($zip[0].Name)`n")
 
-      # Signed SLSA provenance for the core zip, verifiable with
-      # `gh attestation verify <zip> --repo <owner>/<repo>`.
-      - name: Attest core package provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: dist/DLSSVideoPlayer-v*-core-win64.zip
-
       # The body is README's short version for this release plus the download
       # lines; the same script gates pull requests that bump VERSION, so a
       # missing CHANGELOG section or README entry is found there, not here.
       - name: Build release notes
         shell: powershell
-        run: .\tools\release_notes.ps1 -Repository $env:GITHUB_REPOSITORY
+        run: .\tools\release_notes.ps1 -Repository $env:GITHUB_REPOSITORY -OutFile dist\release-notes.md
+
+      # Everything the publish job needs, and nothing else: it checks out
+      # nothing and runs nothing from the repository.
+      - name: Hand the release files to the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-files
+          path: |
+            dist/DLSSVideoPlayer-v*-core-win64.zip
+            dist/DLSSVideoPlayer-v*-core-win64.zip.sha256
+            dist/release-notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      # The provenance attestation of the core zip signs with the job's OIDC
+      # token; no repository secret is involved.
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Receive the release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-files
+          path: dist
+
+      # Signed SLSA provenance for the core zip, verifiable with
+      # `gh attestation verify <zip> --repo <owner>/<repo>`. It names this
+      # workflow run, whose build job produced the file.
+      - name: Attest core package provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/DLSSVideoPlayer-v*-core-win64.zip
 
       - name: Create draft GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           # The generated commit list is appended under the body by the action.
-          body_path: release-notes.md
+          body_path: dist/release-notes.md
           generate_release_notes: true
           prerelease: true
           # A draft: the notes tell people to download the complete package
