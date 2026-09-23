@@ -41,8 +41,11 @@ enum class ColorRange {
     Full,     // ffprobe "pc": Y in 0..255, chroma centred on 128 over 0..255
 };
 
-enum class ColorPrimaries { Unspecified, Bt709, Bt470bg, Smpte170m, Other };
-enum class ColorTransfer { Unspecified, Bt709, Smpte170m, Other };
+// Bt2020, Pq (ffprobe "smpte2084") and Hlg ("arib-std-b67") are the three
+// values that make a stream HDR; they are named so the decoder can tone map
+// exactly those streams (HdrPolicy.h) instead of lumping them into Other.
+enum class ColorPrimaries { Unspecified, Bt709, Bt470bg, Smpte170m, Other, Bt2020 };
+enum class ColorTransfer { Unspecified, Bt709, Smpte170m, Other, Pq, Hlg };
 
 struct SourceColorDescription {
     ColorMatrix matrix{ColorMatrix::Unspecified};

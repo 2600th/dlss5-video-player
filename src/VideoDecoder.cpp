@@ -478,10 +478,13 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     m_source.color.primaries = colorPrimaries.empty() ? ColorPrimaries::Unspecified :
         colorPrimaries == "bt709" ? ColorPrimaries::Bt709 :
         colorPrimaries == "bt470bg" ? ColorPrimaries::Bt470bg :
-        colorPrimaries == "smpte170m" ? ColorPrimaries::Smpte170m : ColorPrimaries::Other;
+        colorPrimaries == "smpte170m" ? ColorPrimaries::Smpte170m :
+        colorPrimaries == "bt2020" ? ColorPrimaries::Bt2020 : ColorPrimaries::Other;
     m_source.color.transfer = colorTransfer.empty() ? ColorTransfer::Unspecified :
         colorTransfer == "bt709" ? ColorTransfer::Bt709 :
-        colorTransfer == "smpte170m" ? ColorTransfer::Smpte170m : ColorTransfer::Other;
+        colorTransfer == "smpte170m" ? ColorTransfer::Smpte170m :
+        colorTransfer == "smpte2084" ? ColorTransfer::Pq :
+        colorTransfer == "arib-std-b67" ? ColorTransfer::Hlg : ColorTransfer::Other;
     // Kept verbatim for the refusal log line: "other" is a diagnosis nobody can
     // act on, "bt2020nc" is.
     const auto tag=[](const std::string& value){return value.empty()?std::string("unspecified"):value;};

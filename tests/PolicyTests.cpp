@@ -7404,8 +7404,19 @@ void video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test
         CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
         CHECK(decoder->ColorDescription().matrix==ColorMatrix::Other);
         CHECK(decoder->ColorDescription().range==ColorRange::Limited);
-        CHECK(decoder->ColorDescription().transfer==ColorTransfer::Other);
+        // PQ and BT.2020 are named rather than folded into Other: they are what
+        // makes the stream HDR, and the decoder tone maps exactly those.
+        CHECK(decoder->ColorDescription().transfer==ColorTransfer::Pq);
+        CHECK(decoder->ColorDescription().primaries==ColorPrimaries::Bt2020);
         CHECK(read_one_frame(*decoder).layout==VideoPixelLayout::Bgra);
+    }
+    {
+        // HLG is the other HDR transfer, and the same refusal.
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(L"colortag_hlg",MediaSourceKind::LocalFile));
+        CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
+        CHECK(decoder->ColorDescription().transfer==ColorTransfer::Hlg);
+        CHECK(decoder->ColorDescription().primaries==ColorPrimaries::Bt2020);
     }
 }
 
@@ -9146,6 +9157,9 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         // coefficients for. Declared-but-unhandled refuses exactly like undeclared.
         if(all.find(L"colortag_bt2020")!=std::wstring::npos){
             std::cout<<color("bt2020nc","tv","bt2020","smpte2084")<<geometry(4,2,"2:1")<<std::flush;return 0;
+        }
+        if(all.find(L"colortag_hlg")!=std::wstring::npos){
+            std::cout<<color("bt2020nc","tv","bt2020","arib-std-b67")<<geometry(4,2,"2:1")<<std::flush;return 0;
         }
         // Odd geometry: NV12's half-resolution UV plane needs even dimensions, so
         // OpenSequential must stay BGRA here even though it prefers NV12 - and the
