@@ -483,7 +483,10 @@ software FFmpeg, on the reasoning that it would otherwise compete with the
 D3D12 neural and NVENC workloads; decode and encode are separate engines and
 the GPU sits idle during export, so that was burning CPU time for nothing.
 The existing CUDA to D3D11VA to software fallback downgrades per codec. Cache
-hits retain full content-hash verification and use header-only metadata probes.
+hits retain full content-hash verification and use header-only metadata probes;
+the one exception is a payload this process published itself, whose promotion
+digest is reused while the file's size, write and change times and file id
+are those it had when it was hashed. The payload hash takes a stop token.
 Before promotion the joined entry is counted by demuxing it - one packet per
 coded frame, so the count and the video span come out of the container rather
 than a full decode, 0.05 s against 23.8 s on a 1440 p render - and its final

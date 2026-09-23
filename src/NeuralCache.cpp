@@ -16,8 +16,10 @@
 #include <atomic>
 #include <chrono>
 #include <charconv>
+#include <cstdio>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <system_error>
@@ -598,6 +600,188 @@ bool ProcessAlive(DWORD pid)
 constexpr size_t kSweepRemovals = 8;
 constexpr std::chrono::milliseconds kSweepBudget{100};
 
+// remove_all is one call, so the sweep's budget was checked only between
+// directories: a partial render of several gigabytes and hundreds of segment
+// files was deleted in one go, on the UI thread, whatever the budget said.
+// This deletes file by file and stops at the deadline; the directory keeps its
+// name, so the next sweep finishes it. Directory symlinks and junctions are
+// removed as links, never followed.
+bool RemoveTreeBefore(const std::filesystem::path& root,
+                      std::chrono::steady_clock::time_point deadline)
+{
+    namespace fs = std::filesystem;
+    std::error_code error;
+    std::vector<fs::path> directories;
+    for (fs::recursive_directory_iterator iterator(root, fs::directory_options::none, error), end;
+         !error && iterator != end; iterator.increment(error)) {
+        std::error_code local;
+        if (fs::is_directory(iterator->symlink_status(local)) && !local) {
+            directories.push_back(iterator->path());
+            continue;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        fs::remove(iterator->path(), local);
+    }
+    for (auto directory = directories.rbegin(); directory != directories.rend(); ++directory) {
+        std::error_code local;
+        fs::remove(*directory, local);
+    }
+    std::error_code local;
+    fs::remove(root, local);
+    return !fs::exists(root, local) && !local;
+}
+
+// Written into a quarantined entry when it is set aside. It says what put it
+// there and when, for whoever inspects it, and it moves the directory's write
+// time to the moment of quarantine, which is what the retention is measured
+// from (a rename does not change a directory's own times).
+void NoteQuarantine(const std::filesystem::path& directory, std::wstring_view reason)
+{
+    SYSTEMTIME now{};
+    GetSystemTime(&now);
+    char stamp[32]{};
+    std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02uT%02u:%02u:%02uZ", now.wYear, now.wMonth,
+                  now.wDay, now.wHour, now.wMinute, now.wSecond);
+    std::ofstream note(directory / L"quarantine.txt", std::ios::binary | std::ios::trunc);
+    note << "reason=" << Utf8(reason) << "\npid=" << GetCurrentProcessId() << "\ntime=" << stamp
+         << "\n";
+}
+
+// Writes `bytes` and flushes them to the device before returning. The
+// manifest used to reach the disk whenever the cache manager got to it, and
+// the rename that publishes the entry is write-through: a power cut between
+// the two left a published entry whose manifest was empty.
+bool WriteFileDurably(const std::filesystem::path& path, std::string_view bytes)
+{
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool ok = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written,
+                              nullptr) && written == bytes.size() && FlushFileBuffers(file);
+    CloseHandle(file);
+    return ok;
+}
+
+// The payload and the sidecars were written by other processes (ffmpeg, the
+// helper) or by ofstream, none of which flushes. Best effort: a file that
+// cannot be opened for the flush is still published, and the log says so.
+bool FlushToDevice(const std::filesystem::path& path)
+{
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    const bool flushed = FlushFileBuffers(file) != FALSE;
+    CloseHandle(file);
+    return flushed;
+}
+
+// Payloads this process published, and the digest promotion computed for each.
+//
+// Lookup hashed the whole payload on every call - a multi-gigabyte render read
+// end to end each time the same process asked about the entry it had just
+// written and hashed a moment before. The digest is reused only while the file
+// is provably the one that was hashed: the same path, size, last-write and
+// change times and file id, under the newest promotion of that path in this
+// process. Every rewrite moves the change time, which SetFileTime cannot
+// restore; a replaced file has a new id. The record dies with the process,
+// and anything that removes or sets aside an entry drops it first.
+struct PayloadStamp {
+    uint64_t size{};
+    int64_t lastWrite{};
+    int64_t change{};
+    uint64_t volume{};
+    std::array<uint8_t, 16> id{};
+    bool operator==(const PayloadStamp&) const = default;
+};
+
+std::optional<PayloadStamp> StampPayload(const std::filesystem::path& path)
+{
+    const HANDLE file = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return std::nullopt;
+    FILE_BASIC_INFO basic{};
+    FILE_STANDARD_INFO standard{};
+    FILE_ID_INFO identity{};
+    const bool ok =
+        GetFileInformationByHandleEx(file, FileBasicInfo, &basic, sizeof(basic)) &&
+        GetFileInformationByHandleEx(file, FileStandardInfo, &standard, sizeof(standard)) &&
+        GetFileInformationByHandleEx(file, FileIdInfo, &identity, sizeof(identity));
+    CloseHandle(file);
+    if (!ok) return std::nullopt;
+    PayloadStamp stamp;
+    stamp.size = static_cast<uint64_t>(standard.EndOfFile.QuadPart);
+    stamp.lastWrite = basic.LastWriteTime.QuadPart;
+    stamp.change = basic.ChangeTime.QuadPart;
+    stamp.volume = identity.VolumeSerialNumber;
+    std::copy(std::begin(identity.FileId.Identifier), std::end(identity.FileId.Identifier),
+              stamp.id.begin());
+    return stamp;
+}
+
+std::wstring PayloadMemoPath(const std::filesystem::path& path)
+{
+    std::wstring normalized = path.lexically_normal().generic_wstring();
+    std::ranges::transform(normalized, normalized.begin(), towlower);
+    return normalized;
+}
+
+struct PublishedPayload {
+    std::wstring path;
+    PayloadStamp stamp;
+    uint64_t promotionSequence{};
+    std::string digest;
+};
+
+std::mutex g_publishedMutex;
+std::vector<PublishedPayload> g_published;
+uint64_t g_promotionSequence{};
+constexpr size_t kPublishedPayloads = 64;
+
+void RememberPublishedPayload(const std::filesystem::path& path, const std::string& digest)
+{
+    const auto stamp = StampPayload(path);
+    if (!stamp) return;
+    const std::wstring key = PayloadMemoPath(path);
+    std::lock_guard lock(g_publishedMutex);
+    std::erase_if(g_published, [&](const PublishedPayload& entry) { return entry.path == key; });
+    if (g_published.size() >= kPublishedPayloads) g_published.erase(g_published.begin());
+    g_published.push_back({key, *stamp, ++g_promotionSequence, digest});
+}
+
+std::optional<std::string> PublishedPayloadDigest(const std::filesystem::path& path)
+{
+    const std::wstring key = PayloadMemoPath(path);
+    {
+        std::lock_guard lock(g_publishedMutex);
+        if (std::ranges::none_of(g_published, [&](const PublishedPayload& entry) {
+                return entry.path == key;
+            })) return std::nullopt;
+    }
+    const auto stamp = StampPayload(path);
+    if (!stamp) return std::nullopt;
+    std::lock_guard lock(g_publishedMutex);
+    const PublishedPayload* newest = nullptr;
+    for (const PublishedPayload& entry : g_published)
+        if (entry.path == key && (!newest || entry.promotionSequence > newest->promotionSequence))
+            newest = &entry;
+    if (!newest || newest->stamp != *stamp) return std::nullopt;
+    return newest->digest;
+}
+
+// Drops every record at or under `directory`.
+void ForgetPublishedPayloads(const std::filesystem::path& directory)
+{
+    std::wstring prefix = PayloadMemoPath(directory);
+    if (!prefix.empty() && prefix.back() != L'/') prefix.push_back(L'/');
+    std::lock_guard lock(g_publishedMutex);
+    std::erase_if(g_published, [&](const PublishedPayload& entry) {
+        return entry.path.starts_with(prefix);
+    });
+}
+
 } // namespace
 
 const char* NeuralCachePromotionStageName(NeuralCachePromotion::Stage stage)
@@ -1050,11 +1234,16 @@ size_t NeuralCacheManager::SweepStaging()
         if (!ParseStagingOwner(name, pid)) continue;
         // An entry set aside as invalid has nothing left to reference it, so it
         // goes whoever made it; a partial payload still being written belongs
-        // to the live process whose pid it carries.
-        if (!name.starts_with(L"invalid") && ProcessAlive(pid)) continue;
+        // to the live process whose pid it carries; a quarantined entry waits
+        // out its retention (cache_eviction::ReapStagingEntry).
+        const auto kind = cache_eviction::ClassifyStagingEntry(name);
         std::error_code timeError;
         const auto written = iterator->last_write_time(timeError);
         if (timeError) continue;
+        const int64_t ageSeconds = std::chrono::duration_cast<std::chrono::seconds>(
+            std::filesystem::file_time_type::clock::now() - written).count();
+        const bool ownerAlive = kind == cache_eviction::StagingEntry::Partial && ProcessAlive(pid);
+        if (!cache_eviction::ReapStagingEntry(kind, ownerAlive, ageSeconds)) continue;
         candidates.push_back({iterator->path(), written});
     }
     if (candidates.empty()) return 0;
@@ -1065,9 +1254,7 @@ size_t NeuralCacheManager::SweepStaging()
         if (removed >= kSweepRemovals ||
             std::chrono::steady_clock::now() - started >= kSweepBudget) break;
         if (!OwnsPath(candidate.path)) continue;
-        std::error_code removeError;
-        std::filesystem::remove_all(candidate.path, removeError);
-        if (!removeError) ++removed;
+        if (RemoveTreeBefore(candidate.path, started + kSweepBudget)) ++removed;
     }
     const double elapsedMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
@@ -1143,7 +1330,7 @@ std::optional<std::filesystem::path> NeuralCacheManager::BeginRenderStaging(std:
 }
 
 std::optional<NeuralCacheEntry> NeuralCacheManager::Lookup(
-    NeuralCacheEntryKind kind, std::string_view key) const
+    NeuralCacheEntryKind kind, std::string_view key, std::stop_token stop) const
 {
     if (!valid_ || !ValidKey(key)) return std::nullopt;
     const std::filesystem::path directory = root_ /
@@ -1170,17 +1357,18 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::Lookup(
     if (!manifest || manifest->kind != kind || !IsReusableNeuralCacheManifest(*manifest))
         return std::nullopt;
     if (!manifest->settingsDigest.empty() &&
-        Sha256File(directory / L"neural-settings.ini") != manifest->settingsDigest)
+        Sha256File(directory / L"neural-settings.ini", stop) != manifest->settingsDigest)
         return std::nullopt;
     // A reusable render always has a receipt digest, so the empty case below is
     // only ever reached by sources and legacy schema-3 entries, which have no
     // receipt to authenticate.
     if (!manifest->receiptDigest.empty() &&
-        Sha256File(directory / L"receipt.json") != manifest->receiptDigest)
+        Sha256File(directory / L"receipt.json", stop) != manifest->receiptDigest)
         return std::nullopt;
     const auto payload = directory /
         (kind == NeuralCacheEntryKind::Source ? L"source.mkv" : L"neural.mkv");
-    const auto digest = Sha256File(payload);
+    auto digest = PublishedPayloadDigest(payload);
+    if (!digest) digest = Sha256File(payload, stop);
     if (!digest) return std::nullopt;
     const std::string& expected = kind == NeuralCacheEntryKind::Source
         ? manifest->sourceDigest : manifest->neuralDigest;
@@ -1188,14 +1376,16 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::Lookup(
     return NeuralCacheEntry{directory, payload, *manifest};
 }
 
-std::optional<NeuralCacheEntry> NeuralCacheManager::LookupSource(std::string_view key) const
+std::optional<NeuralCacheEntry> NeuralCacheManager::LookupSource(std::string_view key,
+                                                                 std::stop_token stop) const
 {
-    return Lookup(NeuralCacheEntryKind::Source, key);
+    return Lookup(NeuralCacheEntryKind::Source, key, std::move(stop));
 }
 
-std::optional<NeuralCacheEntry> NeuralCacheManager::LookupRender(std::string_view key) const
+std::optional<NeuralCacheEntry> NeuralCacheManager::LookupRender(std::string_view key,
+                                                                 std::stop_token stop) const
 {
-    return Lookup(NeuralCacheEntryKind::Render, key);
+    return Lookup(NeuralCacheEntryKind::Render, key, std::move(stop));
 }
 
 bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key,
@@ -1214,8 +1404,14 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
         return fail(NeuralCachePromotion::Stage::Rejected);
     const auto payload = staging /
         (kind == NeuralCacheEntryKind::Source ? L"source.mkv" : L"neural.mkv");
+    // Flushed before it is hashed, and stamped around the hash: the stamp is
+    // what lets a later lookup in this process reuse this digest, so it has to
+    // describe exactly the bytes the digest was taken over.
+    if (!FlushToDevice(payload)) LOG("Neural cache payload could not be flushed before publishing.");
+    const auto hashedStamp = StampPayload(payload);
     const auto digest = Sha256File(payload);
     if (!digest) return fail(NeuralCachePromotion::Stage::PayloadDigest);
+    const bool hashedUnchanged = hashedStamp && StampPayload(payload) == hashedStamp;
     manifest.kind = kind;
     manifest.state = NeuralCacheState::Complete;
     manifest.schema = kSchema;
@@ -1247,14 +1443,17 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     if (!manifest.receiptDigest.empty() &&
         Sha256File(staging / L"receipt.json") != manifest.receiptDigest)
         return fail(NeuralCachePromotion::Stage::SidecarDigest);
-    const auto manifestPath = staging / L"manifest.json";
-    {
-        std::ofstream output(manifestPath, std::ios::binary | std::ios::trunc);
-        if (!output.is_open()) return fail(NeuralCachePromotion::Stage::ManifestWrite);
-        const std::string serialized = SerializeNeuralCacheManifest(manifest);
-        output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
-        if (!output.good()) return fail(NeuralCachePromotion::Stage::ManifestWrite);
+    // The sidecars and the manifest reach the device before the rename that
+    // publishes them does; the rename itself is write-through.
+    for (const auto sidecar : {L"neural-settings.ini", L"receipt.json"}) {
+        std::error_code sidecarError;
+        if (std::filesystem::is_regular_file(staging / sidecar, sidecarError) &&
+            !FlushToDevice(staging / sidecar))
+            LOG("Neural cache sidecar could not be flushed before publishing.");
     }
+    const auto manifestPath = staging / L"manifest.json";
+    if (!WriteFileDurably(manifestPath, SerializeNeuralCacheManifest(manifest)))
+        return fail(NeuralCachePromotion::Stage::ManifestWrite);
     {
         std::ifstream input(manifestPath, std::ios::binary);
         const std::string serialized{std::istreambuf_iterator<char>(input),
@@ -1285,8 +1484,13 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     std::error_code existsError;
     if (std::filesystem::exists(destination, existsError)) {
         if (existsError) return fail(NeuralCachePromotion::Stage::ExistingEntry);
-        if (!MoveToInvalidDirectory(root_, destination, L"invalid-existing"))
+        // An entry lookup refused - tampered or damaged - is set aside for
+        // inspection rather than deleted (see SweepStaging).
+        std::filesystem::path setAside;
+        if (!MoveToInvalidDirectory(root_, destination, L"invalid-existing", &setAside))
             return fail(NeuralCachePromotion::Stage::ExistingEntry);
+        ForgetPublishedPayloads(destination);
+        NoteQuarantine(setAside, L"existing entry failed authentication; replaced by a promotion");
     }
     if (!RenameDirectory(staging, destination, &report.win32Error, &report.attempts,
                          publishRetryObserver_))
@@ -1307,6 +1511,10 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
             payloadError)
             return fail(NeuralCachePromotion::Stage::Reopen);
     }
+    // A rename moves the file, not its bytes or its times; if the stamp still
+    // matches the one taken around the hash, the digest describes this file.
+    if (hashedUnchanged && StampPayload(destination / payloadName) == hashedStamp)
+        RememberPublishedPayload(destination / payloadName, *digest);
     report.entry = NeuralCacheEntry{destination, destination / payloadName, std::move(manifest)};
     if (diagnostic) *diagnostic = std::move(report);
     return true;
@@ -1339,7 +1547,11 @@ bool NeuralCacheManager::Quarantine(const NeuralCacheEntry& entry)
     if (!valid_ || !OwnsPath(entry.directory)) return false;
     const auto parent = entry.directory.parent_path().filename();
     if (parent != L"sources" && parent != L"renders") return false;
-    return MoveToInvalidDirectory(root_,entry.directory,L"invalid-cache");
+    ForgetPublishedPayloads(entry.directory);
+    std::filesystem::path setAside;
+    if (!MoveToInvalidDirectory(root_, entry.directory, L"invalid-cache", &setAside)) return false;
+    NoteQuarantine(setAside, L"published entry failed validation on reuse");
+    return true;
 }
 
 bool NeuralCacheManager::Remove(NeuralCacheEntryKind kind, std::string_view key)
@@ -1355,6 +1567,7 @@ bool NeuralCacheManager::Remove(NeuralCacheEntryKind kind, std::string_view key)
         return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return false;
+    ForgetPublishedPayloads(directory);
     std::error_code error;
     std::filesystem::remove_all(directory, error);
     return !error;
@@ -1502,6 +1715,7 @@ NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
             ++report.failures;
             continue;
         }
+        ForgetPublishedPayloads(directory);
         if (matched != entries.end()) report.freedBytes += matched->bytes;
         if (std::ranges::find(retired, key) != retired.end()) ++report.retiredRemoved;
         else if (unreachable) ++report.unreachableRemoved;
@@ -1579,6 +1793,7 @@ bool NeuralCacheManager::Clear()
             if (removeError) complete = false;
         }
     }
+    ForgetPublishedPayloads(root_);
     if (!complete) LOG("Neural cache clear left entries another process still has open.");
     return complete;
 }

@@ -1013,6 +1013,12 @@ void staging_sweep_reaps_invalid_and_orphaned_entries_but_not_live_ones_test()
         CHECK(!error);
         WriteBytes(directory / L"neural.mkv", "partial");
     }
+    // Quarantined entries are kept for inspection for a few days
+    // (quarantined_entries_are_kept_for_inspection_then_reaped_test); these
+    // two are past it.
+    for (const auto& aged : {invalidExistingOwn, invalidCacheDead})
+        std::filesystem::last_write_time(
+            aged, std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 4));
 
     NeuralCacheManager manager(cacheRoot);
     CHECK(manager.Valid());
@@ -1391,6 +1397,105 @@ void startup_sweep_removes_live_sessions_whose_process_is_gone_test()
     for (const auto& kept : {alive, own, padded, foreign})
         CHECK(std::filesystem::is_directory(kept));
     CHECK_EQ(size_t{0}, manager.SweepLiveSessions());
+}
+
+// Lookup hashed the whole payload on every call, including the entry this
+// process had published and hashed a moment before - a multi-GB read each
+// time - and a cancelled job could not abandon it. The digest promotion took
+// is reused only while the file is provably the one it was taken over.
+void lookup_reuses_its_own_published_digest_only_for_the_same_file_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const std::string key(64, 'a');
+    REQUIRE(PublishRender(manager, key, {}));
+    const auto payload = RenderDirectory(manager, key) / L"neural.mkv";
+
+    // Held with no sharing at all, the payload cannot be read - so a lookup
+    // that answers did not hash it. Any manager in this process may use it.
+    {
+        const HANDLE exclusive = CreateFileW(payload.c_str(), GENERIC_READ, 0, nullptr,
+                                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(exclusive != INVALID_HANDLE_VALUE);
+        CHECK(!Sha256File(payload).has_value());
+        CHECK(manager.LookupRender(key).has_value());
+        NeuralCacheManager second(fixture.Path() / L"cache");
+        CHECK(second.LookupRender(key).has_value());
+        CloseHandle(exclusive);
+    }
+
+    // Rewritten in place with the same bytes: the file is no longer provably
+    // the hashed one, so it is read again - and a stopped lookup gives up on
+    // that read instead of finishing it.
+    const std::string original = ReadBytes(payload);
+    WriteBytes(payload, original);
+    std::stop_source stopped;
+    stopped.request_stop();
+    CHECK(!manager.LookupRender(key, stopped.get_token()).has_value());
+    CHECK(manager.LookupRender(key).has_value());
+
+    // Tampered at the same size, then with its write time put back: the
+    // change time still moved, so the stale digest is never used.
+    const auto published = RenderDirectory(manager, key);
+    REQUIRE(PublishRender(manager, std::string(64, 'b'), {}));
+    const auto other = RenderDirectory(manager, std::string(64, 'b')) / L"neural.mkv";
+    const auto written = std::filesystem::last_write_time(other);
+    std::string tampered = ReadBytes(other);
+    tampered.front() = tampered.front() == 'x' ? 'y' : 'x';
+    WriteBytes(other, tampered);
+    std::filesystem::last_write_time(other, written);
+    CHECK(!manager.LookupRender(std::string(64, 'b')).has_value());
+    CHECK(std::filesystem::exists(published));
+}
+
+// A quarantined entry is the one artifact that says why a render went bad,
+// and the next sweep deleted it. It is kept, noted, for a few days.
+void quarantined_entries_are_kept_for_inspection_then_reaped_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const std::string key(64, 'c');
+    REQUIRE(PublishRender(manager, key, {}));
+    const auto entry = manager.LookupRender(key);
+    REQUIRE(entry.has_value());
+    CHECK(manager.Quarantine(*entry));
+    CHECK(!manager.LookupRender(key).has_value());
+
+    std::filesystem::path quarantined;
+    for (const auto& child : std::filesystem::directory_iterator(manager.Root() / L"staging"))
+        if (child.path().filename().wstring().starts_with(L"invalid-cache-")) quarantined = child.path();
+    REQUIRE(!quarantined.empty());
+    CHECK(std::filesystem::is_regular_file(quarantined / L"neural.mkv"));
+    CHECK(ReadBytes(quarantined / L"quarantine.txt").starts_with("reason="));
+
+    CHECK_EQ(size_t{0}, manager.SweepStaging());
+    CHECK(std::filesystem::is_directory(quarantined));
+    std::filesystem::last_write_time(
+        quarantined, std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 4));
+    CHECK_EQ(size_t{1}, manager.SweepStaging());
+    CHECK(!std::filesystem::exists(quarantined));
+}
+
+// remove_all could not be interrupted, so the sweep's budget meant nothing
+// against one big abandoned directory. It deletes file by file now, and a
+// directory it did not finish is finished by a later sweep.
+void staging_sweep_resumes_a_directory_it_could_not_finish_test()
+{
+    TempDirectory fixture;
+    const auto cacheRoot = fixture.Path() / L"cache";
+    const DWORD deadPid = DeadProcessId();
+    REQUIRE(deadPid != 0);
+    const auto orphan = cacheRoot / L"staging" /
+        (L"render-" + std::wstring(64, L'6') + L"-" + std::to_wstring(deadPid) + L"-1");
+    std::filesystem::create_directories(orphan / L"job1");
+    for (int index = 0; index < 400; ++index)
+        WriteBytes(orphan / L"job1" / (L"neural-" + std::to_wstring(index) + L".mkv"), "segment");
+    NeuralCacheManager manager(cacheRoot);
+    REQUIRE(manager.Valid());
+    for (int pass = 0; pass < 200 && std::filesystem::exists(orphan); ++pass) manager.SweepStaging();
+    CHECK(!std::filesystem::exists(orphan));
 }
 
 void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
@@ -4444,6 +4549,9 @@ int wmain(int argc, wchar_t* argv[])
     cache_operations_yield_to_another_holder_of_the_root_lock_test();
     clear_keeps_what_another_running_instance_owns_test();
     startup_sweep_removes_live_sessions_whose_process_is_gone_test();
+    lookup_reuses_its_own_published_digest_only_for_the_same_file_test();
+    quarantined_entries_are_kept_for_inspection_then_reaped_test();
+    staging_sweep_resumes_a_directory_it_could_not_finish_test();
     media_pipeline_arguments_are_exact_and_never_use_a_shell_test();
     materialization_failure_reports_diagnostics_without_signed_urls_test();
     materialization_discards_oversized_diagnostic_url_fragments_test();

@@ -1142,7 +1142,7 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
     sourceIdentity.applicationVersion=DLSS_VIDEO_PLAYER_VERSION;sourceIdentity.quality=kCompleteSourcePolicy;
     result.key=BuildNeuralCacheKey(sourceIdentity);
     LOG("Checking source cache key="<<result.key);
-    if(const auto cached=cache.LookupSource(result.key)){
+    if(const auto cached=cache.LookupSource(result.key,stop)){
         const ProbeResult cachedProbe=ProbeMedia(moduleDirectory,cached->payloadPath,stop,MediaProbeMode::CachedMetadata);
         if(stop.stop_requested()){result.cancelled=true;result.detail=L"Neural render was cancelled.";return result;}
         const int64_t durationTolerance=std::max<int64_t>(1,cached->manifest.duration100ns/static_cast<int64_t>(std::max<uint64_t>(1,cached->manifest.frameCount))+1);
@@ -1150,6 +1150,8 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
         if(valid){result.path=cached->payloadPath;LOG("Source cache hit: content hash and metadata verified; download skipped.");return result;}
         if(!cache.Quarantine(*cached)){result.detail=L"The invalid source cache entry could not be quarantined.";return result;}
     }
+    // A cancelled lookup reads as a miss; it must not become a download.
+    if(stop.stop_requested()){result.cancelled=true;result.detail=L"Neural render was cancelled.";return result;}
     LOG("Source cache miss or invalid entry; acquiring source.");
     if(onDownload)onDownload({});
     auto staging=cache.BeginSourceStaging(result.key);
@@ -6364,7 +6366,9 @@ private:
                         if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                         if(reuseKey.empty()&&prefetch)reuseKey=prefetch->key;
                         if(!reuseKey.empty()){
-                            const auto cached=cache.LookupSource(reuseKey);
+                            const auto cached=cache.LookupSource(reuseKey,stop);
+                            // A cancelled lookup reads as a missing copy; it must not be reported as one.
+                            if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                             if(cached&&cached->manifest.encoder==kCompleteSourcePolicy){
                                 sourcePath=cached->payloadPath;completion->sourceKey=reuseKey;
                                 LOG("Owned source cache verified; network resolution skipped.");
@@ -6448,7 +6452,7 @@ private:
                     LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest);
                     NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
                     LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
-                    if(const auto cached=cache.LookupRender(renderKey)){
+                    if(const auto cached=cache.LookupRender(renderKey,stop)){
                         // LookupRender already verifies the full payload hash and
                         // strict feature-18 manifest. Do not decode every frame again.
                         const ProbeResult cachedProbe=ProbeMedia(moduleDirectory,cached->payloadPath,stop,MediaProbeMode::CachedMetadata);
@@ -6475,6 +6479,8 @@ private:
                                 <<WideToUtf8(cachedProbe.detail)<<"); it is kept and this render proceeds without it.");
                         }else if(!cache.Quarantine(*cached)){completion->result.detail=L"The invalid neural cache entry could not be quarantined.";goto finish;}
                     }
+                    // A cancelled lookup reads as a miss; it must not start a render.
+                    if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                     // The cache check every open runs: no helper, and the line
                     // it logs is not a render that failed to measure.
                     if(prepareOnly){coldStart->NoteNoHelper("range-selection");completion->preparedOnly=true;LOG("Neural cache miss; opening the original for range selection.");goto finish;}

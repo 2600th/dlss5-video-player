@@ -241,8 +241,15 @@ public:
     // past it, and a successful attempt clears the record.
     const NeuralCacheFailure& LastFailure() const { return failure_; }
 
-    std::optional<NeuralCacheEntry> LookupSource(std::string_view key) const;
-    std::optional<NeuralCacheEntry> LookupRender(std::string_view key) const;
+    // Authenticates the entry - manifest, sidecars and the payload's digest -
+    // and returns it. `stop` abandons the payload hash, which on a multi-GB
+    // source is seconds of reading a cancelled job used to sit out. A payload
+    // this process published is not re-read while it is provably the file
+    // promotion hashed (same path, size, write and change times, file id).
+    std::optional<NeuralCacheEntry> LookupSource(std::string_view key,
+                                                 std::stop_token stop = {}) const;
+    std::optional<NeuralCacheEntry> LookupRender(std::string_view key,
+                                                 std::stop_token stop = {}) const;
     // Where an entry's payload would be, without opening or hashing anything.
     // `LookupSource` authenticates the copy by hashing it, which a caller polling
     // "is there one?" cannot afford; this lets such a caller memoise the verdict
@@ -304,9 +311,12 @@ public:
     // the number removed.
     size_t SweepLiveSessions();
     // Reaps staging/ entries nothing will ever finish: directories set aside
-    // as invalid, and partial payloads whose owning process is gone. Bounded
-    // per call and run by the constructor, so a litter of them is worked off
-    // oldest first across constructions. Returns the number removed.
+    // as invalid, and partial payloads whose owning process is gone.
+    // Quarantined entries - published ones that failed authentication - are
+    // kept for cache_eviction::kQuarantineRetentionSeconds first, so they can be
+    // inspected. Bounded per call, file by file, and run by the constructor,
+    // so a litter of them is worked off oldest first across constructions.
+    // Returns the number removed.
     size_t SweepStaging();
     // Called after each publishing rename that failed on a transient sharing
     // error, before the retry, with the attempt number that failed. The
@@ -324,7 +334,8 @@ private:
     std::optional<std::filesystem::path> BeginStaging(NeuralCacheEntryKind kind,
                                                       std::string_view key);
     std::optional<NeuralCacheEntry> Lookup(NeuralCacheEntryKind kind,
-                                           std::string_view key) const;
+                                           std::string_view key,
+                                           std::stop_token stop = {}) const;
     bool Promote(NeuralCacheEntryKind kind, std::string_view key,
                  const std::filesystem::path& staging, NeuralCacheManifest manifest,
                  NeuralCachePromotion* diagnostic);

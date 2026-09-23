@@ -2358,6 +2358,31 @@ void identity_retirement_needs_certainty_and_respects_other_installations_test()
     CHECK(!IdentityRetired(partial, current));
 }
 
+// A quarantined entry was reaped by the very next sweep, before anyone could
+// look at why it failed. Partial payloads and set-aside directories keep the
+// rules they had.
+void staging_sweep_keeps_quarantined_entries_for_the_retention_test()
+{
+    using cache_eviction::ClassifyStagingEntry;
+    using cache_eviction::ReapStagingEntry;
+    using cache_eviction::StagingEntry;
+    CHECK(ClassifyStagingEntry(L"invalid-cache-4242-7") == StagingEntry::Quarantined);
+    CHECK(ClassifyStagingEntry(L"invalid-existing-4242-7") == StagingEntry::Quarantined);
+    CHECK(ClassifyStagingEntry(L"invalid-4242-7") == StagingEntry::SetAside);
+    CHECK(ClassifyStagingEntry(L"invalid-evicted-4242-7") == StagingEntry::SetAside);
+    CHECK(ClassifyStagingEntry(L"invalid-cleared-4242-7") == StagingEntry::SetAside);
+    CHECK(ClassifyStagingEntry(L"render-abc-4242-7") == StagingEntry::Partial);
+
+    const int64_t retention = cache_eviction::kQuarantineRetentionSeconds;
+    CHECK_EQ(int64_t{3 * 24 * 60 * 60}, retention);
+    CHECK(!ReapStagingEntry(StagingEntry::Quarantined, false, 0));
+    CHECK(!ReapStagingEntry(StagingEntry::Quarantined, false, retention - 1));
+    CHECK(ReapStagingEntry(StagingEntry::Quarantined, true, retention));
+    CHECK(ReapStagingEntry(StagingEntry::SetAside, true, 0));
+    CHECK(!ReapStagingEntry(StagingEntry::Partial, true, retention * 10));
+    CHECK(ReapStagingEntry(StagingEntry::Partial, false, 0));
+}
+
 // A dead session's live/pid<N> is swept at startup, so what counts as one has
 // to be exactly what SessionDirectory writes and nothing that merely looks
 // like it.
@@ -9167,6 +9192,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(a_zero_floor_evicts_only_the_dead_test),
     TEST_CASE(identity_retirement_needs_certainty_and_respects_other_installations_test),
     TEST_CASE(live_session_owner_is_read_only_from_names_session_directory_writes_test),
+    TEST_CASE(staging_sweep_keeps_quarantined_entries_for_the_retention_test),
     TEST_CASE(module_path_grows_past_max_path_test),
     TEST_CASE(module_path_never_accepts_a_filled_buffer_test),
     TEST_CASE(module_path_reports_a_failed_query_test),

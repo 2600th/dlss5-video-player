@@ -74,7 +74,7 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P1.11](#p111) | The runtime lock ignores extra add-ons | S | Pipeline, Release | 🔍 |
 | [P1.12](#p112) | Helper robustness batch | S | Pipeline | 🔍 |
 | [P1.13](#p113) | Parent-side IPC polls at 20 ms | M | Pipeline, Player | 🔍 |
-| [P1.14](#p114) | Hashing and write amplification leftovers | M | Pipeline | 🔍 |
+| [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.15](#p115) | Small render-thread costs | XS each | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
 | [P1.17](#p117) | The GPU CI workflow cannot pass on a fresh runner | S | Release | 🔍 |
@@ -597,21 +597,19 @@ the default 4 KiB. Move the 4 KiB zero-filled chunk out of the drain loop.
 ---
 
 <a id="p114"></a>
-### P1.14 · Hashing and write amplification leftovers
+### P1.14 · Live-session write amplification
 
-`M` · **Pipeline** · 🔍 · _open parts of old 2.9 and 2.19_
+`M` · **Pipeline** · 🔍 · _what is left of old 2.9_
 
-- `Lookup` re-hashes the whole payload on every call, and a multi-GB hash
-  cannot be cancelled (`NeuralCache.cpp:1005`). Add a stop token, and memoise
-  payloads this process published, keyed on
-  `(path, size, mtime, promotionSequence)`.
-- Live sessions write every rendered byte twice and read it three times. The
-  joined `staging/neural.mkv` is a full copy, and the segments are never
-  deleted after the join. Delete one or the other.
-- `SweepStaging`'s `remove_all` cannot be interrupted (`:897-904`). Nothing is
-  flushed before the publishing rename (`:1073-1078`, `:419`). Quarantined
-  entries are deleted on the next sweep (`:887`), before anyone can inspect
-  them.
+A live session writes every rendered byte twice and reads it three times.
+The segments are joined into a full `staging/neural.mkv` copy, and the
+segments stay until the session is released, because `SynchronizedPlayback`
+keeps reading them after the join. Peak disk is about twice the render.
+
+**Fix** — once the joined entry is published, switch playback onto the
+published payload (a `SynchronizedPlayback` retarget) and delete the
+segments, or publish by concatenating straight into the entry's staging
+directory with no intermediate copy.
 
 ---
 

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // What the render cache may delete, and when.
@@ -106,6 +107,38 @@ inline bool IdentityRetired(const Identity& recorded, const Identity& current)
     if (recorded.installation.empty() || recorded.installation != current.installation)
         return false;
     return recorded.application != current.application || recorded.runtime != current.runtime;
+}
+
+// What the staging sweep may reap, by the name the manager gave the directory.
+//
+// A partial payload belongs to the process whose pid it carries and goes once
+// that process does. A directory set aside after a failed render, eviction or
+// Clear has nothing left to reference it and goes at once. A QUARANTINED one -
+// a published entry that failed authentication on reuse (invalid-cache) or was
+// found broken under a promotion (invalid-existing) - was reaped just as fast,
+// so the one artifact that could say why an entry went bad was deleted before
+// anyone could look at it. It is kept for a few days now, measured from when
+// it was quarantined.
+enum class StagingEntry { Partial, SetAside, Quarantined };
+
+inline constexpr int64_t kQuarantineRetentionSeconds = int64_t{3} * 24 * 60 * 60;
+
+inline StagingEntry ClassifyStagingEntry(std::wstring_view name)
+{
+    if (name.starts_with(L"invalid-cache-") || name.starts_with(L"invalid-existing-"))
+        return StagingEntry::Quarantined;
+    if (name.starts_with(L"invalid")) return StagingEntry::SetAside;
+    return StagingEntry::Partial;
+}
+
+inline bool ReapStagingEntry(StagingEntry kind, bool ownerAlive, int64_t ageSeconds)
+{
+    switch (kind) {
+    case StagingEntry::Partial: return !ownerAlive;
+    case StagingEntry::SetAside: return true;
+    case StagingEntry::Quarantined: return ageSeconds >= kQuarantineRetentionSeconds;
+    }
+    return false;
 }
 
 // `freeBytes` is the volume's current free space, `freeFloorBytes` the amount
