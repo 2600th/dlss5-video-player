@@ -177,14 +177,18 @@ bool VideoDecoder::OpenKnown(const std::wstring& path, const KnownMedia& media,
 }
 
 bool VideoDecoder::OpenMetadata(const std::wstring& path, MediaSourceKind sourceKind,
-                                std::stop_token stop) {
+                                std::stop_token stop, bool preferNv12) {
     Close();
     m_path = path;
     m_source = {};
     m_sourceKind = sourceKind;
+    m_source.nv12Requested = m_source.playbackNv12Requested = preferNv12;
     ++m_sourceGeneration;
     m_ffprobeExe = FindTool(L"ffprobe.exe");
-    if (!m_ffprobeExe.empty() && ProbeFFmpeg(path, stop) && !stop.stop_requested()) return true;
+    if (!m_ffprobeExe.empty() && ProbeFFmpeg(path, stop) && !stop.stop_requested()) {
+        DecideSourceLayout();
+        return true;
+    }
     if (stop.stop_requested()) return false;
     // A container ffprobe cannot describe is still worth one Media Foundation
     // question; its reader answers from the file, without a child process.
@@ -948,6 +952,11 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
     } else if (!ProbeFFmpeg(path,stop) || stop.stop_requested()) {
         return false;
     }
+    DecideSourceLayout();
+    return StartFFmpeg(0.0,initialAcceleration);
+}
+
+void VideoDecoder::DecideSourceLayout() {
     // NV12 needs even plane dimensions (the UV plane is half-resolution in
     // both axes); odd geometry stays BGRA even for a sequential/export open,
     // and so does a caller that opted out of NV12 via preferNv12=false.
@@ -994,7 +1003,6 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
     }
     m_source.layout = (wantNv12 && evenGeometry && convertible && playbackConvertible)
         ? VideoPixelLayout::Nv12 : VideoPixelLayout::Bgra;
-    return StartFFmpeg(0.0,initialAcceleration);
 }
 
 // Position on the current timeline of the next frame the child will emit. The

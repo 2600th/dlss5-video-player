@@ -3014,6 +3014,8 @@ public:
     }
     bool Open(const std::filesystem::path&,std::stop_token stop) override
     { ++opens;index=0;return !failOpen&&!stop.stop_requested(); }
+    bool OpenKnown(const std::filesystem::path& path,const VideoDecoder::KnownMedia&,std::stop_token stop) override
+    { ++knownOpens;return Open(path,stop); }
     void Close() override { ++closes; }
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop) override
     {
@@ -3033,7 +3035,7 @@ public:
     double FrameRate() const override { return fps; }
     double DurationSeconds() const override { return duration; }
     std::vector<VideoFrame> frames;size_t index{};uint32_t width{1},height{1};
-    double fps{30.0},duration{};bool failOpen{},failNextSeek{};int opens{},closes{},seeks{},notReadyReads{};
+    double fps{30.0},duration{};bool failOpen{},failNextSeek{};int opens{},knownOpens{},closes{},seeks{},notReadyReads{};
 };
 
 void synchronized_seek_waits_for_decoder_startup_and_preserves_comparison_test()
@@ -3164,6 +3166,22 @@ void synchronized_playback_original_only_mode_remains_available_after_cancel_tes
     CHECK(playback.Open(L"o",{},{}));
     CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
     CHECK(!playback.SetView(ComparisonView::Neural));CHECK_EQ(ComparisonView::Original,playback.View());
+}
+
+// Cached playback already probed the original through its own decoder; the
+// pair used to probe it a second time. Handed that probe, the original opens
+// known and only the neural file - whose duration proves it whole - is probed.
+void synchronized_playback_opens_a_described_original_without_a_probe_test()
+{
+    FakeSynchronizedSource original({0,333333,666666});FakeSynchronizedSource neural({0,333333,666666});
+    SynchronizedPlayback playback(original,neural);
+    VideoDecoder::KnownMedia media{};media.width=1;media.height=1;media.fps=30.0;media.durationSec=original.duration;
+    CHECK(playback.Open(L"o",L"n",{},{},false,media));
+    CHECK_EQ(1,original.knownOpens);CHECK_EQ(0,neural.knownOpens);
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    // Without one it probes, as it always has.
+    CHECK(playback.Open(L"o",L"n",{}));
+    CHECK_EQ(1,original.knownOpens);CHECK_EQ(0,neural.knownOpens);
 }
 
 // Behaves the way VideoDecoder does with the buffer a frame arrives holding:
@@ -4682,6 +4700,7 @@ int wmain(int argc, wchar_t* argv[])
     synchronized_playback_pause_step_and_eos_apply_to_both_streams_test();
     synchronized_playback_original_only_mode_remains_available_after_cancel_test();
     synchronized_playback_returns_released_pair_buffers_to_its_sources_test();
+    synchronized_playback_opens_a_described_original_without_a_probe_test();
     neural_segment_index_orders_appends_and_locates_by_timestamp_test();
     neural_segment_index_resumes_after_retained_coverage_test();
     neural_segment_index_covers_the_rounding_hole_but_not_a_real_gap_test();

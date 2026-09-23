@@ -6193,6 +6193,33 @@ void video_decoder_open_sequential_stays_bgra_for_odd_geometry_test()
     CHECK_EQ(FrameBytes(VideoPixelLayout::Bgra,3,3),frame.bgra.size());
 }
 
+// Cached playback describes the original with OpenMetadata and lets the pair
+// decode it, so the layout the renderer is configured from has to come out of
+// the probe alone - and be the one the pair's decoder, opened from Media(),
+// then takes. A full Open used to run an ffmpeg child nobody read for this.
+void video_decoder_open_metadata_decides_the_playback_layout_without_a_decoder_test()
+{
+    MediaFixture fixture;
+    for(const wchar_t* scenario:{L"nv12geom",L"colortag_bt601full",L"colortag_none",L"oddgeom"}){
+        auto opened=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(opened->Open(scenario,MediaSourceKind::LocalFile,{},/*preferNv12=*/true));
+        auto described=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(described->OpenMetadata(scenario,MediaSourceKind::LocalFile,{},/*preferNv12=*/true));
+        CHECK(!described->Ready());
+        CHECK(described->PixelLayout()==opened->PixelLayout());
+        auto sibling=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(sibling->OpenKnown(scenario,described->Media(),MediaSourceKind::LocalFile,{},/*preferNv12=*/true));
+        CHECK(sibling->PixelLayout()==described->PixelLayout());
+    }
+    auto nv12=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(nv12->OpenMetadata(L"nv12geom",MediaSourceKind::LocalFile,{},/*preferNv12=*/true));
+    CHECK(nv12->PixelLayout()==VideoPixelLayout::Nv12);
+    // Asking for nothing keeps the old answer.
+    auto plain=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(plain->OpenMetadata(L"nv12geom",MediaSourceKind::LocalFile));
+    CHECK(plain->PixelLayout()==VideoPixelLayout::Bgra);
+}
+
 // The GPU source conversion is a matrix plus a range mapping. A source that
 // declares neither, or declares a matrix the conversion has no coefficients for,
 // cannot be converted correctly - so it is never handed over as NV12, however
@@ -9387,6 +9414,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_open_sequential_selects_nv12_for_even_geometry_test),
     TEST_CASE(video_decoder_open_sequential_can_keep_bgra_for_even_geometry_test),
     TEST_CASE(video_decoder_open_sequential_stays_bgra_for_odd_geometry_test),
+    TEST_CASE(video_decoder_open_metadata_decides_the_playback_layout_without_a_decoder_test),
     TEST_CASE(video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test),
     TEST_CASE(video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test),
     TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),

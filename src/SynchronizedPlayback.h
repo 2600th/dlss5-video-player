@@ -90,11 +90,15 @@ public:
     SynchronizedPlayback(SynchronizedPlayback&&) noexcept;
     SynchronizedPlayback& operator=(SynchronizedPlayback&&) noexcept;
 
+    // `originalMedia`, when valid, is the caller's own probe of `originalPath`
+    // and the original is opened without another one - as OpenLive does. The
+    // neural file is always probed: its duration is what proves it whole.
     bool Open(const std::filesystem::path& originalPath,
               const std::filesystem::path& neuralPath = {},
               std::stop_token stop = {},
               SynchronizedRange range = {},
-              bool preferNv12 = false);
+              bool preferNv12 = false,
+              const VideoDecoder::KnownMedia& originalMedia = {});
     // Plays the original against a render job that is still running: the neural
     // member is the growing segment index instead of one finished file.
     // `originalMedia` is the caller's own probe of `originalPath` - the player

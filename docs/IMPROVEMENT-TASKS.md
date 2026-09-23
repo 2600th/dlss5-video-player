@@ -62,7 +62,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
 | **P1** | | | | |
 | [P1.2](#p12) | Remaining per-frame copies and allocations | M | Player | 🔍 |
-| [P1.3](#p13) | Opening a cached render spawns redundant decoders | S | Player | 🔍 |
 | [P1.4](#p14) | Audio clock and endpoint edge cases | S | Player | 🔍 |
 | [P1.5](#p15) | Waits on the UI thread | S | Player | 🔍 |
 | [P1.6](#p16) | Failures that look like success | S | Player, Pipeline | 🔍 |
@@ -342,27 +341,6 @@ downscale). Keep a 1:1 pixel mode for P2.16.
 
 **Impact** — Player: headroom at 119.88 fps and 4K, and less VRAM and host
 memory. The pixels do not change.
-
----
-
-<a id="p13"></a>
-### P1.3 · Opening a cached render spawns redundant decoders
-
-`S` · **Player** · 🔍
-
-**Where** — `main.cpp:6637`, `SynchronizedPlayback.cpp:553`, `:582`
-
-`LoadCachedPlayback` fully opens `m_decoder` (a probe, a spacing probe, and a
-running ffmpeg with its frame queue), and nothing reads it in cached mode.
-`SynchronizedPlayback::Open` then probes the same original and the neural file
-again with `Open`, not `OpenKnown`.
-
-**Impact** — Player: about six extra process spawns per open (around 0.7 s
-each where antivirus scans them), plus an idle NVDEC session held for the
-whole playback.
-
-**Fix** — open `m_decoder` with `OpenMetadata`, and pass the known media into
-`Open` the way `OpenLive` already does.
 
 ---
 

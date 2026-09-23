@@ -6669,7 +6669,15 @@ private:
     }
     bool LoadCachedPlayback(const NeuralJobCompletion& completion){
         Unload();
-        if(!m_decoder.Open(completion.sourcePath.wstring(),MediaSourceKind::LocalFile,{},/*preferNv12=*/true)||!m_synchronizedPlayback.Open(completion.sourcePath,completion.neuralPath,{},SynchronizedRange{completion.range.start100ns,completion.range.end100ns},PairPrefersNv12())){Unload();return false;}
+        // m_decoder only DESCRIBES the original here (geometry, rate, layout,
+        // still or not); the pair decodes it. A full Open kept an ffmpeg child
+        // and an NVDEC session running that nothing read, and the pair then
+        // probed the same file again. A still or a GIF needs options a known
+        // open does not carry, and an answer without an ffprobe profile came
+        // from Media Foundation: those two still let the pair probe.
+        if(!m_decoder.OpenMetadata(completion.sourcePath.wstring(),MediaSourceKind::LocalFile,{},/*preferNv12=*/true)){Unload();return false;}
+        const VideoDecoder::KnownMedia originalMedia=(m_decoder.IsStillImage()||m_decoder.IsAnimation()||m_decoder.Media().hardwareProfile.empty())?VideoDecoder::KnownMedia{}:m_decoder.Media();
+        if(!m_synchronizedPlayback.Open(completion.sourcePath,completion.neuralPath,{},SynchronizedRange{completion.range.start100ns,completion.range.end100ns},PairPrefersNv12(),originalMedia)){Unload();return false;}
         m_dar=m_decoder.DisplayAspectRatio();if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
         const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
         ShowWindow(m_viewport,SW_SHOW);Layout();m_renderer=MakeD3D12Renderer();

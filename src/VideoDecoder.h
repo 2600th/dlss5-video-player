@@ -167,10 +167,14 @@ public:
     KnownMedia Media() const { return {m_source.width, m_source.height, m_source.fps, m_source.durationSec, m_source.hardwareProfile, m_source.color}; }
     // Geometry, frame rate and duration only: runs the probe and starts no
     // decoder. The caller that just needs to describe a file was paying for a
-    // full ffmpeg child it closed two lines later.
+    // full ffmpeg child it closed two lines later. preferNv12 settles
+    // PixelLayout() exactly as a playback Open(preferNv12) would, for a caller
+    // that describes the file here and hands the decoding to another decoder
+    // opened from Media() - cached playback, whose pair has to decode to the
+    // layout this answer configures the renderer for.
     bool OpenMetadata(const std::wstring& path,
                       MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
-                      std::stop_token stop = {});
+                      std::stop_token stop = {}, bool preferNv12 = false);
     void Close();
     bool ReadNext(VideoFrame& out);
     VideoReadResult ReadNextAvailable(VideoFrame& out, std::stop_token stop = {});
@@ -331,6 +335,10 @@ private:
                     FFmpegAcceleration initialAcceleration,
                     const KnownMedia* known);
     bool ProbeFFmpeg(const std::wstring& path, std::stop_token stop);
+    // Sets m_source.layout from the probed (or known) geometry and colour and
+    // what the open asked for. Shared by OpenFFmpeg and OpenMetadata so the
+    // two can never disagree about a file.
+    void DecideSourceLayout();
     void ProbePacketSpacing(const std::wstring& path, const std::wstring& inputOptions,
                             std::stop_token stop);
     // Restarts (seeks, resizes, recovery) default to the path that last produced

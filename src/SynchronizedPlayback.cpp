@@ -612,13 +612,17 @@ SynchronizedPlayback& SynchronizedPlayback::operator=(SynchronizedPlayback&&) no
 
 bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
                                 const std::filesystem::path& neuralPath,std::stop_token stop,
-                                SynchronizedRange range,bool preferNv12)
+                                SynchronizedRange range,bool preferNv12,
+                                const VideoDecoder::KnownMedia& originalMedia)
 {
     Close();if(!impl_->original||originalPath.empty())return false;
     if(range.start100ns<0||range.end100ns<0||(range.end100ns>0&&range.end100ns<=range.start100ns))return false;
     impl_->preferNv12=preferNv12;
     impl_->original->PreferNv12(preferNv12);
-    if(!impl_->original->Open(originalPath,stop))return false;
+    const bool originalReady=originalMedia.Valid()
+        ? impl_->original->OpenKnown(originalPath,originalMedia,stop)
+        : impl_->original->Open(originalPath,stop);
+    if(!originalReady)return false;
     const double originalFps=impl_->original->FrameRate();
     if(!impl_->original->Width()||!impl_->original->Height()||
        !std::isfinite(originalFps)||originalFps<=0.0){
