@@ -42,10 +42,9 @@ endif()
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
 
 # Compile a target's translation units in parallel. MSBuild's /m already runs
-# projects side by side; this is the other axis, and it matters here because
-# the same sources are compiled into twenty executables - 162 object files for
-# 31 sources - so the long pole is one project with many TUs, not many
-# projects.
+# projects side by side; this is the other axis. Since the sources moved into
+# the object libraries below (57 compiles for the whole tree, down from 181),
+# the long pole is the largest of those, player_app, with 13 TUs.
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/MP>)
 
 # Every target is at zero warnings under /W4, so a new one is an error rather
@@ -101,44 +100,36 @@ else()
     message(WARNING "NVIDIA Optical Flow SDK headers are missing from ${NVOF_SDK}. They ship with this repository, so this build will fall back to the CPU motion estimator - see docs/BUILDING.md.")
 endif()
 
-# Every target that compiles D3D12Renderer.cpp also compiles the flow backend; this
-# only points it at the headers, because the source is listed with the renderer.
-function(dlss_video_player_use_nvof target)
-    if(NVOF_FOUND)
-        target_include_directories(${target} PRIVATE "${NVOF_SDK}")
-        target_compile_definitions(${target} PRIVATE DLSS_VIDEO_PLAYER_HAS_NVOF)
-    endif()
-endfunction()
-
 # Control Flow Guard and CET shadow stacks for the two shipped binaries. The
 # compiler and linker already default to /GS, /DYNAMICBASE, /NXCOMPAT and
 # /HIGHENTROPYVA; they are spelled out so a toolset that stops defaulting them
 # shows up as a diff here rather than in dumpbin output of a shipped package.
+# The compile half, /guard:cf /GS, is in dlss_video_player_shipped_code below.
 function(dlss_video_player_harden target)
-    target_compile_options(${target} PRIVATE /guard:cf /GS)
     target_link_options(${target} PRIVATE /GUARD:CF /CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)
 endfunction()
 
 # Symbols and reproducibility for the two shipped binaries. CrashDump.h writes
 # minidumps from both processes, and without a PDB that matches the build a
-# dump cannot be symbolised, so both compile with /Zi and link with /DEBUG.
-# /DEBUG turns the linker's default /OPT:REF and /OPT:ICF off, which would
-# grow and change the shipped code, so they are stated again. /PDBALTPATH
-# keeps only the PDB's file name in the executable instead of the builder's
-# absolute path - the complete package is linked on a maintainer's machine,
-# under their user folder. /Brepro replaces the link timestamp and the PDB
-# signature with hashes of the content, so the same source and toolset give
-# the same bytes and a rebuild can be checked against a published package.
-# The PDBs stay beside the binaries in the build tree; the packager copies an
-# explicit list that does not name them, and CI uploads them separately.
+# dump cannot be symbolised, so their code compiles with /Zi and they link
+# with /DEBUG. /DEBUG turns the linker's default /OPT:REF and /OPT:ICF off,
+# which would grow and change the shipped code, so they are stated again.
+# /PDBALTPATH keeps only the PDB's file name in the executable instead of the
+# builder's absolute path - the complete package is linked on a maintainer's
+# machine, under their user folder. /Brepro (compiled in as well) replaces the
+# link timestamp and the PDB signature with hashes of the content, so the same
+# source, toolset and build path give the same bytes and a rebuild can be
+# checked against a published package. The PDBs stay beside the binaries in
+# the build tree; the packager copies an explicit list that does not name
+# them, and CI uploads them separately.
 function(dlss_video_player_symbols target)
-    target_compile_options(${target} PRIVATE /Zi /Brepro)
     target_link_options(${target} PRIVATE /DEBUG /PDBALTPATH:$<TARGET_PDB_FILE_NAME:${target}>
         "$<$<NOT:$<CONFIG:Debug>>:/OPT:REF;/OPT:ICF;/Brepro>")
 endfunction()
 
-# The code analyzer, on the code that ships. Findings in the SDK and Windows
-# headers are not this project's to fix, so external headers are excluded.
+# The code analyzer runs on the code that ships (dlss_video_player_shipped_code
+# below). Findings in the SDK and Windows headers are not this project's to
+# fix, so external headers are excluded.
 # Under /WX every finding fails the build, so each one below was read and is
 # suppressed for a stated reason (first run, 2026-09-23, 11 findings):
 #   C6262 x6   stack frames of 21-66 KiB: 32K-wchar long-path buffers and the
@@ -158,12 +149,6 @@ endfunction()
 # The last three are scoped to their files and belong in the source as
 # `#pragma warning(suppress: ...)` next to each line when those files are next
 # edited.
-function(dlss_video_player_analyze target)
-    if(DLSS_VIDEO_PLAYER_ANALYZE)
-        target_compile_options(${target} PRIVATE /analyze /analyze:external- /external:anglebrackets /external:W0
-            "SHELL:/analyze:stacksize 131072" /wd28251)
-    endif()
-endfunction()
 if(DLSS_VIDEO_PLAYER_ANALYZE)
     set_property(SOURCE src/main.cpp APPEND PROPERTY COMPILE_OPTIONS /wd6336 /wd6387)
     set_property(SOURCE src/NeuralWorker.cpp APPEND PROPERTY COMPILE_OPTIONS /wd28020)
@@ -177,71 +162,132 @@ configure_file(src/RuntimeLockData.h.in "${CMAKE_BINARY_DIR}/generated/RuntimeLo
 configure_file(src/VersionData.h.in "${CMAKE_BINARY_DIR}/generated/VersionData.h" @ONLY)
 set(GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")
 
+# Link-time code generation for Release, where the toolset supports it. Not in
+# the sanitizer or analyzer configurations, which are not measured and would
+# only link slower. Must be decided before the targets below exist.
+option(DLSS_VIDEO_PLAYER_IPO "Link-time code generation (/GL, /LTCG) for Release" ON)
+if(DLSS_VIDEO_PLAYER_IPO AND NOT DLSS_VIDEO_PLAYER_ASAN AND NOT DLSS_VIDEO_PLAYER_ANALYZE)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT DLSS_VIDEO_PLAYER_IPO OUTPUT DLSS_VIDEO_PLAYER_IPO_OUTPUT LANGUAGES CXX)
+    if(DLSS_VIDEO_PLAYER_IPO)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    else()
+        message(STATUS "Interprocedural optimization is not available: ${DLSS_VIDEO_PLAYER_IPO_OUTPUT}")
+    endif()
+endif()
+
+# One set of options for every target in the tree, tests included. Each target
+# used to spell its own, and they had drifted: six test targets compiled
+# without /Zc:__cplusplus and UpscalingGpuSmoke without the generated include
+# directory, so the tests were not running the object code that ships.
+add_library(dlss_video_player_common INTERFACE)
+target_compile_definitions(dlss_video_player_common INTERFACE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
+target_compile_options(dlss_video_player_common INTERFACE /W4 /permissive- /EHsc /Zc:__cplusplus)
+target_include_directories(dlss_video_player_common INTERFACE
+    "${CMAKE_SOURCE_DIR}/src" "${GENERATED_INCLUDE_DIR}" "${DLSS_SDK}/include")
+target_link_directories(dlss_video_player_common INTERFACE "${DLSS_LIB_DIR}")
+target_link_libraries(dlss_video_player_common INTERFACE
+    d3d12 dxgi dxguid d3dcompiler
+    mfplat mfreadwrite mfuuid
+    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt dbghelp
+    ${DLSS_NGX_LIBRARY})
+
+# How the code that ships is compiled, wherever it is compiled: Control Flow
+# Guard (/guard:cf only protects functions compiled with it, so it belongs on
+# every object the two binaries link, not only on their own sources), symbols
+# and reproducible output (see dlss_video_player_symbols) and, in the analyze
+# configuration, the code analyzer. The object libraries below compile with
+# it, so the tests run these very objects.
+add_library(dlss_video_player_shipped_code INTERFACE)
+target_compile_options(dlss_video_player_shipped_code INTERFACE /guard:cf /GS /Zi /Brepro)
+if(DLSS_VIDEO_PLAYER_ANALYZE)
+    target_compile_options(dlss_video_player_shipped_code INTERFACE
+        /analyze /analyze:external- /external:anglebrackets /external:W0
+        "SHELL:/analyze:stacksize 131072" /wd28251)
+endif()
+
+# One set of objects. Every source used to be compiled once per target that
+# listed it - 181 compiles of about 55 files, VideoDecoder and MediaSource a
+# dozen times each - so a test linked its own copy, built with its own flags.
+# Each library below is compiled once and linked whole, and the split follows
+# what the two binaries link: NeuralWorker is media + render + neural, exactly
+# the objects it always had, and the player adds app. A test links all four,
+# because an object library brings every object and they reference each
+# other. Sources that differ per binary stay with it: main.cpp,
+# NeuralWorkerMain.cpp, NeuralPreflightProbe.cpp, the exported driver hints in
+# GpuPreference.cpp (which a test must not export) and YouTubeResolver.cpp,
+# whose PolicyTests build carries a test seam that changes its layout.
+add_library(player_media OBJECT
+    src/VideoDecoder.cpp src/VideoDecoder.h
+    src/MediaSource.cpp src/MediaSource.h
+    src/MediaPipeline.cpp src/MediaPipeline.h)
+add_library(player_render OBJECT
+    src/D3D12Renderer.cpp src/D3D12Renderer.h
+    src/DLSSBackend.cpp src/DLSSBackend.h
+    src/TemporalGuides.cpp src/TemporalGuides.h
+    src/OpticalFlowNvof.cpp src/OpticalFlowNvof.h
+    src/RuntimePolicy.cpp src/RuntimePolicy.h)
+add_library(player_neural OBJECT
+    src/NeuralWorker.cpp src/NeuralWorker.h
+    src/NeuralPreflight.cpp src/NeuralPreflight.h
+    src/NeuralCache.cpp src/NeuralCache.h
+    src/RuntimeLock.cpp src/RuntimeLock.h
+    src/OfflineNeuralRenderer.cpp src/OfflineNeuralRenderer.h
+    src/ReShadeConfig.cpp src/ReShadeConfig.h)
+# What only the player links.
+add_library(player_app OBJECT
+    src/AppMenu.cpp src/AppMenu.h
+    src/UiLayout.cpp src/UiLayout.h
+    src/UiResources.cpp src/UiResources.h
+    src/DLSSGBackend.cpp src/DLSSGBackend.h
+    src/FrameGenerationPass.cpp src/FrameGenerationPass.h
+    src/AudioPlayer.cpp src/AudioPlayer.h src/WasapiRenderer.cpp
+    src/RecentMedia.cpp src/RecentMedia.h
+    src/SynchronizedPlayback.cpp src/SynchronizedPlayback.h
+    src/NeuralReceipt.cpp src/NeuralReceipt.h
+    src/NeuralSettings.cpp src/NeuralSettings.h
+    src/RangeSelection.cpp src/RangeSelection.h
+    src/UpdateCheck.cpp src/UpdateCheck.h)
+set(PLAYER_OBJECT_LIBRARIES player_media player_render player_neural player_app)
+foreach(object_library IN LISTS PLAYER_OBJECT_LIBRARIES)
+    target_link_libraries(${object_library} PUBLIC dlss_video_player_common PRIVATE dlss_video_player_shipped_code)
+endforeach()
+# Every target that compiles D3D12Renderer.cpp also compiles the flow backend.
+# PUBLIC so a test that includes the renderer's headers sees the same
+# definition the objects were built with.
+if(NVOF_FOUND)
+    target_include_directories(player_render PUBLIC "${NVOF_SDK}")
+    target_compile_definitions(player_render PUBLIC DLSS_VIDEO_PLAYER_HAS_NVOF)
+endif()
+
 add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
     src/resources.h
     src/resources.rc
     src/VersionData.h.in
     src/RuntimeLockData.h.in
-    src/AppMenu.cpp
-    src/AppMenu.h
-    src/UiLayout.cpp
-    src/UiLayout.h
-    src/UiResources.cpp
-    src/UiResources.h
-    src/VideoDecoder.cpp
-    src/VideoDecoder.h
-    src/MediaSource.cpp
-    src/DLSSBackend.cpp
-    src/DLSSBackend.h
-    src/DLSSGBackend.cpp
-    src/DLSSGBackend.h
-    src/FrameGenerationPass.cpp
-    src/FrameGenerationPass.h
     src/FrameRatePolicy.h
-    src/D3D12Renderer.cpp
-    src/D3D12Renderer.h
-    src/OpticalFlowNvof.cpp
-    src/OpticalFlowNvof.h
     src/FlowGate.h
     src/NvofResolveShader.h
     src/HardErrorSuppression.h
     src/D3D12FenceWait.h
-    src/TemporalGuides.cpp
-    src/TemporalGuides.h
     src/PixelLayout.h
     src/ParallelFor.h
-    src/AudioPlayer.cpp src/WasapiRenderer.cpp
-    src/AudioPlayer.h
     src/Log.h
     src/Localization.h
     # Exported driver hints; the comment in GpuPreference.cpp explains why they
     # are a translation unit of their own and why both binaries compile it.
     src/GpuPreference.cpp
     src/GpuPreference.h
-    src/RuntimePolicy.cpp
-    src/RuntimePolicy.h
-    src/ReShadeConfig.cpp
-    src/ReShadeConfig.h
     src/YouTubeResolver.cpp
     src/YouTubeResolver.h
     src/ExampleVideos.h
-    src/RecentMedia.cpp
-    src/RecentMedia.h
     src/CompletionRegistry.h
     src/NetworkMediaTransaction.h
-    src/NeuralCache.cpp
-    src/NeuralCache.h
-    src/MediaPipeline.cpp
-    src/MediaPipeline.h
-    src/OfflineNeuralRenderer.cpp
     src/NeuralRenderTypes.h
-    src/OfflineNeuralRenderer.h
-    src/NeuralWorker.cpp
-    src/NeuralWorker.h
     src/ResidentHelperPolicy.h
-    src/SynchronizedPlayback.cpp
-    src/SynchronizedPlayback.h
     src/NeuralSegmentIndex.h
     src/NeuralCoverage.h
     src/LiveSessionPolicy.h
@@ -252,56 +298,17 @@ add_executable(DLSSVideoPlayer WIN32
     src/FrameIdentity.h
     src/GuideControls.h
     src/NeuralWorkerProtocol.h
-    src/NeuralPreflight.cpp
-    src/NeuralPreflight.h
-    src/RuntimeLock.cpp
-    src/RuntimeLock.h
-    src/NeuralReceipt.cpp
-    src/NeuralReceipt.h
-    src/NeuralSettings.cpp
-    src/NeuralSettings.h
-    src/RangeSelection.cpp
-    src/RangeSelection.h
-    src/UpdateCheck.cpp
-    src/UpdateCheck.h
 )
-
-target_compile_definitions(DLSSVideoPlayer PRIVATE
-    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-    DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
-)
-target_compile_options(DLSSVideoPlayer PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-target_include_directories(DLSSVideoPlayer PRIVATE "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
-target_link_directories(DLSSVideoPlayer PRIVATE "${DLSS_LIB_DIR}")
-target_link_libraries(DLSSVideoPlayer PRIVATE
-    d3d12 dxgi dxguid d3dcompiler
-    mfplat mfreadwrite mfuuid
-    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt dbghelp
-    ${DLSS_NGX_LIBRARY}
-)
-dlss_video_player_use_nvof(DLSSVideoPlayer)
+target_link_libraries(DLSSVideoPlayer PRIVATE ${PLAYER_OBJECT_LIBRARIES} dlss_video_player_shipped_code)
 dlss_video_player_harden(DLSSVideoPlayer)
 dlss_video_player_symbols(DLSSVideoPlayer)
-dlss_video_player_analyze(DLSSVideoPlayer)
 
 # Only the offline helper loads the experimental proxy/add-on. The player root
 # stays hook-free for its independent runtime Super Resolution feature.
-add_executable(NeuralWorker src/NeuralWorkerMain.cpp src/NeuralWorker.cpp
-    src/NeuralPreflight.cpp src/NeuralPreflightProbe.cpp src/NeuralCache.cpp src/RuntimeLock.cpp
-    src/OfflineNeuralRenderer.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp
-    src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp src/OpticalFlowNvof.cpp
-    src/RuntimePolicy.cpp src/ReShadeConfig.cpp src/GpuPreference.cpp)
-target_compile_definitions(NeuralWorker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-    DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
-target_include_directories(NeuralWorker PRIVATE "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
-target_compile_options(NeuralWorker PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-target_link_directories(NeuralWorker PRIVATE "${DLSS_LIB_DIR}")
-get_target_property(player_libraries DLSSVideoPlayer LINK_LIBRARIES)
-target_link_libraries(NeuralWorker PRIVATE ${player_libraries})
-dlss_video_player_use_nvof(NeuralWorker)
+add_executable(NeuralWorker src/NeuralWorkerMain.cpp src/NeuralPreflightProbe.cpp src/GpuPreference.cpp)
+target_link_libraries(NeuralWorker PRIVATE player_media player_render player_neural dlss_video_player_shipped_code)
 dlss_video_player_harden(NeuralWorker)
 dlss_video_player_symbols(NeuralWorker)
-dlss_video_player_analyze(NeuralWorker)
 set_target_properties(NeuralWorker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/neural-runtime")
 add_dependencies(DLSSVideoPlayer NeuralWorker)
 
@@ -347,31 +354,24 @@ if(EXISTS "${YOUTUBE_STAGED_DIR}/yt-dlp.exe" AND EXISTS "${YOUTUBE_STAGED_DIR}/d
 endif()
 
 if(BUILD_TESTING)
-    add_executable(RecentMediaTests tests/RecentMediaTests.cpp src/RecentMedia.cpp)
-    add_executable(RenderSettingsTests tests/RenderSettingsTests.cpp src/ReShadeConfig.cpp src/NeuralCache.cpp
-        src/NeuralSettings.cpp)
+    # Every test links the player's object libraries - the objects that ship -
+    # and through them the common option set, rather than compiling its own
+    # copy of the sources it exercises.
+    function(dlss_video_player_test target)
+        add_executable(${target} ${ARGN})
+        target_link_libraries(${target} PRIVATE ${PLAYER_OBJECT_LIBRARIES})
+    endfunction()
+
+    dlss_video_player_test(RecentMediaTests tests/RecentMediaTests.cpp)
+    dlss_video_player_test(RenderSettingsTests tests/RenderSettingsTests.cpp)
     # CachedExportTests drives SynchronizedPlayback through its owning constructor,
     # which is the only place the decoder-backed frame sources are built, and feeds a
     # real join's probe into the publish gate in RuntimePolicy.
-    add_executable(CachedExportTests tests/CachedExportTests.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp
-        src/MediaSource.cpp src/SynchronizedPlayback.cpp src/RuntimePolicy.cpp)
-    add_executable(RuntimeLockTests tests/RuntimeLockTests.cpp src/RuntimeLock.cpp src/NeuralReceipt.cpp
-        src/NeuralPreflight.cpp src/NeuralCache.cpp)
-    add_executable(RangeSelectionTests tests/RangeSelectionTests.cpp src/RangeSelection.cpp)
-    add_executable(FrameIdentityTests tests/FrameIdentityTests.cpp src/TemporalGuides.cpp
-        src/SynchronizedPlayback.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
-    foreach(test_target RecentMediaTests RenderSettingsTests CachedExportTests RuntimeLockTests
-            RangeSelectionTests FrameIdentityTests)
-        target_include_directories(${test_target} PRIVATE src "${GENERATED_INCLUDE_DIR}")
-        target_compile_definitions(${test_target} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-        target_compile_options(${test_target} PRIVATE /W4 /permissive- /EHsc)
-    endforeach()
-    target_compile_definitions(RuntimeLockTests PRIVATE DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(RecentMediaTests PRIVATE user32)
-    target_link_libraries(RenderSettingsTests PRIVATE bcrypt shell32 ole32)
-    target_link_libraries(CachedExportTests PRIVATE shell32 mfplat mfreadwrite mfuuid ole32 dxgi dxguid)
-    target_link_libraries(RuntimeLockTests PRIVATE bcrypt shell32 ole32 version)
-    target_link_libraries(FrameIdentityTests PRIVATE mfplat mfreadwrite mfuuid ole32 shell32)
+    dlss_video_player_test(CachedExportTests tests/CachedExportTests.cpp)
+    dlss_video_player_test(RuntimeLockTests tests/RuntimeLockTests.cpp)
+    dlss_video_player_test(RangeSelectionTests tests/RangeSelectionTests.cpp)
+    dlss_video_player_test(FrameIdentityTests tests/FrameIdentityTests.cpp)
+    target_link_libraries(RuntimeLockTests PRIVATE version)
     add_test(NAME RecentMediaTests COMMAND RecentMediaTests)
     add_test(NAME RenderSettingsTests COMMAND RenderSettingsTests)
     add_test(NAME CachedExportTests COMMAND CachedExportTests "${FFMPEG_STAGED_DIR}")
@@ -381,25 +381,11 @@ if(BUILD_TESTING)
     add_test(NAME RuntimeLockTests COMMAND RuntimeLockTests)
     add_test(NAME RangeSelectionTests COMMAND RangeSelectionTests)
     add_test(NAME FrameIdentityTests COMMAND FrameIdentityTests)
-    add_executable(UpscalingGpuSmoke tests/UpscalingGpuSmoke.cpp
-        src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp src/OpticalFlowNvof.cpp
-        src/VideoDecoder.cpp src/MediaSource.cpp src/RuntimePolicy.cpp)
-    target_include_directories(UpscalingGpuSmoke PRIVATE src "${DLSS_SDK}/include")
-    target_compile_definitions(UpscalingGpuSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(UpscalingGpuSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_directories(UpscalingGpuSmoke PRIVATE "${DLSS_LIB_DIR}")
-    target_link_libraries(UpscalingGpuSmoke PRIVATE ${player_libraries})
-    dlss_video_player_use_nvof(UpscalingGpuSmoke)
-    # The DLSS-G admission probe. NeuralPreflight.cpp (with the NeuralCache.cpp it
-    # needs) is compiled in for HexResultText, so the hex NGX codes this probe
-    # prints are produced by the same function the receipts use.
-    add_executable(DlssgProbeSmoke tests/DlssgProbeSmoke.cpp
-        src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp)
-    target_include_directories(DlssgProbeSmoke PRIVATE src "${DLSS_SDK}/include")
-    target_compile_definitions(DlssgProbeSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(DlssgProbeSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_directories(DlssgProbeSmoke PRIVATE "${DLSS_LIB_DIR}")
-    target_link_libraries(DlssgProbeSmoke PRIVATE ${player_libraries})
+    dlss_video_player_test(UpscalingGpuSmoke tests/UpscalingGpuSmoke.cpp)
+    # The DLSS-G admission probe. It links NeuralPreflight for HexResultText, so
+    # the hex NGX codes this probe prints are produced by the same function the
+    # receipts use.
+    dlss_video_player_test(DlssgProbeSmoke tests/DlssgProbeSmoke.cpp)
     # The NGX log this probe writes beside its executable is its evidence, and
     # Log opens DLSSVideoPlayer.log with ios::trunc, so it gets its own place
     # rather than erasing the player's log or having its own erased.
@@ -425,13 +411,7 @@ if(BUILD_TESTING)
     # directory for the same reason the probe does - Log truncates
     # DLSSVideoPlayer.log on open and the NGX log beside the executable is the
     # evidence.
-    add_executable(DlssgEvaluateSmoke tests/DlssgEvaluateSmoke.cpp
-        src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp)
-    target_include_directories(DlssgEvaluateSmoke PRIVATE src "${DLSS_SDK}/include")
-    target_compile_definitions(DlssgEvaluateSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(DlssgEvaluateSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_directories(DlssgEvaluateSmoke PRIVATE "${DLSS_LIB_DIR}")
-    target_link_libraries(DlssgEvaluateSmoke PRIVATE ${player_libraries})
+    dlss_video_player_test(DlssgEvaluateSmoke tests/DlssgEvaluateSmoke.cpp)
     set_target_properties(DlssgEvaluateSmoke PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dlssg-evaluate/$<CONFIG>")
     add_custom_command(TARGET DlssgEvaluateSmoke POST_BUILD
@@ -450,24 +430,10 @@ if(BUILD_TESTING)
     # Every combination of the three export stages on one clip. Links the frame
     # generation pass directly and reaches the other two through NeuralWorker,
     # which is how the player drives them.
-    add_executable(ExportMatrixSmoke tests/ExportMatrixSmoke.cpp
-        src/FrameGenerationPass.cpp src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp
-        src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp src/NeuralWorker.cpp)
-    target_include_directories(ExportMatrixSmoke PRIVATE src "${DLSS_SDK}/include")
-    target_compile_definitions(ExportMatrixSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(ExportMatrixSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_directories(ExportMatrixSmoke PRIVATE "${DLSS_LIB_DIR}")
-    target_link_libraries(ExportMatrixSmoke PRIVATE ${player_libraries})
+    dlss_video_player_test(ExportMatrixSmoke tests/ExportMatrixSmoke.cpp)
     add_dependencies(ExportMatrixSmoke NeuralWorker)
 
-    add_executable(FrameGenerationSmoke tests/FrameGenerationSmoke.cpp
-        src/FrameGenerationPass.cpp src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp
-        src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
-    target_include_directories(FrameGenerationSmoke PRIVATE src "${DLSS_SDK}/include")
-    target_compile_definitions(FrameGenerationSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(FrameGenerationSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_directories(FrameGenerationSmoke PRIVATE "${DLSS_LIB_DIR}")
-    target_link_libraries(FrameGenerationSmoke PRIVATE ${player_libraries})
+    dlss_video_player_test(FrameGenerationSmoke tests/FrameGenerationSmoke.cpp)
     set_target_properties(FrameGenerationSmoke PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/frame-generation/$<CONFIG>")
     add_custom_command(TARGET FrameGenerationSmoke POST_BUILD
@@ -475,12 +441,7 @@ if(BUILD_TESTING)
             "${DLSS_SDK}/lib/Windows_x86_64/$<IF:$<CONFIG:Debug>,dev,rel>/nvngx_dlssg.dll"
             "$<TARGET_FILE_DIR:FrameGenerationSmoke>/nvngx_dlssg.dll"
     )
-    add_executable(MediaGpuSmoke tests/MediaGpuSmoke.cpp
-        src/NeuralWorker.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
-    target_include_directories(MediaGpuSmoke PRIVATE src)
-    target_compile_definitions(MediaGpuSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(MediaGpuSmoke PRIVATE /W4 /permissive- /EHsc)
-    target_link_libraries(MediaGpuSmoke PRIVATE shell32 mfplat mfreadwrite mfuuid ole32 dxgi)
+    dlss_video_player_test(MediaGpuSmoke tests/MediaGpuSmoke.cpp)
     add_dependencies(MediaGpuSmoke NeuralWorker)
 
     # Renders a RANGE through the real helper - the one shape of neural render
@@ -490,12 +451,7 @@ if(BUILD_TESTING)
     # workset pool is exhausted before the first captured frame. That is what
     # fd9279b broke while all 21 tests stayed green. See the comment at the top
     # of the source.
-    add_executable(NeuralRangeRenderSmoke tests/NeuralRangeRenderSmoke.cpp
-        src/NeuralWorker.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
-    target_include_directories(NeuralRangeRenderSmoke PRIVATE src)
-    target_compile_definitions(NeuralRangeRenderSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(NeuralRangeRenderSmoke PRIVATE /W4 /permissive- /EHsc)
-    target_link_libraries(NeuralRangeRenderSmoke PRIVATE shell32 mfplat mfreadwrite mfuuid ole32 dxgi)
+    dlss_video_player_test(NeuralRangeRenderSmoke tests/NeuralRangeRenderSmoke.cpp)
     add_dependencies(NeuralRangeRenderSmoke NeuralWorker)
     # The hardware smokes need an RTX GPU, a display, and (MediaGpuSmoke) the neural
     # runtime staged beside NeuralWorker.exe. They are labelled `gpu` so the portable
@@ -669,136 +625,40 @@ if(BUILD_TESTING)
     # is computed from carried one assertion, that a number handed to Seek was
     # stored. This needs a real render endpoint, so it is labelled `audio` and
     # skips (125) where there is none.
-    add_executable(AudioClockSmoke tests/AudioClockSmoke.cpp src/AudioPlayer.cpp src/WasapiRenderer.cpp)
-    target_include_directories(AudioClockSmoke PRIVATE src)
-    target_compile_definitions(AudioClockSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(AudioClockSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_libraries(AudioClockSmoke PRIVATE winmm shell32 ole32)
+    dlss_video_player_test(AudioClockSmoke tests/AudioClockSmoke.cpp)
     set_target_properties(AudioClockSmoke PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/audio-clock/$<CONFIG>")
     add_test(NAME AudioClockSmoke COMMAND AudioClockSmoke
         "${FFMPEG_STAGED_DIR}" "${CMAKE_BINARY_DIR}/audio-clock")
     set_tests_properties(AudioClockSmoke PROPERTIES LABELS audio SKIP_RETURN_CODE 125 TIMEOUT 300)
 
-    add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)
-    target_include_directories(NeuralWorkerTests PRIVATE src)
-    target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(NeuralWorkerTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    # dxgi for GpuTestGate: --real-preflight needs a GPU, so it has to be able
-    # to ask whether there is one before it decides to skip.
-    target_link_libraries(NeuralWorkerTests PRIVATE shell32 dxgi)
+    dlss_video_player_test(NeuralWorkerTests tests/NeuralWorkerTests.cpp)
     add_test(NAME NeuralWorkerTests COMMAND NeuralWorkerTests)
-    add_executable(UpscalingTests tests/UpscalingTests.cpp)
-    target_include_directories(UpscalingTests PRIVATE src)
-    target_compile_definitions(UpscalingTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(UpscalingTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     # The resolve pass's HLSL is compiled headlessly by this suite, which needs no device
-    # and no flow engine - only the compiler.
-    target_link_libraries(UpscalingTests PRIVATE d3dcompiler)
+    # and no flow engine - only the compiler. It links no player objects.
+    add_executable(UpscalingTests tests/UpscalingTests.cpp)
+    target_link_libraries(UpscalingTests PRIVATE dlss_video_player_common)
     add_test(NAME UpscalingTests COMMAND UpscalingTests)
-    add_executable(UpdateCheckTests tests/UpdateCheckTests.cpp src/UpdateCheck.cpp)
-    target_include_directories(UpdateCheckTests PRIVATE src)
-    target_compile_definitions(UpdateCheckTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-        DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
-    target_compile_options(UpdateCheckTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_libraries(UpdateCheckTests PRIVATE winhttp)
+    dlss_video_player_test(UpdateCheckTests tests/UpdateCheckTests.cpp)
     add_test(NAME UpdateCheckTests COMMAND UpdateCheckTests)
-    add_executable(PolicyTests
+    # YouTubeResolver.cpp is compiled here rather than linked from the player's
+    # objects: YOUTUBE_RESOLVER_TESTING opens its test seam, which changes the
+    # class's layout, so this build of it must not meet the shipped one.
+    dlss_video_player_test(PolicyTests
         tests/PolicyTests.cpp
         tests/TestSupport.h
-        src/AppMenu.h
-        src/AppMenu.cpp
-        src/UiLayout.cpp
-        src/UiLayout.h
-        src/UiResources.cpp
-        src/UiResources.h
-        src/GpuPreference.h
-        src/RuntimePolicy.cpp
-        src/RuntimePolicy.h
-        # The frame grid the coverage predicates are measured against. Both live
-        # here so a test can ask whether one step of the grid is work, which is
-        # the question two sibling cases in this file used to answer differently.
-        src/RangeSelection.cpp
-        src/RangeSelection.h
-        src/ReShadeConfig.cpp
-        src/ReShadeConfig.h
         src/YouTubeResolver.cpp
         src/YouTubeResolver.h
-        src/ExampleVideos.h
-        src/VideoDecoder.cpp
-        src/VideoDecoder.h
-        src/MediaSource.cpp
-        src/CompletionRegistry.h
-        src/AudioPlayer.cpp src/WasapiRenderer.cpp
-        src/AudioPlayer.h
-        src/NetworkMediaTransaction.h
-        src/D3D12FenceWait.h
-        src/ParallelFor.h
-        src/D3D12Renderer.cpp
-        src/D3D12Renderer.h
-        src/OpticalFlowNvof.cpp
-        src/OpticalFlowNvof.h
-        src/FlowGate.h
-        src/NvofResolveShader.h
-        src/PixelLayout.h
-        src/DLSSBackend.cpp
-        src/DLSSBackend.h
     )
-    target_include_directories(PolicyTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
-    dlss_video_player_use_nvof(PolicyTests)
-    target_compile_definitions(PolicyTests PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING
-    )
-    target_compile_options(PolicyTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_directories(PolicyTests PRIVATE "${DLSS_LIB_DIR}")
-    target_link_libraries(PolicyTests PRIVATE d3d12 dxgi dxguid d3dcompiler shlwapi shell32 winhttp mfplat mfreadwrite mfuuid ole32 winmm ${DLSS_NGX_LIBRARY})
+    target_compile_definitions(PolicyTests PRIVATE YOUTUBE_RESOLVER_TESTING)
     add_dependencies(PolicyTests DLSSVideoPlayer)
     add_test(NAME PolicyTests COMMAND PolicyTests)
 
     add_executable(ReleaseApiCompileTests tests/ReleaseApiCompileTests.cpp)
-    target_include_directories(ReleaseApiCompileTests PRIVATE src)
-    target_compile_definitions(ReleaseApiCompileTests PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-    )
-    target_compile_options(ReleaseApiCompileTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_link_libraries(ReleaseApiCompileTests PRIVATE dlss_video_player_common)
     add_test(NAME ReleaseApiCompileTests COMMAND ReleaseApiCompileTests)
 
-    add_executable(NeuralPrerenderTests
-        tests/NeuralPrerenderTests.cpp
-        tests/TestSupport.h
-        src/NeuralCache.cpp
-        src/NeuralCache.h
-        src/NeuralPreflight.cpp
-        src/NeuralPreflight.h
-        src/MediaPipeline.cpp
-        src/MediaPipeline.h
-        src/OfflineNeuralRenderer.cpp
-        src/NeuralRenderTypes.h
-        src/OfflineNeuralRenderer.h
-        src/SynchronizedPlayback.cpp
-        src/SynchronizedPlayback.h
-        src/VideoDecoder.cpp
-        src/VideoDecoder.h
-        src/MediaSource.cpp
-        src/MediaSource.h
-        src/D3D12Renderer.cpp
-        src/DLSSBackend.cpp
-        src/TemporalGuides.cpp
-        src/OpticalFlowNvof.cpp
-        # D3D12Renderer.cpp asks RuntimePolicy which adapter to create the
-        # device on, the same reason PolicyTests and UpscalingGpuSmoke pair
-        # these two.
-        src/RuntimePolicy.cpp
-    )
-    target_include_directories(NeuralPrerenderTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
-    target_compile_definitions(NeuralPrerenderTests PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-        DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
-    )
-    target_compile_options(NeuralPrerenderTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_directories(NeuralPrerenderTests PRIVATE "${DLSS_LIB_DIR}")
-    target_link_libraries(NeuralPrerenderTests PRIVATE ${player_libraries})
-    dlss_video_player_use_nvof(NeuralPrerenderTests)
+    dlss_video_player_test(NeuralPrerenderTests tests/NeuralPrerenderTests.cpp tests/TestSupport.h)
     # The job's stage logging has always run here, and Log opens
     # <module directory>/DLSSVideoPlayer.log with ios::trunc, so running beside
     # the player erased its log on every ctest run. The cache-root probe also
@@ -808,19 +668,12 @@ if(BUILD_TESTING)
     add_test(NAME NeuralPrerenderTests COMMAND NeuralPrerenderTests)
 
     # Exercise the real player completion handlers and text submitted to Win32.
+    # The test includes main.cpp itself, so it takes the player's other own
+    # sources (not main.cpp) beside the object libraries.
     get_target_property(player_ui_sources DLSSVideoPlayer SOURCES)
     list(REMOVE_ITEM player_ui_sources src/main.cpp)
-    add_executable(PlayerUiRegressionTests tests/PlayerUiRegressionTests.cpp ${player_ui_sources})
-    target_include_directories(PlayerUiRegressionTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
-    dlss_video_player_use_nvof(PlayerUiRegressionTests)
-    target_compile_definitions(PlayerUiRegressionTests PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX PLAYER_APP_TESTING
-        DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
-    get_target_property(player_ui_options DLSSVideoPlayer COMPILE_OPTIONS)
-    target_compile_options(PlayerUiRegressionTests PRIVATE ${player_ui_options})
-    get_target_property(player_ui_libraries DLSSVideoPlayer LINK_LIBRARIES)
-    target_link_directories(PlayerUiRegressionTests PRIVATE "${DLSS_LIB_DIR}")
-    target_link_libraries(PlayerUiRegressionTests PRIVATE ${player_ui_libraries})
+    dlss_video_player_test(PlayerUiRegressionTests tests/PlayerUiRegressionTests.cpp ${player_ui_sources})
+    target_compile_definitions(PlayerUiRegressionTests PRIVATE PLAYER_APP_TESTING)
     # The player persists settings beside its executable; isolate test settings.
     set_target_properties(PlayerUiRegressionTests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ui-regressions/$<CONFIG>")
@@ -873,10 +726,20 @@ if(BUILD_TESTING)
     # shipped binary. The YouTube seam is proven below by compiling against the
     # release header; this catches every seam by its name on the two targets
     # that ship.
+    # The two binaries now take most of their objects, and every definition,
+    # from the object libraries and the interface targets, so those are checked
+    # as well as the binaries themselves.
     get_directory_property(shipped_directory_definitions COMPILE_DEFINITIONS)
-    foreach(shipped_target DLSSVideoPlayer NeuralWorker)
-        get_target_property(shipped_definitions ${shipped_target} COMPILE_DEFINITIONS)
-        get_target_property(shipped_options ${shipped_target} COMPILE_OPTIONS)
+    foreach(shipped_target DLSSVideoPlayer NeuralWorker ${PLAYER_OBJECT_LIBRARIES}
+            dlss_video_player_common dlss_video_player_shipped_code)
+        get_target_property(shipped_type ${shipped_target} TYPE)
+        if(shipped_type STREQUAL "INTERFACE_LIBRARY")
+            get_target_property(shipped_definitions ${shipped_target} INTERFACE_COMPILE_DEFINITIONS)
+            get_target_property(shipped_options ${shipped_target} INTERFACE_COMPILE_OPTIONS)
+        else()
+            get_target_property(shipped_definitions ${shipped_target} COMPILE_DEFINITIONS)
+            get_target_property(shipped_options ${shipped_target} COMPILE_OPTIONS)
+        endif()
         foreach(entry IN LISTS shipped_directory_definitions shipped_definitions shipped_options)
             if(entry MATCHES "_TESTING(=|$)")
                 message(FATAL_ERROR "${shipped_target} compiles with the test seam ${entry}.")

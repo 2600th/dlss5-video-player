@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P1** | | | | |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
-| [P1.21](#p121) | Build structure: one set of objects, one set of flags | M | Release | 🔍 |
 | [P1.22](#p122) | Test hygiene and coverage gaps | M | Release | 🔍 |
 | [P1.23](#p123) | Docs, screenshots and positioning drift | S | Docs, Site | ✅ |
 | **P2** | | | | |
@@ -150,28 +149,6 @@ These matter because the copies **disagree**, not because they are repeated.
 implementation.
 
 ## Release and CI
-
-<a id="p121"></a>
-### P1.21 · Build structure: one set of objects, one set of flags
-
-`M` · **Release** · 🔍 · _old 2.11 and 2.12_
-
-There is no `add_library` anywhere, so 175 compiles build about 53 unique
-files: `VideoDecoder` and `MediaSource` 12× each, `NeuralCache` 10×. Worse,
-**the copies are built with different flags**. Six test targets lack
-`/Zc:__cplusplus`, and `UpscalingGpuSmoke` lacks the generated include
-directory (`CMakeLists.txt:294`, `:314`). So the tests are not exercising the
-object code that ships.
-
-**Fix** — three `OBJECT` libraries (`player_media`, `player_render`,
-`player_neural`) with one shared set of options. Then enable
-`CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE` behind `check_ipo_supported` and
-measure the change. Leave `/arch:AVX2` and `/fp:fast` alone: the first drops
-pre-Haswell CPUs, and the second breaks the bit-identical renders the
-benchmark relies on. Update the stale counts in the comments at
-`CMakeLists.txt:46`.
-
----
 
 <a id="p122"></a>
 ### P1.22 · Test hygiene and coverage gaps
