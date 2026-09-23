@@ -28,6 +28,8 @@ struct Track {
     std::string title;
     std::string codec;
     int channels = 0;
+    // What passthrough needs to choose the IEC 61937 rate; 0 when unknown.
+    int sampleRate = 0;
     bool isDefault = false;
     // The four dispositions that mean "this is not the feature audio".
     bool comment = false;

@@ -514,7 +514,7 @@ in the player; the old quality arguments and 4K launch scripts are retired.
 
 ## Choosing the audio track
 
-**Playback > Audio track** lists the source's audio streams. Most files have
+**Playback > Audio** lists the source's audio streams. Most files have
 one and the menu says so; the entry exists for the ones that do not.
 
 The player does not simply take the first stream. A disc rip often lists the
@@ -541,6 +541,28 @@ channel layout, which is what it takes to tell two English tracks apart:
 
 Switching tracks restarts the audio at the position you are at, so it costs
 the same as a seek. The choice stays until you load something else.
+
+## Send Dolby Digital or DTS to a receiver
+
+**Playback > Audio > Passthrough to receiver (AC-3/E-AC-3/DTS)** sends an
+AC-3, E-AC-3 or DTS track to an AV receiver or soundbar undecoded, so the
+receiver decodes the surround mix itself. It is off by default and the choice
+is remembered.
+
+Passthrough needs the default playback device to be an HDMI or S/PDIF output
+with a receiver behind it that decodes the codec. The player opens that device
+exclusively while the film plays, so other applications cannot play sound on
+it meanwhile, and Windows' volume slider does not apply: the receiver owns the
+level. Mute still works, by sending silence in the film's place. DTS-HD tracks
+send their DTS core; TrueHD, AAC and every other codec are decoded and played
+as PCM as usual.
+
+When the track or the device cannot do it, the film plays as ordinary PCM and
+the status line says why, for example
+`Passthrough: the audio device does not take AC-3; playing PCM`. Nothing goes
+silent because passthrough was refused. Each seek restarts the bitstream, and
+most receivers take a moment to lock onto it again, so the first fraction of a
+second after a seek can be quiet on the receiver.
 
 ## Generate frames for a higher frame rate
 

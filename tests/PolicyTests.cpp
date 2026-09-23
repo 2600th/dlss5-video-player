@@ -7,6 +7,7 @@
 #include "AudioTrackPolicy.h"
 #include "SourceDigestMemo.h"
 #include "AudioEndpointPolicy.h"
+#include "AudioPassthroughPolicy.h"
 #include "PlatformPaths.h"
 #include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
@@ -8949,7 +8950,7 @@ int run_fake_media_child(int argc,wchar_t* argv[])
             const auto stream=[](int index,const char* codec,int channels,const char* language,
                                  const char* title,int isDefault,int comment){
                 std::string text="[STREAM]\nindex="+std::to_string(index)+"\ncodec_name="+codec+
-                                 "\nchannels="+std::to_string(channels)+"\n";
+                                 "\nchannels="+std::to_string(channels)+"\nsample_rate=48000\n";
                 if(*language)text+=std::string("TAG:language=")+language+"\n";
                 if(*title)text+=std::string("TAG:title=")+title+"\n";
                 text+="DISPOSITION:default="+std::to_string(isDefault)+
@@ -11018,6 +11019,8 @@ void audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test()
         CHECK_EQ(std::string("1. English - Director's Commentary - AC3 5.1 (commentary)"),
                  audio_track::Describe(tracks[0]));
         CHECK_EQ(std::string("2. English - AC3 5.1"), audio_track::Describe(tracks[1]));
+        // What passthrough picks its IEC 61937 rate from.
+        CHECK_EQ(48000, tracks[1].sampleRate);
     }
     // The feature, not the commentary that is listed first and flagged default.
     CHECK_EQ(1, audio->SelectedAudioTrack());
@@ -11459,6 +11462,178 @@ void audio_sink_is_declared_dead_only_after_a_playing_stream_goes_quiet_test()
     CHECK(!Dead(recovered, 1.05, true, true));
     CHECK(!Dead(recovered, 2.0, false, true));
     CHECK(Dead(recovered, 2.2, false, true));
+}
+
+// P3.3 passthrough: which tracks qualify, and at what rate the link runs.
+// E-AC-3 is the one that is easy to get wrong - it travels at four times its
+// sample rate, and opening the endpoint at 48 kHz for it plays a quarter of
+// every burst period.
+void audio_passthrough_plans_the_iec61937_link_for_each_codec_test()
+{
+    using namespace audio_passthrough;
+    CHECK(CodecFromName("ac3") == Codec::Ac3);
+    CHECK(CodecFromName("eac3") == Codec::Eac3);
+    CHECK(CodecFromName("dts") == Codec::Dts);
+    // Decoded here, not passed through: TrueHD needs the eight-channel HBR
+    // link this does not open, and the rest are not bitstream formats.
+    for (const char* other : {"aac", "truehd", "flac", "opus", "pcm_s16le", ""})
+        CHECK(CodecFromName(other) == Codec::None);
+
+    const auto ac3 = PlanLink(Codec::Ac3, 48000, 6);
+    CHECK(ac3.has_value());
+    if (ac3) {
+        CHECK_EQ(48000u, ac3->transportRate);
+        CHECK_EQ(48000u, ac3->encodedRate);
+        CHECK_EQ(uint16_t{6}, ac3->encodedChannels);
+        CHECK(IsEqualGUID(ac3->subFormat, KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL) != 0);
+    }
+    const auto eac3 = PlanLink(Codec::Eac3, 48000, 8);
+    CHECK(eac3.has_value());
+    if (eac3) {
+        CHECK_EQ(192000u, eac3->transportRate);
+        CHECK_EQ(48000u, eac3->encodedRate);
+        CHECK(IsEqualGUID(eac3->subFormat, KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL_PLUS) != 0);
+    }
+    const auto eac3At44 = PlanLink(Codec::Eac3, 44100, 2);
+    CHECK(eac3At44.has_value() && eac3At44->transportRate == 176400u);
+    const auto dts = PlanLink(Codec::Dts, 48000, 6);
+    CHECK(dts.has_value());
+    if (dts) {
+        CHECK_EQ(48000u, dts->transportRate);
+        CHECK(IsEqualGUID(dts->subFormat, KSDATAFORMAT_SUBTYPE_IEC61937_DTS) != 0);
+    }
+    // No carriage, so no link: the player plays PCM rather than opening an
+    // endpoint at a rate the bursts do not fit.
+    CHECK(!PlanLink(Codec::Ac3, 96000, 6));
+    CHECK(!PlanLink(Codec::Dts, 32000, 6));
+    CHECK(!PlanLink(Codec::Ac3, 0, 6));
+    CHECK(!PlanLink(Codec::None, 48000, 2));
+    // A track that did not say how many channels it has is described as
+    // stereo rather than as nothing.
+    const auto untold = PlanLink(Codec::Ac3, 44100, 0);
+    CHECK(untold.has_value() && untold->encodedChannels == 2);
+}
+
+// The format the exclusive stream asks for: IEC 61937 is 16-bit stereo frames
+// whatever the content is, and the WAVEFORMATEXTENSIBLE_IEC61937 extension
+// only adds what those frames decode to.
+void audio_passthrough_wave_format_is_16_bit_stereo_iec61937_extensible_test()
+{
+    using namespace audio_passthrough;
+    const auto link = PlanLink(Codec::Eac3, 48000, 6);
+    CHECK(link.has_value());
+    if (!link) return;
+    const WAVEFORMATEXTENSIBLE_IEC61937 full = WaveFormat(*link);
+    const WAVEFORMATEX& wave = full.FormatExt.Format;
+    CHECK_EQ(WORD(WAVE_FORMAT_EXTENSIBLE), wave.wFormatTag);
+    CHECK_EQ(WORD{2}, wave.nChannels);
+    CHECK_EQ(DWORD{192000}, wave.nSamplesPerSec);
+    CHECK_EQ(WORD{16}, wave.wBitsPerSample);
+    CHECK_EQ(WORD{4}, wave.nBlockAlign);
+    CHECK_EQ(DWORD{192000 * 4}, wave.nAvgBytesPerSec);
+    // The size of what follows WAVEFORMATEX is how a driver tells the two
+    // structures apart, so it has to be exactly the extension's.
+    CHECK_EQ(WORD(sizeof(WAVEFORMATEXTENSIBLE_IEC61937) - sizeof(WAVEFORMATEX)), wave.cbSize);
+    CHECK_EQ(WORD{16}, full.FormatExt.Samples.wValidBitsPerSample);
+    CHECK_EQ(DWORD(KSAUDIO_SPEAKER_STEREO), full.FormatExt.dwChannelMask);
+    CHECK(IsEqualGUID(full.FormatExt.SubFormat, KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL_PLUS) != 0);
+    CHECK_EQ(DWORD{48000}, full.dwEncodedSamplesPerSec);
+    CHECK_EQ(DWORD{6}, full.dwEncodedChannelCount);
+    CHECK_EQ(DWORD{0}, full.dwAverageBytesPerSec);
+
+    // The plain form some drivers want instead: the same leading structure,
+    // sized as a WAVEFORMATEXTENSIBLE, and nothing past it.
+    const WAVEFORMATEXTENSIBLE_IEC61937 plain = WaveFormat(*link, true);
+    CHECK_EQ(WORD(sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)), plain.FormatExt.Format.cbSize);
+    CHECK_EQ(DWORD{192000}, plain.FormatExt.Format.nSamplesPerSec);
+    CHECK(IsEqualGUID(plain.FormatExt.SubFormat, full.FormatExt.SubFormat) != 0);
+    CHECK_EQ(DWORD{0}, plain.dwEncodedSamplesPerSec);
+    CHECK_EQ(DWORD{0}, plain.dwEncodedChannelCount);
+}
+
+// Every state the viewer can be in once they turned passthrough on has a
+// sentence, and Off has none. Kodi #18453: a display-mode change drops the
+// HDMI sink, so an ACTIVE stream - and only an active one - is reopened once
+// the display has settled, and a burst of changes reopens it once.
+void audio_passthrough_says_what_happened_and_reopens_after_a_display_change_test()
+{
+    using namespace audio_passthrough;
+    const Localizer localizer;
+    CHECK(StatusKey(State::Off) == nullptr);
+    for (const State state : {State::NotApplicable, State::Active, State::Refused, State::Unavailable}) {
+        const wchar_t* const key = StatusKey(state);
+        CHECK(key != nullptr);
+        if (!key) continue;
+        const std::wstring text = localizer.Get(key);
+        CHECK(text != key);  // an English default exists
+        CHECK(text.find(L"%s") != std::wstring::npos);
+        // A fallback always says what is playing instead: never silence.
+        if (state != State::Active) CHECK(text.find(L"playing PCM") != std::wstring::npos);
+    }
+    CHECK(localizer.Get(L"audio.passthrough.unsupported_rate") != L"audio.passthrough.unsupported_rate");
+    CHECK(localizer.Get(L"audio.passthrough.unknown_track") != L"audio.passthrough.unknown_track");
+    CHECK(std::wstring(CodecLabel(Codec::Eac3)) == L"E-AC-3");
+
+    // Nothing to reopen unless the bitstream is going out: a PCM fallback is a
+    // shared stream the engine carries across the mode change itself.
+    for (const State state : {State::Off, State::NotApplicable, State::Refused, State::Unavailable}) {
+        DisplayChangeReopen idle;
+        NoteDisplayChange(idle, 10.0, state);
+        CHECK(!ReopenDue(idle, 100.0));
+    }
+    DisplayChangeReopen reopen;
+    NoteDisplayChange(reopen, 10.0, State::Active);
+    // Not in the middle of the retrain.
+    CHECK(!ReopenDue(reopen, 10.0));
+    CHECK(!ReopenDue(reopen, 10.0 + kDisplaySettleSeconds - 0.01));
+    // A mode set sends several changes; each one pushes the reopen back.
+    NoteDisplayChange(reopen, 11.0, State::Active);
+    CHECK(!ReopenDue(reopen, 10.0 + kDisplaySettleSeconds + 0.01));
+    CHECK(ReopenDue(reopen, 11.0 + kDisplaySettleSeconds));
+    // Once.
+    CHECK(!ReopenDue(reopen, 20.0));
+    CHECK(!ReopenDue(reopen, 30.0));
+}
+
+// The passthrough toggle lives in the same popup as the track list, and the
+// track list is rebuilt on every load. The rebuild used to delete everything
+// in the popup, which would have taken the toggle - and its check - with it.
+void audio_menu_keeps_the_passthrough_toggle_across_track_list_rebuilds_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    if (!menu) return;
+    std::vector<MenuEntry> entries;
+    collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, L"Passthrough to receiver (AC-3/E-AC-3/DTS)", app_menu::IDM_AUDIO_PASSTHROUGH));
+    CHECK(has_menu_text(entries, L"Audio"));
+    // Outside the track block, which CheckMenuRadioItem clears.
+    CHECK(app_menu::IDM_AUDIO_PASSTHROUGH >= app_menu::IDM_AUDIO_TRACK_FIRST + app_menu::IDM_AUDIO_TRACK_COUNT);
+    CHECK(app_menu::IDM_AUDIO_PASSTHROUGH < app_menu::IDM_NEURAL_RENDERING);
+
+    const HMENU popup = app_menu::FindMenuContainingCommand(menu, app_menu::IDM_AUDIO_PASSTHROUGH);
+    CHECK(popup != nullptr);
+    CheckMenuItem(menu, app_menu::IDM_AUDIO_PASSTHROUGH, MF_BYCOMMAND | MF_CHECKED);
+    const std::wstring labels[] = {L"1. English - AC3 5.1", L"2. French - AC3 5.1"};
+    for (int round = 0; round < 3; ++round) {
+        app_menu::UpdateAudioTracks(menu, labels, 1);
+        app_menu::UpdateAudioTracks(menu, {}, 0);
+        app_menu::UpdateAudioTracks(menu, labels, 0);
+    }
+    CHECK(GetMenuState(menu, app_menu::IDM_AUDIO_PASSTHROUGH, MF_BYCOMMAND) & MF_CHECKED);
+    if (popup) {
+        // Tracks, one separator, the toggle - and not a second copy of any.
+        CHECK_EQ(4, GetMenuItemCount(popup));
+        CHECK_EQ(app_menu::IDM_AUDIO_TRACK_FIRST, GetMenuItemID(popup, 0));
+        CHECK_EQ(app_menu::IDM_AUDIO_TRACK_FIRST + 1, GetMenuItemID(popup, 1));
+        MENUITEMINFOW separator{};
+        separator.cbSize = sizeof(separator);
+        separator.fMask = MIIM_FTYPE;
+        CHECK(GetMenuItemInfoW(popup, 2, TRUE, &separator) && (separator.fType & MFT_SEPARATOR));
+        CHECK_EQ(app_menu::IDM_AUDIO_PASSTHROUGH, GetMenuItemID(popup, 3));
+    }
+    DestroyMenu(menu);
 }
 
 // P1.16: every hex value in a log line has the digits of its type, so an NGX
@@ -11928,6 +12103,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_endpoint_notifications_fire_only_for_the_stream_we_are_on_test),
     TEST_CASE(audio_endpoint_callbacks_never_reach_a_detached_renderer_test),
     TEST_CASE(audio_sink_is_declared_dead_only_after_a_playing_stream_goes_quiet_test),
+    TEST_CASE(audio_passthrough_plans_the_iec61937_link_for_each_codec_test),
+    TEST_CASE(audio_passthrough_wave_format_is_16_bit_stereo_iec61937_extensible_test),
+    TEST_CASE(audio_passthrough_says_what_happened_and_reopens_after_a_display_change_test),
+    TEST_CASE(audio_menu_keeps_the_passthrough_toggle_across_track_list_rebuilds_test),
     TEST_CASE(hex_text_is_zero_padded_to_the_width_of_its_type_test),
     TEST_CASE(atomic_file_replace_publishes_whole_files_and_cleans_up_only_its_own_test),
     TEST_CASE(media_tools_are_found_the_same_way_by_every_caller_test),

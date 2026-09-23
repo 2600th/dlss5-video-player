@@ -113,6 +113,28 @@ multimedia roles and not communications, so a call does not move a film's
 audio. Recovery reopens and restarts the source rather than splicing into the
 new device, because its mix format may differ and the decoder has to be told.
 
+Passthrough is the one exclusive stream. With the toggle on and an AC-3,
+E-AC-3 or DTS track at a rate IEC 61937 carries (`AudioPassthroughPolicy.h`),
+the renderer asks the endpoint - `IsFormatSupported` in exclusive mode, first
+as `WAVEFORMATEXTENSIBLE_IEC61937`, then as the plain extensible form some
+drivers want - and FFmpeg stream-copies the track through its `spdif` muxer
+into 16-bit stereo frames at the link rate: the track's own rate for AC-3 and
+DTS, four times it for E-AC-3. A refusal, or an exclusive stream that will not
+start, closes that client and opens the ordinary shared PCM stream, and the
+status line says which happened; nothing is ever silent because passthrough
+was asked for. The clock is the same `IAudioClock` count divided by the link
+rate. Two details keep it honest: the exclusive stream is primed with its
+first buffer before it starts, because a device started empty runs its clock
+through the silence ahead of the first burst; and an event the source had
+nothing ready for is answered with null data rather than left to replay the
+previous buffer, with that null data kept out of the played count. Two known
+failures are designed against. mpv #1773, `IAudioClient::Release` hanging after
+a format change: every open activates a new client, an exclusive one is stopped
+and reset before its last reference goes, and that release runs on its own
+thread with a two-second bound. Kodi #18453, a display-mode change dropping the
+HDMI sink: an active passthrough stream is reopened 1.5 s after the last
+`WM_DISPLAYCHANGE`, once the link has retrained.
+
 ### Why there is no drift correction
 
 A player drifts A/V when two clocks each pace one half of the film. mpv

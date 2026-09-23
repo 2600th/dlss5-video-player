@@ -7,6 +7,7 @@
 #include <wrl/client.h>
 
 #include "AudioEndpointPolicy.h"
+#include "AudioPassthroughPolicy.h"
 
 #include <atomic>
 #include <cstdint>
@@ -37,6 +38,10 @@
 // The position this reports is frames PLAYED, from IAudioClock, which is the
 // same guarantee waveOutGetPosition's TIME_SAMPLES gave and what makes the
 // audio-master clock correct rather than optimistic.
+//
+// One exception to shared mode: bitstream passthrough (OpenPassthrough) is an
+// EXCLUSIVE stream, because the shared engine mixes in float and would turn
+// IEC 61937 bursts into noise. See AudioPassthroughPolicy.h.
 class WasapiRenderer {
 public:
     // What the endpoint wants, and therefore what ffmpeg is told to produce.
@@ -57,6 +62,19 @@ public:
     // Opens the default render endpoint at its mix format. COM must already be
     // initialized on the calling thread.
     bool Open();
+
+    // Opens the default render endpoint in exclusive mode carrying `link` as
+    // an IEC 61937 bitstream: 16-bit stereo frames at link.transportRate, as
+    // FFmpeg's spdif muxer writes them. Refused means the endpoint does not
+    // take the format at all - no receiver, or one that does not decode this
+    // codec - and Failed that it does but an exclusive stream would not start
+    // (another application holds it, or exclusive mode is disallowed). The
+    // caller falls back to Open on a fresh renderer either way; this one is
+    // left closed.
+    enum class PassthroughOpen { Opened, Refused, Failed };
+    PassthroughOpen OpenPassthrough(const audio_passthrough::Link& link);
+    // An exclusive passthrough stream is open.
+    bool Exclusive() const;
     void Close();
     bool Valid() const;
 
@@ -80,7 +98,18 @@ public:
 
     // `frames` must hold framesToWrite * BytesPerFrame bytes in the current
     // format, and framesToWrite must not exceed what WaitForSpace reported.
+    //
+    // Exclusive streams take exactly one whole buffer per event, so there a
+    // short write is completed with null data (see WriteFiller) rather than
+    // refused by the endpoint.
     WriteResult Write(const void* frames, uint32_t framesToWrite);
+
+    // Exclusive streams only, and a no-op otherwise: one buffer of null data
+    // for an event the source had nothing ready for. Left unanswered, the
+    // device plays the stale buffer again, and a receiver decodes a repeated
+    // burst as a stutter. The null frames are not film, so the clock does not
+    // count them (PlayedFrames).
+    WriteResult WriteFiller();
 
     bool Start();
     bool Stop();
@@ -99,7 +128,9 @@ public:
     // audio-master clock jump backwards during the last frames.
     bool Reset();
 
-    // Frames played since the last Reset. False when unavailable.
+    // Frames of the source played since the last Reset. False when
+    // unavailable. On an exclusive stream the null data WriteFiller sent is
+    // not counted: the device clock runs through it, the film does not.
     bool PlayedFrames(uint64_t& frames) const;
 
     void SetVolume(float volume01);
@@ -148,6 +179,22 @@ private:
     std::atomic<bool> deviceLost_{false};
     bool noEndpoint_ = false;
     bool started_ = false;
+    // Exclusive passthrough. Such a stream is primed with one buffer before it
+    // is started - started empty, the device clock would run through the
+    // silence ahead of the first burst and the picture would lead the sound by
+    // it - so Start only records the request until the first Write lands.
+    bool exclusive_ = false;
+    bool primed_ = false;
+    bool startRequested_ = false;
+    // Bitstream cannot be attenuated, so a muted passthrough stream sends
+    // null data in place of the film instead; the receiver owns the level.
+    bool muted_ = false;
+    // Where in the stream WriteFiller put null data, in frames written, so
+    // PlayedFrames can leave out exactly the part of it already played.
+    // Adjacent ranges merge, and ranges fully played retire into the total.
+    struct FillerRange { uint64_t start, count; };
+    std::vector<FillerRange> filler_;
+    uint64_t fillerRetired_ = 0;
     // De-click state. See AudioFadePolicy.h for why the ramps exist and why
     // they are raised cosines.
     uint32_t fadeFrames_ = 0;
@@ -175,6 +222,11 @@ private:
     // every call site handles it the same way.
     bool NoteDeviceLoss(HRESULT result);
     bool WriteLocked(const void* frames, uint32_t framesToWrite, bool fadeIn);
+    // Exclusive: one whole buffer, `framesToWrite` of it from `frames` (null
+    // for none) and the rest null data.
+    bool WriteExclusiveLocked(const void* frames, uint32_t framesToWrite);
+    // What both opens share once the client is initialized.
+    bool CompleteOpenLocked();
 };
 
 // Watches for a render endpoint to come back while there is none to play to.

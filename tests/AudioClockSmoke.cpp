@@ -26,7 +26,8 @@
 // the frame on screen would need a loopback capture correlating a tone burst
 // against a marked frame, which is a different and much larger harness. The
 // clock is the part the player actually controls, and it was the untested
-// part.
+// part. (tools/verification/av-drift-probe.cpp is that larger harness for the
+// clock against the audible sound, over minutes rather than seconds.)
 #include "AudioPlayer.h"
 
 #include <windows.h>
@@ -388,6 +389,184 @@ int wmain(int argc, wchar_t** argv)
 
     audio.Stop();
     Check(audio.PositionSeconds() < 0.0, "a stopped player reports no clock");
+
+    // ---- passthrough: the bitstream, or PCM - never silence ----------------
+    // After the player above has stopped: an exclusive stream cannot open
+    // while anything else in this process holds the endpoint.
+    //
+    // A machine without an HDMI or S/PDIF receiver refuses the IEC 61937
+    // format, and the refusal is the path worth proving here: the film has to
+    // come back as PCM with a clock that runs, not as a quiet screen. A
+    // machine that accepts it proves the bitstream's clock instead. Either
+    // way the answer is printed, because which one ran is the evidence.
+    {
+        const auto ac3 = root / L"audio-clock-ac3.mkv";
+        if (!fs::exists(ac3) &&
+            !Generate(helpers / L"ffmpeg.exe",
+                      {L"-v", L"error", L"-nostdin", L"-y",
+                       L"-f", L"lavfi", L"-i", L"sine=frequency=440:duration=12:sample_rate=48000",
+                       L"-ac", L"6", L"-c:a", L"ac3", L"-b:a", L"384k", ac3.wstring()})) {
+            Check(false, "the AC-3 source could not be generated");
+        } else {
+            using audio_passthrough::State;
+            const auto describe = [](State state) {
+                switch (state) {
+                    case State::Off: return "off";
+                    case State::NotApplicable: return "not applicable";
+                    case State::Active: return "active (bitstream to the receiver)";
+                    case State::Refused: return "refused by the endpoint (PCM fallback)";
+                    case State::Unavailable: return "exclusive mode unavailable (PCM fallback)";
+                }
+                return "?";
+            };
+            AudioPlayer::Settings passthroughSettings;
+            passthroughSettings.helperDirectory = helpers.wstring();
+            AudioPlayer pass(std::move(passthroughSettings));
+            pass.SetPassthrough(true);
+            Check(pass.Start(ac3.wstring(), 0.0), "an AC-3 source starts with passthrough on");
+            const auto status = pass.PassthroughStatus();
+            std::cout << "passthrough on this endpoint: " << describe(status.state) << '\n';
+            Check(status.codec == audio_passthrough::Codec::Ac3, "the track is recognised as AC-3");
+            Check(status.state == State::Active || status.state == State::Refused ||
+                      status.state == State::Unavailable,
+                  "an AC-3 track is offered to the endpoint as a bitstream");
+            const double latency = WaitForClock(pass, 5s);
+            Check(latency >= 0.0, "the clock answers whether the bitstream went out or PCM replaced it");
+            std::cout << "passthrough start latency: " << latency << " s\n";
+            if (latency >= 0.0) {
+                const auto mark = std::chrono::steady_clock::now();
+                const double atMark = pass.PositionSeconds();
+                std::this_thread::sleep_for(1500ms);
+                CheckNear(atMark + Seconds(mark), pass.PositionSeconds(), kFrameSeconds * 2,
+                          "the clock advances at real time on the passthrough path");
+            }
+            if (status.state != State::Active)
+                Check(pass.SubmittedBuffers() > 0, "the PCM fallback is writing to the endpoint, not silent");
+
+            // mpv #1773: IAudioClient::Release can hang after a format change.
+            // Every one of these swaps the endpoint between the IEC 61937
+            // format (or the attempt at it) and float PCM, and each has to
+            // come back in bounded time with a clock.
+            for (int round = 0; round < 4; ++round) {
+                pass.SetPassthrough(round % 2 == 1);
+                const auto started = std::chrono::steady_clock::now();
+                Check(pass.Seek(2.0 + round), "a restart across a format change succeeds");
+                const double took = Seconds(started);
+                std::cout << "format-change restart " << round << ": " << took << " s\n";
+                Check(took < 3.0, "a restart across a format change is bounded");
+                Check(WaitForClock(pass, 5s) >= 0.0, "the clock answers after the format change");
+            }
+
+            // A track that is not AC-3, E-AC-3 or DTS says so and plays PCM.
+            pass.SetPassthrough(true);
+            Check(pass.Start(clip.wstring(), 0.0), "an AAC source starts with passthrough on");
+            Check(pass.PassthroughStatus().state == State::NotApplicable,
+                  "an AAC track is not passed through");
+            Check(pass.PassthroughStatus().trackCodec == "aac", "and the status says what it is");
+            Check(WaitForClock(pass, 5s) >= 0.0, "the AAC track plays as PCM");
+            pass.Stop();
+        }
+    }
+
+    // ---- the exclusive stream's own mechanics, on 16-bit PCM ---------------
+    // Without a receiver the bitstream path above never gets past the
+    // refusal, which leaves the exclusive stream itself - primed before it
+    // starts, one whole buffer per event, null data kept out of the clock, a
+    // bounded release - unexercised. The same OpenPassthrough carries plain
+    // 16-bit stereo PCM, which nearly every endpoint takes exclusively, so
+    // that is run here through the renderer the passthrough path uses. The
+    // bursts are the only thing it does not send.
+    {
+        audio_passthrough::Link pcm;
+        pcm.subFormat = KSDATAFORMAT_SUBTYPE_PCM;
+        pcm.transportRate = 48000;
+        pcm.encodedRate = 48000;
+        pcm.encodedChannels = 2;
+        auto exclusive = std::make_unique<WasapiRenderer>();
+        const auto opened = exclusive->OpenPassthrough(pcm);
+        if (opened != WasapiRenderer::PassthroughOpen::Opened) {
+            std::cout << "exclusive 16-bit PCM refused by this endpoint; its mechanics are not measured\n";
+        } else {
+            Check(exclusive->Exclusive(), "the renderer reports an exclusive stream");
+            const uint32_t rate = exclusive->CurrentFormat().sampleRate;
+            Check(exclusive->Start(), "an exclusive start is accepted before the first buffer");
+            uint64_t played = 0;
+            Check(exclusive->PlayedFrames(played) && played == 0,
+                  "an unprimed exclusive stream has not started its clock");
+
+            // A quiet tone, then a gap the source "had nothing" for, then the
+            // tone again. The gap goes out as null data and must not count.
+            constexpr double kTone = 0.6, kGap = 0.4, kAfter = 0.6;
+            std::vector<int16_t> block;
+            uint64_t film = 0, highest = 0;
+            bool backwards = false;
+            double fillerSeconds = 0.0;
+            std::chrono::steady_clock::time_point started{};
+            bool primed = false;
+            for (;;) {
+                const double elapsed = primed ? Seconds(started) : 0.0;
+                if (elapsed >= kTone + kGap + kAfter) break;
+                uint32_t wanted = 0;
+                if (!exclusive->WaitForSpace(200, wanted)) { Check(false, "the exclusive stream keeps asking for data"); break; }
+                if (!wanted) continue;
+                const bool gap = primed && elapsed >= kTone && elapsed < kTone + kGap;
+                if (gap) {
+                    Check(exclusive->WriteFiller() == WasapiRenderer::WriteResult::Written,
+                          "null data is taken for an event with nothing to give");
+                    fillerSeconds += double(wanted) / double(rate);
+                } else {
+                    block.assign(size_t(wanted) * 2, 0);
+                    for (uint32_t frame = 0; frame < wanted; ++frame) {
+                        const double phase = 2.0 * 3.14159265358979323846 * 440.0 * double(film + frame) / double(rate);
+                        const auto sample = int16_t(std::lround(1600.0 * std::sin(phase)));
+                        block[size_t(frame) * 2] = sample;
+                        block[size_t(frame) * 2 + 1] = sample;
+                    }
+                    Check(exclusive->Write(block.data(), wanted) == WasapiRenderer::WriteResult::Written,
+                          "a whole buffer of film is taken");
+                    film += wanted;
+                    if (!primed) { primed = true; started = std::chrono::steady_clock::now(); }
+                }
+                if (exclusive->PlayedFrames(played)) {
+                    if (played < highest) backwards = true;
+                    highest = std::max(highest, played);
+                }
+            }
+            Check(!backwards, "the exclusive clock never steps back across null data");
+            const double wall = Seconds(started);
+            Check(exclusive->PlayedFrames(played), "the exclusive clock answers");
+            const double clock = double(played) / double(rate);
+            std::cout << "exclusive PCM: " << wall << " s of wall time, " << fillerSeconds
+                      << " s of null data, clock " << clock << " s\n";
+            // Two buffers are queued ahead of the device at any moment, so the
+            // clock trails the wall by up to that; the null data is not film.
+            CheckNear(wall - fillerSeconds, clock, 0.05,
+                      "the exclusive clock counts film and leaves the null data out");
+            Check(clock <= double(film) / double(rate) + 1e-9, "the clock never runs past what was written");
+
+            // Pause and resume, as the player does it.
+            Check(exclusive->FadeOutAndStop(), "an exclusive stream stops without a ramp");
+            std::this_thread::sleep_for(300ms);
+            uint64_t stoppedAt = 0, stoppedLater = 0;
+            exclusive->PlayedFrames(stoppedAt);
+            std::this_thread::sleep_for(300ms);
+            exclusive->PlayedFrames(stoppedLater);
+            Check(stoppedAt == stoppedLater, "the exclusive clock holds still while stopped");
+            Check(exclusive->Write(block.data(), 16) == WasapiRenderer::WriteResult::Refused,
+                  "writes are refused while an exclusive stream is stopped");
+            Check(exclusive->Start(), "the exclusive stream resumes");
+
+            // mpv #1773: the release is bounded whatever the driver does.
+            const auto closing = std::chrono::steady_clock::now();
+            exclusive.reset();
+            const double closeSeconds = Seconds(closing);
+            std::cout << "exclusive close: " << closeSeconds << " s\n";
+            Check(closeSeconds < 2.5, "closing an exclusive stream is bounded");
+            // And the endpoint is free again for the shared stream after it.
+            WasapiRenderer shared;
+            Check(shared.Open(), "the shared stream opens after the exclusive one closed");
+        }
+    }
 
     CoUninitialize();
     if (failures) {

@@ -75,10 +75,15 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop");
     add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10");
     add(play, IDM_MUTE, L"menu.mute");
+    // Which track, then how it leaves the machine. UpdateAudioTracks rebuilds
+    // only the rows above the separator, so the passthrough check survives
+    // every media load.
     HMENU audioTracks = CreatePopupMenu();
     AppendMenuW(audioTracks, MF_STRING | MF_GRAYED, IDM_AUDIO_TRACK_FIRST, L"No audio tracks");
+    AppendMenuW(audioTracks, MF_SEPARATOR, 0, nullptr);
+    add(audioTracks, IDM_AUDIO_PASSTHROUGH, L"menu.audio_passthrough");
     AppendMenuW(play, MF_POPUP, reinterpret_cast<UINT_PTR>(audioTracks),
-                localizer.Get(L"menu.audio_track").c_str());
+                localizer.Get(L"menu.audio").c_str());
     AppendMenuW(play, MF_SEPARATOR, 0, nullptr);
     // The range tools. IDM_PAUSE_NEURAL_RENDER used to sit alone below these:
     // it is a control over the neural RENDER, not over playback, and it now
@@ -341,12 +346,18 @@ void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int 
 {
     HMENU tracks=find_menu_containing_command(menuBar,IDM_AUDIO_TRACK_FIRST);
     if(!tracks)return;
-    while(GetMenuItemCount(tracks)>0)DeleteMenu(tracks,0,MF_BYPOSITION);
+    // The track rows are everything above the first separator; what is below
+    // it is not a track and keeps its state.
+    while(GetMenuItemCount(tracks)>0){
+        MENUITEMINFOW item{};item.cbSize=sizeof(item);item.fMask=MIIM_FTYPE;
+        if(!GetMenuItemInfoW(tracks,0,TRUE,&item)||(item.fType&MFT_SEPARATOR))break;
+        DeleteMenu(tracks,0,MF_BYPOSITION);
+    }
     // A source with one track has nothing to choose between, and the player
     // does not build a list for it, so the placeholder covers both that and
     // nothing being loaded.
     if(labels.empty()){
-        AppendMenuW(tracks,MF_STRING|MF_GRAYED,IDM_AUDIO_TRACK_FIRST,L"No audio tracks");
+        InsertMenuW(tracks,0,MF_BYPOSITION|MF_STRING|MF_GRAYED,IDM_AUDIO_TRACK_FIRST,L"No audio tracks");
         return;
     }
     const size_t shown=std::min<size_t>(labels.size(),IDM_AUDIO_TRACK_COUNT);
@@ -359,7 +370,8 @@ void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int 
             if(character==L'&')label+=L'&';
             label+=(character<L' '?L' ':character);
         }
-        AppendMenuW(tracks,MF_STRING,IDM_AUDIO_TRACK_FIRST+static_cast<UINT>(index),label.c_str());
+        InsertMenuW(tracks,static_cast<UINT>(index),MF_BYPOSITION|MF_STRING,
+                    IDM_AUDIO_TRACK_FIRST+static_cast<UINT>(index),label.c_str());
     }
     const UINT chosen=IDM_AUDIO_TRACK_FIRST+
         static_cast<UINT>(selected>=0&&size_t(selected)<shown?size_t(selected):0);

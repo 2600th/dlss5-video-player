@@ -11,6 +11,7 @@
 #include <cstring>
 #include <chrono>
 #include <cmath>
+#include <thread>
 #include <utility>
 
 using Microsoft::WRL::ComPtr;
@@ -43,6 +44,66 @@ WasapiRenderer::Format DescribeFormat(const WAVEFORMATEX& wave)
         format.isFloat = IsEqualGUID(extensible.SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) != 0;
     }
     return format;
+}
+
+// An exclusive client's last Release, bounded.
+//
+// mpv #1773: IAudioClient::Release can hang in the driver after the stream's
+// format has changed, and passthrough changes it every time it starts or
+// falls back - bitstream on one client, float PCM on the next. Every open
+// already activates a new client rather than re-initializing an old one, and
+// Close stops and resets the stream before letting go of it, which is what
+// the drivers that hang are waiting for. This is the part that does not rely
+// on the driver: the release runs on its own thread and is waited for a
+// bounded time, so a driver that hangs there anyway costs one leaked client
+// and a log line rather than the UI thread that asked for a seek.
+struct ExclusiveClientParts {
+    ComPtr<IAudioClock> clock;
+    ComPtr<IAudioRenderClient> render;
+    ComPtr<IAudioClient> client;
+    ComPtr<IMMDevice> device;
+};
+
+constexpr DWORD kExclusiveReleaseBoundMs = 2000;
+
+void ReleaseExclusiveBounded(ExclusiveClientParts parts)
+{
+    HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!done) return;  // parts release here, unbounded, as every other client does
+    std::thread releaser;
+    try {
+        releaser = std::thread([parts = std::move(parts), done]() mutable {
+            const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            parts = {};
+            if (SUCCEEDED(com)) CoUninitialize();
+            SetEvent(done);
+        });
+    } catch (...) {
+        CloseHandle(done);
+        return;
+    }
+    if (WaitForSingleObject(done, kExclusiveReleaseBoundMs) == WAIT_OBJECT_0) {
+        releaser.join();
+        CloseHandle(done);
+        return;
+    }
+    // The thread still owns the client and will signal `done` if the driver
+    // ever lets go, so neither can be closed here.
+    LOG("Audio: the exclusive stream's IAudioClient::Release did not return within "
+        << kExclusiveReleaseBoundMs << " ms (mpv #1773); leaving it behind and carrying on.");
+    releaser.detach();
+}
+
+const char* CodecText(audio_passthrough::Codec codec)
+{
+    switch (codec) {
+        case audio_passthrough::Codec::Ac3: return "AC-3";
+        case audio_passthrough::Codec::Eac3: return "E-AC-3";
+        case audio_passthrough::Codec::Dts: return "DTS";
+        // Only the audio smoke opens one of these: the exclusive stream's
+        // mechanics, measured on plain PCM where there is no receiver.
+        default: return "16-bit PCM";
+    }
 }
 
 } // namespace
@@ -193,6 +254,7 @@ bool WasapiRenderer::Open()
     std::lock_guard<std::mutex> lock(mutex_);
     deviceLost_ = false;
     noEndpoint_ = false;
+    exclusive_ = false;
 
     HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                       IID_PPV_ARGS(&enumerator_));
@@ -227,7 +289,114 @@ bool WasapiRenderer::Open()
                                  kEnginePeriod, 0, mix, nullptr);
     CoTaskMemFree(mix);
     if (FAILED(result)) { LOG("Audio: IAudioClient::Initialize failed hr=" << HexText(result)); return false; }
+    if (!CompleteOpenLocked()) return false;
 
+    LOG("Audio: WASAPI shared mode at " << format_.sampleRate << " Hz, " << format_.channels
+        << " channels, 32-bit float; endpoint buffer " << bufferFrames_ << " frames ("
+        << (double(bufferFrames_) * 1000.0 / double(format_.sampleRate)) << " ms).");
+    return true;
+}
+
+WasapiRenderer::PassthroughOpen WasapiRenderer::OpenPassthrough(const audio_passthrough::Link& link)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    deviceLost_ = false;
+    noEndpoint_ = false;
+    exclusive_ = true;
+    primed_ = false;
+    startRequested_ = false;
+    filler_.clear();
+    fillerRetired_ = 0;
+    const char* const codec = CodecText(link.codec);
+
+    HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                      IID_PPV_ARGS(&enumerator_));
+    if (FAILED(result)) { LOG("Audio: MMDeviceEnumerator failed hr=" << HexText(result)); return PassthroughOpen::Failed; }
+    result = enumerator_->GetDefaultAudioEndpoint(eRender, eConsole, &device_);
+    if (FAILED(result)) {
+        noEndpoint_ = result == E_NOTFOUND;
+        LOG("Audio: no default render endpoint for passthrough hr=" << HexText(result));
+        return PassthroughOpen::Failed;
+    }
+    result = device_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client_);
+    if (FAILED(result)) { LOG("Audio: IAudioClient activation failed hr=" << HexText(result)); return PassthroughOpen::Failed; }
+
+    // Asked first rather than discovered by Initialize failing: an exclusive
+    // Initialize that fails leaves some drivers in a state the next open
+    // inherits. The IEC 61937 extension first, then the plain form some
+    // drivers want instead (see audio_passthrough::WaveFormat).
+    WAVEFORMATEXTENSIBLE_IEC61937 chosen{};
+    bool supported = false;
+    const auto askedAt = std::chrono::steady_clock::now();
+    for (const bool plain : {false, true}) {
+        chosen = audio_passthrough::WaveFormat(link, plain);
+        result = client_->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE,
+                                            reinterpret_cast<const WAVEFORMATEX*>(&chosen), nullptr);
+        if (result == S_OK) { supported = true; break; }
+    }
+    if (!supported) {
+        const double askedMs = std::chrono::duration<double>(std::chrono::steady_clock::now() - askedAt).count() * 1e3;
+        LOG("Audio: the endpoint does not take " << codec << " as IEC 61937 at "
+            << link.transportRate << " Hz (hr=" << HexText(result) << ", answered in " << askedMs
+            << " ms); nothing on it decodes this. Playing PCM instead.");
+        return PassthroughOpen::Refused;
+    }
+
+    REFERENCE_TIME period = 0, minimumPeriod = 0;
+    result = client_->GetDevicePeriod(&period, &minimumPeriod);
+    if (FAILED(result) || period <= 0) { LOG("Audio: GetDevicePeriod failed hr=" << HexText(result)); return PassthroughOpen::Failed; }
+    const auto* const wave = reinterpret_cast<const WAVEFORMATEX*>(&chosen);
+    result = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                                 period, period, wave, nullptr);
+    if (result == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
+        // The documented dance: the period has to be a whole number of the
+        // device's own buffer, which it reports only now, and only a NEW
+        // client may be initialized with the corrected one.
+        UINT32 alignedFrames = 0;
+        result = client_->GetBufferSize(&alignedFrames);
+        if (FAILED(result) || !alignedFrames) { LOG("Audio: GetBufferSize for alignment failed hr=" << HexText(result)); return PassthroughOpen::Failed; }
+        period = REFERENCE_TIME(10'000'000.0 * double(alignedFrames) / double(link.transportRate) + 0.5);
+        client_.Reset();
+        result = device_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client_);
+        if (FAILED(result)) { LOG("Audio: IAudioClient re-activation failed hr=" << HexText(result)); return PassthroughOpen::Failed; }
+        result = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                                     period, period, wave, nullptr);
+    }
+    if (FAILED(result)) {
+        LOG("Audio: the endpoint takes " << codec << " but an exclusive stream would not start (hr="
+            << HexText(result)
+            << (result == AUDCLNT_E_DEVICE_IN_USE ? ", another application holds it"
+                : result == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED ? ", exclusive mode is disallowed for this device"
+                : "")
+            << "). Playing PCM instead.");
+        return PassthroughOpen::Failed;
+    }
+
+    format_ = {};
+    format_.sampleRate = link.transportRate;
+    format_.channels = audio_passthrough::kTransportChannels;
+    format_.bitsPerSample = audio_passthrough::kTransportBits;
+    if (!CompleteOpenLocked()) return PassthroughOpen::Failed;
+
+    const bool plain = chosen.FormatExt.Format.cbSize == sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    LOG("Audio: WASAPI exclusive passthrough, " << codec
+        << (link.codec == audio_passthrough::Codec::None ? "" : " as IEC 61937") << " at " << link.transportRate
+        << " Hz (" << link.encodedChannels << " channels at " << link.encodedRate << " Hz once decoded"
+        << (plain ? ", plain extensible format" : "") << "); endpoint buffer " << bufferFrames_
+        << " frames (" << (double(bufferFrames_) * 1000.0 / double(format_.sampleRate)) << " ms).");
+    return PassthroughOpen::Opened;
+}
+
+bool WasapiRenderer::Exclusive() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return exclusive_ && client_;
+}
+
+// The caller holds mutex_ and has initialized client_ and set format_.
+bool WasapiRenderer::CompleteOpenLocked()
+{
+    HRESULT result = S_OK;
     ready_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!ready_) { LOG("Audio: render event creation failed winerr=" << GetLastError()); return false; }
     result = client_->SetEventHandle(ready_);
@@ -266,8 +435,9 @@ bool WasapiRenderer::Open()
 
     // Volume is per-session, so this moves the player's own slider in the
     // mixer rather than the endpoint's master level. waveOutSetVolume did the
-    // same thing.
-    if (FAILED(client_->GetService(IID_PPV_ARGS(&volume_))))
+    // same thing. An exclusive stream has no mixer to move, and a bitstream
+    // has no level to scale: the receiver owns it.
+    if (!exclusive_ && FAILED(client_->GetService(IID_PPV_ARGS(&volume_))))
         LOG("Audio: ISimpleAudioVolume unavailable; the volume slider will not reach the mixer.");
 
     // Notifications rather than polling. Registered last, so everything a
@@ -287,10 +457,6 @@ bool WasapiRenderer::Open()
                 "be noticed until a call to the endpoint fails.");
     }
     sinkState_ = {};
-
-    LOG("Audio: WASAPI shared mode at " << format_.sampleRate << " Hz, " << format_.channels
-        << " channels, 32-bit float; endpoint buffer " << bufferFrames_ << " frames ("
-        << (double(bufferFrames_) * 1000.0 / double(format_.sampleRate)) << " ms).");
     return true;
 }
 
@@ -325,22 +491,41 @@ void WasapiRenderer::Close()
     session.Reset();
     enumerator.Reset();
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    session_.Reset();
-    if (client_ && started_) client_->Stop();
-    started_ = false;
-    volume_.Reset();
-    clock_.Reset();
-    render_.Reset();
-    client_.Reset();
-    device_.Reset();
-    enumerator_.Reset();
-    if (ready_) { CloseHandle(ready_); ready_ = nullptr; }
-    format_ = {};
-    bufferFrames_ = 0;
-    clockFrequency_ = 0;
-    deviceId_.clear();
-    sinkState_ = {};
+    ExclusiveClientParts exclusiveParts;
+    bool exclusive = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        session_.Reset();
+        if (client_ && started_) client_->Stop();
+        started_ = false;
+        volume_.Reset();
+        exclusive = std::exchange(exclusive_, false);
+        if (exclusive) {
+            // Stopped and reset before the last reference goes, and released
+            // off this thread with a bound; see ReleaseExclusiveBounded.
+            if (client_) client_->Reset();
+            exclusiveParts.clock = std::move(clock_);
+            exclusiveParts.render = std::move(render_);
+            exclusiveParts.client = std::move(client_);
+            exclusiveParts.device = std::move(device_);
+        }
+        clock_.Reset();
+        render_.Reset();
+        client_.Reset();
+        device_.Reset();
+        enumerator_.Reset();
+        if (ready_) { CloseHandle(ready_); ready_ = nullptr; }
+        format_ = {};
+        bufferFrames_ = 0;
+        clockFrequency_ = 0;
+        deviceId_.clear();
+        sinkState_ = {};
+        primed_ = false;
+        startRequested_ = false;
+        filler_.clear();
+        fillerRetired_ = 0;
+    }
+    if (exclusive) ReleaseExclusiveBounded(std::move(exclusiveParts));
 }
 
 bool WasapiRenderer::Valid() const
@@ -354,7 +539,13 @@ bool WasapiRenderer::WaitForSpace(DWORD timeoutMilliseconds, uint32_t& framesWan
     framesWanted = 0;
     HANDLE ready = nullptr;
     bool playing = false;
-    { std::lock_guard<std::mutex> lock(mutex_); ready = ready_; playing = started_; }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ready = ready_; playing = started_;
+        // An exclusive stream is primed before it starts, and a stream that
+        // has not started never signals: the first buffer is wanted now.
+        if (ready && exclusive_ && !primed_) { framesWanted = bufferFrames_; return true; }
+    }
     if (!ready) return false;
     const bool signalled = WaitForSingleObject(ready, timeoutMilliseconds) == WAIT_OBJECT_0;
 
@@ -383,7 +574,10 @@ bool WasapiRenderer::WaitForSpace(DWORD timeoutMilliseconds, uint32_t& framesWan
     uint32_t padding = 0;
     const HRESULT result = client_->GetCurrentPadding(&padding);
     if (FAILED(result)) { NoteDeviceLoss(result); return false; }
-    framesWanted = bufferFrames_ > padding ? bufferFrames_ - padding : 0;
+    // An exclusive event-driven stream is double-buffered a period at a time:
+    // each event is one whole buffer to fill, whatever padding reads, and a
+    // request for anything else is refused (AUDCLNT_E_BUFFER_SIZE_ERROR).
+    framesWanted = exclusive_ ? bufferFrames_ : bufferFrames_ > padding ? bufferFrames_ - padding : 0;
     return true;
 }
 
@@ -395,7 +589,65 @@ WasapiRenderer::WriteResult WasapiRenderer::Write(const void* frames, uint32_t f
     // A tail has been queued and the stream is on its way down. Accepting more
     // would put a step back in after the ramp that removed it.
     if (refusingWrites_) return WriteResult::Refused;
+    if (exclusive_) return WriteExclusiveLocked(frames, framesToWrite) ? WriteResult::Written : WriteResult::Failed;
     return WriteLocked(frames, framesToWrite, true) ? WriteResult::Written : WriteResult::Failed;
+}
+
+WasapiRenderer::WriteResult WasapiRenderer::WriteFiller()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Nothing to replay before the first buffer, and priming with null data
+    // would only start the device clock early.
+    if (!exclusive_ || !primed_) return WriteResult::Written;
+    if (!render_) return WriteResult::Failed;
+    if (refusingWrites_) return WriteResult::Refused;
+    return WriteExclusiveLocked(nullptr, 0) ? WriteResult::Written : WriteResult::Failed;
+}
+
+// The caller holds mutex_.
+bool WasapiRenderer::WriteExclusiveLocked(const void* frames, uint32_t framesToWrite)
+{
+    framesToWrite = std::min(framesToWrite, bufferFrames_);
+    BYTE* destination = nullptr;
+    HRESULT result = render_->GetBuffer(bufferFrames_, &destination);
+    if (FAILED(result)) { NoteDeviceLoss(result); return false; }
+    const size_t bytesPerFrame = format_.BytesPerFrame();
+    const size_t filmBytes = size_t(framesToWrite) * bytesPerFrame;
+    // Muted: null data in the film's place, which the receiver plays as
+    // silence. It is still the film's time, so it is not filler.
+    if (frames && !muted_) std::memcpy(destination, frames, filmBytes);
+    else std::memset(destination, 0, filmBytes);
+    std::memset(destination + filmBytes, 0, size_t(bufferFrames_) * bytesPerFrame - filmBytes);
+    result = render_->ReleaseBuffer(bufferFrames_, 0);
+    if (FAILED(result)) { NoteDeviceLoss(result); return false; }
+    if (const uint32_t nullFrames = bufferFrames_ - framesToWrite) {
+        const uint64_t start = framesWritten_ + framesToWrite;
+        if (!filler_.empty() && filler_.back().start + filler_.back().count == start)
+            filler_.back().count += nullFrames;
+        else
+            filler_.push_back({start, nullFrames});
+    }
+    framesWritten_ += bufferFrames_;
+    // Ranges the device has played past fold into one number, so the list
+    // holds only what is still queued.
+    uint64_t position = 0;
+    if (clock_ && clockFrequency_ && SUCCEEDED(clock_->GetPosition(&position, nullptr))) {
+        const auto played = uint64_t((long double)position / (long double)clockFrequency_ *
+                                     (long double)format_.sampleRate);
+        while (!filler_.empty() && filler_.front().start + filler_.front().count <= played) {
+            fillerRetired_ += filler_.front().count;
+            filler_.erase(filler_.begin());
+        }
+    }
+    if (!primed_) {
+        primed_ = true;
+        if (startRequested_) {
+            result = client_->Start();
+            if (FAILED(result)) { NoteDeviceLoss(result); return false; }
+            started_ = true;
+        }
+    }
+    return true;
 }
 
 // The caller holds mutex_. `fadeIn` is false for the fade-out tail, which is
@@ -425,6 +677,12 @@ bool WasapiRenderer::Start()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!client_ || started_) return client_ != nullptr;
+    // Started once the first buffer is in: see primed_.
+    if (exclusive_ && !primed_) {
+        startRequested_ = true;
+        refusingWrites_ = false;
+        return true;
+    }
     const HRESULT result = client_->Start();
     if (FAILED(result)) { NoteDeviceLoss(result); return false; }
     started_ = true;
@@ -439,6 +697,7 @@ bool WasapiRenderer::Start()
 bool WasapiRenderer::Stop()
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    startRequested_ = false;
     if (!client_ || !started_) return client_ != nullptr;
     const HRESULT result = client_->Stop();
     if (FAILED(result)) { NoteDeviceLoss(result); return false; }
@@ -463,6 +722,11 @@ bool WasapiRenderer::Reset()
     framesWritten_ = 0;
     refusingWrites_ = false;
     std::fill(lastFrame_.begin(), lastFrame_.end(), 0.0f);
+    // An emptied exclusive stream is primed again before it restarts.
+    primed_ = false;
+    startRequested_ = false;
+    filler_.clear();
+    fillerRetired_ = 0;
     return true;
 }
 
@@ -471,6 +735,18 @@ bool WasapiRenderer::FadeOutAndStop()
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!client_) return false;
+        // A bitstream is not a waveform: scaling it would corrupt the bursts,
+        // and the receiver mutes on its own when they stop. Writes close so
+        // the reader keeps its frames for the resume, as below.
+        if (exclusive_) {
+            startRequested_ = false;
+            refusingWrites_ = true;
+            if (!started_) return true;
+            const HRESULT result = client_->Stop();
+            if (FAILED(result)) { NoteDeviceLoss(result); return false; }
+            started_ = false;
+            return true;
+        }
         // Nothing is playing, so there is no waveform to be cut in half.
         if (!started_) return true;
         // Close the door first. Once this is set, lastFrame_ cannot change
@@ -560,12 +836,26 @@ bool WasapiRenderer::PlayedFrames(uint64_t& frames) const
     frames = static_cast<uint64_t>(
         (static_cast<long double>(position) / static_cast<long double>(clockFrequency_)) *
         static_cast<long double>(format_.sampleRate));
+    // The null data an exclusive stream sent in the film's absence: counted
+    // by the device clock, not part of the film. Only the part already played
+    // comes off, so the clock never steps back when a range is queued.
+    if (exclusive_) {
+        // Past what was written the device is replaying a stale buffer - after
+        // the end of the film, say, if the stream is resumed - which is not
+        // the film moving on either.
+        frames = std::min(frames, framesWritten_);
+        uint64_t filler = fillerRetired_;
+        for (const FillerRange& range : filler_)
+            if (frames > range.start) filler += std::min(range.count, frames - range.start);
+        frames = frames > filler ? frames - filler : 0;
+    }
     return true;
 }
 
 void WasapiRenderer::SetVolume(float volume01)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    muted_ = !(volume01 > 0.0f);
     if (!volume_) return;
     const float clamped = std::clamp(volume01, 0.0f, 1.0f);
     if (FAILED(volume_->SetMasterVolume(clamped, nullptr)))

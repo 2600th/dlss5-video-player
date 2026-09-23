@@ -149,6 +149,8 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
     if (videoPath == m_tracksPath) return;
     m_tracksPath = videoPath;
     m_tracks.clear();
+    m_probedTracks.clear();
+    m_tracksProbed = false;
     m_selectedTrack = 0;
 
     const std::wstring ffprobe = FindTool(L"ffprobe.exe");
@@ -164,7 +166,7 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
     audio_stderr::Tail errors;
     if (!CaptureHelperOutput(ffprobe,
             L"-v error -select_streams a "
-            L"-show_entries stream=index,codec_name,channels:stream_tags=language,title:"
+            L"-show_entries stream=index,codec_name,channels,sample_rate:stream_tags=language,title:"
             L"stream_disposition=default,comment,visual_impaired,descriptions,hearing_impaired "
             L"-of default=noprint_wrappers=0 " + inputOptions + L"-i " + Q(videoPath), text, errors)) {
         LOG("Audio: the track list could not be read; playing the first stream.");
@@ -191,6 +193,7 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
         const std::string key = line.substr(0, equals), value = line.substr(equals + 1);
         if (key == "codec_name") current.codec = value;
         else if (key == "channels") { try { current.channels = std::stoi(value); } catch (...) {} }
+        else if (key == "sample_rate") { try { current.sampleRate = std::stoi(value); } catch (...) {} }
         else if (key == "TAG:language") current.language = value;
         else if (key == "TAG:title") current.title = value;
         else if (key == "DISPOSITION:default") current.isDefault = flag(value);
@@ -200,6 +203,8 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
         else if (key == "DISPOSITION:hearing_impaired") current.hearingImpaired = flag(value);
     }
 
+    m_probedTracks = tracks;
+    m_tracksProbed = true;
     // One track needs no menu and no decision; the list stays empty so
     // everything downstream takes the path it always did.
     if (tracks.size() < 2) return;
@@ -246,24 +251,81 @@ bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, Audio
     // the mix format, rather than the fixed 16-bit 48 kHz waveOut was opened
     // at and Windows then converted again.
     WasapiRenderer::Format format{};
+    bool bitstream=false;
     if(!reader->disableAudioDevice){
-        reader->renderer=std::make_unique<WasapiRenderer>();
-        if(!reader->renderer->Open()){const bool noEndpoint=reader->renderer->NoEndpoint();reader->renderer.reset();LOG("Audio: the render endpoint could not be opened.");AwaitEndpoint(noEndpoint);return false;}
+        // Passthrough first when it applies; anything short of an open
+        // exclusive stream falls through to the PCM open below, never to
+        // silence.
+        reader->renderer=OpenPassthrough();
+        bitstream=reader->renderer!=nullptr;
+        if(!reader->renderer)reader->renderer=std::make_unique<WasapiRenderer>();
+        if(!bitstream&&!reader->renderer->Open()){const bool noEndpoint=reader->renderer->NoEndpoint();reader->renderer.reset();LOG("Audio: the render endpoint could not be opened.");AwaitEndpoint(noEndpoint);return false;}
         format=reader->renderer->CurrentFormat();
         reader->sampleRate=format.sampleRate;
         reader->renderer->SetVolume(m_volume);
         // Started only when playing: a paused stream that was started would
         // run the endpoint dry and advance its clock over silence.
         if(!reader->paused&&!reader->renderer->Start()){LOG("Audio: the endpoint refused to start.");AwaitEndpoint(false);return false;}
-    }
-    if (!StartProcess(seekSeconds,reader,format)) return false;
+    }else m_passthroughStatus={};
+    if (!StartProcess(seekSeconds,reader,format,bitstream)) return false;
     m_reader=reader;
     try{m_thread=std::thread(&AudioPlayer::ReaderThread,reader);}catch(...){StopProcess(reader);m_reader.reset();throw;}
     return true;
 }
 
+std::unique_ptr<WasapiRenderer> AudioPlayer::OpenPassthrough() {
+    using namespace audio_passthrough;
+    const Status previous=m_passthroughStatus;
+    m_passthroughStatus={};
+    if(!m_passthroughEnabled)return nullptr;
+    // The selected track as ffprobe described it. Nothing described - no
+    // ffprobe, or a stream it could not read - is not a track that can be
+    // passed through, and says so rather than guessing at a codec.
+    const audio_track::Track* track=nullptr;
+    for(const auto& candidate:m_probedTracks)
+        if(candidate.audioIndex==m_selectedTrack){track=&candidate;break;}
+    // A source ffprobe read and found no audio in has nothing to pass
+    // through and nothing to explain: it plays silent, as it always did.
+    if(!track&&m_tracksProbed&&m_probedTracks.empty())return nullptr;
+    m_passthroughStatus.state=State::NotApplicable;
+    if(track){
+        m_passthroughStatus.trackCodec=track->codec;
+        m_passthroughStatus.codec=CodecFromName(track->codec);
+    }
+    const std::optional<Link> link=track?PlanLink(m_passthroughStatus.codec,uint32_t(std::max(0,track->sampleRate)),track->channels)
+                                         :std::nullopt;
+    if(!link){
+        if(!(previous==m_passthroughStatus))
+            LOG("Audio: passthrough is on, but the track is "<<(track?track->codec:std::string("unknown"))
+                <<(track?" at "+std::to_string(track->sampleRate)+" Hz":std::string())
+                <<", which is not AC-3, E-AC-3 or DTS at a rate IEC 61937 carries; playing PCM.");
+        return nullptr;
+    }
+    auto renderer=std::make_unique<WasapiRenderer>();
+    switch(renderer->OpenPassthrough(*link)){
+        case WasapiRenderer::PassthroughOpen::Opened:
+            m_passthroughStatus.state=State::Active;
+            return renderer;
+        case WasapiRenderer::PassthroughOpen::Refused:
+            m_passthroughStatus.state=State::Refused;
+            break;
+        case WasapiRenderer::PassthroughOpen::Failed:
+            m_passthroughStatus.state=State::Unavailable;
+            break;
+    }
+    // Closed here, before the PCM open, so the exclusive client is gone
+    // before a shared one asks for the same endpoint.
+    renderer.reset();
+    return nullptr;
+}
+
+void AudioPlayer::NoteDisplayModeChanged() {
+    const double now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    audio_passthrough::NoteDisplayChange(m_displayReopen,now,m_passthroughStatus.state);
+}
+
 bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderState>& state,
-                               const WasapiRenderer::Format& format) {
+                               const WasapiRenderer::Format& format, bool bitstream) {
     SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
     HANDLE readPipe = nullptr, writePipe = nullptr;
     if (!CreatePipe(&readPipe, &writePipe, &sa, 1024 * 1024)) return false;
@@ -296,9 +358,13 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     // director's commentary first used to play the commentary. Still
     // optional, so a video-only source produces an empty output rather than
     // a failure.
-    args << L"-i " << Q(m_path)
-         << L" -map 0:a:" << m_selectedTrack << L"? -vn -sn -dn -ac " << channels << L" -ar " << rate
-         << (asFloat ? L" -c:a pcm_f32le -f f32le pipe:1" : L" -c:a pcm_s16le -f s16le pipe:1");
+    args << L"-i " << Q(m_path) << L" -map 0:a:" << m_selectedTrack << L"? -vn -sn -dn";
+    // Passthrough: the track as it is, wrapped in IEC 61937 bursts at the
+    // rate the endpoint was opened at. The spdif muxer sends a DTS-HD track's
+    // core, which is what -dtshd_rate's default of 0 asks for.
+    if (bitstream) args << L" -c:a copy -f spdif pipe:1";
+    else args << L" -ac " << channels << L" -ar " << rate
+              << (asFloat ? L" -c:a pcm_f32le -f f32le pipe:1" : L" -c:a pcm_s16le -f s16le pipe:1");
     std::wstring cmd = Q(m_ffmpeg) + L" " + args.str();
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
     HANDLE job=CreateKillOnCloseJob();
@@ -311,7 +377,7 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     if(!AssignProcessToJobObject(job,pi.hProcess)){if(!TerminateProcess(pi.hProcess,1))LOG("Audio: failed to terminate unassigned child winerr="<<GetLastError());const DWORD waited=WaitForSingleObject(pi.hProcess,500);if(waited!=WAIT_OBJECT_0)LOG("Audio: unassigned child did not exit within bound result="<<waited);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);if(errorRead)CloseHandle(errorRead);CloseHandle(job);return false;}
     if(ResumeThread(pi.hThread)==DWORD(-1)){LOG("Audio: ResumeThread failed winerr="<<GetLastError());if(!TerminateJobObject(job,1))LOG("Audio: failed to terminate suspended job winerr="<<GetLastError());WaitForSingleObject(pi.hProcess,500);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);if(errorRead)CloseHandle(errorRead);CloseHandle(job);return false;}
     CloseHandle(pi.hThread);state->process=pi.hProcess;state->stdoutPipe=readPipe;state->stderrPipe=errorRead;state->job=job;
-    LOG("Audio: FFmpeg PCM path started at " << seekSeconds << " s.");
+    LOG("Audio: FFmpeg " << (bitstream ? "IEC 61937 passthrough" : "PCM") << " path started at " << seekSeconds << " s.");
     return true;
 }
 
@@ -389,6 +455,7 @@ void AudioPlayer::ThreadMain(const std::shared_ptr<ReaderState>& state) {
     // the log records at Open.
     WasapiRenderer* const renderer = state->renderer.get();
     const uint32_t bytesPerFrame = renderer ? renderer->CurrentFormat().BytesPerFrame() : 4;
+    const bool exclusive = renderer && renderer->Exclusive();
 
     // Whole frames only: the endpoint is handed frames, and the pipe delivers
     // arbitrary byte counts, so a partial frame has to be carried over.
@@ -463,6 +530,15 @@ void AudioPlayer::ThreadMain(const std::shared_ptr<ReaderState>& state) {
         // refused write can outnumber the space the next wait reports.
         const uint32_t wholeFrames = std::min(static_cast<uint32_t>(chunk.size() / bytesPerFrame), framesWanted);
         size_t consumedBytes = 0;
+        // An exclusive stream plays its buffer again if an event goes
+        // unanswered, so one with nothing to give still gets null data.
+        if (!wholeFrames && exclusive && !ended) {
+            if (renderer->WriteFiller() == WasapiRenderer::WriteResult::Failed) {
+                if (renderer->DeviceLost()) { state->deviceLost = true; break; }
+                LOG("Audio: writing to the endpoint failed; there will be no sound from here.");
+                break;
+            }
+        }
         if (wholeFrames) {
             const auto written = renderer->Write(chunk.data(), wholeFrames);
             if (written == WasapiRenderer::WriteResult::Failed) {
@@ -493,7 +569,18 @@ void AudioPlayer::ThreadMain(const std::shared_ptr<ReaderState>& state) {
     // audio-master clock jump backwards during the last video frames.
     // Stop() and Seek() perform their own reset, so only cancellation
     // discards queued audio.
-    if (!state->stop && renderer && !state->deviceLost) {
+    if (!state->stop && renderer && !state->deviceLost && exclusive) {
+        // An exclusive device keeps playing its buffer whether or not it is
+        // new: left running, it would repeat the last bursts until Stop. Two
+        // periods of null data let the last of the film out, then it stops,
+        // and the clock stands at the end of the film as it does in PCM.
+        for (int period = 0; period < 3 && !state->stop; ++period) {
+            uint32_t wanted = 0;
+            if (!renderer->WaitForSpace(50, wanted)) break;
+            if (wanted && renderer->WriteFiller() == WasapiRenderer::WriteResult::Failed) break;
+        }
+        if (!state->stop) renderer->Stop();
+    } else if (!state->stop && renderer && !state->deviceLost) {
         uint64_t played = 0, previous = ~uint64_t{0};
         // Bounded: at most the endpoint buffer plus slack, polled until the
         // count stops moving.
@@ -601,6 +688,21 @@ bool AudioPlayer::ServiceDeviceChanges(double playerPositionSeconds, bool player
         // the endpoint was ready is followed by the one that says it is.
         return Start(m_path, playerPositionSeconds,
                      playerPlaying ? AudioStartState::Playing : AudioStartState::Paused);
+    }
+    // A display-mode change has retrained the HDMI link under an exclusive
+    // bitstream, and the receiver is no longer locked to it; see
+    // audio_passthrough::NoteDisplayChange. Every call still succeeds, so
+    // nothing below would notice.
+    const double now = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (audio_passthrough::ReopenDue(m_displayReopen, now) &&
+        m_passthroughStatus.state == audio_passthrough::State::Active) {
+        const double resumeAt = m_lastKnownPosition.load();
+        LOG("Audio: the display changed mode; reopening the passthrough stream at " << resumeAt
+            << " s so the receiver locks onto it again.");
+        if (Seek(resumeAt)) return true;
+        LOG("Audio: could not reopen after the display change; playback continues without sound.");
+        return false;
     }
     // Two sources, and both are needed. The reader latches a loss it ran
     // into - a call to the endpoint that failed. The renderer latches one the

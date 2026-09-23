@@ -277,7 +277,7 @@ result, or generate frames at a lower multiple so there is less to render.
 ## There is no sound, or it is the wrong track
 
 *The wrong track.* If you are hearing the director's commentary or a dub,
-open **Playback > Audio track** and pick another. The player skips tracks the
+open **Playback > Audio** and pick another. The player skips tracks the
 container marks as commentary, audio description or hard-of-hearing when it
 chooses an opening track, but a file whose tracks carry no such marking gives
 it nothing to go on.
@@ -318,6 +318,28 @@ which is the guard for drivers that stop asking for data without reporting an
 error. Note that the player follows the *console* and *multimedia* default
 device and deliberately not the *communications* one, so starting a call does
 not move a film's audio to your headset.
+
+*Passthrough to a receiver plays PCM instead.* With **Playback > Audio >
+Passthrough to receiver** on, the status line says what happened to each
+track. "The audio device does not take AC-3" means the default playback device
+refused the IEC 61937 format: it is not an HDMI or S/PDIF output with a
+receiver behind it that decodes that codec, or the receiver is off or on
+another input. Windows' own **Sound > Playback > Properties > Supported
+Formats** tab lists what the device claims to decode. "In use or refuses
+exclusive mode" means the format was accepted but the stream could not be
+opened exclusively: another application holds the device, or **Allow
+applications to take exclusive control of this device** is off under
+**Properties > Advanced**. Either way the film plays as PCM, and the log has
+the HRESULT:
+
+```
+Audio: the endpoint does not take AC-3 as IEC 61937 at 48000 Hz (hr=0x88890008, answered in 3.0 ms); nothing on it decodes this. Playing PCM instead.
+```
+
+If a receiver goes quiet after the display changes refresh rate - frame
+generation offers such a switch - the player reopens the passthrough stream
+once the display has settled, about a second and a half later, and logs
+`the display changed mode; reopening the passthrough stream`.
 
 ## Preferences do not persist
 

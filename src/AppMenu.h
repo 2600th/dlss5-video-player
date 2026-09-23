@@ -44,6 +44,9 @@ inline constexpr UINT IDM_PAUSE_NEURAL_RENDER = 209;
 // consumer container carries and keeps the block clear of IDM_NEURAL_RENDERING.
 inline constexpr UINT IDM_AUDIO_TRACK_FIRST = 210;
 inline constexpr UINT IDM_AUDIO_TRACK_COUNT = 16;
+// Playback > Audio > Passthrough to receiver (AC-3/E-AC-3/DTS), a checkbox
+// below the track list, just past its block.
+inline constexpr UINT IDM_AUDIO_PASSTHROUGH = 226;
 inline constexpr UINT IDM_NEURAL_RENDERING = 300;
 inline constexpr UINT IDM_REHOOK = 301;
 inline constexpr UINT IDM_VIEW_FINAL = 302;
@@ -163,7 +166,7 @@ enum class PlayerCommandRoute {
 
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable);
 void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled);
-// Playback > Audio track. Empty labels leave a disabled placeholder rather
+// Playback > Audio's track list. Empty labels leave a disabled placeholder rather
 // than an empty popup; `selected` is the index of the track playing and
 // carries the only radio mark.
 void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int selected);

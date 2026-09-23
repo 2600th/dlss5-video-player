@@ -65,7 +65,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P3** | | | | |
 | [P3.1](#p31) | HDR end to end | L | Pipeline, Player | |
 | [P3.2](#p32) | Subtitles via libass, composited after the network | M-L | Player | |
-| [P3.3](#p33) | WASAPI drift correction and passthrough | M | Player | |
 | [P3.4](#p34) | Extract testable units from `main.cpp` | M | Player | |
 | [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | |
 | [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | |
@@ -319,22 +318,6 @@ shimmers static text.
 
 **Baseline UX:** delay adjustment, switching track mid-play, loading external
 files automatically, and detecting the text encoding.
-
----
-
-<a id="p33"></a>
-### P3.3 · WASAPI drift correction and passthrough
-
-`M` · **Player** · _open parts of old 3.8_
-
-- **Drift correction**: resample with `swr_set_compensation` against the
-  `IAudioClock` error. Nothing corrects a crystal offset over a full-length
-  film today.
-- **Bitstream passthrough**, behind a toggle, via FFmpeg's `spdif` muxer.
-
-**Design against two known bugs:**
-- mpv #1773: `IAudioClient::Release` can hang after a format change;
-- Kodi #18453: a display-mode change drops the HDMI audio sink.
 
 ---
 

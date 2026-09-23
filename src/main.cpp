@@ -2157,6 +2157,8 @@ public:
         // broke, and the film played on in silence. Cheap when nothing
         // happened, which is every tick but the one.
         Audio().ServiceDeviceChanges(m_loaded&&!Audio().Active()?Position():-1.0,m_playing);
+        if(auto passthrough=Audio().PassthroughStatus();!(passthrough==m_shownPassthrough)){
+            m_shownPassthrough=std::move(passthrough);UpdateCachedStatus();}
         UpdateLiveSession();
         WatchNeuralJobProgress();
         if(m_seekPending) {
@@ -2336,6 +2338,34 @@ private:
     void ChooseAudioTrack(int audioIndex){
         if(!Audio().SelectAudioTrack(audioIndex))return;
         UpdateAudioTrackMenu();
+    }
+    // Playback > Audio > Passthrough to receiver. Local playback only: the
+    // network player is built on the resolver's worker with passthrough off,
+    // and a stream's Opus or AAC would never qualify anyway. A change restarts
+    // audio where the viewer is, like a track change, so it applies at once.
+    void SetAudioPassthrough(bool enabled){
+        if(m_audioPassthrough==enabled)return;
+        m_audioPassthrough=enabled;m_audio.SetPassthrough(enabled);
+        LOG("Audio passthrough "<<(enabled?"on":"off")<<".");
+        SaveVideoSettings();SyncFeatureMenuState();
+        if(m_loaded&&!NetworkPlayback()&&m_audio.Active())m_audio.Seek(Position());
+        UpdateCachedStatus();
+    }
+    // What the status line says about passthrough: nothing while it is off,
+    // and otherwise whether the bitstream is going out or why it is not.
+    std::wstring AudioPassthroughNote()const{
+        const audio_passthrough::Status status=Audio().PassthroughStatus();
+        const wchar_t* key=audio_passthrough::StatusKey(status.state);
+        if(!key)return{};
+        std::wstring subject=audio_passthrough::CodecLabel(status.codec);
+        // One of ours at a rate nothing carries, rather than another codec.
+        if(status.state==audio_passthrough::State::NotApplicable&&status.codec!=audio_passthrough::Codec::None)
+            key=L"audio.passthrough.unsupported_rate";
+        else if(status.state==audio_passthrough::State::NotApplicable){
+            const std::string codec=audio_track::detail::CodecName(status.trackCodec);
+            subject=codec.empty()?T(L"audio.passthrough.unknown_track"):std::wstring(codec.begin(),codec.end());
+        }
+        return Format(T(key),subject.c_str());
     }
     void RecordRecent(const NeuralJobCompletion& completion,bool preserveCache=false){
         if(!m_recent)return;
@@ -3719,6 +3749,8 @@ private:
         // behaviour the player shipped with.
         m_evenCadenceOnly=ReadIniFloat(L"Playback",L"EvenCadenceOnly",0.0f)!=0.0f;
         m_frameGenHoldDuplicates=GetPrivateProfileIntW(L"FrameGeneration",L"HoldDuplicates",0,SettingsPath().c_str())!=0;
+        m_audioPassthrough=GetPrivateProfileIntW(L"Audio",L"Passthrough",0,SettingsPath().c_str())!=0;
+        m_audio.SetPassthrough(m_audioPassthrough);
         const uint32_t storedTarget=uint32_t(ReadIniFloat(L"Playback",L"UpscaleHeight",1440.0f));
         if(UpscaleRungWidth(storedTarget))m_upscaleTargetHeight=storedTarget;
         const float quality=ReadIniFloat(L"Playback",L"YouTubeQuality",0.0f);
@@ -3898,6 +3930,7 @@ private:
         WriteIniFloat(L"Playback",L"FrameGenerationGenerated",static_cast<float>(m_frameGenPreference));
         WriteIniFloat(L"Playback",L"EvenCadenceOnly",m_evenCadenceOnly?1.0f:0.0f);
         WritePrivateProfileStringW(L"FrameGeneration",L"HoldDuplicates",m_frameGenHoldDuplicates?L"1":L"0",SettingsPath().c_str());
+        WritePrivateProfileStringW(L"Audio",L"Passthrough",m_audioPassthrough?L"1":L"0",SettingsPath().c_str());
         WriteIniFloat(L"Playback",L"YouTubeQuality",static_cast<float>(m_youtubeSourceQuality));
         WriteIniFloat(L"VideoAdjustments",L"Brightness",m_colorSettings.brightness);
         WriteIniFloat(L"VideoAdjustments",L"Contrast",m_colorSettings.contrast);
@@ -4459,6 +4492,8 @@ private:
             // this is a constraint on the multiple, not one of the choices.
             CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
                           MF_BYCOMMAND|(m_evenCadenceOnly?MF_CHECKED:MF_UNCHECKED));
+            CheckMenuItem(menu,IDM_AUDIO_PASSTHROUGH,
+                          MF_BYCOMMAND|(m_audioPassthrough?MF_CHECKED:MF_UNCHECKED));
             CheckMenuItem(menu,IDM_FRAMEGEN_HOLD_DUPLICATES,
                           MF_BYCOMMAND|(m_frameGenHoldDuplicates?MF_CHECKED:MF_UNCHECKED));
             const UINT outputState=(m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())?MF_GRAYED:MF_ENABLED;
@@ -9569,6 +9604,7 @@ private:
             if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;
             text+=L" \u00b7 "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);
             if(!m_cachedTemporal.IsDefault())text+=L"/"+Utf8ToWide(CanonicalTemporalSettings(m_cachedTemporal));
+            if(const std::wstring passthrough=AudioPassthroughNote();!passthrough.empty())text=passthrough+L" \u00b7 "+text;
             if(m_liveSession)text=LiveSessionStatusText()+L" \u00b7 "+text;
             if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;
             if(const std::wstring dropped=m_dropNote.Visible(m_loaded,m_path);!dropped.empty())text=dropped+L" \u00b7 "+text;
@@ -9576,6 +9612,10 @@ private:
         }
         const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);
         status.upscalingStatus=UpscalingStatus();status.frameGenerationStatus=FrameGenerationStatus();std::wstring text=BuildPlayerStatusText(status);
+        // Ahead of the runtime detail only: it answers a toggle, and a narrow
+        // window should lose the counters before it loses why the receiver is
+        // getting PCM.
+        if(const std::wstring passthrough=AudioPassthroughNote();!passthrough.empty())text=passthrough+L" \u00b7 "+text;
         // Lead with what was marked, or with how to mark, because the runtime
         // detail behind it is what a narrow window truncates.
         if(const std::wstring markers=MarkerStatusText();!markers.empty())text=markers+L" \u00b7 "+text;
@@ -9910,7 +9950,7 @@ private:
         // HMONITOR, so the handle comparison cannot see it and the cached mode
         // has to be dropped here. Switching a 4K panel to 1080p is exactly this
         // case, and it moves the Auto rung.
-        case WM_DISPLAYCHANGE:InvalidateMonitorMode();ReportUpscaleRungDrift();Layout();InvalidateRect(h,nullptr,FALSE);return 0;
+        case WM_DISPLAYCHANGE:Audio().NoteDisplayModeChanged();InvalidateMonitorMode();ReportUpscaleRungDrift();Layout();InvalidateRect(h,nullptr,FALSE);return 0;
         case WM_SIZE:Layout();SyncActivityFeedback();RefreshToolbarTips();if(m_shortcutSheetOpen)ShowShortcutSheet();ClearTimelineHover();return 0;
         case WM_MOVE:if(m_shortcutSheetOpen)ShowShortcutSheet();ClearTimelineHover();break;
         case WM_PAINT:Paint();return 0;
@@ -10006,6 +10046,7 @@ private:
         case IDM_FRAMEGEN_MAX:SetFrameGenerationPreference(0);break;
         case IDM_FRAMEGEN_EVEN_ONLY:SetEvenCadenceOnly(!m_evenCadenceOnly);break;
         case IDM_FRAMEGEN_HOLD_DUPLICATES:SetHoldDuplicateFrames(!m_frameGenHoldDuplicates);break;
+        case IDM_AUDIO_PASSTHROUGH:SetAudioPassthrough(!m_audioPassthrough);break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
         case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:SetAspect(false,false);break;case IDM_ASPECT_FILL:SetAspect(true,false);break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
         case IDM_MARK_IN:SetMarker(true,Position100ns());break;case IDM_MARK_OUT:SetMarker(false,Position100ns());break;case IDM_CLEAR_MARKS:ClearMarkers();break;case IDM_GOTO_TIMECODE:ShowTimecodeDialog();break;
@@ -10070,6 +10111,11 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // SetEvenCadenceOnly and FrameRatePolicy.h for why that is the default.
     bool m_evenCadenceOnly=false;
     bool m_frameGenHoldDuplicates=false;
+    // Playback > Audio > Passthrough to receiver; off by default. What the
+    // status line last showed about it, so a restart that changes the answer
+    // (a seek onto a device that refuses, a display-change reopen) is shown.
+    bool m_audioPassthrough=false;
+    audio_passthrough::Status m_shownPassthrough;
     Clock::time_point m_frameGenStarted{};
     // When the current pair first came back NotReady, or the epoch when one is
     // assembling normally, beside when this was last asked for a pair at all.

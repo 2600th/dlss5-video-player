@@ -2,6 +2,7 @@
 #include <windows.h>
 
 #include "AudioClockPolicy.h"
+#include "AudioPassthroughPolicy.h"
 #include "AudioStderrPolicy.h"
 #include "AudioTrackPolicy.h"
 #include "WasapiRenderer.h"
@@ -102,6 +103,21 @@ public:
     // index names no track, so a mis-click cannot silence the film.
     bool SelectAudioTrack(int audioIndex);
 
+    // Bitstream passthrough of AC-3, E-AC-3 and DTS tracks to a receiver
+    // (Playback > Audio). Off by default. Takes effect at the next Start;
+    // the player restarts audio at the current position when it changes.
+    void SetPassthrough(bool enabled) { m_passthroughEnabled = enabled; }
+    bool PassthroughEnabled() const { return m_passthroughEnabled; }
+    // What the last Start did about it, for the status line. Off whenever it
+    // was not asked for; otherwise whether the bitstream went out, or why the
+    // film is playing PCM instead.
+    audio_passthrough::Status PassthroughStatus() const { return m_passthroughStatus; }
+    // The display changed mode. An active passthrough stream is reopened once
+    // it has settled, because the HDMI retrain drops the receiver's lock on
+    // it; see audio_passthrough::kDisplaySettleSeconds. ServiceDeviceChanges
+    // does the reopening.
+    void NoteDisplayModeChanged();
+
 private:
     struct ReaderState {
         HANDLE process = nullptr;
@@ -141,7 +157,10 @@ private:
     // not changed, and re-probing it would add an ffprobe to every seek.
     void ProbeAudioTracks(const std::wstring& videoPath);
     bool StartProcess(double seekSeconds, const std::shared_ptr<ReaderState>& state,
-                      const WasapiRenderer::Format& format);
+                      const WasapiRenderer::Format& format, bool bitstream);
+    // Opens the endpoint for passthrough when it was asked for and the
+    // selected track qualifies, and records what happened. Null means PCM.
+    std::unique_ptr<WasapiRenderer> OpenPassthrough();
     void StopProcess(const std::shared_ptr<ReaderState>& state);
     static void ReaderThread(std::shared_ptr<ReaderState> state) noexcept;
     static void ThreadMain(const std::shared_ptr<ReaderState>& state);
@@ -151,6 +170,12 @@ private:
     std::wstring m_path;
     std::wstring m_ffmpeg;
     std::vector<audio_track::Track> m_tracks;
+    // Every audio stream ffprobe listed, one or more: m_tracks is left empty
+    // for a single track, and passthrough still needs that track's codec.
+    std::vector<audio_track::Track> m_probedTracks;
+    // ffprobe answered for m_tracksPath, so an empty m_probedTracks means no
+    // audio rather than no answer.
+    bool m_tracksProbed = false;
     // The path m_tracks describes, so a seek reuses them and a new media load
     // re-enumerates.
     std::wstring m_tracksPath;
@@ -162,6 +187,9 @@ private:
     std::unique_ptr<RenderEndpointArrival> m_endpointArrival;
     double m_seekBaseSec = 0.0;
     float m_volume = 1.0f;
+    bool m_passthroughEnabled = false;
+    audio_passthrough::Status m_passthroughStatus;
+    audio_passthrough::DisplayChangeReopen m_displayReopen;
     Settings m_settings;
     // PositionSeconds is const and is the only place that can notice the clock
     // has stopped, so the staleness it tracks is mutable. Guarded because the
