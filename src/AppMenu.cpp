@@ -96,10 +96,12 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
     // The modes, in the compare bar's order, then the Mix and the view. One radio
     // group from IDM_COMPARE_NEURAL to kLastComparisonModeCommand, by position.
-    add(compare, IDM_COMPARE_NEURAL, L"menu.compare_neural"); add(compare, IDM_COMPARE_ORIGINAL, L"menu.compare_original"); add(compare, IDM_COMPARE_SPLIT, L"menu.compare_split"); add(compare, IDM_COMPARE_WIPE, L"menu.compare_wipe"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
+    add(compare, IDM_COMPARE_NEURAL, L"menu.compare_neural"); add(compare, IDM_COMPARE_ORIGINAL, L"menu.compare_original"); add(compare, IDM_COMPARE_SPLIT, L"menu.compare_split"); add(compare, IDM_COMPARE_WIPE, L"menu.compare_wipe"); add(compare, IDM_COMPARE_DIFFERENCE, L"menu.compare_difference"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
     // C and Shift+C walk the modes; listed so the keys reach the shortcut sheet.
     add(compare, IDM_COMPARE_NEXT_MODE, L"menu.compare_next_mode"); add(compare, IDM_COMPARE_PREVIOUS_MODE, L"menu.compare_previous_mode");
     add(compare, IDM_COMPARE_BLEND_LESS, L"menu.compare_blend_less"); add(compare, IDM_COMPARE_BLEND_MORE, L"menu.compare_blend_more"); add(compare, IDM_COMPARE_SWAP, L"menu.compare_swap"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
+    // How the Difference view is drawn.
+    add(compare, IDM_COMPARE_DIFFERENCE_LESS, L"menu.compare_difference_less"); add(compare, IDM_COMPARE_DIFFERENCE_MORE, L"menu.compare_difference_more"); add(compare, IDM_COMPARE_DIFFERENCE_LUMA, L"menu.compare_difference_luma"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
     add(compare, IDM_COMPARE_ZOOM, L"menu.compare_zoom"); add(compare, IDM_COMPARE_ZOOM_OUT, L"menu.compare_zoom_out"); add(compare, IDM_COMPARE_ZOOM_FIT, L"menu.compare_zoom_fit"); add(compare, IDM_COMPARE_LOUPE, L"menu.compare_loupe");
     // Which image is on screen: the comparison modes and the four debug views
     // are the same question asked two ways, so they are one group.
@@ -493,18 +495,20 @@ bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool r
 }
 
 bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable,
-                          UINT selectedMode, bool zoomed, bool swapped, bool loupe)
+                          UINT selectedMode, bool zoomed, bool swapped, bool loupe, bool differenceLuma)
 {
     const HMENU menu = find_menu_containing_command(menuBar, IDM_COMPARE_NEURAL);
     if (!menu) return false;
-    constexpr UINT modes[] = {IDM_COMPARE_NEURAL, IDM_COMPARE_ORIGINAL, IDM_COMPARE_SPLIT, IDM_COMPARE_WIPE};
+    constexpr UINT modes[] = {IDM_COMPARE_NEURAL, IDM_COMPARE_ORIGINAL, IDM_COMPARE_SPLIT, IDM_COMPARE_WIPE, IDM_COMPARE_DIFFERENCE};
     if (std::find(std::begin(modes), std::end(modes), selectedMode) == std::end(modes)) selectedMode = IDM_COMPARE_NEURAL;
     bool ok = true;
     for (const UINT command : modes)
         ok = EnableMenuItem(menu, command, MF_BYCOMMAND | (modesAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
-    for (const UINT command : {IDM_COMPARE_NEXT_MODE, IDM_COMPARE_PREVIOUS_MODE, IDM_COMPARE_BLEND_LESS, IDM_COMPARE_BLEND_MORE, IDM_COMPARE_SWAP})
+    for (const UINT command : {IDM_COMPARE_NEXT_MODE, IDM_COMPARE_PREVIOUS_MODE, IDM_COMPARE_BLEND_LESS, IDM_COMPARE_BLEND_MORE, IDM_COMPARE_SWAP,
+                               IDM_COMPARE_DIFFERENCE_LESS, IDM_COMPARE_DIFFERENCE_MORE, IDM_COMPARE_DIFFERENCE_LUMA})
         ok = EnableMenuItem(menu, command, MF_BYCOMMAND | (modesAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
     ok = CheckMenuItem(menu, IDM_COMPARE_SWAP, MF_BYCOMMAND | (swapped ? MF_CHECKED : MF_UNCHECKED)) != static_cast<DWORD>(-1) && ok;
+    ok = CheckMenuItem(menu, IDM_COMPARE_DIFFERENCE_LUMA, MF_BYCOMMAND | (differenceLuma ? MF_CHECKED : MF_UNCHECKED)) != static_cast<DWORD>(-1) && ok;
     ok = CheckRadioCommand(menu, IDM_COMPARE_NEURAL, kLastComparisonModeCommand, selectedMode) && ok;
     ok = EnableMenuItem(menu, IDM_COMPARE_ZOOM, MF_BYCOMMAND | (zoomAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
     for (const UINT command : {IDM_COMPARE_ZOOM_OUT, IDM_COMPARE_ZOOM_FIT})
@@ -639,8 +643,8 @@ std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDo
     case 'L': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_LOUPE);
     case 'X': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_SWAP);
     case 'C': return shiftDown ? IDM_COMPARE_PREVIOUS_MODE : IDM_COMPARE_NEXT_MODE;
-    case VK_OEM_4: return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_BLEND_LESS);
-    case VK_OEM_6: return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_BLEND_MORE);
+    case VK_OEM_4: return shiftDown ? IDM_COMPARE_DIFFERENCE_LESS : IDM_COMPARE_BLEND_LESS;
+    case VK_OEM_6: return shiftDown ? IDM_COMPARE_DIFFERENCE_MORE : IDM_COMPARE_BLEND_MORE;
     default: return std::nullopt;
     }
 }

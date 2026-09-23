@@ -142,7 +142,7 @@ struct CapturedVideoFrame {
 // Which member of an original/neural pair the presentation shader shows. The values
 // are persisted ([Comparison] Mode) and are the shader's mode numbers, so new ones
 // only ever go on the end.
-enum class ComparisonMode { Neural, Original, Blend, SplitVertical, Wipe };
+enum class ComparisonMode { Neural, Original, Blend, SplitVertical, Wipe, Difference };
 
 struct ComparisonSettings {
     ComparisonMode mode = ComparisonMode::Neural;
@@ -170,6 +170,11 @@ struct ComparisonSettings {
     float loupeLeftX = 0.0f, loupeLeftY = 0.0f, loupeRightX = 0.0f, loupeRightY = 0.0f;
     float loupeRadius = 0.0f;
     float loupeMagnification = 4.0f;
+    // Difference: |DLSS 5 at the Mix - original| in linear light, times the gain, as
+    // grey luma or per channel. Drawn without the image adjustments, which would
+    // move a difference that is not in the render.
+    float differenceGain = 4.0f;
+    bool differenceLuma = true;
 };
 
 // Whether a comparison needs the window compositor (PSPresentScaled) even when the
@@ -420,7 +425,7 @@ public:
     // A reference has been uploaded, or is queued behind the next submission.
     bool HasReference() const { return m_hasReference || m_referencePending; }
     // The tags the compositor draws on the picture: premultiplied BGRA, one row of
-    // `rowHeight` pixels per tag, in the order Original, DLSS 5, then two spare rows,
+    // `rowHeight` pixels per tag, in the order Original, DLSS 5, Difference, then a spare row,
     // each `rowWidths[i]` pixels wide from the left edge. Drawn by the caller at the
     // window's DPI; uploaded synchronously, so it drains the queue - call it when the
     // text or the DPI changes, not per frame. False leaves the previous atlas in use.
@@ -489,9 +494,9 @@ private:
     static constexpr uint32_t RootOverlay = 3, RootCompose = 4;
     // 16 present parameters plus the capture pass's source texel size.
     static constexpr uint32_t PresentConstantCount = 20;
-    // Pane, Label, LabelW, Target, Loupe, LoupeAt; see the Compose cbuffer in
+    // Pane, Label, LabelW, Target, Loupe, LoupeAt, Diff; see the Compose cbuffer in
     // D3D12Renderer.cpp.
-    static constexpr uint32_t ComposeConstantCount = 24;
+    static constexpr uint32_t ComposeConstantCount = 28;
     static constexpr uint32_t ReferenceSRV = 6;
     // NV12 source planes, bound at t0/t1 for the one conversion draw.
     static constexpr uint32_t SourceLumaSRV = 7, SourceChromaSRV = 8;

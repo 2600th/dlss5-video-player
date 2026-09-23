@@ -388,10 +388,11 @@ float3 SampleFootprint(Texture2D tex,float2 uv,float2 footprint,bool srgb){
 cbuffer Compose:register(b1){
     float4 Pane;    // y = original on the right of the divider (swap), w = labels on
     float4 Label;   // x = atlas row height px, y = inset from the picture's corner px, zw = atlas size px
-    float4 LabelW;  // atlas row widths px: Original, DLSS 5, and two spare rows
+    float4 LabelW;  // atlas row widths px: Original, DLSS 5, Difference, and a spare row
     float4 Target;  // xy = backbuffer size px
     float4 Loupe;   // xy = image UV under the pointer, z = circle radius px, w = px per output texel (0 = off)
     float4 LoupeAt; // xy = centre of the left circle, zw = of the right one, px
+    float4 Diff;    // x = difference gain, y = 1 for grey luma, 0 per channel
 }
 Texture2D Labels:register(t4);
 // One tag from the premultiplied atlas over an sRGB-encoded colour, with its top-left
@@ -435,6 +436,13 @@ float3 LoupeOver(float3 o,float2 px,bool swap){
     }
     return o;
 }
+// Where the model changed the picture: |DLSS 5 - original| in linear light, amplified,
+// as grey luma or per channel. `c` is the neural frame already dialled to the Mix, so
+// the view answers for the picture the other modes show.
+float3 DifferenceOf(float3 c,float3 ref){
+    float3 d=abs(c-ref)*max(Diff.x,0.0);
+    return Diff.y>0.5?Luma709(d).xxx:d;
+}
 float4 PSPresentScaled(V i):SV_Target{
     float zoom=max(Misc.y,0.01);
     float2 zc=Compare.zw;
@@ -450,9 +458,10 @@ float4 PSPresentScaled(V i):SV_Target{
         if(strength!=1.0)c=ApplyNeuralStrength(c,ref,strength,max(ColorB.w,1.0));
         if(mode==1)c=ref;
         else if(mode==2)c=lerp(ref,c,saturate(Compare.y));
+        else if(mode==5)c=DifferenceOf(c,ref);
         else if(mode!=0)c=(uv.x<Compare.y)!=swap?ref:c;
     }
-    c=ApplyVideoAdjustments(c);
+    if(mode!=5)c=ApplyVideoAdjustments(c);
     float screenSplit=(Compare.y-zc.x)*zoom+zc.x;
     if(mode==4){
         // Misc.x is one BACKBUFFER pixel here, so the divider stays a fixed width
@@ -469,6 +478,7 @@ float4 PSPresentScaled(V i):SV_Target{
         float2 px=i.uv*Target.xy;
         float inset=Label.y;
         if(mode==1)o=LabelOver(o,px,float2(inset,inset),0);
+        else if(mode==5)o=LabelOver(o,px,float2(inset,inset),2);
         else if(mode==3||mode==4){
             int left=swap?1:0,right=1-left;
             if(px.x<screenSplit*Target.x)o=LabelOver(o,px,float2(inset,inset),left);
@@ -1401,7 +1411,8 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
         float(m_labelWidths[0]),float(m_labelWidths[1]),float(m_labelWidths[2]),float(m_labelWidths[3]),
         float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),0,0,
         cmp.loupeU,cmp.loupeV,cmp.loupeRadius,loupe?std::max(cmp.loupeMagnification,1.0f):0.0f,
-        cmp.loupeLeftX,cmp.loupeLeftY,cmp.loupeRightX,cmp.loupeRightY};
+        cmp.loupeLeftX,cmp.loupeLeftY,cmp.loupeRightX,cmp.loupeRightY,
+        std::max(cmp.differenceGain,0.0f),cmp.differenceLuma?1.0f:0.0f,0,0};
     cmd->SetGraphicsRoot32BitConstants(RootCompose,ComposeConstantCount,compose,0);
     cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(OverlaySRV));
 }

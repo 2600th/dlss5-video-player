@@ -1972,6 +1972,9 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(has_menu_entry(compareEntries, L"Original", app_menu::IDM_COMPARE_ORIGINAL));
     CHECK(has_menu_entry(compareEntries, L"Split", app_menu::IDM_COMPARE_SPLIT));
     CHECK(has_menu_entry(compareEntries, L"Wipe", app_menu::IDM_COMPARE_WIPE));
+    CHECK(has_menu_entry(compareEntries, L"Difference", app_menu::IDM_COMPARE_DIFFERENCE));
+    CHECK(has_menu_entry(compareEntries, L"More difference gain\tShift+]", app_menu::IDM_COMPARE_DIFFERENCE_MORE));
+    CHECK(has_menu_entry(compareEntries, L"Less difference gain\tShift+[", app_menu::IDM_COMPARE_DIFFERENCE_LESS));
     // Blend was the Mix under another name; its row is gone and [ and ] step the Mix.
     CHECK(!has_menu_text(compareEntries, L"Blend"));
     CHECK(has_menu_entry(compareEntries, L"Mix less\t[", app_menu::IDM_COMPARE_BLEND_LESS));
@@ -2025,6 +2028,10 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_WIPE, false, false));
     CHECK(checked(app_menu::IDM_COMPARE_WIPE));CHECK(!checked(app_menu::IDM_COMPARE_ORIGINAL));
     CHECK(!checked(app_menu::IDM_COMPARE_SWAP));
+    // Difference ends the group.
+    CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_DIFFERENCE, false, false, false, false));
+    CHECK(checked(app_menu::IDM_COMPARE_DIFFERENCE));CHECK(!checked(app_menu::IDM_COMPARE_WIPE));
+    CHECK(!checked(app_menu::IDM_COMPARE_DIFFERENCE_LUMA));
 
     using app_menu::CommandForPlayerKey;
     CHECK(CommandForPlayerKey('I', false, false) == app_menu::IDM_MARK_IN);
@@ -2042,6 +2049,8 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(CommandForPlayerKey('X', false, false) == app_menu::IDM_COMPARE_SWAP);
     CHECK(CommandForPlayerKey('Z', false, true) == app_menu::IDM_COMPARE_ZOOM_OUT);
     CHECK(CommandForPlayerKey('L', false, false) == app_menu::IDM_COMPARE_LOUPE);
+    CHECK(CommandForPlayerKey(VK_OEM_4, false, true) == app_menu::IDM_COMPARE_DIFFERENCE_LESS);
+    CHECK(CommandForPlayerKey(VK_OEM_6, false, true) == app_menu::IDM_COMPARE_DIFFERENCE_MORE);
     CHECK(CommandForPlayerKey('C', false, false) == app_menu::IDM_COMPARE_NEXT_MODE);
     CHECK(CommandForPlayerKey('C', false, true) == app_menu::IDM_COMPARE_PREVIOUS_MODE);
     // Ctrl+Alt+C is the overlay hotkey for the adjustments; Ctrl+C stays unclaimed.
@@ -7520,7 +7529,7 @@ void compare_compositor_stays_out_of_the_capture_program_test()
     ComparisonSettings comparison;
     CHECK(!ComparisonNeedsCompositor(comparison));
     comparison.mode=ComparisonMode::Blend;CHECK(!ComparisonNeedsCompositor(comparison));
-    for(const ComparisonMode mode:{ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe}){
+    for(const ComparisonMode mode:{ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe,ComparisonMode::Difference}){
         comparison.mode=mode;CHECK(ComparisonNeedsCompositor(comparison));
     }
 }
@@ -7600,6 +7609,18 @@ void compare_settings_migrate_strength_and_blend_to_the_mix_test()
     CHECK_EQ(0.0f,StepMix(0.05f,-0.1f));
     CHECK_EQ(2.0f,StepMix(1.95f,0.1f));
     CHECK(std::abs(StepMix(0.33f,0.1f)-0.45f)<1e-6f);
+    // The Difference view's gain walks a doubling ladder from 1x to 32x, starting at 4x.
+    CHECK_EQ(8.0f,StepDifferenceGain(4.0f,+1));
+    CHECK_EQ(2.0f,StepDifferenceGain(4.0f,-1));
+    CHECK_EQ(32.0f,StepDifferenceGain(32.0f,+1));
+    CHECK_EQ(1.0f,StepDifferenceGain(1.0f,-1));
+    CHECK_EQ(4.0f,LoadDifferenceGain(5.0f));
+    CHECK_EQ(kDefaultDifferenceGain,LoadDifferenceGain(-1.0f));
+    CHECK_EQ(kDefaultDifferenceGain,LoadDifferenceGain(std::numeric_limits<float>::infinity()));
+    CHECK_EQ(32.0f,LoadDifferenceGain(1000.0f));
+    // Difference is a mode a file can come back to.
+    const std::array<int,5> withDifference{kNeural,kOriginal,kSplit,kWipe,kDifference};
+    CHECK_EQ(kDifference,Migrate(1.0f,kDifference,0.5f,1.0f,withDifference).mode);
 }
 
 // GDI draws the tags opaque; the compositor needs them premultiplied over a plate

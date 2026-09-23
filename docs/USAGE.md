@@ -178,6 +178,13 @@ also under **Video > Compare**:
   the picture to move it. Wipe adds a white line. Both are tagged **ORIGINAL**
   and **DLSS 5** in the picture's top corners. **Swap** (`X`) puts the original
   on the right.
+- **Difference** shows where the model changed the picture: the absolute
+  difference between DLSS 5 (at the current Mix) and the original, computed in
+  linear light and amplified 4x, as brightness. `Shift+]` and `Shift+[` step the
+  amplification through 1x, 2x, 4x, 8x, 16x and 32x, and **Video > Compare >
+  Difference as brightness only** switches between one grey value and a
+  difference per color channel. The image adjustments do not apply to it, and
+  its tag names the amplification and the channels, e.g. `DIFFERENCE x4 · LUMA`.
 - **Mix** is how much of the neural result you see: 100% is the render
   untouched, lower mixes back toward the original, higher extends the model's
   own change. Drag the slider or press `[` and `]` (a tenth per press). It
@@ -210,8 +217,8 @@ To look closely:
   Fit/Fill button go back to Fit or Fill.
 
 Pause and step with `.` to judge a single frame; `D` still switches the whole
-view between original and neural. The mode, Mix, split position, swap and zoom
-step are remembered in `[Comparison]`.
+view between original and neural. The mode, Mix, split position, swap, zoom step and difference settings
+are remembered in `[Comparison]`.
 
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
 local structure, local tone, skin structure, style and automatic mask, the

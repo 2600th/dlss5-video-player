@@ -3708,6 +3708,9 @@ private:
         // ZoomScale has no step that means the same, so it is left behind.
         m_zoomStep=std::clamp(int(GetPrivateProfileIntW(L"Comparison",L"ZoomStep",0,SettingsPath().c_str())),0,compare_zoom::kSteps-1);
         m_comparison.swap=GetPrivateProfileIntW(L"Comparison",L"Swap",0,SettingsPath().c_str())!=0;
+        m_comparison.differenceGain=compare_settings::LoadDifferenceGain(ReadIniFloat(L"Comparison",L"DifferenceGain",compare_settings::kDefaultDifferenceGain));
+        m_comparison.differenceLuma=GetPrivateProfileIntW(L"Comparison",L"DifferenceLuma",1,SettingsPath().c_str())!=0;
+        ++m_labelTextRevision;
         LoadRenderPace();
     }
 
@@ -3857,6 +3860,8 @@ private:
         WritePrivateProfileStringW(L"Comparison",L"Mode",std::to_wstring(static_cast<int>(m_comparison.mode)).c_str(),SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"Mix",m_comparison.strength);
         WritePrivateProfileStringW(L"Comparison",L"Swap",m_comparison.swap?L"1":L"0",SettingsPath().c_str());
+        WriteIniFloat(L"Comparison",L"DifferenceGain",m_comparison.differenceGain);
+        WritePrivateProfileStringW(L"Comparison",L"DifferenceLuma",m_comparison.differenceLuma?L"1":L"0",SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"SplitX",m_comparison.splitX);
         WritePrivateProfileStringW(L"Comparison",L"ZoomStep",std::to_wstring(m_zoomStep).c_str(),SettingsPath().c_str());
     }
@@ -3919,13 +3924,13 @@ private:
     // The modes the compare bar offers, in its order, which is also the order C steps
     // through. Blend is not one of them: it was the Mix under another name.
     static std::span<const ComparisonMode> CompareBarModes(){
-        static constexpr std::array modes{ComparisonMode::Neural,ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe};
+        static constexpr std::array modes{ComparisonMode::Neural,ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe,ComparisonMode::Difference};
         return modes;
     }
     static const wchar_t* CompareModeLabelKey(ComparisonMode mode){
-        switch(mode){case ComparisonMode::Original:return L"compare.mode.original";case ComparisonMode::SplitVertical:return L"compare.mode.split";case ComparisonMode::Wipe:return L"compare.mode.wipe";default:return L"compare.mode.neural";}
+        switch(mode){case ComparisonMode::Original:return L"compare.mode.original";case ComparisonMode::SplitVertical:return L"compare.mode.split";case ComparisonMode::Wipe:return L"compare.mode.wipe";case ComparisonMode::Difference:return L"compare.mode.difference";default:return L"compare.mode.neural";}
     }
-    static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Original:return IDM_COMPARE_ORIGINAL;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;default:return IDM_COMPARE_NEURAL;}}
+    static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Original:return IDM_COMPARE_ORIGINAL;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;case ComparisonMode::Difference:return IDM_COMPARE_DIFFERENCE;default:return IDM_COMPARE_NEURAL;}}
     // Uploads the original member the presentation shader compares against.
     // Only modes that read the reference pay for the source-size copy, plus a strength
     // dial off its default, which composites against that same original.
@@ -3998,6 +4003,15 @@ private:
     }
     void AdjustMix(float delta){SetMix(compare_settings::StepMix(m_comparison.strength,delta));}
     void ToggleSwap(){if(!ComparisonModesAvailable())return;m_comparison.swap=!m_comparison.swap;ApplyComparison();}
+    // The Difference view's gain and channel choice are both named in its tag, so a
+    // change redraws the tag atlas.
+    void StepDifferenceGain(int direction){
+        if(!ComparisonModesAvailable())return;
+        const float gain=compare_settings::StepDifferenceGain(m_comparison.differenceGain,direction);
+        if(gain==m_comparison.differenceGain)return;
+        m_comparison.differenceGain=gain;++m_labelTextRevision;ApplyComparison();
+    }
+    void ToggleDifferenceLuma(){if(!ComparisonModesAvailable())return;m_comparison.differenceLuma=!m_comparison.differenceLuma;++m_labelTextRevision;ApplyComparison();}
     void CycleComparisonMode(bool reverse){
         if(!ComparisonModesAvailable())return;
         const auto modes=CompareBarModes();
@@ -4165,7 +4179,7 @@ private:
             }
             app_menu::CheckRadioCommand(menu,IDM_ASPECT_FIT,IDM_ASPECT_ONE_TO_ONE,m_onePixel?IDM_ASPECT_ONE_TO_ONE:(m_fill?IDM_ASPECT_FILL:IDM_ASPECT_FIT));
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
-            app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_zoomStep>0,m_comparison.swap,m_loupe);
+            app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_zoomStep>0,m_comparison.swap,m_loupe,m_comparison.differenceLuma);
             DrawMenuBar(m_hwnd);
         }
     }
@@ -6614,7 +6628,13 @@ private:
     // flag rule down its left edge, DESIGN.md's provenance tag. Premultiplied, one row
     // per tag, at the window's DPI; see compare_labels::Premultiply for the alpha.
     struct LabelAtlasPixels{std::vector<uint8_t> pixels;uint32_t width{},height{},rowHeight{};std::array<uint32_t,4> widths{};};
-    std::array<std::wstring,4> LabelAtlasTexts()const{return{T(L"compare.tag.original"),T(L"compare.tag.dlss"),std::wstring{},std::wstring{}};}
+    std::array<std::wstring,4> LabelAtlasTexts()const{
+        // "DIFFERENCE x4 - LUMA": what the view is, how far it is amplified and which
+        // channels, because a difference image without its gain cannot be read.
+        wchar_t gain[16]{};swprintf_s(gain,L"%g",double(m_comparison.differenceGain));
+        const std::wstring difference=T(L"compare.tag.difference")+L" \u00d7"+gain+L" \u00b7 "+T(m_comparison.differenceLuma?L"compare.tag.luma":L"compare.tag.color");
+        return{T(L"compare.tag.original"),T(L"compare.tag.dlss"),difference,std::wstring{}};
+    }
     LabelAtlasPixels BuildLabelAtlas(UINT dpi)const{
         LabelAtlasPixels atlas;
         const auto texts=LabelAtlasTexts();
@@ -9615,7 +9635,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         // the view Blend became, the neural frame at the Mix.
         case IDM_COMPARE_NEURAL:case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_ORIGINAL:SetComparisonMode(ComparisonMode::Original);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustMix(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustMix(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
-        case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_ZOOM_OUT:ZoomBy(-1,false,PointerOverPicture());break;case IDM_COMPARE_ZOOM_FIT:ZoomToFit();break;case IDM_COMPARE_LOUPE:ToggleLoupe();break;
+        case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_DIFFERENCE:SetComparisonMode(ComparisonMode::Difference);break;
+        case IDM_COMPARE_DIFFERENCE_LESS:StepDifferenceGain(-1);break;case IDM_COMPARE_DIFFERENCE_MORE:StepDifferenceGain(+1);break;case IDM_COMPARE_DIFFERENCE_LUMA:ToggleDifferenceLuma();break;case IDM_COMPARE_ZOOM_OUT:ZoomBy(-1,false,PointerOverPicture());break;case IDM_COMPARE_ZOOM_FIT:ZoomToFit();break;case IDM_COMPARE_LOUPE:ToggleLoupe();break;
         case IDM_ASPECT_ONE_TO_ONE:SetAspect(false,true);break;case IDM_COMPARE_NEXT_MODE:CycleComparisonMode(false);break;case IDM_COMPARE_PREVIOUS_MODE:CycleComparisonMode(true);break;
         }
     }

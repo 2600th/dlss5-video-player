@@ -107,7 +107,11 @@ inline constexpr UINT IDM_COMPARE_PREVIOUS_MODE = 430;
 inline constexpr UINT IDM_COMPARE_ZOOM_OUT = 431;
 inline constexpr UINT IDM_COMPARE_ZOOM_FIT = 432;
 inline constexpr UINT IDM_COMPARE_LOUPE = 433;
-inline constexpr UINT kLastComparisonModeCommand = IDM_COMPARE_WIPE;
+inline constexpr UINT IDM_COMPARE_DIFFERENCE = 434;
+inline constexpr UINT IDM_COMPARE_DIFFERENCE_LESS = 435;
+inline constexpr UINT IDM_COMPARE_DIFFERENCE_MORE = 436;
+inline constexpr UINT IDM_COMPARE_DIFFERENCE_LUMA = 437;
+inline constexpr UINT kLastComparisonModeCommand = IDM_COMPARE_DIFFERENCE;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 inline constexpr UINT IDM_CLEAR_NEURAL_CACHE = 451;
 inline constexpr UINT IDM_OPEN_RENDER_RECEIPT = 452;
@@ -182,15 +186,16 @@ bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool r
 // _WIPE); anything else checks IDM_COMPARE_NEURAL.
 // zoomed enables Zoom out and Fit; the zoom steps themselves carry no check.
 bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable,
-                          UINT selectedMode, bool zoomed, bool swapped = false, bool loupe = false);
+                          UINT selectedMode, bool zoomed, bool swapped = false, bool loupe = false,
+                          bool differenceLuma = true);
 // CheckMenuRadioItem over the popup that holds `first`, by the POSITIONS of `first`
 // and `last`: with MF_BYCOMMAND Windows wants the checked id numerically between
 // them, which a group that grew an item past its original ids cannot promise.
 bool CheckRadioCommand(HMENU menuBar, UINT first, UINT last, UINT chosen);
 // Menu command for a plain-key accelerator of the range, preview, neural
 // settings and comparison items (I, O, Shift+I/O, Ctrl+G, F, Shift+F, Ctrl+R,
-// Ctrl+N, Z, Shift+Z, [ and ], X, C, Shift+C and L); nullopt when the key is not
-// one of them.
+// Ctrl+N, Z, Shift+Z, [ and ], Shift+[ and Shift+], X, C, Shift+C and L); nullopt
+// when the key is not one of them.
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown);
 
 // One row of the keyboard cheat sheet: the menu it lives in (or "Keyboard"

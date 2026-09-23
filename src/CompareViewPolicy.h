@@ -114,7 +114,7 @@ inline Step Release(State& state)
 namespace compare_settings {
 
 // Modes as persisted in [Comparison] Mode; the numbers are ComparisonMode's.
-inline constexpr int kNeural = 0, kOriginal = 1, kBlend = 2, kSplit = 3, kWipe = 4;
+inline constexpr int kNeural = 0, kOriginal = 1, kBlend = 2, kSplit = 3, kWipe = 4, kDifference = 5;
 
 struct Loaded {
     float mix = 1.0f;
@@ -155,6 +155,28 @@ inline Loaded Migrate(std::optional<float> savedMix, int savedMode, float savedA
 inline float StepMix(float mix, float delta)
 {
     return std::clamp(std::round((mix + delta) * 20.0f) / 20.0f, 0.0f, 2.0f);
+}
+
+// The Difference view's gain, a doubling ladder: 1x shows the raw difference, which
+// for a subtle render is near black, and 32x turns a one-code-value change into a
+// visible one. Shift+[ and Shift+] walk it; 4x is where it starts.
+inline constexpr std::array<float, 6> kDifferenceGains{1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f};
+inline constexpr float kDefaultDifferenceGain = 4.0f;
+
+inline float StepDifferenceGain(float gain, int direction)
+{
+    size_t index = 0;
+    for (size_t candidate = 0; candidate < kDifferenceGains.size(); ++candidate)
+        if (std::abs(kDifferenceGains[candidate] - gain) < std::abs(kDifferenceGains[index] - gain)) index = candidate;
+    if (direction > 0 && index + 1 < kDifferenceGains.size()) ++index;
+    if (direction < 0 && index > 0) --index;
+    return kDifferenceGains[index];
+}
+
+// A saved gain is snapped onto the ladder, so a hand-edited 5 reads as 4.
+inline float LoadDifferenceGain(float saved)
+{
+    return std::isfinite(saved) && saved > 0.0f ? StepDifferenceGain(saved, 0) : kDefaultDifferenceGain;
 }
 
 } // namespace compare_settings

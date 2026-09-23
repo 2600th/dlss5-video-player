@@ -1964,7 +1964,27 @@ struct PlayerAppTestAccess {
         app.HandleCommand(IDM_COMPARE_NEXT_MODE);
         CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
         app.HandleCommand(IDM_COMPARE_NEXT_MODE); app.HandleCommand(IDM_COMPARE_NEXT_MODE);
+        CHECK(app.m_comparison.mode == ComparisonMode::Difference);
+        app.HandleCommand(IDM_COMPARE_NEXT_MODE);
         CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        app.HandleCommand(IDM_COMPARE_PREVIOUS_MODE);
+        CHECK(app.m_comparison.mode == ComparisonMode::Difference);
+        // The Difference view: its gain walks the ladder and its tag names the gain and
+        // the channels, so the atlas is redrawn when either changes.
+        CHECK(app.m_renderer->GetComparison().mode == ComparisonMode::Difference);
+        CHECK_EQ(4.0f, app.m_comparison.differenceGain);
+        const uint64_t revision = app.m_labelTextRevision;
+        app.HandleCommand(IDM_COMPARE_DIFFERENCE_MORE);
+        CHECK_EQ(8.0f, app.m_renderer->GetComparison().differenceGain);
+        CHECK(app.m_labelTextRevision != revision);
+        CHECK(app.LabelAtlasTexts()[2].find(L"\u00d78") != std::wstring::npos);
+        CHECK(app.LabelAtlasTexts()[2].find(L"LUMA") != std::wstring::npos);
+        app.HandleCommand(IDM_COMPARE_DIFFERENCE_LUMA);
+        CHECK(!app.m_renderer->GetComparison().differenceLuma);
+        CHECK(app.LabelAtlasTexts()[2].find(L"COLOR") != std::wstring::npos);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_COMPARE_DIFFERENCE, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        CHECK(app.BuildLabelAtlas(96).widths[2] > app.BuildLabelAtlas(96).widths[1]);
+        app.HandleCommand(IDM_COMPARE_DIFFERENCE_LUMA); app.HandleCommand(IDM_COMPARE_DIFFERENCE_LESS);
         app.HandleCommand(IDM_COMPARE_PREVIOUS_MODE);
         CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
         app.HandleCommand(IDM_COMPARE_SWAP);
@@ -2078,11 +2098,11 @@ struct PlayerAppTestAccess {
         CHECK(!app.m_dragMix);
         // A press on the row that hits nothing is still the row's.
         CHECK(app.CompareBarMouseDown(1, layout.bar.top + 1));
-        // The tags the compositor draws: two non-empty rows, flag rule opaque at the left
+        // The tags the compositor draws: three non-empty rows, flag rule opaque at the left
         // edge, plate translucent beside it, nothing past each tag's width.
         const auto atlas = app.BuildLabelAtlas(96);
         CHECK(!atlas.pixels.empty());
-        CHECK(atlas.widths[0] > 0 && atlas.widths[1] > 0 && atlas.widths[2] == 0);
+        CHECK(atlas.widths[0] > 0 && atlas.widths[1] > 0 && atlas.widths[2] > 0 && atlas.widths[3] == 0);
         CHECK_EQ(size_t(atlas.width) * atlas.height * 4, atlas.pixels.size());
         if (!atlas.pixels.empty() && atlas.widths[1] + 1 < atlas.width) {
             const auto alpha = [&](uint32_t x, uint32_t y) { return atlas.pixels[(size_t(y) * atlas.width + x) * 4 + 3]; };
