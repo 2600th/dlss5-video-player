@@ -77,3 +77,6 @@ site/dist/
 .impeccable/analysis/
 .impeccable/mocks/
 .impeccable/brief-body.md
+
+# Browser-automation session logs (Playwright MCP) written into the working directory
+/.playwright-mcp/
