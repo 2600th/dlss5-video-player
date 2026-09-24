@@ -15,6 +15,7 @@ Add-Type -Namespace Win -Name Cap -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
 [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr h);
 [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr h, IntPtr dc);
 [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr dc);
@@ -27,7 +28,11 @@ public struct RECT { public int Left, Top, Right, Bottom; }
 # Physical pixels, not the scaled ones a DPI-unaware PowerShell is given: at
 # 150% GetWindowRect reported two thirds of the player's real size and the
 # bitmap kept only its top-left corner.
-[void][Win.Cap]::SetProcessDPIAware()
+# Per-monitor v2 (-4), not just system-aware: a system-aware process still gets
+# rectangles scaled by system DPI / monitor DPI for a window on a monitor whose
+# scale differs from the primary's. With the primary at 175% and the player on a
+# 150% monitor, a 1920x1032 window was reported - and captured - as 2240x1204.
+if (-not [Win.Cap]::SetProcessDpiAwarenessContext([IntPtr]-4)) { [void][Win.Cap]::SetProcessDPIAware() }
 
 # PrintWindow draws into a GDI bitmap of our own, which becomes a System.Drawing
 # image only afterwards. It used to draw into the HDC of Graphics.FromImage(bitmap)
