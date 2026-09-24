@@ -2520,6 +2520,9 @@ private:
     // published into its index as the helper finalizes them.
     bool Render(){
         const auto& liveIndex=in_.liveIndex;const auto& liveDirectory=in_.liveDirectory;const uint64_t liveRunId=in_.liveRunId;const auto& coldStart=in_.coldStart;
+        // The key is settled and the helper is next: from here to the first
+        // frame is model preparation, which is what the warm-up line says.
+        {NeuralRenderProgress preparing{};preparing.phase=NeuralRenderPhase::NeuralRendering;PostProgress(preparing);}
         staging_=cache_.BeginRenderStaging(renderKey_);if(!staging_){completion_->result.detail=in_.cacheFailureText.Describe(cache_);return false;}
         {std::ofstream settingsFile(*staging_/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot_->data(),static_cast<std::streamsize>(settingsSnapshot_->size()));if(!settingsFile){cache_.MarkInvalid(*staging_);completion_->result.detail=L"The neural settings snapshot could not be staged.";return false;}}
         const auto& range=in_.range;
@@ -10247,6 +10250,9 @@ private:
         // paused; the pause event, not that report, decides when rendering resumes.
         const bool holdPause=m_neuralLifecycle.state==NeuralPlaybackState::Paused&&next==NeuralPlaybackState::Rendering&&NeuralJobPaused();
         if(!holdPause)m_neuralLifecycle.Transition(next);
+        // The status line and the chips are cached text: a phase change is
+        // what the warm-up line reports, so it has to reach them.
+        if(m_liveSession)UpdateCachedStatus();
         InvalidateRect(m_hwnd,nullptr,FALSE);
     }
     // Silence budget per phase, in seconds; 0 means the phase is not watched.
