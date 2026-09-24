@@ -12,97 +12,97 @@
                                                {
                                                    "width":  960,
                                                    "format":  "avif",
-                                                   "pairPsnr":  27.28,
-                                                   "sourcePairPsnr":  27.33,
+                                                   "pairPsnr":  27.83,
+                                                   "sourcePairPsnr":  27.84,
                                                    "original":  {
-                                                                    "psnrAgainstSource":  39.98,
+                                                                    "psnrAgainstSource":  43.07,
                                                                     "file":  "hero-original-960.avif",
-                                                                    "bytes":  20321
+                                                                    "bytes":  8010
                                                                 },
                                                    "neural":  {
-                                                                  "psnrAgainstSource":  39.21,
+                                                                  "psnrAgainstSource":  42.77,
                                                                   "file":  "hero-neural-960.avif",
-                                                                  "bytes":  23181
+                                                                  "bytes":  7773
                                                               }
                                                },
                                                {
                                                    "width":  960,
                                                    "format":  "webp",
-                                                   "pairPsnr":  27.12,
-                                                   "sourcePairPsnr":  27.33,
+                                                   "pairPsnr":  27.75,
+                                                   "sourcePairPsnr":  27.84,
                                                    "original":  {
-                                                                    "psnrAgainstSource":  38.02,
+                                                                    "psnrAgainstSource":  41.04,
                                                                     "file":  "hero-original-960.webp",
-                                                                    "bytes":  40124
+                                                                    "bytes":  17104
                                                                 },
                                                    "neural":  {
-                                                                  "psnrAgainstSource":  37.58,
+                                                                  "psnrAgainstSource":  40.98,
                                                                   "file":  "hero-neural-960.webp",
-                                                                  "bytes":  44694
+                                                                  "bytes":  16426
                                                               }
                                                },
                                                {
                                                    "width":  1280,
                                                    "format":  "avif",
-                                                   "pairPsnr":  27.31,
-                                                   "sourcePairPsnr":  27.34,
+                                                   "pairPsnr":  27.85,
+                                                   "sourcePairPsnr":  27.85,
                                                    "original":  {
-                                                                    "psnrAgainstSource":  41.33,
+                                                                    "psnrAgainstSource":  44.4,
                                                                     "file":  "hero-original-1280.avif",
-                                                                    "bytes":  26242
+                                                                    "bytes":  10646
                                                                 },
                                                    "neural":  {
-                                                                  "psnrAgainstSource":  40.58,
+                                                                  "psnrAgainstSource":  44.04,
                                                                   "file":  "hero-neural-1280.avif",
-                                                                  "bytes":  30097
+                                                                  "bytes":  10466
                                                               }
                                                },
                                                {
                                                    "width":  1280,
                                                    "format":  "webp",
-                                                   "pairPsnr":  27.23,
-                                                   "sourcePairPsnr":  27.34,
+                                                   "pairPsnr":  27.77,
+                                                   "sourcePairPsnr":  27.85,
                                                    "original":  {
-                                                                    "psnrAgainstSource":  39.04,
+                                                                    "psnrAgainstSource":  41.77,
                                                                     "file":  "hero-original-1280.webp",
-                                                                    "bytes":  53512
+                                                                    "bytes":  23868
                                                                 },
                                                    "neural":  {
-                                                                  "psnrAgainstSource":  38.88,
+                                                                  "psnrAgainstSource":  41.75,
                                                                   "file":  "hero-neural-1280.webp",
-                                                                  "bytes":  59914
+                                                                  "bytes":  23666
                                                               }
                                                },
                                                {
                                                    "width":  1920,
                                                    "format":  "avif",
-                                                   "pairPsnr":  27.31,
-                                                   "sourcePairPsnr":  27.27,
+                                                   "pairPsnr":  27.85,
+                                                   "sourcePairPsnr":  27.83,
                                                    "original":  {
-                                                                    "psnrAgainstSource":  42.28,
+                                                                    "psnrAgainstSource":  45.38,
                                                                     "file":  "hero-original-1920.avif",
-                                                                    "bytes":  39408
+                                                                    "bytes":  16255
                                                                 },
                                                    "neural":  {
-                                                                  "psnrAgainstSource":  41.27,
+                                                                  "psnrAgainstSource":  44.9,
                                                                   "file":  "hero-neural-1920.avif",
-                                                                  "bytes":  46578
+                                                                  "bytes":  16176
                                                               }
                                                },
                                                {
                                                    "width":  1920,
                                                    "format":  "webp",
-                                                   "pairPsnr":  27.24,
-                                                   "sourcePairPsnr":  27.27,
+                                                   "pairPsnr":  27.78,
+                                                   "sourcePairPsnr":  27.83,
                                                    "original":  {
-                                                                    "psnrAgainstSource":  40.34,
+                                                                    "psnrAgainstSource":  42.59,
                                                                     "file":  "hero-original-1920.webp",
-                                                                    "bytes":  88370
+                                                                    "bytes":  40620
                                                                 },
                                                    "neural":  {
-                                                                  "psnrAgainstSource":  39.93,
+                                                                  "psnrAgainstSource":  42.39,
                                                                   "file":  "hero-neural-1920.webp",
-                                                                  "bytes":  99796
+                                                                  "bytes":  40688
                                                               }
                                                }
                                            ]

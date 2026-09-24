@@ -182,17 +182,24 @@
         var source = demo.getAttribute('data-video');
         if (!source) { return; }
 
+        // The poster and the size come from the markup, so the video starts in
+        // exactly the box the poster held and the page does not shift.
+        var poster = demo.querySelector('.demo__poster');
         var video = document.createElement('video');
         video.src = source;
         video.controls = true;
         video.autoplay = true;
         video.playsInline = true;
-        video.setAttribute('poster', 'assets/demo/demo-poster.jpg');
+        if (poster) {
+          video.setAttribute('poster', poster.getAttribute('src'));
+          video.width = parseInt(poster.getAttribute('width'), 10);
+          video.height = parseInt(poster.getAttribute('height'), 10);
+        }
 
         demo.textContent = '';
         demo.appendChild(video);
         video.focus({ preventScroll: true });
-        track('demo_play', { length_seconds: 22 });
+        track('demo_play', { length_seconds: 25 });
       });
     }
   }

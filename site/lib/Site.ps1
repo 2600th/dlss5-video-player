@@ -323,6 +323,26 @@ function Get-MediaSize {
     return $null
 }
 
+function Get-VideoDuration {
+    <#  An MP4's duration in seconds, from its 'mvhd' box, or $null. The page's
+        structured data and sitemap state the demonstration's length; this is
+        what they are checked against. #>
+    param([Parameter(Mandatory)][string]$Path)
+    $b = [System.IO.File]::ReadAllBytes($Path)
+    $at = [System.Text.Encoding]::ASCII.GetString($b).IndexOf('mvhd')
+    if ($at -lt 0) { return $null }
+    $u32 = { param($i) ([long]$b[$i] -shl 24) -bor ([long]$b[$i + 1] -shl 16) -bor ([long]$b[$i + 2] -shl 8) -bor [long]$b[$i + 3] }
+    if ($b[$at + 4] -eq 1) {
+        $scale = & $u32 ($at + 24)
+        $duration = ((& $u32 ($at + 28)) -shl 32) -bor (& $u32 ($at + 32))
+    } else {
+        $scale = & $u32 ($at + 16)
+        $duration = & $u32 ($at + 20)
+    }
+    if ($scale -le 0) { return $null }
+    return [double]$duration / $scale
+}
+
 function ConvertTo-HtmlText {
     param([AllowNull()][string]$Text)
     if ($null -eq $Text) { return '' }

@@ -1,0 +1,219 @@
+﻿{
+    "generatedBy":  "site/tools/make-responsive-images.ps1",
+    "operations":  "area downscale (area+accurate_rnd), then one encode; no sharpening or colour adjustment",
+    "avif":  "-c:v libaom-av1 -still-picture 1 -crf 30 -cpu-used 4 -color_range pc -colorspace bt470bg -color_primaries bt709 -color_trc iec61966-2-1",
+    "webp":  "-c:v libwebp -quality 82 -compression_level 6",
+    "provenance":  "docs/media/stills/*.provenance.json",
+    "sets":  {
+                 "007-first-light-bond":  {
+                                              "source":  "docs/media/stills/007-first-light-bond.png",
+                                              "halves":  "original x=20 y=80, render x=740 y=80, each 700x880, scaled with the file",
+                                              "variants":  [
+                                                               {
+                                                                   "width":  960,
+                                                                   "format":  "avif",
+                                                                   "file":  "007-first-light-bond-960.avif",
+                                                                   "bytes":  9530,
+                                                                   "pairPsnr":  25.04,
+                                                                   "sourcePairPsnr":  25.04,
+                                                                   "psnrAgainstSource":  42.52
+                                                               },
+                                                               {
+                                                                   "width":  960,
+                                                                   "format":  "webp",
+                                                                   "file":  "007-first-light-bond-960.webp",
+                                                                   "bytes":  20048,
+                                                                   "pairPsnr":  24.89,
+                                                                   "sourcePairPsnr":  25.04,
+                                                                   "psnrAgainstSource":  40.94
+                                                               },
+                                                               {
+                                                                   "width":  1460,
+                                                                   "format":  "avif",
+                                                                   "file":  "007-first-light-bond-1460.avif",
+                                                                   "bytes":  14458,
+                                                                   "pairPsnr":  25.07,
+                                                                   "sourcePairPsnr":  25.02,
+                                                                   "psnrAgainstSource":  43.25
+                                                               },
+                                                               {
+                                                                   "width":  1460,
+                                                                   "format":  "webp",
+                                                                   "file":  "007-first-light-bond-1460.webp",
+                                                                   "bytes":  34676,
+                                                                   "pairPsnr":  24.98,
+                                                                   "sourcePairPsnr":  25.02,
+                                                                   "psnrAgainstSource":  41.3
+                                                               }
+                                                           ]
+                                          },
+                 "007-first-light-suit":  {
+                                              "source":  "docs/media/stills/007-first-light-suit.png",
+                                              "halves":  "original x=20 y=80, render x=740 y=80, each 700x880, scaled with the file",
+                                              "variants":  [
+                                                               {
+                                                                   "width":  960,
+                                                                   "format":  "avif",
+                                                                   "file":  "007-first-light-suit-960.avif",
+                                                                   "bytes":  9713,
+                                                                   "pairPsnr":  27.12,
+                                                                   "sourcePairPsnr":  27.15,
+                                                                   "psnrAgainstSource":  42.8
+                                                               },
+                                                               {
+                                                                   "width":  960,
+                                                                   "format":  "webp",
+                                                                   "file":  "007-first-light-suit-960.webp",
+                                                                   "bytes":  18272,
+                                                                   "pairPsnr":  26.94,
+                                                                   "sourcePairPsnr":  27.15,
+                                                                   "psnrAgainstSource":  41.83
+                                                               },
+                                                               {
+                                                                   "width":  1460,
+                                                                   "format":  "avif",
+                                                                   "file":  "007-first-light-suit-1460.avif",
+                                                                   "bytes":  15160,
+                                                                   "pairPsnr":  27.22,
+                                                                   "sourcePairPsnr":  27.21,
+                                                                   "psnrAgainstSource":  43.65
+                                                               },
+                                                               {
+                                                                   "width":  1460,
+                                                                   "format":  "webp",
+                                                                   "file":  "007-first-light-suit-1460.webp",
+                                                                   "bytes":  32762,
+                                                                   "pairPsnr":  27.13,
+                                                                   "sourcePairPsnr":  27.21,
+                                                                   "psnrAgainstSource":  42.59
+                                                               }
+                                                           ]
+                                          },
+                 "resident-evil-requiem-flashlight":  {
+                                                          "source":  "docs/media/stills/resident-evil-requiem-flashlight.png",
+                                                          "halves":  "original x=20 y=80, render x=740 y=80, each 700x880, scaled with the file",
+                                                          "variants":  [
+                                                                           {
+                                                                               "width":  960,
+                                                                               "format":  "avif",
+                                                                               "file":  "resident-evil-requiem-flashlight-960.avif",
+                                                                               "bytes":  12638,
+                                                                               "pairPsnr":  21.73,
+                                                                               "sourcePairPsnr":  21.73,
+                                                                               "psnrAgainstSource":  41.72
+                                                                           },
+                                                                           {
+                                                                               "width":  960,
+                                                                               "format":  "webp",
+                                                                               "file":  "resident-evil-requiem-flashlight-960.webp",
+                                                                               "bytes":  24192,
+                                                                               "pairPsnr":  21.62,
+                                                                               "sourcePairPsnr":  21.73,
+                                                                               "psnrAgainstSource":  40.34
+                                                                           },
+                                                                           {
+                                                                               "width":  1460,
+                                                                               "format":  "avif",
+                                                                               "file":  "resident-evil-requiem-flashlight-1460.avif",
+                                                                               "bytes":  21544,
+                                                                               "pairPsnr":  21.69,
+                                                                               "sourcePairPsnr":  21.71,
+                                                                               "psnrAgainstSource":  42.39
+                                                                           },
+                                                                           {
+                                                                               "width":  1460,
+                                                                               "format":  "webp",
+                                                                               "file":  "resident-evil-requiem-flashlight-1460.webp",
+                                                                               "bytes":  46544,
+                                                                               "pairPsnr":  21.69,
+                                                                               "sourcePairPsnr":  21.71,
+                                                                               "psnrAgainstSource":  40.52
+                                                                           }
+                                                                       ]
+                                                      },
+                 "gta6-lucia":  {
+                                    "source":  "docs/media/stills/gta6-lucia.png",
+                                    "halves":  "original x=20 y=80, render x=740 y=80, each 700x880, scaled with the file",
+                                    "variants":  [
+                                                     {
+                                                         "width":  960,
+                                                         "format":  "avif",
+                                                         "file":  "gta6-lucia-960.avif",
+                                                         "bytes":  14218,
+                                                         "pairPsnr":  27.24,
+                                                         "sourcePairPsnr":  27.27,
+                                                         "psnrAgainstSource":  41.68
+                                                     },
+                                                     {
+                                                         "width":  960,
+                                                         "format":  "webp",
+                                                         "file":  "gta6-lucia-960.webp",
+                                                         "bytes":  28056,
+                                                         "pairPsnr":  27.12,
+                                                         "sourcePairPsnr":  27.27,
+                                                         "psnrAgainstSource":  39.56
+                                                     },
+                                                     {
+                                                         "width":  1460,
+                                                         "format":  "avif",
+                                                         "file":  "gta6-lucia-1460.avif",
+                                                         "bytes":  20926,
+                                                         "pairPsnr":  27.64,
+                                                         "sourcePairPsnr":  27.59,
+                                                         "psnrAgainstSource":  42.38
+                                                     },
+                                                     {
+                                                         "width":  1460,
+                                                         "format":  "webp",
+                                                         "file":  "gta6-lucia-1460.webp",
+                                                         "bytes":  46308,
+                                                         "pairPsnr":  27.49,
+                                                         "sourcePairPsnr":  27.59,
+                                                         "psnrAgainstSource":  40.71
+                                                     }
+                                                 ]
+                                },
+                 "ac-shadows-low-key-limit":  {
+                                                  "source":  "docs/media/stills/ac-shadows-low-key-limit.png",
+                                                  "halves":  "original x=20 y=80, render x=740 y=80, each 700x880, scaled with the file",
+                                                  "variants":  [
+                                                                   {
+                                                                       "width":  960,
+                                                                       "format":  "avif",
+                                                                       "file":  "ac-shadows-low-key-limit-960.avif",
+                                                                       "bytes":  19425,
+                                                                       "pairPsnr":  27.72,
+                                                                       "sourcePairPsnr":  27.71,
+                                                                       "psnrAgainstSource":  40.42
+                                                                   },
+                                                                   {
+                                                                       "width":  960,
+                                                                       "format":  "webp",
+                                                                       "file":  "ac-shadows-low-key-limit-960.webp",
+                                                                       "bytes":  32136,
+                                                                       "pairPsnr":  27.18,
+                                                                       "sourcePairPsnr":  27.71,
+                                                                       "psnrAgainstSource":  40.4
+                                                                   },
+                                                                   {
+                                                                       "width":  1460,
+                                                                       "format":  "avif",
+                                                                       "file":  "ac-shadows-low-key-limit-1460.avif",
+                                                                       "bytes":  34890,
+                                                                       "pairPsnr":  27.53,
+                                                                       "sourcePairPsnr":  27.51,
+                                                                       "psnrAgainstSource":  41.18
+                                                                   },
+                                                                   {
+                                                                       "width":  1460,
+                                                                       "format":  "webp",
+                                                                       "file":  "ac-shadows-low-key-limit-1460.webp",
+                                                                       "bytes":  60244,
+                                                                       "pairPsnr":  27.48,
+                                                                       "sourcePairPsnr":  27.51,
+                                                                       "psnrAgainstSource":  41.12
+                                                                   }
+                                                               ]
+                                              }
+             }
+}

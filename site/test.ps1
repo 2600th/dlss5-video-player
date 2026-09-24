@@ -686,14 +686,83 @@ Test-Case 'every encoded variant stays a matched pair' {
             }
         }
     }
-    Assert-True ($checked -ge 18) "expected the hero and three scenes in two formats, checked $checked"
+    Assert-True ($checked -ge 10) "expected the hero and the player scene in two formats, checked $checked"
+}
+
+Test-Case 'every comparison still ships whole, keeps its halves apart and carries its record' {
+    # The stills are one PNG each, source and render side by side. Their web
+    # variants must not have smoothed the two halves together (the tool
+    # measures, this re-checks the record), the full-size PNG must ship behind
+    # the variants, and each still names its frame and links its record.
+    $manifestPath = [IO.Path]::Combine($distFull, 'assets', 'stills', 'variants.json')
+    Assert-True (Test-Path $manifestPath) 'stills/variants.json ships beside the files it describes'
+    $manifest = (Read-TextFile -Path $manifestPath).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $checked = 0
+    foreach ($set in $manifest.sets.PSObject.Properties) {
+        foreach ($v in $set.Value.variants) {
+            Assert-True (Test-Path ([IO.Path]::Combine($distFull, 'assets', 'stills', $v.file))) "$($v.file) ships"
+            Assert-True ([double]$v.pairPsnr -le [double]$v.sourcePairPsnr + 0.5) `
+                "$($v.file): the encoded halves ($($v.pairPsnr) dB) are more alike than the still's ($($v.sourcePairPsnr) dB)"
+            $checked++
+        }
+    }
+    Assert-True ($checked -ge 20) "expected five stills at two widths in two formats, checked $checked"
+
+    $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
+    $stills = [regex]::Matches($htmlFull, '<figure class="still" id="([^"]+)">(.*?)</figure>', $options)
+    Assert-True ($stills.Count -ge 5) "expected four stills in the gallery and one with the limits, matched $($stills.Count)"
+    foreach ($m in $stills) {
+        $body = $m.Groups[2].Value
+        $png = [regex]::Match($body, 'src="(media/[^"]+\.png)"').Groups[1].Value
+        Assert-True ([bool]$png -and (Test-Path (Join-Path $distFull $png))) "$($m.Groups[1].Value) ships its full-size PNG"
+        Assert-Contains $body "href=`"$png`"" "$($m.Groups[1].Value) links its full-size PNG"
+        Assert-True ($body -match 'docs/media/stills/[a-z0-9-]+\.provenance\.json') "$($m.Groups[1].Value) links its provenance record"
+        $data = [regex]::Match($body, '<span class="still__data">(.*?)</span>', $options).Groups[1].Value
+        Assert-True ($data -match 'frame \d+' -and $data -match 'default settings') "$($m.Groups[1].Value) states its frame and its settings"
+    }
+}
+
+Test-Case 'the frame where the model does not help is shown with the limits, never as the hero' {
+    $limits = [regex]::Match($htmlFull, '(?s)<section class="section" id="limits">(.*?)</section>').Groups[1].Value
+    Assert-Contains $limits 'ac-shadows-low-key-limit' 'the honest miss is in the limits section'
+    $hero = [regex]::Match($htmlFull, '(?s)<section class="hero">(.*?)</section>').Groups[1].Value
+    Assert-NotContains $hero 'ac-shadows' 'the honest miss is not the hero'
+    Assert-Equal 1 ([regex]::Matches($htmlFull, 'src="media/ac-shadows-low-key-limit\.png"').Count) 'it is shown once, where the limits are'
+}
+
+Test-Case 'nothing of the retired Matrix demonstration survives' {
+    $sitemap = Read-TextFile -Path (Join-Path $distFull 'sitemap.xml')
+    foreach ($text in @($htmlFull, $sitemap)) {
+        foreach ($stale in @('Matrix', 'Trinity', 'Warner', 'demo-poster', 'PT19.7S', 'social-card.jpg')) {
+            # Case-sensitive: the page's own layout has a .matrix component.
+            Assert-True (-not $text.Contains($stale)) "no '$stale' left over from the previous media"
+        }
+    }
+    Assert-True (-not (Test-Path ([IO.Path]::Combine($distFull, 'assets', 'demo')))) 'the old poster folder is gone'
+}
+
+Test-Case 'the demonstration is described at its real length' {
+    # The VideoObject, the sitemap and the play button all state the length;
+    # all three are checked against the file's own header.
+    $video = Join-Path $distFull 'media/neural-comparison-demo.mp4'
+    $seconds = Get-VideoDuration -Path $video
+    Assert-True ($null -ne $seconds -and $seconds -gt 1) 'the demonstration has a readable duration'
+    $m = [regex]::Match($htmlFull, '(?s)<script type="application/ld\+json">(.*?)</script>')
+    $node = @(($m.Groups[1].Value | ConvertFrom-Json).'@graph' | Where-Object { $_.'@type' -eq 'VideoObject' })[0]
+    $iso = 'PT{0}S' -f ([math]::Round($seconds, 1)).ToString([cultureinfo]::InvariantCulture)
+    Assert-Equal $iso $node.duration 'the VideoObject duration is the file''s'
+    $sitemap = Read-TextFile -Path (Join-Path $distFull 'sitemap.xml')
+    Assert-Contains $sitemap "<video:duration>$([math]::Round($seconds))</video:duration>" 'the sitemap duration is the file''s, in whole seconds'
+    Assert-Contains $htmlFull "Play the $([math]::Round($seconds))-second demonstration" 'the play button states the length'
+    $bytes = (Get-Item $video).Length
+    Assert-Contains $htmlFull "$(Format-ByteSize $bytes) $([char]0x00B7) loads only when you ask" 'the play button states the file''s size'
 }
 
 Test-Case 'every gallery scene has its pair, a flip, a 1:1 view, a link and provenance' {
     $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
     $scenes = [regex]::Matches($htmlFull, '<figure class="scene" id="([^"]+)"(.*?)</figure>', $options)
     # Asserted first so a pattern that matches nothing cannot pass the loop.
-    Assert-True ($scenes.Count -ge 3) "expected at least three scenes, matched $($scenes.Count)"
+    Assert-True ($scenes.Count -ge 1) "expected the player scene, matched $($scenes.Count)"
     $ids = @{}
     foreach ($s in $scenes) {
         $id = $s.Groups[1].Value

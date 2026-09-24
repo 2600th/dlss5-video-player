@@ -240,6 +240,12 @@ The repository link appears in three places — the masthead, the source row bes
 ### Checksum Control
 A `<button>` styled as text: mono at 0.72rem in Paper Meta, no background, a 1px dashed bottom border as its only chrome. On hover both text and border go flag; on successful copy the trailing uppercase micro-label swaps to "copied" in flag for 1.8s, then reverts. Confirmation is a word and a colour change on the control itself, never a toast.
 
+### Comparison Still
+A figure for the media tools' side-by-side stills: one image, the source and the render as the stills were written (their own "Original" and "DLSS 5" labels and navy band are the file's pixels, not the page's), in a two-column grid under a structural rule, one column below 60rem. Under each, the provenance caption in the scene's shape: a flag left rule, the title and credit in Paper Dim, then the mono Data line (frame, source size, "unscaled 700×880 crops", settings, GPU) ending in links to the full-size PNG and to its provenance record. They are shown whole rather than split into a flip, because both halves at once is what they were made to show; the hero's seam and the gallery's player scene remain the page's in-place comparisons. The **single** variant (`stills--single`) holds one still at up to 46rem: the frame where the model does not help, under the limits, never in the hero.
+
+### Screen
+A player window outside the "How it works" beats (the three under the feature matrix, and the start screen beside the first-run steps): the image with a soft hairline, a Paper Meta caption and the mono provenance tick of the beats. Its own class rather than `.beat__figure`, whose explicit grid placement belongs to the beats.
+
 ### Disclosure (FAQ)
 `<details>` rows separated by soft hairlines, summary at weight 650, native marker removed. The indicator is a drawn cross of two 1px gradient bars; open state removes the vertical bar and rotates 180°. No chevrons, no plus glyph.
 

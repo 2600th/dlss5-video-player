@@ -225,6 +225,11 @@ $primarySize = if ($release.Full) { $release.Full.SizeText }
                elseif ($release.Core) { $release.Core.SizeText }
                else { '' }
 
+# The demonstration's size is read from the file, so the play button cannot
+# promise a download of a different size from the one it starts.
+$demoSource = Join-Path $repoRoot 'docs/media/neural-comparison-demo.mp4'
+$demoSize = if (Test-Path $demoSource) { Format-ByteSize (Get-Item $demoSource).Length } else { '' }
+
 $tokens = @{
     SITE_URL        = $siteUrl
     REPO_URL        = "https://github.com/$repo"
@@ -243,6 +248,7 @@ $tokens = @{
     GITHUB_MARK     = $githubMark
     GITHUB_SYMBOL   = $githubSymbol
     GITHUB_META     = $stars.Meta
+    DEMO_SIZE       = $demoSize
     ANALYTICS       = $analytics
     BUILT_AT        = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     YEAR            = (Get-Date).ToUniversalTime().Year
@@ -286,12 +292,14 @@ $lastMod = if ($publishedIso) { $publishedIso } else { (Get-Date).ToUniversalTim
 $sitemapImages = @(
     'assets/hero/hero-neural.jpg'
     'assets/hero/hero-original.jpg'
-    'media/gta6-lucia-neural.jpg'
-    'media/gta6-lucia-original.jpg'
-    'media/matrix-neural.jpg'
-    'media/matrix-original.jpg'
+    'media/007-first-light-bond.png'
+    'media/007-first-light-suit.png'
+    'media/resident-evil-requiem-flashlight.png'
+    'media/gta6-lucia.png'
+    'media/ac-shadows-low-key-limit.png'
+    'media/compare-wipe.jpg'
+    'media/compare-difference.jpg'
     'media/neural-playback.jpg'
-    'media/neural-strength.jpg'
 ) | ForEach-Object { "    <image:image><image:loc>$siteUrl$_</image:loc></image:image>" }
 Write-TextFile -Path (Join-Path $OutputPath 'sitemap.xml') -Text @"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -305,11 +313,11 @@ Write-TextFile -Path (Join-Path $OutputPath 'sitemap.xml') -Text @"
     <priority>1.0</priority>
 $($sitemapImages -join "`n")
     <video:video>
-      <video:thumbnail_loc>${siteUrl}assets/demo/demo-poster.jpg</video:thumbnail_loc>
-      <video:title>DLSS 5 Video Player: twenty seconds of the original against the neural render</video:title>
-      <video:description>The Matrix and Grand Theft Auto VI Trailer 2, each source frame against the player's own DLSS 5 render of the same frame. No sound.</video:description>
+      <video:thumbnail_loc>${siteUrl}media/neural-comparison-poster.jpg</video:thumbnail_loc>
+      <video:title>DLSS 5 Video Player: the source against the player's DLSS 5 render, in 25 seconds</video:title>
+      <video:description>007 First Light and Grand Theft Auto VI Trailer 2 at default settings: a source frame split against the same frame of the player's render, GTA VI playing with the divider, then the player's Difference, Side by side and loupe views and a render filling the timeline. No sound.</video:description>
       <video:content_loc>${siteUrl}media/neural-comparison-demo.mp4</video:content_loc>
-      <video:duration>20</video:duration>
+      <video:duration>25</video:duration>
     </video:video>
   </url>
 </urlset>
@@ -320,16 +328,31 @@ $($sitemapImages -join "`n")
 $mediaOut = Join-Path $OutputPath 'media'
 New-Item -ItemType Directory -Force -Path $mediaOut | Out-Null
 
+# Everything large stays in docs/ and is copied here at build time, so the
+# repository holds one copy of each picture. The page offers AVIF and WebP
+# variants from site/src/assets first; these are the full-size files behind
+# them - the <img> fallbacks, the 1:1 view and the "full size" links.
 $mediaFiles = @(
+    # Player screenshots.
     'docs/screenshots/current/neural-playback.jpg'
-    'docs/screenshots/current/neural-strength.jpg'
-    'docs/screenshots/current/recent-videos.jpg'
     'docs/screenshots/current/original-comparison.jpg'
-    # The gallery's full-size plates: what its 1:1 view and its links open.
-    'docs/screenshots/current/gta6-lucia-original.jpg'
-    'docs/screenshots/current/gta6-lucia-neural.jpg'
-    'docs/screenshots/current/matrix-original.jpg'
-    'docs/screenshots/current/matrix-neural.jpg'
+    'docs/screenshots/current/recent-videos.jpg'
+    'docs/screenshots/current/neural-strength.jpg'
+    'docs/screenshots/current/compare-wipe.jpg'
+    'docs/screenshots/current/compare-difference.jpg'
+    'docs/screenshots/current/saved-comparison-2x2.png'
+    'docs/screenshots/current/neural-settings.jpg'
+    'docs/screenshots/current/subtitles.jpg'
+    'docs/screenshots/current/player-start.jpg'
+    # The comparison stills, source and render side by side, unscaled.
+    'docs/media/stills/007-first-light-bond.png'
+    'docs/media/stills/007-first-light-suit.png'
+    'docs/media/stills/resident-evil-requiem-flashlight.png'
+    'docs/media/stills/gta6-lucia.png'
+    'docs/media/stills/ac-shadows-low-key-limit.png'
+    # The demonstration's poster and the link-preview card.
+    'docs/media/neural-comparison-poster.jpg'
+    'docs/media/social/card-1200x630.jpg'
 )
 if (-not $SkipMedia) { $mediaFiles += 'docs/media/neural-comparison-demo.mp4' }
 

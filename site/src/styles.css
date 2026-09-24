@@ -668,6 +668,60 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   letter-spacing: -0.01em;
 }
 
+/* --- stills ---------------------------------------------------------------
+   The comparison stills: one PNG each, the source and the render side by
+   side as the player's media tools wrote them, labels included. They are
+   shown whole rather than split into a flip, because both halves at once is
+   what they were made to show; the hero's seam and the scene below are the
+   page's two in-place comparisons. Each carries its provenance line and links
+   to its record, the Real Pixels Rule in this component's shape.
+   -------------------------------------------------------------------------- */
+
+.stills {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(2rem, 4vw, 3rem) clamp(1.5rem, 3vw, 2.5rem);
+  padding-top: clamp(1.75rem, 4vw, 3rem);
+  border-top: 1px solid var(--line);
+  margin-bottom: clamp(3rem, 6vw, 5rem);
+}
+.stills--single { grid-template-columns: minmax(0, 46rem); margin-bottom: 0; }
+.still { margin: 0; }
+.still__plate { display: block; width: 100%; height: auto; border: 1px solid var(--line-soft); }
+.still__caption {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.85rem;
+  border-left: 1px solid var(--flag);
+  padding-left: 0.85rem;
+}
+.still__title { color: var(--text-dim); font-size: 0.82rem; }
+.still__data {
+  color: var(--text-meta);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.still__data a { color: var(--text-dim); }
+.still__data a:hover { color: var(--text); }
+
+/* A titled group inside a section: the gallery's player pair, and the one
+   frame in the limits where the model does not help. */
+.gallery__sub { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.3; margin-bottom: 0.7rem; }
+.gallery__note { color: var(--text-dim); max-width: var(--measure); margin-bottom: 0.5rem; }
+#limits .gallery__sub { margin-top: clamp(2.5rem, 5vw, 4rem); margin-bottom: 1.25rem; }
+
+/* --- screens: the player's own windows under the feature matrix ----------- */
+
+.screens {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(1.5rem, 3vw, 2.5rem);
+  margin-top: clamp(2.5rem, 5vw, 4rem);
+}
+
 /* --- matrix --------------------------------------------------------------- */
 
 .matrix {
@@ -823,7 +877,20 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 
 /* --- requirements & notice ------------------------------------------------ */
 
-.requires { margin-bottom: 2.5rem; }
+.requires {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: clamp(1.75rem, 4vw, 3.5rem);
+  align-items: start;
+  margin-bottom: 2.5rem;
+}
+/* The start screen beside the first-run steps: what the player shows first. */
+/* A player window with its caption and provenance tick, outside the beats: the
+   screens under the feature matrix, and the start screen here. Its own class
+   rather than .beat__figure, whose grid placement belongs to the beats. */
+.screen, .requires__figure { margin: 0; }
+.screen img, .requires__figure img { width: 100%; height: auto; border: 1px solid var(--line-soft); }
+.screen figcaption, .requires__figure figcaption { margin-top: 0.7rem; color: var(--text-meta); font-size: 0.78rem; }
 .requires__title { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.9rem; }
 .requires__list { color: var(--text-dim); max-width: var(--measure); padding-left: 1.2rem; }
 .requires__list li { margin-bottom: 0.5rem; }
@@ -928,6 +995,8 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   .beat__text p { max-width: var(--measure); }
 
   .readout__row { grid-template-columns: 1fr; gap: 0.2rem; }
+
+  .stills, .screens, .requires { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 34rem) {

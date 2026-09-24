@@ -18,11 +18,11 @@
 <meta property="og:title" content="DLSS 5 Video Player — see what DLSS 5 does to your videos">
 <meta property="og:description" content="A free, open-source Windows player that runs your videos through NVIDIA's DLSS 5 neural renderer on your RTX card while you watch, with the original on the same frame to check it against.">
 <meta property="og:url" content="{{SITE_URL}}">
-<meta property="og:image" content="{{SITE_URL}}assets/hero/social-card.jpg">
+<meta property="og:image" content="{{SITE_URL}}media/card-1200x630.jpg">
 <meta property="og:image:type" content="image/jpeg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="One frame of Grand Theft Auto VI Trailer 2 split down the face: the original on the left, the DLSS 5 neural render on the right.">
+<meta property="og:image:alt" content="DLSS 5 Video Player: a 007 First Light face split between the source and the player's DLSS 5 render.">
 <meta property="og:video" content="{{SITE_URL}}media/neural-comparison-demo.mp4">
 <meta property="og:video:type" content="video/mp4">
 <meta property="og:video:width" content="1920">
@@ -30,8 +30,8 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="DLSS 5 Video Player — see what DLSS 5 does to your videos">
 <meta name="twitter:description" content="Free and open source, for Windows and RTX: DLSS 5 neural rendering while you watch, checked against the original on the same frame.">
-<meta name="twitter:image" content="{{SITE_URL}}assets/hero/social-card.jpg">
-<meta name="twitter:image:alt" content="One frame of Grand Theft Auto VI Trailer 2 split down the face: the original on the left, the DLSS 5 neural render on the right.">
+<meta name="twitter:image" content="{{SITE_URL}}media/card-1200x630.jpg">
+<meta name="twitter:image:alt" content="DLSS 5 Video Player: a 007 First Light face split between the source and the player's DLSS 5 render.">
 
 <link rel="icon" href="assets/favicon.ico" sizes="any">
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/archivo-latin.woff2" crossorigin>
@@ -80,10 +80,11 @@
       "releaseNotes": "{{REPO_URL}}/blob/main/CHANGELOG.md",
       "license": "https://opensource.org/licenses/MIT",
       "isAccessibleForFree": true,
-      "image": "{{SITE_URL}}assets/hero/social-card.jpg",
+      "image": "{{SITE_URL}}media/card-1200x630.jpg",
       "screenshot": [
+        "{{SITE_URL}}media/compare-wipe.jpg",
+        "{{SITE_URL}}media/compare-difference.jpg",
         "{{SITE_URL}}media/neural-playback.jpg",
-        "{{SITE_URL}}media/original-comparison.jpg",
         "{{SITE_URL}}media/neural-strength.jpg"
       ],
       "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -145,12 +146,12 @@
     {
       "@type": "VideoObject",
       "@id": "{{SITE_URL}}#demo",
-      "name": "DLSS 5 Video Player: twenty seconds of the original against the neural render",
-      "description": "The Matrix and Grand Theft Auto VI Trailer 2, each source frame against the player's own DLSS 5 render of the same frame: paused frames wiped across the face, then playback with the divider held still. Rendered on an RTX 4080 SUPER. No sound.",
-      "thumbnailUrl": "{{SITE_URL}}assets/demo/demo-poster.jpg",
+      "name": "DLSS 5 Video Player: the source against the player's DLSS 5 render, in 25 seconds",
+      "description": "007 First Light and Grand Theft Auto VI Trailer 2 at the player's default settings: a source frame split against the same frame of the player's render, GTA VI playing with the divider held still, then the player's own Difference, Side by side and loupe views, and a live render filling the timeline while the video plays. Rendered on an RTX 4080 SUPER. No sound.",
+      "thumbnailUrl": "{{SITE_URL}}media/neural-comparison-poster.jpg",
       "contentUrl": "{{SITE_URL}}media/neural-comparison-demo.mp4",
-      "uploadDate": "2026-09-22T23:57:29+05:30",
-      "duration": "PT19.7S",
+      "uploadDate": "2026-09-24T17:03:58+05:30",
+      "duration": "PT24.8S",
       "encodingFormat": "video/mp4",
       "width": 1920,
       "height": 1080,
@@ -199,7 +200,7 @@
         <source type="image/avif" srcset="assets/hero/hero-neural-960.avif 960w, assets/hero/hero-neural-1280.avif 1280w, assets/hero/hero-neural-1920.avif 1920w" sizes="(max-width: 60rem) 119vw, max(100vw, 177.8vh)">
         <source type="image/webp" srcset="assets/hero/hero-neural-960.webp 960w, assets/hero/hero-neural-1280.webp 1280w, assets/hero/hero-neural-1920.webp 1920w" sizes="(max-width: 60rem) 119vw, max(100vw, 177.8vh)">
         <img class="compare__plate compare__plate--neural" src="assets/hero/hero-neural.jpg"
-             width="1920" height="1080" alt="One frame of Grand Theft Auto VI Trailer 2 rendered through the DLSS 5 neural renderer."
+             width="1920" height="1080" alt="One frame of the 007 First Light story trailer, a man's face in a wood-panelled room, from the player's DLSS 5 render at default settings."
              fetchpriority="high" decoding="async">
       </picture>
       <picture>
@@ -223,8 +224,8 @@
     </div>
 
     <figcaption class="compare__caption" id="compare-caption">
-      <span class="compare__caption-line">Grand Theft Auto VI Trailer 2 · Rockstar Games</span>
-      <span class="compare__caption-data">2560×1440 source · frame 1940 (64.67&nbsp;s) · RTX 4080 SUPER · rendered by v0.25.0 · native 1920×1080 crop at 0,144 · same pixels both sides</span>
+      <span class="compare__caption-line">007 First Light, Story Trailer · IO Interactive</span>
+      <span class="compare__caption-data">2560×1440 source · frame 1122 (18.72&nbsp;s) · default settings · RTX 4080 SUPER · rendered by 0.25.0 + main (dced888) · native 1920×1080 crop at 426,180 · same pixels both sides</span>
     </figcaption>
   </figure>
 
@@ -259,38 +260,41 @@
   <div class="section__head">
     <h2 class="section__title">The same frame, rendered twice</h2>
     <p class="section__note">
-      Drag the seam above. Both plates are one frame of Grand Theft Auto VI
-      Trailer 2: on the left as the source file decodes it, on the right the
-      same frame from the render the player wrote for that file, cropped
-      identically. Nothing was retouched, sharpened or colour-graded. The two
-      differ by 31.7&nbsp;dB PSNR, and the change sits in skin, hair and light
-      across the face: the renderer rebuilds detail rather than laying a filter
-      over the picture.
+      Drag the seam above. Both plates are one frame of the 007 First Light
+      story trailer: on the left as the source file decodes it, on the right
+      the same frame from the whole-video render the player wrote for that
+      file, at its default settings, cropped identically. Nothing was
+      retouched, sharpened or colour-graded. The two differ by 27.8&nbsp;dB
+      PSNR, and the change sits in skin, stubble and light across the face:
+      the renderer rebuilds detail rather than laying a filter over the
+      picture.
     </p>
   </div>
 
   <div class="readout">
-    <p class="readout__row"><span class="readout__k">Source</span><span class="readout__v">2560×1440 VP9 · 30&nbsp;fps · 166.733&nbsp;s · 5,002 frames</span></p>
-    <p class="readout__row"><span class="readout__k">Session</span><span class="readout__v">4,948 of 4,948 frames verified, from 1.80&nbsp;s · failure none · lock ok</span></p>
-    <p class="readout__row"><span class="readout__k">Machine</span><span class="readout__v">RTX 4080 SUPER · driver 610.47 · player v0.25.0 · RenoDX 6.5.3 · DLSS-NR 310.8.0</span></p>
-    <p class="readout__row"><span class="readout__k">Settings</span><span class="readout__v">Intensity, Local tone and Local structure 2.0 (defaults 1.0) · upscaling off</span></p>
+    <p class="readout__row"><span class="readout__k">Source</span><span class="readout__v">2560×1440 VP9 · 59.94&nbsp;fps · 96.5&nbsp;s · 5,784 frames</span></p>
+    <p class="readout__row"><span class="readout__k">Render</span><span class="readout__v">whole video · 5,784 of 5,784 frames verified · frame 1122 of the render is frame 1122 of the source</span></p>
+    <p class="readout__row"><span class="readout__k">Machine</span><span class="readout__v">RTX 4080 SUPER · driver 610.47 · runtime lock 310.8.SF-v2 · player 0.25.0 + main (dced888)</span></p>
+    <p class="readout__row"><span class="readout__k">Settings</span><span class="readout__v">the defaults: Intensity, Local tone and Local structure 1.0 · settings digest 96bf471a · upscaling off</span></p>
   </div>
 </section>
 
 <!-- ============================== demo ============================== -->
 <section class="section" id="demo">
-  <h2 class="section__title">Twenty seconds of it running</h2>
+  <h2 class="section__title">Twenty-five seconds of it running</h2>
   <p class="section__note">
-    The Matrix and Grand Theft Auto VI, each source against the player's own
-    render of the same frame: paused frames wiped across the face, then
-    playback with the divider held still. Same frames and the same crop on both
-    sides. No sound.
+    007 First Light and Grand Theft Auto VI at the default settings. A paused
+    frame split down the face, then GTA&nbsp;VI playing with the divider held
+    still, both halves the same frame and the same crop. Then the player's own
+    Difference, Side by side and loupe views of that frame, and a live render
+    filling the timeline while the video plays, shown at 2× speed and labelled
+    so. No sound.
   </p>
 
   <div class="demo" data-video="media/neural-comparison-demo.mp4">
-    <img class="demo__poster" src="assets/demo/demo-poster.jpg" width="1920" height="1080"
+    <img class="demo__poster" src="media/neural-comparison-poster.jpg" width="1920" height="1080"
          loading="lazy" decoding="async"
-         alt="A paused frame of The Matrix split down Trinity's face: the original on the left, the DLSS 5 neural render on the right.">
+         alt="007 First Light, one frame split down the face: the source on the left, the player's DLSS 5 render on the right.">
     <button class="demo__play" type="button">
       <!-- The backing is a plate behind the label, not a wash over the frame:
            this section's job is to show image quality, so the footage keeps
@@ -301,93 +305,88 @@
             <path d="M8 5.5v13l11-6.5z" stroke-linejoin="round"></path>
           </svg>
         </span>
-        <span class="demo__play-label">Play the 20-second demonstration</span>
-        <span class="demo__play-meta">7.2 MB · loads only when you ask</span>
+        <span class="demo__play-label">Play the 25-second demonstration</span>
+        <span class="demo__play-meta">{{DEMO_SIZE}} · loads only when you ask</span>
       </span>
     </button>
   </div>
   <p class="demo__credit">
-    Poster: frame 110 of the video. The Matrix — Warner Bros.; Grand Theft
-    Auto VI — Rockstar Games.
+    Poster: frame 45 of the video. Rendered on an RTX 4080 SUPER by 0.25.0 +
+    main (dced888); <a href="{{REPO_URL}}/blob/main/docs/media/README.md" rel="noopener">how it was made</a>.
+    007 First Light — IO Interactive; Grand Theft Auto VI — Rockstar Games.
   </p>
 </section>
 
 <!-- ============================= gallery ============================ -->
 <section class="section" id="gallery">
   <div class="section__head">
-    <h2 class="section__title">Three more frames, both ways</h2>
+    <h2 class="section__title">Four faces, at the default settings</h2>
     <p class="section__note">
-      Each pair is one frame: the source, and the same frame from the player's
-      render of it. <strong>Flip</strong> swaps the whole picture between the
-      two; <strong>1:1</strong> opens the captured file itself, one image pixel
-      to one screen pixel, so nothing on this page does the resizing. Not every
-      source changes as much: The Matrix pair differs by 5.2 levels on average,
-      GTA&nbsp;VI's by 9.5.
+      Each still is one frame of a trailer: on the left as the source decodes
+      it, on the right the same frame of the player's render of that source,
+      the same unscaled 700×880 crop from both, at the default neural
+      settings. They are the strongest frames found, not typical ones; the
+      frame where it does not help is with the <a href="#limits-miss">limits</a>.
     </p>
   </div>
 
-  <figure class="scene" id="scene-lucia" data-view="neural" data-focus="0.43,0.41"
-          data-full-original="media/gta6-lucia-original.jpg" data-full-neural="media/gta6-lucia-neural.jpg">
-    <div class="scene__frame">
-      <div class="scene__canvas">
-        <picture>
-          <source type="image/avif" srcset="assets/gallery/lucia-neural-960.avif 960w, assets/gallery/lucia-neural-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
-          <source type="image/webp" srcset="assets/gallery/lucia-neural-960.webp 960w, assets/gallery/lucia-neural-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
-          <img class="scene__plate scene__plate--neural" src="media/gta6-lucia-neural.jpg" width="2560" height="1440"
-               loading="lazy" decoding="async" alt="Grand Theft Auto VI Trailer 2, source frame 1940, from the DLSS 5 neural render.">
-        </picture>
-        <picture>
-          <source type="image/avif" srcset="assets/gallery/lucia-original-960.avif 960w, assets/gallery/lucia-original-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
-          <source type="image/webp" srcset="assets/gallery/lucia-original-960.webp 960w, assets/gallery/lucia-original-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
-          <img class="scene__plate scene__plate--original" src="media/gta6-lucia-original.jpg" width="2560" height="1440"
-               loading="lazy" decoding="async" alt="The same frame as the source file decodes it.">
-        </picture>
-      </div>
-    </div>
-    <div class="scene__controls">
-      <span class="scene__tag" aria-hidden="true">Neural</span>
-      <button class="scene__button scene__flip" type="button" hidden>Flip to the original</button>
-      <button class="scene__button scene__zoom" type="button" aria-pressed="false" hidden>1:1 pixels</button>
-      <span class="scene__files">Full size <a href="media/gta6-lucia-original.jpg">original</a> <a href="media/gta6-lucia-neural.jpg">neural</a></span>
-      <a class="scene__link" href="#scene-lucia">Link to this frame</a>
-    </div>
-    <figcaption class="scene__caption">
-      <span class="scene__title">Grand Theft Auto VI Trailer 2, the whole frame · Rockstar Games</span>
-      <span class="scene__data">2560×1440 VP9 source · frame 1940 (64.67&nbsp;s) · RTX 4080 SUPER · v0.25.0 · Intensity, Local tone and Local structure 2.0 · the hero is a 1920×1080 crop of this frame</span>
-    </figcaption>
-  </figure>
+  <div class="stills">
+    <figure class="still" id="still-bond">
+      <picture>
+        <source type="image/avif" srcset="assets/stills/007-first-light-bond-960.avif 960w, assets/stills/007-first-light-bond-1460.avif 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <source type="image/webp" srcset="assets/stills/007-first-light-bond-960.webp 960w, assets/stills/007-first-light-bond-1460.webp 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <img class="still__plate" src="media/007-first-light-bond.png" width="1460" height="992" loading="lazy" decoding="async"
+             alt="007 First Light, one frame: the source on the left, the same frame from the player's render at default settings on the right, identical unscaled 700x880 crops.">
+      </picture>
+      <figcaption class="still__caption">
+        <span class="still__title">007 First Light, Story Trailer · IO Interactive</span>
+        <span class="still__data">frame 1122 (18.72&nbsp;s) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/007-first-light-bond.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/007-first-light-bond.provenance.json" rel="noopener">record</a></span>
+      </figcaption>
+    </figure>
+    <figure class="still" id="still-suit">
+      <picture>
+        <source type="image/avif" srcset="assets/stills/007-first-light-suit-960.avif 960w, assets/stills/007-first-light-suit-1460.avif 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <source type="image/webp" srcset="assets/stills/007-first-light-suit-960.webp 960w, assets/stills/007-first-light-suit-1460.webp 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <img class="still__plate" src="media/007-first-light-suit.png" width="1460" height="992" loading="lazy" decoding="async"
+             alt="007 First Light, an older man in a dark suit: the source on the left, the player's render on the right, identical unscaled crops.">
+      </picture>
+      <figcaption class="still__caption">
+        <span class="still__title">007 First Light, Story Trailer · IO Interactive</span>
+        <span class="still__data">frame 2928 (48.85&nbsp;s) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/007-first-light-suit.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/007-first-light-suit.provenance.json" rel="noopener">record</a></span>
+      </figcaption>
+    </figure>
+    <figure class="still" id="still-requiem">
+      <picture>
+        <source type="image/avif" srcset="assets/stills/resident-evil-requiem-flashlight-960.avif 960w, assets/stills/resident-evil-requiem-flashlight-1460.avif 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <source type="image/webp" srcset="assets/stills/resident-evil-requiem-flashlight-960.webp 960w, assets/stills/resident-evil-requiem-flashlight-1460.webp 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <img class="still__plate" src="media/resident-evil-requiem-flashlight.png" width="1460" height="992" loading="lazy" decoding="async"
+             alt="Resident Evil Requiem, a face lit from below by a torch: the source on the left, the player's render on the right, identical unscaled crops.">
+      </picture>
+      <figcaption class="still__caption">
+        <span class="still__title">Resident Evil Requiem, 2nd Trailer · Capcom</span>
+        <span class="still__data">frame 4125 (1:08.82) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/resident-evil-requiem-flashlight.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/resident-evil-requiem-flashlight.provenance.json" rel="noopener">record</a></span>
+      </figcaption>
+    </figure>
+    <figure class="still" id="still-lucia">
+      <picture>
+        <source type="image/avif" srcset="assets/stills/gta6-lucia-960.avif 960w, assets/stills/gta6-lucia-1460.avif 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <source type="image/webp" srcset="assets/stills/gta6-lucia-960.webp 960w, assets/stills/gta6-lucia-1460.webp 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <img class="still__plate" src="media/gta6-lucia.png" width="1460" height="992" loading="lazy" decoding="async"
+             alt="GTA VI Trailer 2, Lucia at golden hour: the source on the left, the player's render at default settings on the right, identical unscaled crops.">
+      </picture>
+      <figcaption class="still__caption">
+        <span class="still__title">Grand Theft Auto VI Trailer 2 · Rockstar Games</span>
+        <span class="still__data">frame 1940 (1:04.67) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/gta6-lucia.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/gta6-lucia.provenance.json" rel="noopener">record</a></span>
+      </figcaption>
+    </figure>
+  </div>
 
-  <figure class="scene" id="scene-matrix" data-view="neural" data-focus="0.51,0.45"
-          data-full-original="media/matrix-original.jpg" data-full-neural="media/matrix-neural.jpg">
-    <div class="scene__frame">
-      <div class="scene__canvas">
-        <picture>
-          <source type="image/avif" srcset="assets/gallery/matrix-neural-960.avif 960w, assets/gallery/matrix-neural-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
-          <source type="image/webp" srcset="assets/gallery/matrix-neural-960.webp 960w, assets/gallery/matrix-neural-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
-          <img class="scene__plate scene__plate--neural" src="media/matrix-neural.jpg" width="1440" height="930"
-               loading="lazy" decoding="async" alt="The player paused on Trinity in The Matrix at 1:28 with the neural view on.">
-        </picture>
-        <picture>
-          <source type="image/avif" srcset="assets/gallery/matrix-original-960.avif 960w, assets/gallery/matrix-original-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
-          <source type="image/webp" srcset="assets/gallery/matrix-original-960.webp 960w, assets/gallery/matrix-original-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
-          <img class="scene__plate scene__plate--original" src="media/matrix-original.jpg" width="1440" height="930"
-               loading="lazy" decoding="async" alt="The same paused frame with the neural view off.">
-        </picture>
-      </div>
-    </div>
-    <div class="scene__controls">
-      <span class="scene__tag" aria-hidden="true">Neural</span>
-      <button class="scene__button scene__flip" type="button" hidden>Flip to the original</button>
-      <button class="scene__button scene__zoom" type="button" aria-pressed="false" hidden>1:1 pixels</button>
-      <span class="scene__files">Full size <a href="media/matrix-original.jpg">original</a> <a href="media/matrix-neural.jpg">neural</a></span>
-      <a class="scene__link" href="#scene-matrix">Link to this frame</a>
-    </div>
-    <figcaption class="scene__caption">
-      <span class="scene__title">The Matrix, paused at 1:28 in the player · Warner Bros.</span>
-      <span class="scene__data">1440×930 window · 2560×1440 VP9 source at 23.976&nbsp;fps · neural view on, then off, no seek between · v0.25.0 on an RTX 4080 SUPER · mean difference 5.2 levels over the picture</span>
-    </figcaption>
-  </figure>
-
+  <h3 class="gallery__sub">One paused frame in the player, the view switched</h3>
+  <p class="gallery__note">
+    <strong>Flip</strong> swaps the whole picture between the two;
+    <strong>1:1</strong> opens the captured files themselves, one image pixel to
+    one screen pixel, so nothing on this page does the resizing.
+  </p>
   <figure class="scene" id="scene-gta-player" data-view="neural" data-focus="0.5,0.45"
           data-full-original="media/original-comparison.jpg" data-full-neural="media/neural-playback.jpg">
     <div class="scene__frame">
@@ -430,7 +429,9 @@
       <p>
         Rendering is not an export queue. Press <kbd>D</kbd> at any point and
         playback moves onto rendered frames a few seconds later, while the rest
-        of the video renders behind you, nearest the playhead first.
+        of the video renders behind you, nearest the playhead first. Seek
+        anywhere: rendered frames play wherever they are, and elsewhere the
+        original plays at once while the render moves there.
       </p>
     </div>
     <figure class="beat__figure">
@@ -446,44 +447,68 @@
 
   <article class="beat beat--flip">
     <div class="beat__text">
-      <h3 class="beat__title">Seek anywhere, rendered or not</h3>
+      <h3 class="beat__title">Compare without moving the playhead</h3>
       <p>
-        Land on rendered frames and playback continues on them wherever they are
-        on the timeline. Land somewhere nobody has rendered and the original
-        plays at once while the render moves there. Nothing already rendered is
-        thrown away.
+        Split, wipe, side by side or 2&nbsp;×&nbsp;2, all on one timestamp,
+        from a compare bar under the picture. Drag the divider across a face,
+        hold the mouse to see the original in place, or step frames on either
+        view.
       </p>
     </div>
     <figure class="beat__figure">
       <picture>
-        <source type="image/avif" srcset="assets/gallery/gta-player-original-960.avif 960w, assets/gallery/gta-player-original-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
-        <source type="image/webp" srcset="assets/gallery/gta-player-original-960.webp 960w, assets/gallery/gta-player-original-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
-        <img src="media/original-comparison.jpg" width="1440" height="930" loading="lazy" decoding="async"
-             alt="The same paused frame with neural rendering switched off, for comparison.">
+        <source type="image/avif" srcset="assets/screens/compare-wipe-960.avif 960w, assets/screens/compare-wipe-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <source type="image/webp" srcset="assets/screens/compare-wipe-960.webp 960w, assets/screens/compare-wipe-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <img src="media/compare-wipe.jpg" width="1902" height="1023" loading="lazy" decoding="async"
+             alt="The player in Wipe mode on 007 First Light: the original left of a divider down a face, the DLSS 5 render right of it, with the compare bar below.">
       </picture>
-      <figcaption>The same frame, Neural Rendering off<span class="beat__tick">no seek between the two captures · 1440×930 window · JPEG q95, no chroma subsampling</span></figcaption>
+      <figcaption>Wipe, with the compare bar<span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
     </figure>
   </article>
 
   <article class="beat">
     <div class="beat__text">
-      <h3 class="beat__title">Compare without moving the playhead</h3>
+      <h3 class="beat__title">See where the model changed the picture</h3>
       <p>
-        Split, wipe, side by side or 2&nbsp;×&nbsp;2, all on one timestamp.
-        <strong>Difference</strong> shows where the model changed the picture,
-        and the loupe magnifies both at the same spot, pixel for pixel. Change
-        a neural setting while paused and that frame re-renders, so you decide
-        on the picture.
+        <strong>Difference</strong> shows the change itself: the render minus
+        the original, in linear light, amplified 1× to 32×. The loupe
+        magnifies both at the same spot, pixel for pixel, and a setting changed
+        while paused re-renders that frame, so you decide on the picture.
       </p>
     </div>
     <figure class="beat__figure">
-      <img src="media/neural-strength.jpg" width="1902" height="1023" loading="lazy" decoding="async"
-           alt="Image adjustments open over a paused 007 First Light frame, the DLSS 5 mix slider at 1.00, with the compare bar below.">
-      <figcaption>DLSS 5 mix, at its 1.00 default<span class="beat__tick">image adjustments over 007 First Light, frame 1122 · 1902×1023 window at 150% · captured 24 September 2026</span></figcaption>
+      <picture>
+        <source type="image/avif" srcset="assets/screens/compare-difference-960.avif 960w, assets/screens/compare-difference-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <source type="image/webp" srcset="assets/screens/compare-difference-960.webp 960w, assets/screens/compare-difference-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <img src="media/compare-difference.jpg" width="1902" height="1023" loading="lazy" decoding="async"
+             alt="The player's Difference view of the same frame: where the model changed the picture, amplified 4x, as brightness.">
+      </picture>
+      <figcaption>Difference, ×4, brightness only<span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
     </figure>
   </article>
 
   <article class="beat beat--flip">
+    <div class="beat__text">
+      <h3 class="beat__title">Keep the evidence, with its provenance</h3>
+      <p>
+        <strong>Save comparison image</strong> writes exactly what the picture
+        shows as a PNG, with a footer recording the player version, the video,
+        the frame, the view, a digest of the neural settings and the runtime.
+        The footer travels with the pixels.
+      </p>
+    </div>
+    <figure class="beat__figure">
+      <picture>
+        <source type="image/avif" srcset="assets/screens/saved-comparison-2x2-960.avif 960w, assets/screens/saved-comparison-2x2-1266.avif 1266w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <source type="image/webp" srcset="assets/screens/saved-comparison-2x2-960.webp 960w, assets/screens/saved-comparison-2x2-1266.webp 1266w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <img src="media/saved-comparison-2x2.png" width="1266" height="790" loading="lazy" decoding="async"
+             alt="The PNG the player saved for its 2 x 2 view: original, DLSS 5, Difference and DLSS 5 at Mix 50%, with a footer recording the version, frame, view, settings digest and runtime.">
+      </picture>
+      <figcaption>The file the player saved, as saved<span class="beat__tick">2 × 2 view of 007 First Light, frame 1122 · 1266×790 PNG · 0.25.0 + main (dced888) · 24 September 2026</span></figcaption>
+    </figure>
+  </article>
+
+  <article class="beat">
     <div class="beat__text">
       <h3 class="beat__title">Come back and it is still there</h3>
       <p>
@@ -554,6 +579,36 @@
       </ul>
     </section>
   </div>
+
+  <div class="screens">
+    <figure class="screen">
+      <picture>
+        <source type="image/avif" srcset="assets/screens/subtitles-960.avif 960w, assets/screens/subtitles-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 24rem">
+        <source type="image/webp" srcset="assets/screens/subtitles-960.webp 960w, assets/screens/subtitles-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 24rem">
+        <img src="media/subtitles.jpg" width="1902" height="1023" loading="lazy" decoding="async"
+             alt="A subtitle drawn over the DLSS 5 frame of 007 First Light; the text is a test file that says what it is.">
+      </picture>
+      <figcaption>Subtitles, drawn after the render<span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+    </figure>
+    <figure class="screen">
+      <picture>
+        <source type="image/avif" srcset="assets/screens/neural-settings-960.avif 960w, assets/screens/neural-settings-1324.avif 1324w" sizes="(max-width: 60rem) 100vw, 24rem">
+        <source type="image/webp" srcset="assets/screens/neural-settings-960.webp 960w, assets/screens/neural-settings-1324.webp 1324w" sizes="(max-width: 60rem) 100vw, 24rem">
+        <img src="media/neural-settings.jpg" width="1324" height="674" loading="lazy" decoding="async"
+             alt="The Neural settings dialog at its defaults, grouped under Look, Quality and render time, Guides sent to the model, and Across frames.">
+      </picture>
+      <figcaption>Neural settings, at their defaults<span class="beat__tick">the dialog alone · 1324×674 at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+    </figure>
+    <figure class="screen">
+      <picture>
+        <source type="image/avif" srcset="assets/screens/neural-strength-960.avif 960w, assets/screens/neural-strength-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 24rem">
+        <source type="image/webp" srcset="assets/screens/neural-strength-960.webp 960w, assets/screens/neural-strength-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 24rem">
+        <img src="media/neural-strength.jpg" width="1902" height="1023" loading="lazy" decoding="async"
+             alt="Image adjustments open over a paused 007 First Light frame, the DLSS 5 mix slider at 1.00, with the compare bar below.">
+      </picture>
+      <figcaption>The DLSS 5 mix, at its 1.00 default<span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+    </figure>
+  </div>
 </section>
 
 <!-- ============================== limits ============================= -->
@@ -572,7 +627,24 @@
     <p class="readout__row"><span class="readout__k">Upscaling</span><span class="readout__v readout__v--prose">DLSS Super Resolution scored below a plain bicubic upscale on all six video clips measured. It is built for games, so it is off by default and there for its look, not for detail.</span></p>
     <p class="readout__row"><span class="readout__k">Runtime</span><span class="readout__v readout__v--prose">The neural runtime is a modified, unsigned community build, not a signed NVIDIA package. <a href="#faq-unsigned">Why it is unsigned</a>.</span></p>
     <p class="readout__row"><span class="readout__k">Artifacts</span><span class="readout__v readout__v--prose">Depth is estimated from the picture, and so is motion on cards without the optical flow engine. Expect some artifacts.</span></p>
+    <p class="readout__row"><span class="readout__k">Low key</span><span class="readout__v readout__v--prose">In deep shadow the model can crush a face towards black and add speckle. The frame below is the plainest case found, and it is on this page on purpose.</span></p>
     <p class="readout__row"><span class="readout__k">Cache</span><span class="readout__v readout__v--prose">A render started partway into a video is not joined to the rest, and below 20&nbsp;GB free the least recently watched renders are deleted first.</span></p>
+  </div>
+
+  <h3 class="gallery__sub" id="limits-miss">Where it does not help</h3>
+  <div class="stills stills--single">
+    <figure class="still" id="still-ac-shadows">
+      <picture>
+        <source type="image/avif" srcset="assets/stills/ac-shadows-low-key-limit-960.avif 960w, assets/stills/ac-shadows-low-key-limit-1460.avif 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <source type="image/webp" srcset="assets/stills/ac-shadows-low-key-limit-960.webp 960w, assets/stills/ac-shadows-low-key-limit-1460.webp 1460w" sizes="(max-width: 60rem) 100vw, 36rem">
+        <img class="still__plate" src="media/ac-shadows-low-key-limit.png" width="1460" height="992" loading="lazy" decoding="async"
+             alt="Assassin's Creed Shadows, a face in deep shadow under a helmet: the source on the left; on the right the player's render crushes the face towards black and adds speckle.">
+      </picture>
+      <figcaption class="still__caption">
+        <span class="still__title">Assassin's Creed Shadows, Story Trailer · Ubisoft</span>
+        <span class="still__data">frame 1987 (1:06.23) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/ac-shadows-low-key-limit.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/ac-shadows-low-key-limit.provenance.json" rel="noopener">record</a></span>
+      </figcaption>
+    </figure>
   </div>
 </section>
 
@@ -592,6 +664,7 @@
   </div>
 
   <div class="requires">
+    <div class="requires__steps">
     <h3 class="requires__title">Before you run it</h3>
     <ol class="requires__list">
       <li>Unzip into a <strong>new, empty folder</strong>. Keep <code>neural-runtime/</code> next to the executable.</li>
@@ -599,6 +672,16 @@
       <li>Open a file with <kbd>Ctrl</kbd>+<kbd>O</kbd>, paste a YouTube link with <kbd>Ctrl</kbd>+<kbd>L</kbd>, or pick something from <strong>File &gt; Game trailers</strong>.</li>
       <li>Press <kbd>D</kbd>. It buffers for a few seconds, then plays rendered.</li>
     </ol>
+    </div>
+    <figure class="requires__figure">
+      <picture>
+        <source type="image/avif" srcset="assets/screens/player-start-960.avif 960w, assets/screens/player-start-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 34rem">
+        <source type="image/webp" srcset="assets/screens/player-start-960.webp 960w, assets/screens/player-start-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 34rem">
+        <img src="media/player-start.jpg" width="1902" height="1023" loading="lazy" decoding="async"
+             alt="The start screen: the capability check and the seven game trailers with their YouTube thumbnails.">
+      </picture>
+      <figcaption>The start screen checks the machine first<span class="beat__tick">fresh profile · 1902×1023 at 150% · 0.25.0 + main (dced888) · thumbnails are YouTube’s, for the trailers’ publishers</span></figcaption>
+    </figure>
   </div>
 
   <aside class="notice">
@@ -742,9 +825,12 @@
   <div class="footer__base">
     <p>
       MIT licensed. Not affiliated with, endorsed by, or a product of NVIDIA
-      Corporation. Footage is credited to Warner Bros. and Rockstar Games
-      and is shown to document the software; its inclusion is not an
-      endorsement and the source licence does not relicense it.
+      Corporation. Footage is from trailers for 007 First Light (IO
+      Interactive), Resident Evil Requiem (Capcom), Grand Theft Auto VI
+      (Rockstar Games), Assassin's Creed Shadows (Ubisoft) and Mafia: The Old
+      Country, credited to their publishers, and is shown to document the
+      software; its inclusion is not an endorsement and the source licence does
+      not relicense it.
     </p>
     <p class="footer__meta">
       <span>© {{YEAR}} DLSS 5 Video Player contributors</span>
