@@ -1,6 +1,6 @@
 # Neural quality benchmark
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
+_Verified against main (9d3e6cc) on 2026-09-25._
 
 The benchmark exists to give quality claims a repeatable test set: measured
 neural time / FPS / VRAM / flicker / OCR / face consistency / colour shift /
@@ -546,8 +546,9 @@ script's own numbers.
 
 What still cannot be decided by measurement here: the NVOFA cost gate has no published
 scale, so calibrating it wants the forward/backward agreement mask rather than another
-invented threshold; `IsHDR` on the linear FP16 input, and a supplied 1×1 exposure
-texture against auto-exposure, are A/Bs nobody has run; and depth is now answerable as
+invented threshold; `IsHDR` on the linear FP16 input is an A/B nobody has run on the
+neural pass (Super Resolution's is in `docs/measurements/sr-quality-20260924/`, the
+supplied exposure's in `docs/measurements/exposure-ab-20260923/`); and depth is now answerable as
 `depth-constant` versus `depth-proxy` but the OF-structure candidate has no argument
 behind it to run. The VSR literature's warp-error metric remains the shape to copy for
 a stronger false-motion number than a luma tolerance can give: the flow rejection
@@ -618,11 +619,11 @@ What moved since 4.70, and what the UI does about it:
   nothing, which matches the add-on's description of the mask ("so the
   Character/Skin Structure response applies to them"). The mask's own tooltip said it
   "chooses regions to leave untouched"; it now says what the add-on and this table say.
-- **Neither gives face protection** (P2.6). The change a skin value makes lands on
+- **Neither gives face protection**. The change a skin value makes lands on
   Haar-detected face boxes 2.1× as densely as their area, against 1.8× for Intensity
   and 1.9× for Color strength on the same frames: skin is barely more face-local than
   a global control, and the mask toggle less (1.35×). There is nothing here worth
-  wiring into the P2.6 mask as a "Protect skin" option, so nothing was.
+  wiring into the compare mask as a "Protect skin" option, so nothing was.
 - **Global tone and UI correction are inert** on this path at every value tried, so
   the player does not write them and the dialog does not show them.
   `NRUICorrection` is read as an integer (0.5 is stored back as 0).
@@ -632,7 +633,7 @@ What moved since 4.70, and what the UI does about it:
 ### Two harness corrections this table depends on
 
 **The normalization governor.** The add-on's `NRNormGovernor` (0 off, 1 slew, 2
-stable; the player does not write it, so 2 ships) settles its brightness divisor at
+stable; the player did not write it then, so 2 shipped) settles its brightness divisor at
 rates per second. On the two synthetic near/far clips a repeat of one configuration
 at the default is not byte-identical: 12.5 % of bytes from frame 69 of `depth-pan`
 and 26 % from frame 37 of `depth-subject`, mean |Δ| 0.41-0.46, worst frame 0.9-2.2

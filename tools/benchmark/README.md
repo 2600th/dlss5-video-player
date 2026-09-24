@@ -1,6 +1,6 @@
 # Neural quality benchmark
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
+_Verified against main (9d3e6cc) on 2026-09-25._
 
 Repeatable corpus, worker driver, metric analysis and blind A/B tooling for the
 isolated `NeuralWorker.exe`. Everything is written
@@ -346,7 +346,7 @@ pixels at 1080p, normalized Rec.709 cell luma), and are withheld whole - `null` 
 | sigma+ | output minus source per-pixel temporal standard deviation of luma inside a shot (frames between manifest cuts), meaned over pixels and frame-weighted over shots, in 8-bit luma levels; `temporal_sigma_p99_*` in `metrics.json` is the p99 of the same map. Localized shimmer a frame-global mean averages away moves this |
 | false mv | fraction of the cells the source held static across a consecutive pair (cell luma change ≤ 2/255) whose output changed by more than the same tolerance: motion the pass invented. The NVENC carrier sets a floor; `intensity-0` measures it |
 | flips+ | output minus source fraction of cells whose moving/static verdict changes from one consecutive pair to the next - instability of the motion field rather than of the pixels |
-| cut P/R/F1 | the generator's own cut test (residual > 0.30, or residual > 0.10 with histogram overlap < 0.85, debounced over 0.6 s) run over each file's cell grids and matched to the manifest's hard cuts at ±1 frame, source and output. `cuts.*_evidence` in `metrics.json` records every firing frame with residual, overlap, arm and suppression; `cutlab.py` scores the same test against the labelled corpus without needing a render |
+| cut P/R/F1 | the generator's own cut test (residual > 0.30, or residual > 0.10 with histogram overlap < 0.85, debounced over 0.3 s) run over each file's cell grids and matched to the manifest's hard cuts at ±1 frame, source and output. `cuts.*_evidence` in `metrics.json` records every firing frame with residual, overlap, arm and suppression; `cutlab.py` scores the same test against the labelled corpus without needing a render |
 | dE | mean CIE76 ΔE*ab between output and source (OpenCV Lab, L rescaled to 0-100) |
 | RGB shift | mean per-channel (output − source) in `metrics.json` |
 | PSNR / SSIM | RGB PSNR and grayscale Gaussian SSIM against the lossless source. A relighting model is expected to move these; use them as a change magnitude, not a pass/fail |
