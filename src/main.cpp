@@ -8465,7 +8465,7 @@ private:
             const RECT spinner{sr.left,sr.top,sr.left+Dip(18),sr.top+Dip(18)};
             DrawActivitySpinner(dc,spinner,ResolveActivityVisual({},ActivityElapsedMs(),0,0,false,m_activityMotionEnabled).spinnerStep);sr.left+=Dip(25);
         }
-        DrawTextW(dc,m_cachedStatus.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);if(volumeRect){const RECT& vr=*volumeRect;std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");TextOutW(dc,vr.right+Dip(8),vr.top-Dip(6),vol.c_str(),int(vol.size()));}SelectObject(dc,of);
+        DrawTextW(dc,m_cachedStatus.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);if(volumeRect){const RECT& vr=*volumeRect;std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");RECT label{vr.right+Dip(8),vr.top,std::max<LONG>(vr.right+Dip(8),c.right-Dip(16)),vr.bottom};DrawTextW(dc,vol.c_str(),int(vol.size()),&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);}SelectObject(dc,of);
     }
 
     void Paint(){

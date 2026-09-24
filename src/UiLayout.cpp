@@ -427,11 +427,16 @@ std::optional<RECT> LayoutVolumeSlider(int clientWidth, int clientHeight, UINT d
                                       std::span<const ToolbarItem> toolbarItems)
 {
     if (clientWidth <= 0 || clientHeight <= 0) return std::nullopt;
+    // The whole height of the button row, so the track sits on the row's
+    // centre line and reads as one more control on it. It used to be an 8 dip
+    // strip 27 dip below the row's centre, alone under the buttons, and that
+    // strip was also all there was to grab.
+    const int rowTop = clientHeight - DipToPixels(kToolbarTopOffsetDip, dpi);
     const RECT candidate{
         clientWidth - DipToPixels(185, dpi),
-        clientHeight - DipToPixels(69, dpi),
+        rowTop,
         clientWidth - DipToPixels(95, dpi),
-        clientHeight - DipToPixels(61, dpi),
+        rowTop + DipToPixels(kToolbarMinHitHeightDip, dpi),
     };
     if (candidate.left < 0 || candidate.top < 0 || candidate.right <= candidate.left ||
         candidate.bottom <= candidate.top) {

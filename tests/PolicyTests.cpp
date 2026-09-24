@@ -690,6 +690,17 @@ void volume_slider_never_intersects_compact_or_threshold_toolbar_test()
     }
     CHECK_EQ(static_cast<LONG>(thresholdWidth - 185), slider->left);
     CHECK_EQ(static_cast<LONG>(thresholdWidth - 95), slider->right);
+    // On the button row's centre line, and as tall as a button to grab.
+    for (const UINT dpi : {96u, 168u}) {
+        const int width = MulDiv(thresholdWidth, static_cast<int>(dpi), 96);
+        const int height = MulDiv(180, static_cast<int>(dpi), 96);
+        const auto items = LayoutToolbar(width, height, dpi);
+        const auto placed = LayoutVolumeSlider(width, height, dpi, items);
+        CHECK(placed.has_value());
+        if (!placed || items.empty()) continue;
+        CHECK_EQ(items.front().bounds.top + items.front().bounds.bottom, placed->top + placed->bottom);
+        CHECK(placed->bottom - placed->top >= MulDiv(kToolbarMinHitHeightDip, static_cast<int>(dpi), 96));
+    }
 }
 
 void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
