@@ -109,22 +109,22 @@
         {
           "@type": "Question",
           "name": "Is it safe to run?",
-          "acceptedAnswer": { "@type": "Answer", "text": "It is open source and says what it contains, but part of it is unsigned, so decide with that in view. Each zip has a SHA-256 beside it. The core zip is built by CI from this repository and carries a signed build attestation (gh attestation verify); the complete zip is assembled by the maintainer and has a checksum only. Inside either, verify_package.ps1 checks every file against a pinned manifest before the first run. The exception is the neural runtime, a modified community build nobody can sign. Scan it as you would any unsigned software, or take the core zip and supply your own." }
+          "acceptedAnswer": { "@type": "Answer", "text": "It is open source, but its neural runtime is a modified community build that nobody can sign, so decide with that in view. Each zip has a SHA-256 beside it. The core zip is built by CI from this repository and carries a signed build attestation (gh attestation verify); the complete zip is assembled by the maintainer and has a checksum only. Inside either, verify_package.ps1 checks every file against a pinned manifest before the first run. Scan the runtime as you would any unsigned software, or take the core zip and supply your own." }
         },
         {
           "@type": "Question",
           "name": "Why is the neural runtime unsigned?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Because it has been modified. It includes NVIDIA's neural DLL patched to run on RTX 40 cards, which invalidates NVIDIA's signature, alongside community ReShade and RenoDX files that were never signed. It is not a redistribution of a signed NVIDIA package and nobody is in a position to re-sign it, so it ships unsigned and says so. Its files are pinned by size and SHA-256, and the package verifier rejects anything that has drifted." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Because it has been modified. It includes NVIDIA's neural DLL patched to run on RTX 40 cards, which invalidates NVIDIA's signature, alongside community ReShade and RenoDX files that were never signed. Nobody is in a position to re-sign it, so it ships unsigned and says so. Its files are pinned by size and SHA-256, and the package verifier rejects any that have changed." }
         },
         {
           "@type": "Question",
           "name": "Which GPUs does it need?",
-          "acceptedAnswer": { "@type": "Answer", "text": "An NVIDIA RTX card and driver 610.47 or newer for neural rendering; with an older driver the player says so up front. It has been checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack native FP8 and should be several times slower; nobody has tested one yet. The player is built and tested for Windows with an RTX card; on any other GPU its start screen says \"not an RTX GPU, so no DLSS\", and playback there has not been tested." }
+          "acceptedAnswer": { "@type": "Answer", "text": "An NVIDIA RTX card and driver 610.47 or newer; with an older driver the player says so up front. It has been checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack native FP8 and should be several times slower; nobody has tested one yet. On any other GPU the start screen says \"not an RTX GPU, so no DLSS\", and playback there has not been tested." }
         },
         {
           "@type": "Question",
           "name": "How long does a render take?",
-          "acceptedAnswer": { "@type": "Answer", "text": "You do not wait for it to start: playback joins the render a few seconds after you press D, and the rest fills in while you watch. A live 1080p30 session costs 8.4 ms a frame on an RTX 5090 and 15.3 ms on an RTX 4080 SUPER, both faster than the video plays; 1440p30 on the 5090 costs 15.4 ms. A whole 4K film on the 4080 SUPER rendered at 14.8 frames a second. After your first session the player knows your GPU and warns you before a video it expects to fall behind on. The rest of the measured limits are above." }
+          "acceptedAnswer": { "@type": "Answer", "text": "You do not wait for it to start: playback joins the render a few seconds after you press D, and the rest fills in while you watch. A live 1080p30 session costs 8.4 ms a frame on an RTX 5090 and 15.3 ms on an RTX 4080 SUPER, both faster than the video plays; 1440p30 on the 5090 costs 15.4 ms. A whole 4K film on the 4080 SUPER rendered at 14.8 frames a second. After your first session the player warns you before a video it expects to fall behind on. The other limits are above." }
         },
         {
           "@type": "Question",
@@ -134,12 +134,12 @@
         {
           "@type": "Question",
           "name": "Does it upscale video too?",
-          "acceptedAnswer": { "@type": "Answer", "text": "It can, with DLSS Super Resolution, but that is off by default because on video it does not beat a plain scaler: from 960×540 to 1080p on six clips, a bicubic upscale scored higher VMAF every time. DLSS Super Resolution is built for rendered games, not decoded footage, so turn it on for its look, not for detail. Neural rendering itself keeps the source resolution." }
+          "acceptedAnswer": { "@type": "Answer", "text": "It can, with DLSS Super Resolution, but that is off by default because on video it does not beat a plain scaler: on six clips upscaled from 960×540 to 1080p, bicubic scored higher every time. It is built for rendered games, not decoded footage, so turn it on for its look, not for detail. Neural rendering itself keeps the source resolution." }
         },
         {
           "@type": "Question",
           "name": "Can I keep the result?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video, from the player, and from the release after v0.25.0 also from a script with --render. MKV keeps the source audio, subtitles and chapters without re-encoding them. Export with DLSS stages writes Super Resolution, neural rendering and frame generation into one file, in NVIDIA's order." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video, from the player or, from v0.26.0, from a script with --render. MKV keeps the source audio, subtitles and chapters without re-encoding them. Export with DLSS stages writes Super Resolution, neural rendering and frame generation into one file, in NVIDIA's order." }
         }
       ]
     },
@@ -225,7 +225,7 @@
 
     <figcaption class="compare__caption" id="compare-caption">
       <span class="compare__caption-line">007 First Light, Story Trailer · IO Interactive</span>
-      <span class="compare__caption-data">2560×1440 source · frame 1122 (18.72&nbsp;s) · default settings · RTX 4080 SUPER · rendered by 0.25.0 + main (dced888) · native 1920×1080 crop at 426,180 · same pixels both sides</span>
+      <span class="compare__caption-data">frame 1122 · default settings · RTX 4080 SUPER · the player's own output, cropped, not retouched</span>
     </figcaption>
   </figure>
 
@@ -260,22 +260,19 @@
   <div class="section__head">
     <h2 class="section__title">The same frame, rendered twice</h2>
     <p class="section__note">
-      Drag the seam above. Both plates are one frame of the 007 First Light
-      story trailer: on the left as the source file decodes it, on the right
-      the same frame from the whole-video render the player wrote for that
-      file, at its default settings, cropped identically. Nothing was
-      retouched, sharpened or colour-graded. The two differ by 27.8&nbsp;dB
-      PSNR, and the change sits in skin, stubble and light across the face:
-      the renderer rebuilds detail rather than laying a filter over the
-      picture.
+      Drag the seam above. Both sides are one frame of the 007 First Light
+      story trailer: the source on the left, the player's render at its
+      default settings on the right, cropped identically and not retouched,
+      sharpened or colour-graded. The change sits in skin, stubble and light
+      across the face: the renderer rebuilds detail rather than laying a
+      filter over the picture.
     </p>
   </div>
 
   <div class="readout">
-    <p class="readout__row"><span class="readout__k">Source</span><span class="readout__v">2560×1440 VP9 · 59.94&nbsp;fps · 96.5&nbsp;s · 5,784 frames</span></p>
-    <p class="readout__row"><span class="readout__k">Render</span><span class="readout__v">whole video · 5,784 of 5,784 frames verified · frame 1122 of the render is frame 1122 of the source</span></p>
-    <p class="readout__row"><span class="readout__k">Machine</span><span class="readout__v">RTX 4080 SUPER · driver 610.47 · runtime lock 310.8.SF-v2 · player 0.25.0 + main (dced888)</span></p>
-    <p class="readout__row"><span class="readout__k">Settings</span><span class="readout__v">the defaults: Intensity, Local tone and Local structure 1.0 · settings digest 96bf471a · upscaling off</span></p>
+    <p class="readout__row"><span class="readout__k">Source</span><span class="readout__v">2560×1440 · 59.94&nbsp;fps · 96.5&nbsp;s</span></p>
+    <p class="readout__row"><span class="readout__k">Render</span><span class="readout__v">the whole video, at the default settings, upscaling off</span></p>
+    <p class="readout__row"><span class="readout__k">Machine</span><span class="readout__v">RTX 4080 SUPER · driver 610.47</span></p>
   </div>
 </section>
 
@@ -283,12 +280,10 @@
 <section class="section" id="demo">
   <h2 class="section__title">Twenty-five seconds of it running</h2>
   <p class="section__note">
-    007 First Light and Grand Theft Auto VI at the default settings. A paused
-    frame split down the face, then GTA&nbsp;VI playing with the divider held
-    still, both halves the same frame and the same crop. Then the player's own
-    Difference, Side by side and loupe views of that frame, and a live render
-    filling the timeline while the video plays, shown at 2× speed and labelled
-    so. No sound.
+    007 First Light and Grand Theft Auto VI at the default settings: a paused
+    frame split down the face, GTA&nbsp;VI playing with the divider held still,
+    then the player's Difference, Side by side and loupe views, and a live
+    render filling the timeline (shown at 2× speed). No sound.
   </p>
 
   <div class="demo" data-video="media/neural-comparison-demo.mp4">
@@ -311,8 +306,8 @@
     </button>
   </div>
   <p class="demo__credit">
-    Poster: frame 45 of the video. Rendered on an RTX 4080 SUPER by 0.25.0 +
-    main (dced888); <a href="{{REPO_URL}}/blob/main/docs/media/README.md" rel="noopener">how it was made</a>.
+    Rendered on an RTX 4080 SUPER;
+    <a href="{{REPO_URL}}/blob/main/docs/media/README.md" rel="noopener">how it was made</a>.
     007 First Light — IO Interactive; Grand Theft Auto VI — Rockstar Games.
   </p>
 </section>
@@ -322,11 +317,10 @@
   <div class="section__head">
     <h2 class="section__title">Four faces, at the default settings</h2>
     <p class="section__note">
-      Each still is one frame of a trailer: on the left as the source decodes
-      it, on the right the same frame of the player's render of that source,
-      the same unscaled 700×880 crop from both, at the default neural
-      settings. They are the strongest frames found, not typical ones; the
-      frame where it does not help is with the <a href="#limits-miss">limits</a>.
+      Each still is one frame of a trailer, the source on the left and the
+      player's render on the right, the same unscaled 700×880 crop at the
+      default settings. They are the strongest frames found, not typical ones;
+      the frame where it does not help is with the <a href="#limits-miss">limits</a>.
     </p>
   </div>
 
@@ -340,7 +334,7 @@
       </picture>
       <figcaption class="still__caption">
         <span class="still__title">007 First Light, Story Trailer · IO Interactive</span>
-        <span class="still__data">frame 1122 (18.72&nbsp;s) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/007-first-light-bond.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/007-first-light-bond.provenance.json" rel="noopener">record</a></span>
+        <span class="still__data">frame 1122 · default settings · RTX 4080 SUPER · <a href="media/007-first-light-bond.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/007-first-light-bond.provenance.json" rel="noopener">record</a></span>
       </figcaption>
     </figure>
     <figure class="still" id="still-suit">
@@ -352,7 +346,7 @@
       </picture>
       <figcaption class="still__caption">
         <span class="still__title">007 First Light, Story Trailer · IO Interactive</span>
-        <span class="still__data">frame 2928 (48.85&nbsp;s) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/007-first-light-suit.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/007-first-light-suit.provenance.json" rel="noopener">record</a></span>
+        <span class="still__data">frame 2928 · default settings · RTX 4080 SUPER · <a href="media/007-first-light-suit.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/007-first-light-suit.provenance.json" rel="noopener">record</a></span>
       </figcaption>
     </figure>
     <figure class="still" id="still-requiem">
@@ -364,7 +358,7 @@
       </picture>
       <figcaption class="still__caption">
         <span class="still__title">Resident Evil Requiem, 2nd Trailer · Capcom</span>
-        <span class="still__data">frame 4125 (1:08.82) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/resident-evil-requiem-flashlight.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/resident-evil-requiem-flashlight.provenance.json" rel="noopener">record</a></span>
+        <span class="still__data">frame 4125 · default settings · RTX 4080 SUPER · <a href="media/resident-evil-requiem-flashlight.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/resident-evil-requiem-flashlight.provenance.json" rel="noopener">record</a></span>
       </figcaption>
     </figure>
     <figure class="still" id="still-lucia">
@@ -376,16 +370,15 @@
       </picture>
       <figcaption class="still__caption">
         <span class="still__title">Grand Theft Auto VI Trailer 2 · Rockstar Games</span>
-        <span class="still__data">frame 1940 (1:04.67) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/gta6-lucia.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/gta6-lucia.provenance.json" rel="noopener">record</a></span>
+        <span class="still__data">frame 1940 · default settings · RTX 4080 SUPER · <a href="media/gta6-lucia.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/gta6-lucia.provenance.json" rel="noopener">record</a></span>
       </figcaption>
     </figure>
   </div>
 
   <h3 class="gallery__sub">One paused frame in the player, the view switched</h3>
   <p class="gallery__note">
-    <strong>Flip</strong> swaps the whole picture between the two;
-    <strong>1:1</strong> opens the captured files themselves, one image pixel to
-    one screen pixel, so nothing on this page does the resizing.
+    <strong>Flip</strong> swaps the picture between the two; <strong>1:1</strong>
+    shows the captured files at one image pixel per screen pixel.
   </p>
   <figure class="scene" id="scene-gta-player" data-view="neural" data-focus="0.5,0.45"
           data-full-original="media/original-comparison.jpg" data-full-neural="media/neural-playback.jpg">
@@ -414,7 +407,7 @@
     </div>
     <figcaption class="scene__caption">
       <span class="scene__title">Grand Theft Auto VI, paused at 1:04 in the player · Rockstar Games</span>
-      <span class="scene__data">1440×930 window · 2560×1440 VP9 source at 30&nbsp;fps · neural view on, then off, no seek between · v0.25.0 on an RTX 4080 SUPER · mean difference 9.5 levels over the picture</span>
+      <span class="scene__data">neural view on, then off, no seek between · Intensity, Local tone and Local structure at 2.0 (default 1.0) · RTX 4080 SUPER</span>
     </figcaption>
   </figure>
 </section>
@@ -441,7 +434,7 @@
         <img src="media/neural-playback.jpg" width="1440" height="930" loading="lazy" decoding="async"
              alt="The player paused on Grand Theft Auto VI with neural rendering on, the status line reporting the live render running ahead.">
       </picture>
-      <figcaption>Grand Theft Auto VI, paused at 1:04 in a live session<span class="beat__tick">neural rendering from here · 22.6&nbsp;s buffered · v0.25.0 on an RTX 4080 SUPER</span></figcaption>
+      <figcaption>Grand Theft Auto VI, paused at 1:04 in a live session<span class="beat__tick">neural rendering from here · 22.6&nbsp;s buffered</span></figcaption>
     </figure>
   </article>
 
@@ -462,7 +455,7 @@
         <img src="media/compare-wipe.jpg" width="1902" height="1023" loading="lazy" decoding="async"
              alt="The player in Wipe mode on 007 First Light: the original left of a divider down a face, the DLSS 5 render right of it, with the compare bar below.">
       </picture>
-      <figcaption>Wipe, with the compare bar <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+      <figcaption>Wipe, with the compare bar <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">007 First Light, frame 1122</span></figcaption>
     </figure>
   </article>
 
@@ -470,9 +463,8 @@
     <div class="beat__text">
       <h3 class="beat__title">See where the model changed the picture <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></h3>
       <p>
-        <strong>Difference</strong> shows the change itself: the render minus
-        the original, in linear light, amplified 1× to 32×. The loupe
-        magnifies both at the same spot, pixel for pixel, and a setting changed
+        <strong>Difference</strong> shows the change itself, amplified 1× to
+        32×. The loupe magnifies both at the same spot, and a setting changed
         while paused re-renders that frame, so you decide on the picture.
       </p>
     </div>
@@ -483,7 +475,7 @@
         <img src="media/compare-difference.jpg" width="1902" height="1023" loading="lazy" decoding="async"
              alt="The player's Difference view of the same frame: where the model changed the picture, amplified 4x, as brightness.">
       </picture>
-      <figcaption>Difference, ×4, brightness only<span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+      <figcaption>Difference, ×4, brightness only<span class="beat__tick">007 First Light, frame 1122</span></figcaption>
     </figure>
   </article>
 
@@ -492,9 +484,8 @@
       <h3 class="beat__title">Keep the evidence, with its provenance <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></h3>
       <p>
         <strong>Save comparison image</strong> writes exactly what the picture
-        shows as a PNG, with a footer recording the player version, the video,
-        the frame, the view, a digest of the neural settings and the runtime.
-        The footer travels with the pixels.
+        shows as a PNG, with a footer recording the player version, video,
+        frame, view, neural settings and runtime.
       </p>
     </div>
     <figure class="beat__figure">
@@ -504,7 +495,7 @@
         <img src="media/saved-comparison-2x2.png" width="1266" height="790" loading="lazy" decoding="async"
              alt="The PNG the player saved for its 2 x 2 view: original, DLSS 5, Difference and DLSS 5 at Mix 50%, with a footer recording the version, frame, view, settings digest and runtime.">
       </picture>
-      <figcaption>The file the player saved, as saved<span class="beat__tick">2 × 2 view of 007 First Light, frame 1122 · 1266×790 PNG · 0.25.0 + main (dced888) · 24 September 2026</span></figcaption>
+      <figcaption>The file the player saved, as saved<span class="beat__tick">2 × 2 view of 007 First Light, frame 1122</span></figcaption>
     </figure>
   </article>
 
@@ -514,15 +505,14 @@
       <p>
         Renders stay on disk until you clear them or the drive falls below
         20&nbsp;GB free. Reopen a film weeks later and its whole-film render is
-        still attached, reused only while the source, the runtime and the
-        neural settings all still match, so what you reopen is what you
-        rendered.
+        still attached, as long as the source, the runtime and the neural
+        settings still match.
       </p>
     </div>
     <figure class="beat__figure">
       <img src="media/recent-videos.jpg" width="1493" height="932" loading="lazy" decoding="async"
            alt="The File menu open, with Game trailers, Recent videos and Save comparison image, over a paused neural frame.">
-      <figcaption>Recent videos reopens a film with its render already attached<span class="beat__tick">File menu · captured 24 September 2026 · history submenu closed, no local paths in frame</span></figcaption>
+      <figcaption>Recent videos reopens a film with its render already attached</figcaption>
     </figure>
   </article>
 </section>
@@ -531,9 +521,9 @@
 <section class="section" id="features">
   <h2 class="section__title">What it does</h2>
   <p class="section__note">
-    Every item here is in the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md" rel="noopener">usage guide</a>,
-    with the measurements behind it. Nothing is uploaded: the work happens on
-    your GPU and the cache sits on your disk.
+    Details are in the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md" rel="noopener">usage guide</a>.
+    Nothing is uploaded: the work happens on your GPU and the cache stays on
+    your disk.
     <!-- unreleased --><span class="unreleased-note">Items marked <span class="new" title="In main, after v0.25.0; the next release carries it">New</span> are in
     <code>main</code>, after v0.25.0: the next release carries them. Until
     then, <a href="{{REPO_URL}}/blob/main/docs/BUILDING.md" rel="noopener">build it yourself</a>.</span><!-- /unreleased -->
@@ -556,7 +546,7 @@
       <ul class="matrix__list">
         <li>Renders while you watch, and seeks anywhere, rendered or not</li>
         <li>Local files, public YouTube links, photos, animated GIFs and the bundled game trailers</li>
-        <li>HDR10 and HLG tone-mapped for the model on the GPU, and the original shown in HDR on an HDR display <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
+        <li>HDR10 and HLG tone-mapped for the model, and the original shown in HDR on an HDR display <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
         <li>Subtitles (SRT, ASS, WebVTT, PGS, VobSub) drawn after the render, so text is never warped <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
       </ul>
     </section>
@@ -564,11 +554,11 @@
     <section class="matrix__group">
       <h3 class="matrix__title">Keep and export</h3>
       <ul class="matrix__list">
-        <li>A constant-quality render cache: HEVC at CQ&nbsp;16 by default, 10-bit or lossless if you ask <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
+        <li>Renders kept on disk at Standard, High (10-bit) or Lossless quality <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
         <li>PNG, JPEG, GIF, MP4 or MKV; MKV keeps the audio, subtitles and chapters untouched</li>
         <li>Super Resolution, neural rendering and frame generation in one file, in NVIDIA&rsquo;s order</li>
         <li>Frame generation from 2× to 5× the frame rate, as a conversion</li>
-        <li>The same export from a script: <code>--render</code>, with exit codes <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
+        <li>The same export from the command line, with <code>--render</code> <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
       </ul>
     </section>
 
@@ -591,7 +581,7 @@
         <img src="media/subtitles.jpg" width="1902" height="1023" loading="lazy" decoding="async"
              alt="A subtitle drawn over the DLSS 5 frame of 007 First Light; the text is a test file that says what it is.">
       </picture>
-      <figcaption>Subtitles, drawn after the render <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+      <figcaption>Subtitles, drawn after the render <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></figcaption>
     </figure>
     <figure class="screen">
       <picture>
@@ -600,7 +590,7 @@
         <img src="media/neural-settings.jpg" width="1324" height="674" loading="lazy" decoding="async"
              alt="The Neural settings dialog at its defaults, grouped under Look, Quality and render time, Guides sent to the model, and Across frames.">
       </picture>
-      <figcaption>Neural settings, at their defaults<span class="beat__tick">the dialog alone · 1324×674 at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+      <figcaption>Neural settings, at their defaults</figcaption>
     </figure>
     <figure class="screen">
       <picture>
@@ -609,7 +599,7 @@
         <img src="media/neural-strength.jpg" width="1902" height="1023" loading="lazy" decoding="async"
              alt="Image adjustments open over a paused 007 First Light frame, the DLSS 5 mix slider at 1.00, with the compare bar below.">
       </picture>
-      <figcaption>The DLSS 5 mix, at its 1.00 default <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+      <figcaption>The DLSS 5 mix, at its 1.00 default <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></figcaption>
     </figure>
   </div>
 </section>
@@ -619,8 +609,7 @@
   <div class="section__head">
     <h2 class="section__title">Limits and requirements</h2>
     <p class="section__note">
-      The limits, stated as plainly as the features. Each is measured or
-      documented in the repository.
+      Stated as plainly as the features, and measured where a number is given.
     </p>
   </div>
 
@@ -630,7 +619,7 @@
     <p class="readout__row"><span class="readout__k">Upscaling</span><span class="readout__v readout__v--prose">DLSS Super Resolution scored below a plain bicubic upscale on all six video clips measured. It is built for games, so it is off by default and there for its look, not for detail.</span></p>
     <p class="readout__row"><span class="readout__k">Runtime</span><span class="readout__v readout__v--prose">The neural runtime is a modified, unsigned community build, not a signed NVIDIA package. <a href="#faq-unsigned">Why it is unsigned</a>.</span></p>
     <p class="readout__row"><span class="readout__k">Artifacts</span><span class="readout__v readout__v--prose">Depth is estimated from the picture, and so is motion on cards without the optical flow engine. Expect some artifacts.</span></p>
-    <p class="readout__row"><span class="readout__k">Low key</span><span class="readout__v readout__v--prose">In deep shadow the model can crush a face towards black and add speckle. The frame below is the plainest case found, and it is on this page on purpose.</span></p>
+    <p class="readout__row"><span class="readout__k">Low key</span><span class="readout__v readout__v--prose">In deep shadow the model can crush a face towards black and add speckle. The frame below is the plainest case found.</span></p>
     <p class="readout__row"><span class="readout__k">Cache</span><span class="readout__v readout__v--prose">A render started partway into a video is not joined to the rest, and below 20&nbsp;GB free the least recently watched renders are deleted first.</span></p>
   </div>
 
@@ -645,7 +634,7 @@
       </picture>
       <figcaption class="still__caption">
         <span class="still__title">Assassin's Creed Shadows, Story Trailer · Ubisoft</span>
-        <span class="still__data">frame 1987 (1:06.23) · 2560×1440 source · unscaled 700×880 crops · default settings · RTX 4080 SUPER · <a href="media/ac-shadows-low-key-limit.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/ac-shadows-low-key-limit.provenance.json" rel="noopener">record</a></span>
+        <span class="still__data">frame 1987 · default settings · RTX 4080 SUPER · <a href="media/ac-shadows-low-key-limit.png">full size</a> · <a href="{{REPO_URL}}/blob/main/docs/media/stills/ac-shadows-low-key-limit.provenance.json" rel="noopener">record</a></span>
       </figcaption>
     </figure>
   </div>
@@ -678,7 +667,7 @@
       <li>Unzip into a <strong>new, empty folder</strong>. Keep <code>neural-runtime/</code> next to the executable.</li>
       <li>Run <code>DLSSVideoPlayer.exe</code>.</li>
       <li>Open a file with <kbd>Ctrl</kbd>+<kbd>O</kbd>, paste a YouTube link with <kbd>Ctrl</kbd>+<kbd>L</kbd>, or pick something from <strong>File &gt; Game trailers</strong>.</li>
-      <li>Press <kbd>D</kbd>. It buffers for a few seconds, then plays rendered.</li>
+      <li>Press <kbd>D</kbd>. It buffers for a few seconds, then plays the render.</li>
     </ol>
     </div>
     <figure class="requires__figure">
@@ -688,7 +677,7 @@
         <img src="media/player-start.jpg" width="1902" height="1023" loading="lazy" decoding="async"
              alt="The start screen: the capability check and the seven game trailers with their YouTube thumbnails.">
       </picture>
-      <figcaption>The start screen checks the machine first <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">fresh profile · 1902×1023 at 150% · 0.25.0 + main (dced888) · thumbnails are YouTube’s, for the trailers’ publishers</span></figcaption>
+      <figcaption>The start screen checks the machine first <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">thumbnails from YouTube, for the trailers’ publishers</span></figcaption>
     </figure>
   </div>
 
@@ -697,8 +686,8 @@
       <strong>This is a community project — it is not an NVIDIA product.</strong>
       The neural runtime it ships with is a modified, <strong>unsigned</strong>
       community build, so Windows and your antivirus will treat it as unknown
-      software (<a href="#faq-unsigned">why</a>). Neural rendering needs NVIDIA driver 610.47 or newer, on an RTX
-      card. Checked on an RTX 4080 SUPER and an RTX 5090.
+      software (<a href="#faq-unsigned">why</a>). Neural rendering needs an
+      RTX card and NVIDIA driver 610.47 or newer.
     </p>
     <p>
       GitHub's automatically generated “Source code” archives do not run: the
@@ -715,14 +704,13 @@
     <details class="faq__item" id="faq-safe">
       <summary>Is it safe to run?</summary>
       <p>
-        It is open source and says what it contains, but part of it is
-        unsigned, so decide with that in view. Each zip has a SHA-256 beside
-        it. The core zip is built by CI from this repository and carries a
-        signed build attestation (<code>gh attestation verify</code>); the
-        complete zip is assembled by the maintainer and has a checksum only.
-        Inside either, <code>verify_package.ps1</code> checks every file against
-        a pinned manifest before the first run. The exception is the neural
-        runtime, a modified community build nobody can sign. Scan it as you
+        It is open source, but its neural runtime is a modified community
+        build that nobody can sign, so decide with that in view. Each zip has a
+        SHA-256 beside it. The core zip is built by CI from this repository and
+        carries a signed build attestation (<code>gh attestation verify</code>);
+        the complete zip is assembled by the maintainer and has a checksum
+        only. Inside either, <code>verify_package.ps1</code> checks every file
+        against a pinned manifest before the first run. Scan the runtime as you
         would any unsigned software, or take the core zip and supply your own.
       </p>
     </details>
@@ -731,23 +719,21 @@
       <p>
         Because it has been modified. It includes NVIDIA's neural DLL patched
         to run on RTX 40 cards, which invalidates NVIDIA's signature, alongside
-        community ReShade and RenoDX files that were never signed. It is not a
-        redistribution of a signed NVIDIA package and nobody is in a position
-        to re-sign it, so it ships unsigned and says so. Its files are pinned
-        by size and SHA-256, and the package verifier rejects anything that has
-        drifted.
+        community ReShade and RenoDX files that were never signed. Nobody is in
+        a position to re-sign it, so it ships unsigned and says so. Its files
+        are pinned by size and SHA-256, and the package verifier rejects any
+        that have changed.
       </p>
     </details>
     <details class="faq__item" id="faq-gpu">
       <summary>Which GPUs does it need?</summary>
       <p>
-        An NVIDIA RTX card and driver 610.47 or newer for neural rendering;
-        with an older driver the player says so up front. It has been checked
-        on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack
-        native FP8 and should be several times slower; nobody has tested one
-        yet. The player is built and tested for Windows with an RTX card; on
-        any other GPU its start screen says "not an RTX GPU, so no DLSS", and
-        playback there has not been tested.
+        An NVIDIA RTX card and driver 610.47 or newer; with an older driver
+        the player says so up front. It has been checked on an RTX 4080 SUPER
+        and an RTX 5090. RTX 20 and 30 series cards lack native FP8 and should
+        be several times slower; nobody has tested one yet. On any other GPU
+        the start screen says "not an RTX GPU, so no DLSS", and playback there
+        has not been tested.
       </p>
     </details>
     <details class="faq__item" id="faq-speed">
@@ -759,9 +745,8 @@
         and 15.3&nbsp;ms on an RTX 4080 SUPER, both faster than the video
         plays; 1440p30 on the 5090 costs 15.4&nbsp;ms. A whole 4K film on the
         4080 SUPER rendered at 14.8 frames a second. After your first session
-        the player knows your GPU and warns you before a video it expects to
-        fall behind on. The rest of the measured limits are
-        <a href="#limits">above</a>.
+        the player warns you before a video it expects to fall behind on. The
+        other limits are <a href="#limits">above</a>.
       </p>
     </details>
     <details class="faq__item" id="faq-upload">
@@ -780,20 +765,19 @@
       <summary>Does it upscale video too?</summary>
       <p>
         It can, with DLSS Super Resolution, but that is off by default because
-        on video it does not beat a plain scaler: from 960×540 to 1080p on six
-        clips, a bicubic upscale scored higher VMAF every time. DLSS Super
-        Resolution is built for rendered games, not decoded footage, so turn it
-        on for its look, not for detail. Neural rendering itself keeps the
-        source resolution.
+        on video it does not beat a plain scaler: on six clips upscaled from
+        960×540 to 1080p, bicubic scored higher every time. It is built for
+        rendered games, not decoded footage, so turn it on for its look, not
+        for detail. Neural rendering itself keeps the source resolution.
       </p>
     </details>
     <details class="faq__item" id="faq-export">
       <summary>Can I keep the result?</summary>
       <p>
         Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video,
-        from the player, and from the release after v0.25.0 also from a script
-        with <code>--render</code>. MKV keeps
-        the source audio, subtitles and chapters without re-encoding them.
+        from the player or, from v0.26.0, from a script with
+        <code>--render</code>. MKV keeps the source audio, subtitles and
+        chapters without re-encoding them.
         Export with DLSS stages writes Super Resolution, neural rendering and
         frame generation into one file, in NVIDIA's order.
       </p>
