@@ -5059,6 +5059,8 @@ void neural_zero_motion_test_ships_on_and_is_a_cache_key_term_test()
 void upscaling_history_defaults_to_temporal_and_never_reaches_the_model_test()
 {
     CHECK(kDefaultUpscalingHistory == UpscalingHistory::Temporal);
+    // The viewer starts at Per-frame; a job that names none still means Temporal.
+    CHECK(kRecommendedUpscalingHistory == UpscalingHistory::PerFrame);
     for (const UpscalingHistory history : {UpscalingHistory::Temporal, UpscalingHistory::PerFrame})
         CHECK(ParseUpscalingHistory(UpscalingHistoryName(history)) == std::optional<UpscalingHistory>(history));
     CHECK(UpscalingHistoryName(UpscalingHistory::PerFrame) == "per-frame");

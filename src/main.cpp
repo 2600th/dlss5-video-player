@@ -1551,8 +1551,8 @@ static uint32_t ReadProcessingScale(const std::filesystem::path& settings){
 // The saved Super Resolution history, by name; anything else is the default.
 static UpscalingHistory ReadUpscalingHistory(const std::filesystem::path& settings){
     wchar_t saved[32]{};
-    GetPrivateProfileStringW(L"Playback",L"UpscalingHistory",L"temporal",saved,static_cast<DWORD>(std::size(saved)),settings.c_str());
-    return ParseUpscalingHistory(WideToUtf8(saved)).value_or(kDefaultUpscalingHistory);
+    GetPrivateProfileStringW(L"Playback",L"UpscalingHistory",L"",saved,static_cast<DWORD>(std::size(saved)),settings.c_str());
+    return ParseUpscalingHistory(WideToUtf8(saved)).value_or(kRecommendedUpscalingHistory);
 }
 
 // Everything a neural render writes into the add-on's [RenoDX.DLSS5]: the
@@ -1606,7 +1606,7 @@ struct StageExportJob {
     uint32_t processingScale{kDefaultProcessingScale};
     // Super Resolution's history for an upscaling pass without the model; a pass
     // that runs the model keeps Temporal (CarrierUpscalingHistory).
-    UpscalingHistory upscalingHistory{kDefaultUpscalingHistory};
+    UpscalingHistory upscalingHistory{kRecommendedUpscalingHistory};
     // Written to the add-on before a neural pass. The dialog's tooltip has
     // always said the neural stage "runs the neural model with the settings
     // from Neural settings", but nothing wrote them: the export used whatever
@@ -11071,8 +11071,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // fresh install and never moved down by anything but the user.
     uint32_t m_processingScale=kDefaultProcessingScale;
     // Super Resolution's history for playback and for an export's SR stage on its
-    // own (UpscalingPolicy.h). Temporal on a fresh install.
-    UpscalingHistory m_upscalingHistory=kDefaultUpscalingHistory;
+    // own (UpscalingPolicy.h). Per-frame on a fresh install.
+    UpscalingHistory m_upscalingHistory=kRecommendedUpscalingHistory;
     NeuralSettings m_neuralSettings;
     // Frame-accurate in/out markers on the loaded source's timeline.
     RangeMarkers m_markers;

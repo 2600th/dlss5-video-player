@@ -397,11 +397,12 @@ six clips, a bicubic upscale scored higher VMAF than DLSS on every one
 (`docs/measurements/sr-quality-20260924` and `sr-history-20260924`). Turn it on if
 you prefer its look, not because it recovers detail.
 
-**DLSS > Upscaling history** chooses how it uses earlier frames. **Temporal
-(steadier)**, the default, accumulates them. Its picture changes less from frame to
-frame than the source, which calms grain and also trails motion. **Per-frame
-(sharper on some clips)** upscales every frame on its own. It scored 0.8 to 19 VMAF
-above Temporal on five of the six clips and 1.3 below on a held frame. The greyed
+**DLSS > Upscaling history** chooses how it uses earlier frames. **Per-frame
+(recommended)**, the default, upscales every frame on its own. It scored 0.8 to 19
+VMAF above Temporal on five of the six clips and 1.3 below on a held frame, and its
+frame-to-frame change is no larger than the source's. **Temporal** accumulates
+earlier frames: its picture changes less from frame to frame than the source,
+which calms grain and also trails motion. The greyed
 line at the top of the submenu and each item's right-hand column give the measured
 range. The same choice is the **History** row of **Export with DLSS stages**.
 

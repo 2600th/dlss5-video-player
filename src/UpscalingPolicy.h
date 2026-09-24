@@ -89,8 +89,8 @@ inline bool SuperResolutionCarrier(uint32_t modelWidth, uint32_t modelHeight,
 
 // ---- Super Resolution history ---------------------------------------------
 //
-// Whether DLSS Super Resolution accumulates over frames (Temporal, the default
-// and what it always did) or starts over on every frame (PerFrame: each output
+// Whether DLSS Super Resolution accumulates over frames (Temporal, what it
+// always did and still the wire default) or starts over on every frame (PerFrame: each output
 // is DLSS's single-frame upscale of that frame alone).
 //
 // On decoded video neither beats a plain scaler. DLSS SR is built for rendered
@@ -102,7 +102,8 @@ inline bool SuperResolutionCarrier(uint32_t modelWidth, uint32_t modelHeight,
 // scored above both everywhere. Temporal's output changes less from frame to
 // frame than the source (up to 1.2 luma levels less), which is what "steadier"
 // means here: it calms grain and trails motion. Neither is right for every clip,
-// so the viewer picks, with the numbers beside the choice;
+// so the viewer picks, with the numbers beside the choice, starting at Per-frame
+// (kRecommendedUpscalingHistory);
 // docs/measurements/sr-history-20260924/REPORT.md has them.
 //
 // Playback's Super Resolution and an export's Super Resolution stage follow the
@@ -113,6 +114,14 @@ inline bool SuperResolutionCarrier(uint32_t modelWidth, uint32_t modelHeight,
 // key exactly as they were.
 enum class UpscalingHistory : uint8_t { Temporal, PerFrame };
 inline constexpr UpscalingHistory kDefaultUpscalingHistory = UpscalingHistory::Temporal;
+// What a fresh install offers the viewer, which is not the wire default above.
+// kDefaultUpscalingHistory is what a job means when it names none - every
+// cached carrier and every older helper was built on it - so it stays
+// Temporal. The viewer's own choice starts at Per-frame, because it measured
+// better on video on both counts: higher VMAF on 5 of 6 clips (+19 on a slow
+// pan), and frame-to-frame change no larger than the source's, where Temporal
+// smooths and trails motion. Bicubic still scored above both on every clip.
+inline constexpr UpscalingHistory kRecommendedUpscalingHistory = UpscalingHistory::PerFrame;
 
 // Stored by name, so a value a later build adds is not misread by index.
 inline constexpr std::string_view UpscalingHistoryName(UpscalingHistory history) noexcept {

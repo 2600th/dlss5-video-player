@@ -164,7 +164,8 @@ inline constexpr UINT IDM_NEURAL_PRESET_CUSTOM = 479;
 inline constexpr UINT IDM_PROCESSING_SCALE_FIRST = 480;
 inline constexpr UINT IDM_PROCESSING_SCALE_LAST = 482;
 // Super Resolution's history (UpscalingHistory, UpscalingPolicy.h), its own
-// contiguous radio block in the enum's order: Temporal, the default, first.
+// contiguous radio block in the enum's order: Temporal first, then Per-frame
+// (the recommended default).
 inline constexpr UINT IDM_UPSCALE_HISTORY_TEMPORAL = 484;
 inline constexpr UINT IDM_UPSCALE_HISTORY_PER_FRAME = 485;
 // Right-justified affordance appended to the menu bar itself, not a submenu.
