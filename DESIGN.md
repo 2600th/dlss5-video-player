@@ -279,3 +279,71 @@ Two real photographic plates at identical crop and `object-position`, stacked; t
 - **Don't** add scroll-triggered animation, parallax, or entrance staggering; the seam sweep is the page's only authored moment.
 - **Don't** tint, dim, or wash over footage in a section whose job is to show image quality — put the label on a plate beside or beneath the frame instead.
 - **Don't** reorder responsive columns with `order`; place them with `grid-column` so the wide column always keeps the screenshot.
+
+## Player
+
+Everything above is the project site. The native player (`src/`, Win32 + GDI
+chrome over a D3D12 picture) is a separate surface with its own tokens, and
+this section records them. The player is an **Operate** surface: the video is
+the hero, the chrome recedes during playback, and nothing is ever drawn over
+the comparison point. The one thing it shares with the site is the flag
+orange, used the same way: as the mark under the selected compare mode.
+
+### Tokens
+
+The palette is `ui_palette` in `src/UiResources.h`; the button looks are
+`ResolveButtonVisual` in `src/UiResources.cpp`.
+
+| Token | Value | Use |
+|---|---|---|
+| Window | `RGB(18,19,21)` | Window and start-screen ground; dark label on lit pills |
+| ControlSurface | `RGB(27,28,31)` | The control strip; the pressed button's sunken fill |
+| Inactive | `RGB(47,49,53)` | Resting pill, chip and compare segment |
+| Hover | `RGB(62,65,70)` | Hovered resting pill |
+| PrimaryBlue | `RGB(55,139,226)` | On (active) pill, played progress; hovered `RGB(84,158,236)` |
+| NeuralCoverage | `RGB(72,196,178)` | Working pill, rendered coverage lane; hovered `RGB(104,214,198)` |
+| Coverage lit | `RGB(176,246,234)` | The coverage lane at the height of the render-complete glow |
+| MarkedRange | `RGB(158,112,240)` | The In/Out selection (edge `RGB(206,178,255)`) |
+| Attention | `RGB(255,168,64)` | A dropped frame; the Out marker |
+| Flag | `RGB(255,106,26)` | The selected compare mode's 2 px mark, as on the site |
+| PrimaryText / SecondaryText | `RGB(240,240,242)` / `RGB(160,164,172)` | Labels / quiet values and captions |
+
+Type is Segoe UI at 16 px (body), 14 px (pills, chips, status) and 24 px
+semibold (the start screen's title), all in DIPs through `ActiveWindowDpi`.
+Icons are the bundled Tabler font (`GlyphForIcon`); without it every control
+keeps its words. Pills have an 8 dip radius and a 36 dip minimum hit height;
+chips a 4 dip radius; compare segments are square with a 1 px gap. A lit pill's
+label must keep 4.5:1 contrast in every state, hovered included (PolicyTests
+checks it).
+
+### Motion
+
+Motion is information: it says where something came from or went, and it
+never decorates. The numbers live in `src/ChromeMotionPolicy.h`, with tests.
+
+| Moment | Trigger | Duration and easing | Without animations (SPI_GETCLIENTAREAANIMATION off) |
+|---|---|---|---|
+| Hover tint on a toolbar control | cursor enters / leaves | in 120 ms cubic ease-out; out 180 ms cubic ease-in; a reversal starts from the current level | lands at once |
+| Press | button down | no animation: glyph and label sink 1 px into the darker fill for as long as it is held | same |
+| Render complete | a live session that had holes has none left | 900 ms: the coverage lane lights over the first fifth, a highlight crosses it left to right, then it eases back to teal | the lane holds lit for 900 ms, no sweep |
+| Status chip flash | the fact a chip reports changes (not every repaint) | 900 ms linear fall-off (`status_chips::Flash`) | holds lit for 900 ms |
+| Rendering-now hatch | a live job is running | drifts with the 50 ms activity timer | still hatch, 1 s repaint |
+
+Rules:
+- 120-220 ms for anything that answers the pointer; ease-out when something
+  arrives, ease-in when it leaves; no bounce, no overshoot.
+- A timer runs only while something is moving, and it repaints only the
+  rectangle that moves. Chrome animation must never cost a video frame:
+  the playback-health line (`Playback health: ... dropped=`) is the measure.
+- Every animation has a static equivalent that says the same thing.
+- Nothing flashes over the picture.
+
+### Tooltips
+
+Every toolbar control has a tip (`src/ToolbarTipPolicy.h`). A control with a
+key names it on the first line as `Name (Key)`, the form the compare bar
+uses, and the key is checked against the control's menu row by PolicyTests.
+A second line, when there is one, says what the control does in the plain,
+measured voice the rest of the product uses; where there is a measurement,
+the tip quotes it (Upscaling, Mix, SR history). Tips appear after 500 ms and
+at once when moving from one control to the next.
