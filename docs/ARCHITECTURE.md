@@ -1,6 +1,6 @@
 # Architecture
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
+_Verified against main (9d3e6cc) on 2026-09-25._
 
 ## High-level pipeline
 
@@ -1004,8 +1004,14 @@ per-frame bilinear tent, and the neural-rendering feature does not read a jitter
 offset at all. `Jitter_Offset_X/Y` are pinned to zero for every evaluation.
 These controls do not alter the offline DLAA carrier or cache identity.
 
-Frame Generation is a conversion, not a presentation mode, and it is the one NGX
-feature the player creates besides Super Resolution. `FrameGenerationPass`
+RTX Video Super Resolution (NGX feature 16, `VsrEngine.h`) is compiled only
+with `-DRTX_VIDEO_SDK`. It joins the NGX session `DLSSBackend` opened on the
+device rather than opening its own, and runs on the decoded original for the
+**RTX VSR** compare view only, so it never reaches the capture, the cache or an
+export.
+
+Frame Generation is a conversion, not a presentation mode, and the player
+creates it besides Super Resolution and RTX VSR. `FrameGenerationPass`
 decodes a file, evaluates `NVSDK_NGX_Feature_FrameGeneration` between each pair
 of source frames and encodes the result at the planned multiple of the source
 rate; the player then loads that file. Live pacing is deliberately absent:
@@ -1368,9 +1374,9 @@ are implemented; the measured guide ablation lives in [Benchmark](BENCHMARK.md).
 Buffered viewing shipped as the active session, and protection masks were
 measured and abandoned because the NGX mask inputs are inert on both features.
 HDR sources are tone mapped to SDR on decode and an HDR display shows their
-original in HDR (`HdrPolicy.h`); what remains is an HDR cache and export, RTX
-Video modes and the rest of GPU-resident processing; the changelog's `Unreleased` section carries anything
-in flight.
+original in HDR (`HdrPolicy.h`); what remains is an HDR cache and export and
+the rest of GPU-resident processing. Open tasks are in
+[IMPROVEMENT-TASKS.md](IMPROVEMENT-TASKS.md).
 
 The harness under `tools/benchmark/` is deliberately not a second implementation
 of what it scores. Its cell grid, cell luma, scene-cut thresholds and cut
@@ -1387,6 +1393,5 @@ Durable mid-job resume is deliberately a from-zero relaunch: a validated
 segment checkpoint would have to carry the temporal neural state at the
 boundary (a preroll re-evaluation, not just frame indices and encoded
 segments), and the relaunch bound already covers the observed failure
-modes. Compose subtitles after enhancement, with burn-in only as an explicit
-export choice. These are pending ideas, not current features or release
-commitments.
+modes. Subtitles are composed after enhancement (above); burning them in, as an
+explicit export choice, is a pending idea, not a release commitment.
