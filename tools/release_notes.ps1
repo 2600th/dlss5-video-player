@@ -88,19 +88,17 @@ $summary = ($lines[$start..($end - 1)] -join "`n").TrimEnd()
 # runtime, so the release is created as a draft and the maintainer attaches the
 # complete zip before publishing - which is why the intro can promise it.
 $intro = @(
-    'Windows x64, an RTX GPU and NVIDIA driver 610.47 or newer. Community project, not an',
+    'Windows x64, an NVIDIA RTX GPU and driver 610.47 or newer. Community project, not an',
     'NVIDIA product; the neural runtime is a modified, unsigned community build.',
     '',
-    ('Download `dlss5-video-player-v{0}-win64.zip` below - player plus the pinned neural' -f $version),
-    'runtime, assembled by the maintainer and attached before this release was published.',
-    ('`DLSSVideoPlayer-v{0}-core-win64.zip` is the player alone, with no runtime in it,' -f $version),
-    'built and attested by CI. Each has a `.sha256` beside it; GitHub''s "Source code" zip',
-    'does not run.',
+    ('Download `dlss5-video-player-v{0}-win64.zip`: the player with its neural runtime.' -f $version),
+    ('`DLSSVideoPlayer-v{0}-core-win64.zip` is the player alone, built and attested by CI.' -f $version),
+    'Each has a `.sha256` beside it. GitHub''s "Source code" zip does not run.',
     ''
 )
 $tail = @(
     '',
-    ('What changed: [CHANGELOG.md for {0}](https://github.com/{1}/blob/{2}/CHANGELOG.md). What was measured, and the decisions it settled: [Decisions and the measurements behind them](https://github.com/{1}/blob/{2}/docs/ARCHITECTURE.md#decisions-and-the-measurements-behind-them).' -f $version, $Repository, $tag)
+    ('Every change: [CHANGELOG.md for {0}](https://github.com/{1}/blob/{2}/CHANGELOG.md).' -f $version, $Repository, $tag)
 )
 $body = (($intro + $summary + $tail) -join "`n").TrimEnd() + "`n"
 [IO.File]::WriteAllText($OutFile, $body)
