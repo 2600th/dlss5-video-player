@@ -275,16 +275,38 @@ Sitemap: ${siteUrl}sitemap.xml
 
 # One page, but a sitemap still gives crawlers a lastmod to work from, and the
 # date is the release's rather than the build's: rebuilding the site without a
-# new release has not changed anything worth recrawling for.
+# new release has not changed anything worth recrawling for. It also names the
+# evidence images and the demonstration, which image and video search index
+# from here rather than from a lazily loaded <picture>.
 $lastMod = if ($publishedIso) { $publishedIso } else { (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') }
+$sitemapImages = @(
+    'assets/hero/hero-neural.jpg'
+    'assets/hero/hero-original.jpg'
+    'media/gta6-lucia-neural.jpg'
+    'media/gta6-lucia-original.jpg'
+    'media/matrix-neural.jpg'
+    'media/matrix-original.jpg'
+    'media/neural-playback.jpg'
+    'media/neural-strength.jpg'
+) | ForEach-Object { "    <image:image><image:loc>$siteUrl$_</image:loc></image:image>" }
 Write-TextFile -Path (Join-Path $OutputPath 'sitemap.xml') -Text @"
 <?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"
+        xmlns:video="http://www.google.com/schemas/sitemap-video/1.1">
   <url>
     <loc>$siteUrl</loc>
     <lastmod>$lastMod</lastmod>
     <changefreq>monthly</changefreq>
     <priority>1.0</priority>
+$($sitemapImages -join "`n")
+    <video:video>
+      <video:thumbnail_loc>${siteUrl}assets/demo/demo-poster.jpg</video:thumbnail_loc>
+      <video:title>DLSS 5 Video Player: twenty seconds of the original against the neural render</video:title>
+      <video:description>The Matrix and Grand Theft Auto VI Trailer 2, each source frame against the player's own DLSS 5 render of the same frame. No sound.</video:description>
+      <video:content_loc>${siteUrl}media/neural-comparison-demo.mp4</video:content_loc>
+      <video:duration>20</video:duration>
+    </video:video>
   </url>
 </urlset>
 "@

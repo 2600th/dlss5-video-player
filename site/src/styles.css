@@ -235,6 +235,12 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
    this crop and object-position, so anything further left puts the whole face
    on one side and the comparison proves nothing. */
 .compare { position: absolute; inset: 0; margin: 0; --seam: 55%; }
+/* The sweep starts at 88%. Drawing it there from the first paint (the class is
+   set in <head>) means main.js picks the seam up where it already is, rather
+   than moving it from 55% to 88% after the frame has shown. */
+@media (prefers-reduced-motion: no-preference) {
+  .js .compare { --seam: 88%; }
+}
 .compare__frame { position: absolute; inset: 0; overflow: hidden; }
 
 .compare__plate {
@@ -850,7 +856,7 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 .footer { border-top: 1px solid var(--line); padding: clamp(2.5rem, 6vw, 4.5rem) var(--gutter) 3rem; max-width: 76rem; margin-inline: auto; }
 .footer__cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 2rem; margin-bottom: 3rem; }
 .footer__col { display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
-.footer__col h3 {
+.footer__title {
   font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78;
   text-transform: uppercase; letter-spacing: 0.15em; color: var(--flag); margin-bottom: 0.35rem;
 }

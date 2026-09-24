@@ -334,6 +334,19 @@ Test-Case 'the page keeps its one authored motion moment' {
     }
 }
 
+Test-Case 'the seam is first drawn where the sweep starts, so it never jumps' {
+    # main.js starts the sweep at a fixed position. If the first paint showed
+    # the authored 55% instead, the seam would jump once the deferred script
+    # ran: a visible flash, measured as a layout shift on a throttled phone.
+    $js = Read-TextFile -Path (Join-Path $distFull 'main.js')
+    $css = Read-TextFile -Path (Join-Path $distFull 'styles.css')
+    $start = [regex]::Match($js, 'var start = (\d+);').Groups[1].Value
+    Assert-True ([bool]$start) 'main.js names the sweep start'
+    Assert-True ($css.Contains(".js .compare { --seam: $start%; }")) "the stylesheet draws the scripted seam at $start%"
+    Assert-Contains $htmlFull "document.documentElement.classList.add('js')" 'the page marks itself scripted before first paint'
+    Assert-True ($css -match '(?s)@media \(prefers-reduced-motion: no-preference\) \{\s*\.js \.compare') 'reduced motion keeps the authored position'
+}
+
 Test-Case 'the hero comparison crops ship and stay a matched pair' {
     $originalCrop = [IO.Path]::Combine($distFull, 'assets', 'hero', 'hero-original.jpg')
     $neuralCrop = [IO.Path]::Combine($distFull, 'assets', 'hero', 'hero-neural.jpg')
@@ -389,6 +402,30 @@ Test-Case 'structured data is valid JSON and describes this release' {
     Assert-True ($null -eq (Get-Property $app 'review')) 'no review is fabricated'
 }
 
+Test-Case 'the application, the site and the demo are described in structured data' {
+    $m = [regex]::Match($htmlFull, '(?s)<script type="application/ld\+json">(.*?)</script>')
+    $graph = ($m.Groups[1].Value | ConvertFrom-Json).'@graph'
+    $app = @($graph | Where-Object { $_.'@type' -eq 'SoftwareApplication' })[0]
+    Assert-Equal 'Windows' $app.operatingSystem 'the operating system is declared'
+    Assert-Equal 'MultimediaApplication' $app.applicationCategory 'the category is a multimedia application'
+    Assert-Equal '0' $app.offers.price 'it is declared free'
+    Assert-Contains $app.license 'MIT' 'the licence is MIT'
+    Assert-Contains ($app.sameAs -join ' ') $repoUrl 'the repository is declared the same thing'
+    Assert-True (@($graph | Where-Object { $_.'@type' -eq 'WebSite' }).Count -eq 1) 'a WebSite node names the site'
+
+    $video = @($graph | Where-Object { $_.'@type' -eq 'VideoObject' })[0]
+    Assert-True ($null -ne $video) 'the demonstration has a VideoObject'
+    foreach ($field in @('name', 'description', 'thumbnailUrl', 'contentUrl', 'uploadDate', 'duration')) {
+        Assert-True ([bool](Get-Property $video $field)) "the VideoObject declares $field"
+    }
+    # Both URLs are absolute; what follows the site URL must be a shipped file.
+    $siteUrl = [regex]::Match($htmlFull, '<link rel="canonical" href="([^"]+)"').Groups[1].Value
+    foreach ($url in @($video.thumbnailUrl, $video.contentUrl)) {
+        Assert-True ($url.StartsWith($siteUrl)) "$url is on this site"
+        Assert-True (Test-Path (Join-Path $distFull $url.Substring($siteUrl.Length))) "$url ships"
+    }
+}
+
 Test-Case 'every visible FAQ question appears in the FAQ structured data' {
     # Structured data that does not match what the visitor can see is a
     # penalty, not an optimisation, so the two are checked against each other.
@@ -415,6 +452,14 @@ Test-Case 'crawl files ship and point at this site' {
     Assert-Contains $sitemap 'github.io' 'sitemap points at the deployed host'
     [xml]$parsed = $sitemap   # throws if malformed
     Assert-True ($null -ne $parsed.urlset) 'sitemap is well-formed XML'
+    # The image and video entries must name files the build actually ships.
+    $siteUrl = $parsed.urlset.url.loc
+    $locs = @([regex]::Matches($sitemap, '<(?:image:loc|video:thumbnail_loc|video:content_loc)>([^<]+)<') | ForEach-Object { $_.Groups[1].Value })
+    Assert-True ($locs.Count -ge 8) "expected the evidence images and the demo in the sitemap, found $($locs.Count)"
+    foreach ($loc in $locs) {
+        Assert-True ($loc.StartsWith($siteUrl)) "$loc is on this site"
+        Assert-True (Test-Path (Join-Path $distFull $loc.Substring($siteUrl.Length))) "$loc ships"
+    }
 }
 
 Test-Case 'the page carries the metadata a search result is built from' {
@@ -422,9 +467,42 @@ Test-Case 'the page carries the metadata a search result is built from' {
     Assert-Contains $htmlFull 'property="og:image"' 'social image declared'
     Assert-Contains $htmlFull 'name="twitter:card"' 'twitter card declared'
     Assert-Contains $htmlFull 'name="description"' 'meta description present'
+    # Lengths a results page shows without truncating: about 60 characters of
+    # title and 160 of description.
+    $title = [regex]::Match($htmlFull, '<title>([^<]*)</title>').Groups[1].Value
+    Assert-True ($title.Length -le 60) "the title fits a results page (is $($title.Length))"
+    Assert-Contains $title 'DLSS 5 Video Player' 'the title leads with the name'
+    Assert-Contains $title 'videos' 'the title carries the search phrase'
     $desc = [regex]::Match($htmlFull, '<meta name="description" content="([^"]*)"').Groups[1].Value
-    Assert-True ($desc.Length -gt 70 -and $desc.Length -lt 320) "meta description is a usable length (is $($desc.Length))"
+    Assert-True ($desc.Length -ge 110 -and $desc.Length -le 160) "meta description is a usable length (is $($desc.Length))"
     Assert-Equal 1 ([regex]::Matches($htmlFull, '<h1[ >]').Count) 'exactly one h1'
+}
+
+Test-Case 'the headings form one tree with no skipped level' {
+    $levels = @([regex]::Matches($htmlFull, '<h([1-6])[ >]') | ForEach-Object { [int]$_.Groups[1].Value })
+    Assert-Equal 1 $levels[0] 'the h1 comes first'
+    for ($i = 1; $i -lt $levels.Count; $i++) {
+        Assert-True ($levels[$i] -le $levels[$i - 1] + 1) "heading $i jumps from h$($levels[$i - 1]) to h$($levels[$i])"
+    }
+}
+
+Test-Case 'every image names what it shows and reserves its box' {
+    $imgs = [regex]::Matches($htmlFull, '<img\b[^>]*>')
+    Assert-True ($imgs.Count -ge 10) "expected the page's images, matched $($imgs.Count)"
+    foreach ($m in $imgs) {
+        $tag = $m.Value
+        $alt = [regex]::Match($tag, 'alt="([^"]*)"')
+        Assert-True ($alt.Success -and $alt.Groups[1].Value.Length -ge 20) "an image has a descriptive alt: $tag"
+        Assert-True ($tag -match 'width="\d+"' -and $tag -match 'height="\d+"') "an image reserves its box against layout shift: $tag"
+    }
+}
+
+Test-Case 'every in-page link lands on something' {
+    $ids = @{}
+    foreach ($m in [regex]::Matches($htmlFull, '\sid="([^"]+)"')) { $ids[$m.Groups[1].Value] = $true }
+    $anchors = @([regex]::Matches($htmlFull, 'href="#([^"]+)"') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    Assert-True ($anchors.Count -ge 8) "expected the nav and the in-copy links, matched $($anchors.Count)"
+    foreach ($a in $anchors) { Assert-True $ids.ContainsKey($a) "#$a has a target" }
 }
 
 Test-Case 'the comparison is operable without a pointer' {

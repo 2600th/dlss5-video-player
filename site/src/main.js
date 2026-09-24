@@ -338,4 +338,21 @@
   }
 
   refreshRelease();
+
+  /* --- FAQ deep links ----------------------------------------------------- *
+   * The page links its questions from where a visitor has them ("Is it
+   * safe?" beside the download), and a search result can land on one. A
+   * link to a closed <details> would scroll to a bare question, so the one
+   * named in the address opens. Without scripting it is still reached.
+   * ----------------------------------------------------------------------- */
+
+  function openFromHash() {
+    var id = window.location.hash.slice(1);
+    if (!id) { return; }
+    var target = document.getElementById(id);
+    if (target && target.tagName === 'DETAILS') { target.open = true; }
+  }
+
+  openFromHash();
+  window.addEventListener('hashchange', openFromHash);
 })();

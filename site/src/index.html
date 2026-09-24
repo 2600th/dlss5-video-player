@@ -3,27 +3,35 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DLSS 5 Video Player — DLSS 5 neural rendering, checked against the original on the same frame</title>
-<meta name="description" content="Free, open-source Windows player that runs video, photos and GIFs through NVIDIA's DLSS 5 neural renderer on your own RTX GPU while you watch, then compares the render with the original frame by frame. Export to MP4 or MKV. No upload, no subscription.">
+<title>DLSS 5 Video Player — DLSS 5 for videos on your RTX GPU</title>
+<meta name="description" content="Free, open-source AI video enhancement for RTX: run your videos through NVIDIA DLSS 5 neural rendering as you watch, and compare each frame with the original.">
 <link rel="canonical" href="{{SITE_URL}}">
 <meta name="theme-color" content="#050506">
-<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
 <meta name="author" content="DLSS 5 Video Player contributors">
+<meta name="application-name" content="DLSS 5 Video Player">
+<link rel="alternate" type="application/atom+xml" title="DLSS 5 Video Player releases" href="{{REPO_URL}}/releases.atom">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="DLSS 5 Video Player">
-<meta property="og:locale" content="en">
-<meta property="og:title" content="DLSS 5 Video Player — neural rendering you can check against the original, frame by frame">
-<meta property="og:description" content="Run video through NVIDIA's DLSS 5 neural renderer while you watch, then compare the render with the original on the same frame. Free and open source, for Windows.">
+<meta property="og:locale" content="en_US">
+<meta property="og:title" content="DLSS 5 Video Player — see what DLSS 5 does to your videos">
+<meta property="og:description" content="A free, open-source Windows player that runs your videos through NVIDIA's DLSS 5 neural renderer on your RTX card while you watch, with the original on the same frame to check it against.">
 <meta property="og:url" content="{{SITE_URL}}">
 <meta property="og:image" content="{{SITE_URL}}assets/hero/social-card.jpg">
+<meta property="og:image:type" content="image/jpeg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="One frame of Grand Theft Auto VI Trailer 2 split down the face: the original on the left, the DLSS 5 neural render on the right.">
+<meta property="og:video" content="{{SITE_URL}}media/neural-comparison-demo.mp4">
+<meta property="og:video:type" content="video/mp4">
+<meta property="og:video:width" content="1920">
+<meta property="og:video:height" content="1080">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="DLSS 5 Video Player — neural rendering you can check against the original, frame by frame">
-<meta name="twitter:description" content="Run video through NVIDIA's DLSS 5 neural renderer while you watch, then compare the render with the original on the same frame.">
+<meta name="twitter:title" content="DLSS 5 Video Player — see what DLSS 5 does to your videos">
+<meta name="twitter:description" content="Free and open source, for Windows and RTX: DLSS 5 neural rendering while you watch, checked against the original on the same frame.">
 <meta name="twitter:image" content="{{SITE_URL}}assets/hero/social-card.jpg">
+<meta name="twitter:image:alt" content="One frame of Grand Theft Auto VI Trailer 2 split down the face: the original on the left, the DLSS 5 neural render on the right.">
 
 <link rel="icon" href="assets/favicon.ico" sizes="any">
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/archivo-latin.woff2" crossorigin>
@@ -36,31 +44,51 @@
       imagesrcset="assets/hero/hero-original-960.avif 960w, assets/hero/hero-original-1280.avif 1280w, assets/hero/hero-original-1920.avif 1920w"
       imagesizes="(max-width: 60rem) 119vw, max(100vw, 177.8vh)" fetchpriority="high">
 <link rel="stylesheet" href="styles.css">
+<!-- Marks the page as scripted before first paint, so the seam can be drawn
+     at the sweep's starting point instead of jumping there once main.js runs
+     (a visible flash, and a layout shift). Without scripting the seam simply
+     sits at its authored position. -->
+<script>document.documentElement.classList.add('js');</script>
 
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@graph": [
     {
+      "@type": "WebSite",
+      "@id": "{{SITE_URL}}#site",
+      "name": "DLSS 5 Video Player",
+      "url": "{{SITE_URL}}",
+      "inLanguage": "en"
+    },
+    {
       "@type": "SoftwareApplication",
       "@id": "{{SITE_URL}}#app",
       "name": "DLSS 5 Video Player",
       "url": "{{SITE_URL}}",
-      "description": "A Windows player that runs video, photos and GIFs through NVIDIA's DLSS 5 neural renderer while you watch, and holds the original and the render on the same frame for comparison.",
+      "description": "A free, open-source Windows player that runs video, photos and GIFs through NVIDIA's DLSS 5 neural renderer on your own RTX card while you watch, and holds the original and the render on the same frame for comparison.",
       "applicationCategory": "MultimediaApplication",
       "applicationSubCategory": "Neural video rendering",
-      "operatingSystem": "Windows 10, Windows 11",
-      "processorRequirements": "NVIDIA RTX graphics card",
-      "softwareRequirements": "NVIDIA driver 610.47 or newer, NVIDIA RTX graphics card",
+      "operatingSystem": "Windows",
+      "processorRequirements": "x64",
+      "softwareRequirements": "NVIDIA RTX graphics card with driver 610.47 or newer",
       "softwareVersion": "{{VERSION}}",
       "datePublished": "{{PUBLISHED_ISO}}",
       "downloadUrl": "{{PRIMARY_URL}}",
       "installUrl": "{{RELEASE_URL}}",
+      "fileSize": "{{PRIMARY_SIZE}}",
       "releaseNotes": "{{REPO_URL}}/blob/main/CHANGELOG.md",
       "license": "https://opensource.org/licenses/MIT",
       "isAccessibleForFree": true,
       "image": "{{SITE_URL}}assets/hero/social-card.jpg",
+      "screenshot": [
+        "{{SITE_URL}}media/neural-playback.jpg",
+        "{{SITE_URL}}media/original-comparison.jpg",
+        "{{SITE_URL}}media/neural-strength.jpg"
+      ],
       "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "author": { "@type": "Organization", "name": "DLSS 5 Video Player contributors", "url": "{{REPO_URL}}" },
+      "sameAs": ["{{REPO_URL}}"],
       "featureList": [
         "DLSS 5 neural rendering while the video plays",
         "The original and the render compared on the same frame: split, wipe, side by side, 2x2, Difference and a loupe",
@@ -95,7 +123,7 @@
         {
           "@type": "Question",
           "name": "How long does a render take?",
-          "acceptedAnswer": { "@type": "Answer", "text": "You do not wait for it to start: playback joins the render a few seconds after you press D, and the rest fills in while you watch. A live 1080p30 session costs 8.4 ms a frame on an RTX 5090 and 15.3 ms on an RTX 4080 SUPER, both faster than the video plays; 1440p30 on the 5090 costs 15.4 ms. A whole 4K film on the 4080 SUPER rendered at 14.8 frames a second. After your first session the player knows your GPU and warns you before a video it expects to fall behind on." }
+          "acceptedAnswer": { "@type": "Answer", "text": "You do not wait for it to start: playback joins the render a few seconds after you press D, and the rest fills in while you watch. A live 1080p30 session costs 8.4 ms a frame on an RTX 5090 and 15.3 ms on an RTX 4080 SUPER, both faster than the video plays; 1440p30 on the 5090 costs 15.4 ms. A whole 4K film on the 4080 SUPER rendered at 14.8 frames a second. After your first session the player knows your GPU and warns you before a video it expects to fall behind on. The rest of the measured limits are above." }
         },
         {
           "@type": "Question",
@@ -113,6 +141,20 @@
           "acceptedAnswer": { "@type": "Answer", "text": "Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video, from the player or from a script with --render. MKV keeps the source audio, subtitles and chapters without re-encoding them. Export with DLSS stages writes Super Resolution, neural rendering and frame generation into one file, in NVIDIA's order." }
         }
       ]
+    },
+    {
+      "@type": "VideoObject",
+      "@id": "{{SITE_URL}}#demo",
+      "name": "DLSS 5 Video Player: twenty seconds of the original against the neural render",
+      "description": "The Matrix and Grand Theft Auto VI Trailer 2, each source frame against the player's own DLSS 5 render of the same frame: paused frames wiped across the face, then playback with the divider held still. Rendered on an RTX 4080 SUPER. No sound.",
+      "thumbnailUrl": "{{SITE_URL}}assets/demo/demo-poster.jpg",
+      "contentUrl": "{{SITE_URL}}media/neural-comparison-demo.mp4",
+      "uploadDate": "2026-09-22T23:57:29+05:30",
+      "duration": "PT19.7S",
+      "encodingFormat": "video/mp4",
+      "width": 1920,
+      "height": 1080,
+      "isPartOf": { "@id": "{{SITE_URL}}#site" }
     }
   ]
 }
@@ -201,7 +243,7 @@
     </div>
     <p class="hero__caveat">
       Windows · NVIDIA RTX · driver 610.47+ · MIT licensed. A community
-      project, not an NVIDIA product.
+      project, not an NVIDIA product. <a href="#faq-safe">Is it safe?</a>
     </p>
   </div>
 
@@ -501,7 +543,7 @@
     <section class="matrix__group">
       <h3 class="matrix__title">Check</h3>
       <ul class="matrix__list">
-        <li>A SHA-256 beside every zip</li>
+        <li>A SHA-256 beside every zip, and <a href="#faq-safe">what it does and does not prove</a></li>
         <li>Signed build provenance on the core zip, checked with <code>gh attestation verify</code></li>
         <li><code>verify_package.ps1</code> checks every file against a pinned manifest before the first run</li>
         <li>MIT licensed, built in the open on <a href="{{REPO_URL}}" rel="noopener">GitHub</a></li>
@@ -524,7 +566,7 @@
     <p class="readout__row"><span class="readout__k">Hardware</span><span class="readout__v readout__v--prose">An NVIDIA RTX card and driver 610.47 or newer; older drivers are refused up front. Checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 cards lack native FP8, should be several times slower, and are untested.</span></p>
     <p class="readout__row"><span class="readout__k">Speed</span><span class="readout__v readout__v--prose">A live 1080p30 session costs <span class="data">8.4&nbsp;ms</span> a frame on an RTX 5090 and <span class="data">15.3&nbsp;ms</span> on an RTX 4080 SUPER. A whole 4K render on the 4080 SUPER ran at <span class="data">14.8&nbsp;fps</span>, slower than a 30&nbsp;fps film plays.</span></p>
     <p class="readout__row"><span class="readout__k">Upscaling</span><span class="readout__v readout__v--prose">DLSS Super Resolution scored below a plain bicubic upscale on all six video clips measured. It is built for games, so it is off by default and there for its look, not for detail.</span></p>
-    <p class="readout__row"><span class="readout__k">Runtime</span><span class="readout__v readout__v--prose">The neural runtime is a modified, unsigned community build, not a signed NVIDIA package.</span></p>
+    <p class="readout__row"><span class="readout__k">Runtime</span><span class="readout__v readout__v--prose">The neural runtime is a modified, unsigned community build, not a signed NVIDIA package. <a href="#faq-unsigned">Why it is unsigned</a>.</span></p>
     <p class="readout__row"><span class="readout__k">Artifacts</span><span class="readout__v readout__v--prose">Depth is estimated from the picture, and so is motion on cards without the optical flow engine. Expect some artifacts.</span></p>
     <p class="readout__row"><span class="readout__k">Cache</span><span class="readout__v readout__v--prose">A render started partway into a video is not joined to the rest, and below 20&nbsp;GB free the least recently watched renders are deleted first.</span></p>
   </div>
@@ -560,7 +602,7 @@
       <strong>This is a community project — it is not an NVIDIA product.</strong>
       The neural runtime it ships with is a modified, <strong>unsigned</strong>
       community build, so Windows and your antivirus will treat it as unknown
-      software. Neural rendering needs NVIDIA driver 610.47 or newer, on an RTX
+      software (<a href="#faq-unsigned">why</a>). Neural rendering needs NVIDIA driver 610.47 or newer, on an RTX
       card. Checked on an RTX 4080 SUPER and an RTX 5090.
     </p>
     <p>
@@ -622,7 +664,8 @@
         plays; 1440p30 on the 5090 costs 15.4&nbsp;ms. A whole 4K film on the
         4080 SUPER rendered at 14.8 frames a second. After your first session
         the player knows your GPU and warns you before a video it expects to
-        fall behind on.
+        fall behind on. The rest of the measured limits are
+        <a href="#limits">above</a>.
       </p>
     </details>
     <details class="faq__item" id="faq-upload">
@@ -666,21 +709,21 @@
 
   <div class="footer__cols">
     <div class="footer__col">
-      <h3>Read</h3>
+      <h2 class="footer__title">Read</h2>
       <a href="{{REPO_URL}}/blob/main/README.md" rel="noopener">Overview</a>
       <a href="{{REPO_URL}}/blob/main/docs/USAGE.md" rel="noopener">Usage guide</a>
       <a href="{{REPO_URL}}/blob/main/docs/TROUBLESHOOTING.md" rel="noopener">Troubleshooting</a>
       <a href="{{REPO_URL}}/blob/main/CHANGELOG.md" rel="noopener">Changelog</a>
     </div>
     <div class="footer__col">
-      <h3>Build</h3>
+      <h2 class="footer__title">Build</h2>
       <a href="{{REPO_URL}}/blob/main/docs/BUILDING.md" rel="noopener">Build from source</a>
       <a href="{{REPO_URL}}/blob/main/TECHNICAL_OVERVIEW.md" rel="noopener">Technical overview</a>
       <a href="{{REPO_URL}}/blob/main/docs/ARCHITECTURE.md" rel="noopener">Architecture</a>
       <a href="{{REPO_URL}}/blob/main/CONTRIBUTING.md" rel="noopener">Contributing</a>
     </div>
     <div class="footer__col">
-      <h3>Verify</h3>
+      <h2 class="footer__title">Verify</h2>
       <a href="{{REPO_URL}}/blob/main/docs/VERIFICATION-matrix.md" rel="noopener">Verification matrix</a>
       <a href="{{REPO_URL}}/blob/main/docs/screenshots/README.md" rel="noopener">Screenshot provenance</a>
       <a href="{{REPO_URL}}/blob/main/THIRD_PARTY.md" rel="noopener">Third-party notices</a>
