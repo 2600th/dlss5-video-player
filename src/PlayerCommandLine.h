@@ -17,7 +17,12 @@ struct Parsed {
     // The output box a neural render is fitted into; `--output WxH`.
     uint32_t maxWidth = 3840, maxHeight = 2160;
     bool outputExplicit = false;
-    // The file or URL to open: the last argument that is not an option.
+    // The file or URL to open: the last run of arguments that are not options.
+    // A run of several is one path with spaces that reached the command line
+    // unquoted (Windows PowerShell 5.1's Start-Process -ArgumentList does
+    // that), rejoined with single spaces as Notepad does. Taking only its last
+    // word opened "Trailer.mkv" for "...\007 First Light - Story Trailer.mkv",
+    // which is also why a lone "-" counts as a word rather than an option.
     std::wstring file;
     // Non-empty when the command line is refused; the text is shown as is.
     std::wstring error;
@@ -26,8 +31,11 @@ struct Parsed {
 inline Parsed Parse(const std::vector<std::wstring>& arguments)
 {
     Parsed parsed;
+    bool inRun = false;
     for (size_t index = 0; index < arguments.size(); ++index) {
         const std::wstring& argument = arguments[index];
+        const bool plain = !argument.empty() && (argument[0] != L'-' || argument == L"-");
+        if (!plain) inRun = false;
         if (argument == L"--safe-mode") {
             continue;
         } else if (argument == L"--output" && index + 1 < arguments.size()) {
@@ -45,8 +53,9 @@ inline Parsed Parse(const std::vector<std::wstring>& arguments)
             parsed.error = L"The legacy --quality option was removed. Neural rendering preserves source resolution; "
                            L"choose Super Resolution output in the DLSS menu.";
             return parsed;
-        } else if (!argument.empty() && argument[0] != L'-') {
-            parsed.file = argument;
+        } else if (plain) {
+            parsed.file = inRun ? parsed.file + L' ' + argument : argument;
+            inRun = true;
         }
     }
     return parsed;

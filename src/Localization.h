@@ -419,6 +419,7 @@ private:
             {L"status.hdr_at_sdr", L"HDR display: comparing at SDR, as DLSS 5 sees the source"},
             {L"menu.compare_hdr_at_sdr", L"Compare HDR at SDR"},
             {L"recent.missing", L"This local video has moved or is no longer available."},
+            {L"open.missing", L"This video could not be found:\n\n%s"},
             // Keyboard discoverability (P2.23). The cheat sheet lists every
             // menu command that names a key by reading the menus themselves;
             // these are only the rows no menu command carries, and the sheet's

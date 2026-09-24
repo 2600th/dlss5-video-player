@@ -6698,6 +6698,17 @@ private:
         // Every open by name ends what a previous drop said; a drop sets its
         // note again once this returns.
         m_dropNote.Clear();
+        // A path that names no file used to reach the render job, whose first
+        // step - hashing it - failed as "The source digest could not be
+        // computed", which tells nobody the file is missing.
+        if(sourceKind==MediaSourceKind::LocalFile){
+            std::error_code fileError;
+            if(!std::filesystem::is_regular_file(source,fileError)){
+                LOG("Open refused: no file at "<<WideToUtf8(source));
+                MessageBoxW(m_hwnd,FormatLocalizedText(T(L"open.missing"),source).c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONINFORMATION);
+                return false;
+            }
+        }
         // Preview first: identify the source and replay a validated cache entry
         // when one exists, otherwise open the original and let the user choose
         // what to render. Opening a file never starts a whole-video render.

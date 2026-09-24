@@ -13723,6 +13723,14 @@ void player_command_line_takes_the_output_box_and_the_last_file_test()
     const auto files = Parse({L"--safe-mode", L"first.mkv", L"--unknown", L"https://youtu.be/x"});
     CHECK(files.file == L"https://youtu.be/x");
     CHECK(files.error.empty());
+    // A path with spaces that arrived unquoted is one run of plain arguments,
+    // rejoined; an option ends a run, and the last run is still the file.
+    // A lone "-" is a word of the title, not an option.
+    const auto split = Parse({L"C:\\t\\007", L"First", L"Light", L"-", L"Story", L"Trailer.mkv"});
+    CHECK(split.file == L"C:\\t\\007 First Light - Story Trailer.mkv");
+    const auto runs = Parse({L"old", L"clip.mkv", L"--output", L"1920x1080", L"new", L"clip.mkv"});
+    CHECK(runs.file == L"new clip.mkv");
+    CHECK_EQ(1920u, runs.maxWidth);
 
     // The removed --quality is refused by name rather than silently ignored.
     const auto quality = Parse({L"clip.mp4", L"--quality", L"Balanced"});
