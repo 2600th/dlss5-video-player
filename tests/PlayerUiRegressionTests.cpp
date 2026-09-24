@@ -1358,6 +1358,13 @@ struct PlayerAppTestAccess {
         CHECK(live.find(L"Shift+C") != std::wstring::npos);
         CHECK(app.CallbackTipText(PlayerApp::kCompareModeTipIdBase + 7).empty() || app.CompareBarModes().size() > 7);
         CHECK(app.CallbackTipText(1).empty());
+        // The chips' tips speak only for a chip that is shown.
+        app.m_cachedChips = app.BuildStatusChips();
+        const bool fpsShown = app.m_cachedChips[static_cast<size_t>(status_chips::Chip::Fps)].visible;
+        const std::wstring fps = app.CallbackTipText(PlayerApp::kChipTipIdBase + static_cast<UINT_PTR>(status_chips::Chip::Fps));
+        CHECK(fpsShown ? fps.starts_with(L"Frame rate") : fps.empty());
+        CHECK(app.CallbackTipText(PlayerApp::kChipTipIdBase + static_cast<UINT_PTR>(status_chips::Chip::Render)).empty() ==
+              !app.m_cachedChips[static_cast<size_t>(status_chips::Chip::Render)].visible);
         // The notification hands the text over.
         NMTTDISPINFOW info{};
         info.hdr.hwndFrom = nullptr;

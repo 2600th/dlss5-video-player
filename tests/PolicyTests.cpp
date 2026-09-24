@@ -1521,6 +1521,35 @@ void toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test()
     CHECK(toolbar_tips::kReshowDelayMs < 100);
 }
 
+void status_chip_tips_say_what_was_measured_test()
+{
+    using namespace status_chips;
+    TipFacts facts{};
+    facts.render = RenderProgress{true, 0.42, 75.0};
+    facts.rangeSeconds = 600.0;
+    facts.paceRatio = 1.37;
+    const std::wstring render = TipText(Chip::Render, facts);
+    CHECK(render.starts_with(L"Neural render\n42% of 10:00 of video rendered"));
+    CHECK(render.find(L"1.4\u00d7 real time") != std::wstring::npos);
+    CHECK(render.find(L"about 1:15") != std::wstring::npos);
+    // No pace yet: say when there will be one rather than inventing it.
+    facts.paceRatio = 0.0;
+    facts.render.etaSeconds.reset();
+    CHECK(TipText(Chip::Render, facts).find(L"measured once") != std::wstring::npos);
+    // 99.6% is not rendered; done says so.
+    facts.render.fraction = 0.996;
+    CHECK(TipText(Chip::Render, facts).find(L"99%") != std::wstring::npos);
+    facts.render.fraction = 1.0;
+    CHECK(TipText(Chip::Render, facts).find(L"whole range plays rendered") != std::wstring::npos);
+    facts.renderedFps = 29.6;
+    facts.sourceFps = 30.0;
+    CHECK(TipText(Chip::Fps, facts).find(L"30 frames a second reached the screen, against the source's 30") != std::wstring::npos);
+    facts.dropped = 1;
+    CHECK(TipText(Chip::Dropped, facts).find(L"1 frame was skipped") != std::wstring::npos);
+    facts.dropped = 12;
+    CHECK(TipText(Chip::Dropped, facts).find(L"12 frames were skipped") != std::wstring::npos);
+}
+
 void status_chips_flash_on_the_fact_not_on_every_repaint_test()
 {
     using namespace status_chips;
@@ -14139,6 +14168,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(slider_geometry_fills_from_its_origin_and_keeps_the_knob_and_bubble_inside_test),
     TEST_CASE(escape_leaves_fullscreen_before_it_stops_anything_test),
     TEST_CASE(toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test),
+    TEST_CASE(status_chip_tips_say_what_was_measured_test),
     TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),
     TEST_CASE(status_chips_keep_fixed_places_and_give_the_line_the_rest_test),
     TEST_CASE(feature_pills_shrink_before_the_bar_goes_compact_test),

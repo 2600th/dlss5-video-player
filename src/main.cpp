@@ -5578,6 +5578,7 @@ private:
     // Tool ids past every ToolbarAction value, so the compare bar's tips never replace a toolbar one.
     static constexpr UINT_PTR kCompareTipIdBase=0x1000;
     static constexpr UINT_PTR kCompareModeTipIdBase=0x1100;static constexpr size_t kCompareModeTipCount=8;
+    static constexpr UINT_PTR kChipTipIdBase=0x1200;
     // Text for a tool registered with LPSTR_TEXTCALLBACK, built when the tip
     // is about to show; empty means the tool has nothing to say (no tip).
     std::wstring CallbackTipText(UINT_PTR id){
@@ -5586,6 +5587,16 @@ private:
             if(index>=modes.size())return {};
             if(!ComparisonModesAvailable())return T(L"compare.hint.unavailable");
             return CompareModeLabel(modes[index],false)+T(L"compare.tip.mode_cycle");
+        }
+        if(id>=kChipTipIdBase&&id<kChipTipIdBase+status_chips::kChipCount){
+            const size_t index=size_t(id-kChipTipIdBase);
+            if(!m_cachedChips[index].visible)return {};
+            status_chips::TipFacts facts{RenderChipProgress(),0.0,0.0,m_submitFps,m_decoder.FrameRate(),m_droppedFrames};
+            if(m_liveSession&&m_liveRange.end100ns>m_liveRange.start100ns){
+                facts.rangeSeconds=double(m_liveRange.end100ns-m_liveRange.start100ns)*1e-7;
+                facts.paceRatio=LiveRealtimeRatio();
+            }
+            return status_chips::TipText(static_cast<status_chips::Chip>(index),facts);
         }
         return {};
     }
@@ -5651,6 +5662,18 @@ private:
             for(const auto& item:bar.items)if(item.part==compare_bar::Part::Mode&&item.index==index)bounds=item.bounds;
             TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_SUBCLASS;
             info.hwnd=m_hwnd;info.uId=kCompareModeTipIdBase+static_cast<UINT_PTR>(index);
+            if(SendMessageW(host,TTM_GETTOOLINFOW,0,reinterpret_cast<LPARAM>(&info))){
+                info.rect=bounds;SendMessageW(host,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&info));continue;
+            }
+            info.lpszText=LPSTR_TEXTCALLBACKW;info.rect=bounds;
+            SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
+        }
+        // The chips, asked for when shown for the same reason: the numbers move.
+        const auto chips=m_loaded?StatusRowLayout():status_chips::RowLayout{};
+        for(size_t index=0;index<status_chips::kChipCount;++index){
+            TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_SUBCLASS;
+            info.hwnd=m_hwnd;info.uId=kChipTipIdBase+index;
+            const RECT bounds=ControlsVisible()?chips.chips[index]:RECT{};
             if(SendMessageW(host,TTM_GETTOOLINFOW,0,reinterpret_cast<LPARAM>(&info))){
                 info.rect=bounds;SendMessageW(host,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&info));continue;
             }
@@ -7868,6 +7891,7 @@ private:
         // row repaints; otherwise only the chips do.
         RECT dirty=StatusRect();
         if(!layoutChanged){LONG left=dirty.right;for(const RECT& chip:StatusRowLayout().chips)if(chip.right>chip.left)left=std::min(left,chip.left);dirty.left=left;}
+        else RefreshToolbarTips();
         InvalidateRect(m_hwnd,&dirty,FALSE);
         if(flashed&&!m_chipFlashTimer)m_chipFlashTimer=SetTimer(m_hwnd,kChipFlashTimerId,m_activityMotionEnabled?40u:UINT(status_chips::kFlashDuration.count()),nullptr);
     }

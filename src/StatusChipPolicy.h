@@ -205,6 +205,58 @@ inline RowLayout LayoutRow(RECT row, UINT dpi, const std::array<bool, kChipCount
     return layout;
 }
 
+// What a chip says on hover: the measurement behind its few characters, in
+// the plain numeric voice the menus' measured rows use. The chip shows the
+// number; the tip says what was counted, over what, and what it means.
+struct TipFacts {
+    RenderProgress render;
+    double rangeSeconds{};      // the stretch the render covers
+    double paceRatio{};         // video seconds rendered per second; 0 = not measured
+    double renderedFps{};
+    double sourceFps{};
+    uint64_t dropped{};
+};
+
+inline std::wstring OneDecimal(double value)
+{
+    wchar_t text[32]{};
+    swprintf_s(text, L"%.1f", value);
+    return text;
+}
+
+inline std::wstring TipText(Chip chip, const TipFacts& facts)
+{
+    switch (chip) {
+    case Chip::Render: {
+        const long long percent = std::llround(std::clamp(facts.render.fraction, 0.0, 1.0) * 100.0);
+        const long long shown = facts.render.fraction < 1.0 ? std::min<long long>(percent, 99) : percent;
+        std::wstring text = L"Neural render\n" + std::to_wstring(shown) + L"% of " +
+                            (facts.rangeSeconds > 0.0 ? EtaText(facts.rangeSeconds) + L" of video rendered"
+                                                      : std::wstring(L"the range rendered"));
+        if (facts.render.fraction >= 1.0) return text + L". The whole range plays rendered.";
+        if (facts.paceRatio > 0.0)
+            text += L", at " + OneDecimal(facts.paceRatio) + L"\u00d7 real time";
+        else
+            text += L". The pace is measured once the first rendered second lands";
+        if (facts.render.etaSeconds && *facts.render.etaSeconds > 0.0)
+            text += L"; all of it in about " + EtaText(*facts.render.etaSeconds);
+        return text + L".";
+    }
+    case Chip::Fps:
+        return L"Frame rate\n" + std::to_wstring(std::lround(std::max(0.0, facts.renderedFps))) +
+               L" frames a second reached the screen, against the source's " +
+               std::to_wstring(std::lround(std::max(0.0, facts.sourceFps))) +
+               L". Measured over the last three quarters of a second. Fewer than the source means frames are "
+               L"being skipped to keep time.";
+    case Chip::Dropped:
+        return L"Dropped frames\n" + std::to_wstring(facts.dropped) +
+               (facts.dropped == 1 ? L" frame was" : L" frames were") +
+               L" skipped since this file opened: each was due and already late, so showing it would have put "
+               L"the picture behind the sound.";
+    }
+    return {};
+}
+
 // When each chip's reported fact last changed, and how much flash is left.
 class Flash {
 public:
