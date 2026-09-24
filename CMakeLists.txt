@@ -176,6 +176,30 @@ configure_file(src/RuntimeLockData.h.in "${CMAKE_BINARY_DIR}/generated/RuntimeLo
 configure_file(src/VersionData.h.in "${CMAKE_BINARY_DIR}/generated/VersionData.h" @ONLY)
 set(GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")
 
+# The NVIDIA RTX Video SDK (P2.8), optional and never committed: it is behind an
+# NVIDIA developer login and its licence allows it to ship only as object code in
+# an application (docs/BUILDING.md, THIRD_PARTY.md). Empty, as on CI, compiles the
+# RTX VSR engine out and everything builds and tests as it did before. Set, the
+# engine is compiled against the SDK's VSR feature header and its release
+# nvngx_vsr.dll is staged beside the player. It links no library of its own: the
+# DLSS SDK's NGX core already linked creates feature 16 (VsrEngine.h).
+set(RTX_VIDEO_SDK "" CACHE PATH "Path to the NVIDIA RTX Video SDK (optional; builds the RTX VSR comparison view)")
+set(RTX_VSR_FOUND FALSE)
+if(RTX_VIDEO_SDK)
+    set(RTX_VSR_RUNTIME "${RTX_VIDEO_SDK}/bin/Windows/x64/rel/nvngx_vsr.dll")
+    if(NOT EXISTS "${RTX_VIDEO_SDK}/include/nvsdk_ngx_helpers_vsr.h" OR NOT EXISTS "${RTX_VSR_RUNTIME}")
+        message(FATAL_ERROR "RTX_VIDEO_SDK is ${RTX_VIDEO_SDK}, which holds no include/nvsdk_ngx_helpers_vsr.h or bin/Windows/x64/rel/nvngx_vsr.dll. Point it at the extracted RTX Video SDK (see docs/BUILDING.md), or leave it empty to build without RTX VSR.")
+    endif()
+    set(RTX_VSR_FOUND TRUE)
+    # The DLSS SDK's helpers first, then the VSR SDK's by absolute path: the VSR
+    # SDK ships its own copies of the NGX core headers under the same include
+    # guards, so the ones the linked core was built from stay in force. Angle
+    # brackets keep both external (/external:anglebrackets), like every NGX header.
+    file(CONFIGURE OUTPUT "${GENERATED_INCLUDE_DIR}/RtxVideoSdkHeaders.h"
+        CONTENT "#pragma once\n#include <nvsdk_ngx_helpers.h>\n#include <${RTX_VIDEO_SDK}/include/nvsdk_ngx_helpers_vsr.h>\n")
+    message(STATUS "NVIDIA RTX Video SDK found at ${RTX_VIDEO_SDK}; the RTX VSR comparison view is built.")
+endif()
+
 # Link-time code generation for Release, where the toolset supports it. Not in
 # the sanitizer or analyzer configurations, which are not measured and would
 # only link slower. Must be decided before the targets below exist.
@@ -250,6 +274,7 @@ add_library(player_media OBJECT
 add_library(player_render OBJECT
     src/D3D12Renderer.cpp src/D3D12Renderer.h
     src/DLSSBackend.cpp src/DLSSBackend.h
+    src/VsrEngine.cpp src/VsrEngine.h src/VsrPolicy.h
     src/TemporalGuides.cpp src/TemporalGuides.h
     src/OpticalFlowNvof.cpp src/OpticalFlowNvof.h
     src/NvencDirect.cpp src/NvencDirect.h src/NvencDirectPolicy.h src/NvencDirectMux.h
@@ -293,6 +318,10 @@ endif()
 if(NVENC_FOUND)
     target_include_directories(player_render PUBLIC "${NVENC_SDK}")
     target_compile_definitions(player_render PUBLIC DLSS_VIDEO_PLAYER_HAS_NVENC)
+endif()
+# The RTX VSR engine behind its one switch, PUBLIC for the same reason.
+if(RTX_VSR_FOUND)
+    target_compile_definitions(player_render PUBLIC DLSS_VIDEO_PLAYER_HAS_RTX_VSR)
 endif()
 
 add_executable(DLSSVideoPlayer WIN32
@@ -361,6 +390,15 @@ add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
         "${CMAKE_SOURCE_DIR}/LICENSE"
         "$<TARGET_FILE_DIR:DLSSVideoPlayer>/LICENSE"
 )
+# The release feature DLL only, in every configuration: the SDK's dev build draws a
+# watermark over the picture (RTX Video SDK Programming Guide 1.1.0, chapter 4).
+if(RTX_VSR_FOUND)
+    add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${RTX_VSR_RUNTIME}"
+            "$<TARGET_FILE_DIR:DLSSVideoPlayer>/nvngx_vsr.dll"
+    )
+endif()
 
 # The one-click BAT stages these binaries automatically. Keep this optional so
 # developers can still configure CMake before downloading FFmpeg.
