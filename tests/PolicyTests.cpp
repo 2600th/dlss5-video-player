@@ -77,6 +77,7 @@
 #include "DebandPolicy.h"
 #include "SeekPolicy.h"
 #include "RenderPacePolicy.h"
+#include "PlayerCommandLine.h"
 #ifdef small
 #undef small
 #endif
@@ -13200,6 +13201,47 @@ void render_pace_median_outvotes_a_contended_sample_and_round_trips_test()
     CHECK_EQ(size_t{2}, legacy.size());
 }
 
+// P3.4: ParseArgs's decisions, out of main.cpp, with a command line that is a
+// vector rather than the process's own.
+void player_command_line_takes_the_output_box_and_the_last_file_test()
+{
+    using player_command_line::Parse;
+    const auto defaults = Parse({});
+    CHECK_EQ(3840u, defaults.maxWidth);
+    CHECK_EQ(2160u, defaults.maxHeight);
+    CHECK(!defaults.outputExplicit);
+    CHECK(defaults.file.empty() && defaults.error.empty());
+
+    const auto output = Parse({L"--output", L"1920x1080", L"C:\\clips\\a.mp4"});
+    CHECK_EQ(1920u, output.maxWidth);
+    CHECK_EQ(1080u, output.maxHeight);
+    CHECK(output.outputExplicit);
+    CHECK(output.file == L"C:\\clips\\a.mp4");
+    CHECK(Parse({L"--output", L"2560X1440"}).maxHeight == 1440u);
+    // Either side below 64, or not a number, is 64.
+    const auto tiny = Parse({L"--output", L"8x-5"});
+    CHECK_EQ(64u, tiny.maxWidth);
+    CHECK_EQ(64u, tiny.maxHeight);
+    CHECK(tiny.outputExplicit);
+    // A value without a cross is consumed and ignored, so it is never taken
+    // for the file to open; a trailing --output with no value is ignored too.
+    const auto noCross = Parse({L"--output", L"1080", L"--output"});
+    CHECK(!noCross.outputExplicit);
+    CHECK(noCross.file.empty());
+    CHECK(noCross.error.empty());
+
+    // --safe-mode was read by ParseRuntimeArguments; here it is skipped, as
+    // is any other option. The last plain argument is the file.
+    const auto files = Parse({L"--safe-mode", L"first.mkv", L"--unknown", L"https://youtu.be/x"});
+    CHECK(files.file == L"https://youtu.be/x");
+    CHECK(files.error.empty());
+
+    // The removed --quality is refused by name rather than silently ignored.
+    const auto quality = Parse({L"clip.mp4", L"--quality", L"Balanced"});
+    CHECK(quality.error.find(L"--quality option was removed") != std::wstring::npos);
+    CHECK(quality.file == L"clip.mp4");
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -13555,6 +13597,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(utf8_text_lossy_keeps_the_message_and_strict_refuses_it_test),
     TEST_CASE(seek_clamp_stays_on_a_decodable_frame_and_inside_a_finished_range_test),
     TEST_CASE(render_pace_median_outvotes_a_contended_sample_and_round_trips_test),
+    TEST_CASE(player_command_line_takes_the_output_box_and_the_last_file_test),
 };
 
 

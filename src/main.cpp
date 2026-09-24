@@ -67,6 +67,7 @@
 #include "StatusNotePolicy.h"
 #include "SeekPolicy.h"
 #include "RenderPacePolicy.h"
+#include "PlayerCommandLine.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
 #include "SourceDigestMemo.h"
@@ -1162,17 +1163,9 @@ static AppOptions ParseArgs() {
     o.argumentsOk=true;
     o.safeMode=runtimeArguments.safeMode;
     o.userArguments=runtimeArguments.userArguments;
-    for(size_t i=0;i<o.userArguments.size();++i) {
-        const std::wstring& a=o.userArguments[i];
-        if(a==L"--safe-mode") {
-            continue;
-        } else if(a==L"--output" && i+1<o.userArguments.size()) {
-            std::wstring v=o.userArguments[++i]; auto x=v.find(L'x'); if(x==std::wstring::npos) x=v.find(L'X');
-            if(x!=std::wstring::npos) { o.maxW=std::max(64,_wtoi(v.substr(0,x).c_str())); o.maxH=std::max(64,_wtoi(v.substr(x+1).c_str())); o.outputExplicit=true; }
-        } else if(a==L"--quality") {
-            o.argumentsOk=false;o.argumentError=L"The legacy --quality option was removed. Neural rendering preserves source resolution; choose Super Resolution output in the DLSS menu.";return o;
-        } else if(!a.empty() && a[0]!=L'-') o.file=a;
-    }
+    const player_command_line::Parsed parsed=player_command_line::Parse(o.userArguments);
+    o.maxW=parsed.maxWidth;o.maxH=parsed.maxHeight;o.outputExplicit=parsed.outputExplicit;o.file=parsed.file;
+    if(!parsed.error.empty()){o.argumentsOk=false;o.argumentError=parsed.error;}
     return o;
 }
 
