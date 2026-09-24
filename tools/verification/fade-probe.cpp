@@ -14,12 +14,11 @@
 // endpoint removes it: a held 0.8 came back through loopback as a decaying
 // transient, which is a high-pass somewhere in the chain.
 //
-// Build:
-//   cl /nologo /std:c++20 /EHsc /W4 /I src tools\verification\fade-probe.cpp
-//      src\WasapiRenderer.cpp ole32.lib
+// Build: it is the FadeProbe target, built with the tests (CMakeLists.txt), so
+// a change to WasapiRenderer's API breaks the build rather than this file.
 // Run, with loopback-probe.exe recording alongside:
-//   fade-probe.exe faded     (FadeOutAndStop)
-//   fade-probe.exe cut       (Stop, which is what the path did before)
+//   FadeProbe.exe faded     (FadeOutAndStop)
+//   FadeProbe.exe cut       (Stop, which is what the path did before)
 //
 // Measured on the RTX 5090 machine's default endpoint, 48 kHz shared mode,
 // 1056-frame (22 ms) engine buffer:
@@ -34,8 +33,12 @@
 // queued and drained in every run. It is the audio engine's transient as it
 // takes the stream down, which the player does not control.
 
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <objbase.h>
 
@@ -92,7 +95,12 @@ int wmain(int argc, wchar_t** argv)
             for (uint16_t channel = 0; channel < format.channels; ++channel)
                 block[size_t(frame) * format.channels + channel] = value;
         }
-        if (!renderer.Write(block.data(), wanted)) { std::puts("write failed"); break; }
+        // Only Written took the frames: since a pause's refused write stopped
+        // being reported as success, Write answers Written, Refused or Failed.
+        if (renderer.Write(block.data(), wanted) != WasapiRenderer::WriteResult::Written) {
+            std::puts("write failed");
+            break;
+        }
         written += wanted;
     }
 

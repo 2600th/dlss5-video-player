@@ -653,6 +653,11 @@ if(BUILD_TESTING)
     add_test(NAME AudioClockSmoke COMMAND AudioClockSmoke
         "${FFMPEG_STAGED_DIR}" "${CMAKE_BINARY_DIR}/audio-clock")
     set_tests_properties(AudioClockSmoke PROPERTIES LABELS audio SKIP_RETURN_CODE 125 TIMEOUT 300)
+    # tools/verification/fade-probe.cpp is run by hand against a loopback
+    # recording (its header says how), so nothing compiled it, and it stopped
+    # compiling when WasapiRenderer::Write began returning a WriteResult. Built
+    # here, not registered as a test: an API change now breaks the build instead.
+    dlss_video_player_test(FadeProbe tools/verification/fade-probe.cpp)
 
     dlss_video_player_test(NeuralWorkerTests tests/NeuralWorkerTests.cpp)
     add_test(NAME NeuralWorkerTests COMMAND NeuralWorkerTests)
