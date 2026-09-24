@@ -1816,7 +1816,9 @@ bool NeuralCacheManager::Clear()
     // reported rather than half deleted.
     bool complete = true;
     const DWORD self = GetCurrentProcessId();
-    for (const auto name : {L"sources", L"renders", L"staging", L"frame-generation", L"live"}) {
+    // thumbs/ holds the start screen's trailer pictures; SizeBytes counts it,
+    // so the dialog's promise covers it too.
+    for (const auto name : {L"sources", L"renders", L"staging", L"frame-generation", L"live", L"thumbs"}) {
         const std::wstring bucket = name;
         const auto target = root_ / name;
         if (!OwnsPath(target)) return false;

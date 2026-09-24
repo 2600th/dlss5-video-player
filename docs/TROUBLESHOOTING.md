@@ -89,6 +89,15 @@ drafts (every published release is a pre-release, so those count), and stores it
 `DLSSVideoPlayer.ini` beside the executable; `Enabled=0` turns it off. When
 GitHub cannot be reached the player says so and keeps playing.
 
+## Blank trailer tiles on the start screen
+
+The trailer tiles' pictures come from `i.ytimg.com`, YouTube's image server,
+fetched once and kept under `thumbs\` in the cache folder for 30 days (see
+[usage](USAGE.md)). A tile shows its plain placeholder when that request
+failed, timed out, or is turned off with `[Start] ThumbnailFetch=0`; the log
+says which, on a `Trailer thumbnail` line. Nothing else waits on it, and the
+trailer still opens.
+
 ## A render fails or starts again
 
 The cache is reused only after source/runtime/settings hashes, dimensions,

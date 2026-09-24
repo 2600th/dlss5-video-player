@@ -43,8 +43,8 @@ render instead. To stop the requests, set this in `DLSSVideoPlayer.ini`:
 ThumbnailFetch=0
 ```
 
-Pictures already cached still show. **Clear Neural Cache** leaves them; delete
-the `thumbs` folder to remove them.
+Pictures already cached still show. **Clear Neural Cache** removes them with
+the rest of the cache.
 
 Open a local photo, GIF or video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
 select a trailer under **File > Game trailers**. Opening media never starts a
