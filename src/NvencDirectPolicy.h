@@ -134,8 +134,9 @@ inline Rational DoubleToRational(double value, int64_t max)
     if (std::isnan(value)) return {0, 0};
     if (std::fabs(value) > double(std::numeric_limits<int32_t>::max()) + 3.0)
         return {value < 0 ? -1 : 1, 0};
+    // Only the exponent is wanted; the mantissa frexp returns is not.
     int exponent = 0;
-    std::frexp(value, &exponent);
+    (void)std::frexp(value, &exponent);
     exponent = std::max(exponent - 1, 0);
     const int64_t den = int64_t{1} << (62 - exponent);
     Rational result = Reduce(int64_t(std::floor(value * double(den) + 0.5)), den, max);
