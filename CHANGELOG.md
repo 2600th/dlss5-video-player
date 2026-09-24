@@ -156,6 +156,12 @@ new capture defaults, so the first conversion of each video renders it again.
   start screen and Image adjustments are retaken.
 - **A link-preview card and a square clip** (1200x630 and 1080x1080) for
   sharing.
+- **The website shows the new media.** A native 1920x1080 hero from the
+  *007 First Light* still, the four stills in a gallery with their provenance,
+  the *Assassin's Creed Shadows* frame under the limits, and the new demo. It
+  links the GitHub repository from the masthead and beside the download, marks
+  what is only in `main` as **New** until a release carries it, and no longer
+  claims the player works without an RTX card, which is untested.
 - **The benchmark still reproduces.** Its `real-*` clips are cut from an older
   video, so that file moved unchanged to `tools/benchmark/fixtures/`.
 
