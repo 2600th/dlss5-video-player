@@ -100,6 +100,12 @@ Keep neural settings unchanged while rendering. Inspect
 diagnostics; player-side failures are in `DLSSVideoPlayer.log` beside the EXE.
 Successful NGX initialization alone does not prove neural output was captured.
 
+`Neural render encoder:` in `NeuralWorker.log` says whether a render was encoded
+by NVENC straight from the GPU or by the ffmpeg encoder, and why. Lines starting
+`NVENC direct:` name what stopped the direct encoder; the render then continued
+through ffmpeg, which writes the same file, so they explain a slower render
+rather than a failed one.
+
 ## The cache directory is unavailable
 
 Use a writable player/data location and check free space. Cache data prefers

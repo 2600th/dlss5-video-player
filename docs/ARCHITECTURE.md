@@ -421,10 +421,20 @@ the undithered programs keep their bytecode, and it is a cache-key term
 (`dither-bayer8-v1`).
 
 During neural pre-render, `RenderFrameForCache` copies the evaluated output to a
-dedicated readback resource and emits tightly packed BGRA frames to a bounded
-FFmpeg encoder process. The same persistent NGX/feature-18 session is retained
-across the sequence; an add-on-requested feature recreation does not break the
-job's monotonic successful-submission count.
+dedicated readback resource and emits tightly packed frames - BGRA, or the NV12
+or P010 planes the capture shaders convert to - to a bounded FFmpeg encoder
+process. An NV12 or P010 capture of a single-file render skips all of that
+(`NvencDirect.h`, P3.7): the capture copies its planes into a pool of NV12/P010
+surfaces, the job hands the encoder a token naming the surface instead of the
+pixels, and NVENC's D3D12 interface reads the surface after waiting on the
+capture's own fence. Its packets go to a minimal Matroska hand-off that FFmpeg
+stream-copies into the cache file. The session is configured field by field as
+`hevc_nvenc` configures itself for the same options (`NvencDirectPolicy.h`), so
+the file is packet-identical to the child's and shares its cache key; the child
+stays the fallback when the driver's NVENC API is older than 13.1 or the direct
+session fails. The same persistent NGX/feature-18 session is retained across the
+sequence; an add-on-requested feature recreation does not break the job's
+monotonic successful-submission count.
 
 The renderer also holds a source-size reference texture (the original member
 of a synchronized pair), allocated on the first upload with three upload
@@ -522,7 +532,10 @@ error of both after moving the previous frame by the guide generator's own flow,
 per-sample temporal sigma inside each shot, and the mean colour distance and
 luma shift. That is `analyze.py`'s flicker and sigma on a grid rather than every
 pixel, computed where the pixels already are, at a cost below a millisecond a
-frame. The helper sends them as one `Metrics` message ahead of the result; they
+frame. A capture encoded by NVENC straight from the GPU is never read back whole:
+it brings back just the rows the grid's samples sit on, which the same sampler
+reads (`SampleRowPayload`), and a High render's P010 capture is read on the same
+8-bit scale as NV12. The helper sends them as one `Metrics` message ahead of the result; they
 are receipt fields and never key terms.
 
 The runtime directory has exactly one writer at a time. A job holds a

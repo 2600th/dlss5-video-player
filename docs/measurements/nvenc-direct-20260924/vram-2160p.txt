@@ -1,0 +1,14 @@
+# nvidia-smi --query-gpu=memory.used -lms 250 across one 6 s 3840x2160 render per arm
+# (NeuralRangeRenderSmoke --encoder-path-cost 3840x2160 6 1), peak inside each arm's
+# helper run against the idle desktop before the first one (3436 MiB). Whole-GPU
+# memory, so the encoder child's CUDA context and surfaces are counted with the helper.
+3840x2160 standard-bgra-child-1: ok=1 frames=180 elapsed=13.69s wall=13.1 fps loop=42.64 ms (23.5 fps) cpu=31.3s (174.1 ms/frame) neuralGpuMs p50=18.00
+3840x2160 standard-nv12-child-1: ok=1 frames=180 elapsed=13.66s wall=13.2 fps loop=41.39 ms (24.2 fps) cpu=24.3s (134.8 ms/frame) neuralGpuMs p50=18.27
+3840x2160 standard-nv12-direct-1: ok=1 frames=180 elapsed=16.57s wall=10.9 fps loop=39.85 ms (25.1 fps) cpu=24.2s (134.2 ms/frame) neuralGpuMs p50=18.00
+3840x2160 high-p010-child-1: ok=1 frames=180 elapsed=13.87s wall=13.0 fps loop=42.84 ms (23.3 fps) cpu=27.8s (154.7 ms/frame) neuralGpuMs p50=18.93
+3840x2160 high-p010-direct-1: ok=1 frames=180 elapsed=13.45s wall=13.4 fps loop=39.68 ms (25.2 fps) cpu=18.1s (100.7 ms/frame) neuralGpuMs p50=18.12
+standard-bgra-child-1        peak=7145 MiB (+3709 over idle)
+standard-nv12-child-1        peak=7125 MiB (+3689 over idle)
+standard-nv12-direct-1       peak=6885 MiB (+3449 over idle)
+high-p010-child-1            peak=7461 MiB (+4025 over idle)
+high-p010-direct-1           peak=7159 MiB (+3723 over idle)

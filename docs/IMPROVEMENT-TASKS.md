@@ -59,7 +59,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P3** | | | | |
 | [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | |
 | [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | |
-| [P3.7](#p37) | Feed NVENC directly from D3D12 | M | Pipeline | |
 | [P3.8](#p38) | Repository media hygiene | S | Release | |
 
 ---
@@ -152,19 +151,6 @@ SEA-RAFT's smallest model runs 1080p at about 21 fps on a 3090, and an ONNX
 export exists. That is too slow for live playback, but acceptable for export.
 Keep NVOFA for live. Build this only if P2.4's harness shows a gain: motion
 vectors measured only +0.297 dB on the cuts-motion clip.
-
----
-
-<a id="p37"></a>
-### P3.7 · Feed NVENC directly from D3D12
-
-`M` · **Pipeline** · _a narrow form of the parked zero-copy rewrite_
-
-Keep the ffmpeg child for decoding and codec coverage, but encode the cache
-straight from the D3D12 texture. NVENC has accepted D3D12 input with fence
-synchronisation since SDK 11.1. This removes the readback and pipe copy on
-the busiest path. Do it only if P2.7 and P1.x still leave 4K30 short of real
-time.
 
 ---
 

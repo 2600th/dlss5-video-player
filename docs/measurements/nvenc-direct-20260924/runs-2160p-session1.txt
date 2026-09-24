@@ -1,0 +1,16 @@
+3840x2160 standard-bgra-child-1: ok=1 frames=300 elapsed=17.42s wall=17.2 fps loop=39.63 ms (25.2 fps) cpu=43.9s (146.3 ms/frame) neuralGpuMs p50=18.48
+3840x2160 standard-nv12-child-1: ok=1 frames=300 elapsed=18.96s wall=15.8 fps loop=44.48 ms (22.5 fps) cpu=35.6s (118.8 ms/frame) neuralGpuMs p50=18.45
+3840x2160 standard-nv12-direct-1: ok=1 frames=300 elapsed=16.83s wall=17.8 fps loop=37.34 ms (26.8 fps) cpu=29.5s (98.4 ms/frame) neuralGpuMs p50=17.97
+3840x2160 high-p010-child-1: ok=1 frames=300 elapsed=18.93s wall=15.8 fps loop=40.28 ms (24.8 fps) cpu=35.4s (117.9 ms/frame) neuralGpuMs p50=18.30
+3840x2160 high-p010-direct-1: ok=1 frames=300 elapsed=16.87s wall=17.8 fps loop=37.40 ms (26.7 fps) cpu=27.9s (92.9 ms/frame) neuralGpuMs p50=18.12
+3840x2160 standard-bgra-child-2: ok=1 frames=300 elapsed=17.48s wall=17.2 fps loop=39.68 ms (25.2 fps) cpu=42.5s (141.7 ms/frame) neuralGpuMs p50=18.51
+3840x2160 standard-nv12-child-2: ok=1 frames=300 elapsed=18.69s wall=16.1 fps loop=39.25 ms (25.5 fps) cpu=32.4s (108.0 ms/frame) neuralGpuMs p50=18.16
+3840x2160 standard-nv12-direct-2: ok=1 frames=300 elapsed=29.20s wall=10.3 fps loop=62.54 ms (16.0 fps) cpu=36.4s (121.2 ms/frame) neuralGpuMs p50=18.21
+3840x2160 high-p010-child-2: ok=1 frames=300 elapsed=17.70s wall=16.9 fps loop=39.63 ms (25.2 fps) cpu=39.6s (132.1 ms/frame) neuralGpuMs p50=18.92
+3840x2160 high-p010-direct-2: ok=1 frames=300 elapsed=17.21s wall=17.4 fps loop=37.39 ms (26.7 fps) cpu=29.6s (98.8 ms/frame) neuralGpuMs p50=18.32
+3840x2160 standard-bgra-child-3: ok=1 frames=300 elapsed=17.77s wall=16.9 fps loop=40.30 ms (24.8 fps) cpu=46.0s (153.4 ms/frame) neuralGpuMs p50=18.96
+3840x2160 standard-nv12-child-3: ok=1 frames=300 elapsed=17.00s wall=17.6 fps loop=38.17 ms (26.2 fps) cpu=31.9s (106.4 ms/frame) neuralGpuMs p50=18.18
+3840x2160 standard-nv12-direct-3: ok=1 frames=300 elapsed=16.75s wall=17.9 fps loop=36.92 ms (27.1 fps) cpu=24.0s (80.1 ms/frame) neuralGpuMs p50=18.07
+3840x2160 high-p010-child-3: ok=1 frames=300 elapsed=17.45s wall=17.2 fps loop=39.25 ms (25.5 fps) cpu=31.7s (105.7 ms/frame) neuralGpuMs p50=18.51
+3840x2160 high-p010-direct-3: ok=1 frames=300 elapsed=17.49s wall=17.2 fps loop=38.80 ms (25.8 fps) cpu=26.1s (87.0 ms/frame) neuralGpuMs p50=19.61
+evidence: <run-dir>\20260924-055140

@@ -559,6 +559,15 @@ retire the cache entries written before them, so a range is rendered once more:
   pass running the GPU is the scarce resource: 8.35 ms/frame against 8.66 on an
   RTX 5070 Ti. On, it adds `nv12-output-v1` to the key: the GPU's 2x2 box
   chroma downsample and ffmpeg's conversion are different filters.
+
+  An NV12 or P010 capture - this setting on, or the High rung - is encoded by
+  NVENC straight from the GPU instead of being read back and piped to ffmpeg,
+  and writes exactly the file the ffmpeg encoder would have, so the choice is
+  not part of the key. Measured on an RTX 4080 SUPER it renders 3-7 % faster
+  and uses 5-19 % less CPU (`docs/measurements/nvenc-direct-20260924/`).
+  Standard's default 8-bit capture, Lossless and live playback keep the ffmpeg
+  encoder, which is also what any render falls back to when the driver cannot
+  do this; `neural-runtime/NeuralWorker.log` names the encoder each render used.
 - `GpuSourceConversion` (default off). Decodes the source to NV12 and converts
   it on the GPU, which saves 2.6x on pipe traffic. It is part of the render
   identity - the key carries `nv12-source-v1` when it is on - so a render made
