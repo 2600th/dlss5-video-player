@@ -1135,6 +1135,49 @@ struct PlayerAppTestAccess {
         if (!hadRenderer) app.m_renderer.reset();
     }
 
+    // The render-complete glow lights the lane for its 900 ms, on a timer that
+    // then stops, and paints nothing once it has settled.
+    static void render_complete_glow_lights_the_lane_then_stops_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool motion = app.m_activityMotionEnabled;
+        HDC dc = CreateCompatibleDC(nullptr);
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(info.bmiHeader);
+        info.bmiHeader.biWidth = 200;
+        info.bmiHeader.biHeight = -10;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        void* bits = nullptr;
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        REQUIRE(dc && bitmap);
+        const HGDIOBJ old = SelectObject(dc, bitmap);
+        const RECT lane{0, 0, 200, 10};
+        const auto paint = [&] {
+            HBRUSH base = CreateSolidBrush(ui_palette::NeuralCoverage);
+            FillRect(dc, &lane, base);
+            DeleteObject(base);
+            app.DrawCompletionGlow(dc, lane);
+            GdiFlush();
+            return GetPixel(dc, 190, 5);
+        };
+        for (const bool animated : {true, false}) {
+            app.m_activityMotionEnabled = animated;
+            app.StartCompletionGlow();
+            CHECK(app.m_glowTimer != 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            CHECK(paint() != ui_palette::NeuralCoverage);
+            std::this_thread::sleep_for(chrome_motion::kCompleteGlow);
+            app.AnimateCompletionGlow();
+            CHECK_EQ(static_cast<UINT_PTR>(0), app.m_glowTimer);
+            CHECK_EQ(ui_palette::NeuralCoverage, paint());
+        }
+        SelectObject(dc, old);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+        app.m_activityMotionEnabled = motion;
+    }
+
     // ? and F1 open the cheat sheet from anywhere, Esc and the same keys put
     // it away, and Help > Keyboard shortcuts is the menu route to it.
     // Tips are registered by rectangle, so they have to follow the surface: the
@@ -2192,6 +2235,7 @@ struct PlayerAppTestAccess {
         UI_CASE(toolbar_tips_follow_the_surface_test),
         UI_CASE(toolbar_hover_fades_run_only_while_moving_test),
         UI_CASE(timeline_keeps_the_render_lane_clear_during_a_live_session_test),
+        UI_CASE(render_complete_glow_lights_the_lane_then_stops_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),

@@ -1948,6 +1948,60 @@ void chrome_motion_fades_ease_without_overshoot_and_honour_reduced_motion_test()
     CHECK(!fade.Animating(start + kHoverIn));
 }
 
+void chrome_motion_render_complete_glow_sweeps_once_and_only_for_a_render_watched_happening_test()
+{
+    using namespace chrome_motion;
+    const Clock::time_point start{};
+    Glow glow;
+    CHECK(!glow.Animating(start));
+    CHECK_EQ(0.0, glow.Level(start, true));
+    glow.Start(start);
+    // Lights quickly, holds while the highlight crosses, settles to nothing.
+    CHECK(glow.Animating(start));
+    CHECK(glow.Level(start + kCompleteGlow / 10, true) > 0.5);
+    CHECK_EQ(1.0, glow.Level(start + kCompleteGlow / 2, true));
+    CHECK(glow.Level(start + kCompleteGlow * 19 / 20, true) < 0.5);
+    CHECK_EQ(0.0, glow.Level(start + kCompleteGlow, true));
+    CHECK(!glow.Animating(start + kCompleteGlow));
+    // The sweep crosses left to right, once, and is gone before the settle.
+    double last = -1.0;
+    for (int step = 0; step < 7; ++step) {
+        const auto sweep = glow.Sweep(start + kCompleteGlow * step / 10, true);
+        CHECK(sweep.has_value());
+        if (sweep) {
+            CHECK(*sweep > last && *sweep <= 1.0);
+            last = *sweep;
+        }
+    }
+    CHECK(!glow.Sweep(start + kCompleteGlow * 8 / 10, true).has_value());
+    // Without motion: lit for the same time, no sweep, then out.
+    CHECK_EQ(1.0, glow.Level(start + kCompleteGlow / 10, false));
+    CHECK(!glow.Sweep(start + kCompleteGlow / 10, false).has_value());
+    CHECK_EQ(0.0, glow.Level(start + kCompleteGlow, false));
+    glow.Cancel();
+    CHECK(!glow.Animating(start));
+
+    // Fires once, on the first finished observation after one with holes.
+    CompletionLatch latch;
+    CHECK(!latch.Observe(true, false));
+    CHECK(!latch.Observe(true, false));
+    CHECK(latch.Observe(true, true));
+    CHECK(!latch.Observe(true, true));
+    // A session that opens on a render already whole never earns it.
+    CompletionLatch whole;
+    CHECK(!whole.Observe(true, true));
+    CHECK(!whole.Observe(true, true));
+    // Holes seen in one session do not carry into the next.
+    CompletionLatch across;
+    CHECK(!across.Observe(true, false));
+    CHECK(!across.Observe(false, false));
+    CHECK(!across.Observe(true, true));
+    // A seek that opens new holes after completion earns a second moment
+    // when those are filled.
+    CHECK(!across.Observe(true, false));
+    CHECK(across.Observe(true, true));
+}
+
 void failed_icon_font_uses_label_only_presentation_test()
 {
     UiResources resources;
@@ -13974,6 +14028,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(native_button_palette_has_distinct_interaction_states_test),
     TEST_CASE(active_button_small_text_meets_wcag_contrast_test),
     TEST_CASE(chrome_motion_fades_ease_without_overshoot_and_honour_reduced_motion_test),
+    TEST_CASE(chrome_motion_render_complete_glow_sweeps_once_and_only_for_a_render_watched_happening_test),
     TEST_CASE(failed_icon_font_uses_label_only_presentation_test),
     TEST_CASE(button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test),
     TEST_CASE(button_content_layout_centers_combined_icon_and_label_without_outline_contact_test),

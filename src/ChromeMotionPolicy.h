@@ -26,6 +26,10 @@ using Clock = std::chrono::steady_clock;
 // cursor passes over a row of pills reads as flicker.
 inline constexpr std::chrono::milliseconds kHoverIn{120};
 inline constexpr std::chrono::milliseconds kHoverOut{180};
+// The "render complete" glow along the timeline's coverage lane: a sweep
+// across what was rendered, then a settle. Longer than a hover because it
+// announces something that took minutes, and it happens once per render.
+inline constexpr std::chrono::milliseconds kCompleteGlow{900};
 // One repaint per display frame at 60 Hz is all a GDI tint can use.
 inline constexpr unsigned kFrameMs = 16;
 
@@ -96,6 +100,73 @@ private:
     bool motion_{true};
     double from_{0.0};
     std::optional<Clock::time_point> started_;
+};
+
+// The once-per-render glow. `Sweep` is where the highlight has got to across
+// the rendered span (0 = its left edge, 1 = past its right edge); `Level` is
+// how lit the whole lane is. The lane lights with the sweep and settles after
+// it. Without motion there is no sweep: the lane holds lit for the same time
+// and then goes out, the static equivalent of the same announcement.
+class Glow {
+public:
+    void Start(Clock::time_point now) { started_ = now; }
+    void Cancel() { started_.reset(); }
+
+    [[nodiscard]] double Level(Clock::time_point now, bool motion) const
+    {
+        const auto t = Progress(now);
+        if (!t) return 0.0;
+        if (!motion) return 1.0;
+        // Rise over the first fifth, hold while the sweep crosses, then ease out.
+        if (*t < 0.2) return EaseOut(*t / 0.2);
+        if (*t < 0.6) return 1.0;
+        return 1.0 - EaseIn((*t - 0.6) / 0.4);
+    }
+    [[nodiscard]] std::optional<double> Sweep(Clock::time_point now, bool motion) const
+    {
+        const auto t = Progress(now);
+        if (!t || !motion || *t >= 0.7) return std::nullopt;
+        return EaseOut(*t / 0.7);
+    }
+    [[nodiscard]] bool Animating(Clock::time_point now) const { return Progress(now).has_value(); }
+
+private:
+    [[nodiscard]] std::optional<double> Progress(Clock::time_point now) const
+    {
+        if (!started_) return std::nullopt;
+        const double t = std::chrono::duration<double>(now - *started_).count() /
+                         std::chrono::duration<double>(kCompleteGlow).count();
+        if (t < 0.0 || t >= 1.0) return std::nullopt;
+        return t;
+    }
+    std::optional<Clock::time_point> started_;
+};
+
+// Whether a live session just finished, as opposed to having been finished
+// when it was opened. A source whose render is already whole attaches a
+// session with no holes; glowing then would announce a render nobody watched
+// happen. So only a session seen with holes earns the moment, once.
+class CompletionLatch {
+public:
+    // Returns true exactly once per session: on the first observation that it
+    // is finished after one where it was not.
+    bool Observe(bool sessionActive, bool finished)
+    {
+        if (!sessionActive) {
+            sawHoles_ = false;
+            return false;
+        }
+        if (!finished) {
+            sawHoles_ = true;
+            return false;
+        }
+        const bool fire = sawHoles_;
+        sawHoles_ = false;
+        return fire;
+    }
+
+private:
+    bool sawHoles_{false};
 };
 
 } // namespace chrome_motion

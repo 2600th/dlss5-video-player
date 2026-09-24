@@ -2982,6 +2982,8 @@ private:
     static constexpr UINT_PTR kPeekTimerId=0xD15A;
     // The toolbar's hover fades; runs only while a fade is moving.
     static constexpr UINT_PTR kHoverTimerId=0xD15B;
+    // The render-complete glow along the timeline; runs for its 900 ms only.
+    static constexpr UINT_PTR kGlowTimerId=0xD15C;
     static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
     // How long a live or cached pair may stay NotReady before the player stops
     // waiting for it. A segment source is reopened at every boundary and after
@@ -7657,6 +7659,45 @@ private:
         }
         return DefWindowProcW(h,m,w,l);
     }
+    // The "render complete" moment: the coverage lane lights, a highlight
+    // crosses it left to right - the whole range, rendered - and it settles
+    // back to its own teal (chrome_motion::Glow, 900 ms). No sound, no
+    // flash over the picture: the timeline is where coverage has always been
+    // reported, so that is where the end of it is announced. Without motion
+    // the lane holds lit for the same time and goes out, with no sweep.
+    static constexpr COLORREF kCoverageLit=RGB(176,246,234);
+    void DrawCompletionGlow(HDC dc,const RECT& lane){
+        const auto now=Clock::now();
+        if(!m_completeGlow.Animating(now)||lane.right<=lane.left||lane.bottom<=lane.top)return;
+        const double level=m_completeGlow.Level(now,m_activityMotionEnabled);
+        HBRUSH lit=CreateSolidBrush(chrome_motion::Mix(ui_palette::NeuralCoverage,kCoverageLit,level));FillRect(dc,&lane,lit);DeleteObject(lit);
+        const auto sweep=m_completeGlow.Sweep(now,m_activityMotionEnabled);
+        if(!sweep)return;
+        const int saved=SaveDC(dc);if(!saved)return;
+        IntersectClipRect(dc,lane.left,lane.top,lane.right,lane.bottom);
+        // A soft-edged highlight from bands of rising brightness, centred on the
+        // sweep's position; it starts before the lane and leaves past its end.
+        const LONG half=Dip(28);
+        const LONG centre=lane.left-half+LONG(std::lround(*sweep*double(lane.right-lane.left+2*half)));
+        constexpr int kSteps=4;
+        for(int step=0;step<kSteps;++step){
+            const LONG reach=half*(kSteps-step)/kSteps;
+            const RECT band{centre-reach,lane.top,centre+reach,lane.bottom};
+            HBRUSH b=CreateSolidBrush(chrome_motion::Mix(kCoverageLit,RGB(236,255,251),double(step+1)/kSteps));FillRect(dc,&band,b);DeleteObject(b);
+        }
+        RestoreDC(dc,saved);
+    }
+    void StartCompletionGlow(){
+        m_completeGlow.Start(Clock::now());
+        LOG("Live session coverage complete; the timeline marks it.");
+        if(m_glowTimer&&m_hwnd)KillTimer(m_hwnd,m_glowTimer);
+        m_glowTimer=m_hwnd?SetTimer(m_hwnd,kGlowTimerId,m_activityMotionEnabled?chrome_motion::kFrameMs:UINT(chrome_motion::kCompleteGlow.count()),nullptr):0;
+        InvalidatePlaybackProgress();
+    }
+    void AnimateCompletionGlow(){
+        InvalidatePlaybackProgress();
+        if(!m_completeGlow.Animating(Clock::now())&&m_glowTimer){KillTimer(m_hwnd,m_glowTimer);m_glowTimer=0;}
+    }
     // The hatched stretch the render is filling right now, animated with the
     // activity timer that is already running while a job is.
     void DrawRenderingNow(HDC dc,const RECT& lane,LONG left,LONG right){
@@ -7734,6 +7775,10 @@ private:
     // presented frame already reaches. Only a changed chip repaints, and only
     // a changed FACT - see status_chips::Flash - starts a flash.
     void UpdateStatusChips(){
+        // Before the unchanged-chips return below: the render chip reads
+        // "Render 100%" a moment before the last hole is published, so the
+        // chips can be unchanged on the call that sees the session finish.
+        if(m_completionLatch.Observe(m_liveSession&&m_liveSegments!=nullptr,LiveSessionFinished()))StartCompletionGlow();
         const status_chips::Snapshot chips=BuildStatusChips();
         if(chips==m_cachedChips)return;
         bool layoutChanged=false;
@@ -8344,6 +8389,7 @@ private:
                 }
             else{RECT band{rendered.left,tr.bottom-coverageLane,rendered.right,tr.bottom};FillRect(dc,&band,nb);}
             DeleteObject(nb);
+            DrawCompletionGlow(dc,RECT{rendered.left,tr.bottom-coverageLane,rendered.right,tr.bottom});
         }
         // Where the render is working right now, hatched, from the head of
         // the hole the running job is filling: the band says what is done,
@@ -10795,7 +10841,7 @@ private:
         case dark_mode::WM_UAHDRAWMENU:if(DrawDarkMenuBar(h,reinterpret_cast<const dark_mode::UAHMENU*>(l)))return TRUE;break;
         case dark_mode::WM_UAHDRAWMENUITEM:if(DrawDarkMenuBarItem(h,reinterpret_cast<const dark_mode::UAHDRAWMENUITEM*>(l)))return TRUE;break;
         case WM_NCPAINT:case WM_NCACTIVATE:{const LRESULT result=DefWindowProcW(h,m,w,l);PaintMenuBarSeparator(h);return result;}
-        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}if(w==kHoverTimerId){AnimateHover();return 0;}break;
+        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}if(w==kHoverTimerId){AnimateHover();return 0;}if(w==kGlowTimerId){AnimateCompletionGlow();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
         case WM_ENTERSIZEMOVE:m_inSizeMove=true;StartModalTick();break;
@@ -11070,6 +11116,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // Indexed by ToolbarAction; m_hoverAnimating has a bit per fade that was
     // moving on the last frame, so the frame it lands gets painted too.
     std::array<chrome_motion::Fade,static_cast<size_t>(ToolbarAction::None)+1> m_hoverFades{};uint32_t m_hoverAnimating=0;UINT_PTR m_hoverTimer=0;
+    chrome_motion::Glow m_completeGlow;chrome_motion::CompletionLatch m_completionLatch;UINT_PTR m_glowTimer=0;
     // Windows' own rule for focus cues: hidden until the keyboard is used to move
     // between controls, hidden again by the mouse. The focused action is always the
     // first enabled one, so without this the Open button wore a ring from launch on.
