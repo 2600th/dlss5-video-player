@@ -162,6 +162,7 @@
 {{ANALYTICS}}
 </head>
 <body>
+{{GITHUB_SYMBOL}}
 <div class="grain" aria-hidden="true"></div>
 <a class="skip" href="#main">Skip to content</a>
 
@@ -239,7 +240,10 @@
         <span class="button__label">Download for Windows</span>
         <span class="button__meta">{{VERSION_LABEL}} · {{PRIMARY_SIZE}}</span>
       </a>
-      <a class="button button--ghost" href="#evidence">See what changes</a>
+      <a class="button button--ghost button--gh" href="{{REPO_URL}}" rel="noopener">
+        <span class="button__label">{{GITHUB_MARK}}View source</span>
+        <span class="button__meta">GitHub · {{GITHUB_META}}</span>
+      </a>
     </div>
     <p class="hero__caveat">
       Windows · NVIDIA RTX · driver 610.47+ · MIT licensed. A community

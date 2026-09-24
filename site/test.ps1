@@ -644,17 +644,36 @@ Test-Case 'the flip is a state change, not a transition' {
     Assert-True ($css.Contains("[data-view='neural'] .scene__plate--original { visibility: hidden; }")) 'the top plate is shown or hidden outright'
 }
 
-Test-Case 'the GitHub link is in the masthead, beside the downloads and in the footer' {
+Test-Case 'the GitHub link is in the masthead, the hero, beside the downloads and in the footer' {
     $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
-    foreach ($where in @('masthead__gh', 'pkg__cta--gh', 'footer__gh')) {
+    foreach ($where in @('masthead__gh', 'button--gh', 'pkg__cta--gh', 'footer__gh')) {
         $m = [regex]::Match($htmlFull, "<a class=`"[^`"]*$where[^`"]*`" href=`"([^`"]+)`"[^>]*>(.*?)</a>", $options)
         Assert-True $m.Success "a $where link is present"
         Assert-Equal $repoUrl $m.Groups[1].Value "the $where link points at the repository"
         Assert-Contains $m.Groups[2].Value '<svg class="gh__mark"' "the $where link carries the inline mark"
         Assert-Contains $m.Groups[2].Value 'aria-hidden="true"' "the $where mark is hidden from assistive technology"
+        Assert-Contains $m.Groups[2].Value '<use href="#gh-mark">' "the $where mark draws the page's one copy of the path"
         $text = [regex]::Replace($m.Groups[2].Value, '<svg.*?</svg>|<[^>]+>', '', $options).Trim()
         Assert-True ($text -match 'GitHub|View source') "the $where link has a spoken name without the mark (got '$text')"
     }
+}
+
+Test-Case 'the hero offers Download first and the source second' {
+    # One primary action, filled; the source beside it in the same two-line
+    # shape but unfilled, so the hierarchy is carried by weight, not by order
+    # alone.
+    $actions = [regex]::Match($htmlFull, '(?s)<div class="hero__actions">(.*?)</div>').Groups[1].Value
+    $links = @([regex]::Matches($actions, '<a class="([^"]+)" href="([^"]+)"'))
+    Assert-Equal 2 $links.Count 'the hero has exactly two actions'
+    Assert-Contains $links[0].Groups[1].Value 'button--primary' 'the first action is the filled Download'
+    Assert-Contains $links[1].Groups[1].Value 'button--ghost' 'the second action is unfilled'
+    Assert-Equal $repoUrl $links[1].Groups[2].Value 'the second action is the repository'
+    Assert-Contains $actions 'button__meta">GitHub' 'the source button states where it goes'
+}
+
+Test-Case 'the GitHub mark is defined once' {
+    Assert-Equal 1 ([regex]::Matches($htmlFull, '<symbol id="gh-mark"').Count) 'one symbol'
+    Assert-Equal 1 ([regex]::Matches($htmlFull, '<path fill="currentColor" d="M8 0C3.58').Count) 'one copy of the path'
 }
 
 Test-Case 'the star count is baked in at build time and never fetched by the page' {

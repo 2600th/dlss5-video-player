@@ -176,7 +176,7 @@ A monochrome ground and one saturated ink; every colour on the page is either a 
 
 ## Layout
 
-A single column of full-width sections on a true-black ground, centred at `max-width: 76rem` (widened to `84rem` for the "How it works" band, which carries screenshots) with a fluid gutter (`{spacing.gutter}`). Vertical rhythm comes from one large section pad (`{spacing.section-block}`) and hairline rules; there is no card grid and no background-tone change between sections.
+A single column of full-width sections on a true-black ground, centred at `max-width: 76rem` (widened to `84rem` for the "How it works" band, which carries screenshots) with a fluid gutter (`{spacing.gutter}`). Vertical rhythm comes from one large section pad (`{spacing.section-block}`), halved at the top of a section that directly follows another so two pads never stack, and hairline rules; there is no card grid and no background-tone change between sections.
 
 The hero is the exception: `min-height: 100svh`, the comparison figure absolutely positioned full-bleed behind the type, a two-layer scrim (diagonal plus bottom) applied equally to both plates so the comparison stays fair, and the headline block held to `min(41rem, 92%)` over the frame's left third. Provenance packs the lower-left against an otherwise bare frame; the drag hint sits at the lower-right.
 
@@ -193,7 +193,7 @@ Two breakpoints, both editorial rather than device-shaped:
 The four `shadow` declarations in the build are legibility and focus devices, not elevation, and should be read that way:
 
 ### Shadow Vocabulary
-- **Tag legibility** (`text-shadow: 0 1px 6px rgba(0,0,0,0.8)`): only on the ORIGINAL/NEURAL tags, which sit on unpredictable footage.
+- **Tag legibility** (`text-shadow: 0 1px 6px rgba(0,0,0,0.8)`): only on text that sits on unpredictable footage — the ORIGINAL/NEURAL tags and the masthead links, which lie over the hero frame's brightest area.
 - **Seam edge** (`box-shadow: 0 0 0 1px rgba(0,0,0,0.55)`): a dark 1px ring hugging the orange seam so it survives a bright frame. A hairline halo, not a shadow.
 - **Focus halo** (`box-shadow: 0 0 0 3px rgba(5,5,6,0.9), 0 0 0 6px var(--flag)`): the keyboard-focus ring on the comparison grip, where the standard 2px orange outline would be lost on footage.
 
@@ -215,7 +215,7 @@ Where other systems reach for an icon font or a glyph, this one draws the mark: 
 - **Shape:** hard square (0 radius), 1px border always present — transparent on the primary so the box metrics match the ghost exactly.
 - **Primary:** flag fill with warm near-black text, `0.85rem 1.5rem`. Stacked two-line content: a 700-weight 1rem label above a condensed uppercase meta line (version · size) at 72% opacity. The meta line is part of the component — a download button on this page always states what it will download.
 - **Hover / Focus:** background lifts to Flag Lift over 0.16s ease. Focus is the global 2px flag outline at 3px offset.
-- **Ghost:** hairline border, paper text; on hover both border and text go flag. Used for the in-page "See what changes" and, in package form, for the secondary download.
+- **Ghost:** hairline border, paper text; on hover both border and text go flag. In the hero it is the secondary action, **View source**, with the GitHub mark in its label and "GitHub · N stars" as its meta line, so it matches the primary's two-line shape and the pair is ranked by fill alone. In package form it is the secondary download and the source row.
 - **Mobile:** below 34rem buttons become full-width and the action row stacks.
 
 ### Inputs / Fields
@@ -226,6 +226,8 @@ A baseline-aligned masthead absolutely positioned over the hero — no backgroun
 
 ### Readout
 A key/value ledger under a structural rule. Flag-coloured uppercase Label key in a fixed 7.5rem column, mono tabular value in Paper Meta/Dim, one soft hairline per row, no zebra striping, no box. This is the page's canonical way to present measured fact at rest.
+
+The **prose** variant (`readout__v--prose`) carries the limits and requirements: the same ledger, but its values are sentences, so they are set in the Body voice at 0.95rem, and only the measured figures inside them switch to the Data voice. It exists so the limits are stated with the same weight and shape as the evidence, not tucked into a footnote.
 
 ### Package Row
 Not a pricing card: a rule-bottomed column in an auto-fit grid. Flag uppercase kind, dimmed summary held to 34ch, a CTA whose label and size sit on one baseline, the literal filename in mono below it, and a copy-checksum control. The pending variant greys the kind to Paper Meta and swaps the CTA for a link to the release page — a state change carried by greyscale and copy, not by a badge.

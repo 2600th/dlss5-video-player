@@ -189,8 +189,11 @@ $coreBlock = New-PackageBlock -Package $release.Core -Kind 'Core' `
 
 # The source sits beside the downloads as a package of its own: the secondary
 # action, in the same row shape, so it reads as an option rather than an ad.
-# One copy of the mark, inlined wherever it is used: no icon font, no request.
+# One copy of the mark's path, as a symbol at the top of the page, and a
+# <use> of it wherever it appears: no icon font, no request, and the 1 KB path
+# is sent once rather than four times.
 $githubMark = (Read-TextFile -Path ([IO.Path]::Combine($srcRoot, 'partials', 'github-mark.svg'))).Trim()
+$githubSymbol = (Read-TextFile -Path ([IO.Path]::Combine($srcRoot, 'partials', 'github-symbol.svg'))).Trim()
 
 $sourceBlock = Expand-Token -Text (Read-TextFile -Path ([IO.Path]::Combine($srcRoot, 'partials', 'source.html'))) `
     -Values @{ REPO_URL = "https://github.com/$repo"; REPO_SLUG = $repo; GITHUB_META = $stars.Meta; GITHUB_MARK = $githubMark }
@@ -238,6 +241,7 @@ $tokens = @{
     REPO_SLUG       = $repo
     GITHUB_STARS    = $stars.Badge
     GITHUB_MARK     = $githubMark
+    GITHUB_SYMBOL   = $githubSymbol
     GITHUB_META     = $stars.Meta
     ANALYTICS       = $analytics
     BUILT_AT        = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')

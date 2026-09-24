@@ -168,45 +168,6 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 .masthead__nav a { color: var(--text-dim); text-decoration: none; }
 .masthead__nav a:hover { color: var(--text); }
 
-/* --- GitHub link ------------------------------------------------------------
-   The mark, the word, and the star count baked in at build time. The count is
-   a measured value, so it is set in the Data voice and parted from the label
-   by a hairline rather than a badge. The mark is GitHub's own, inlined once
-   per use as a stroked-free 16px path in currentColor: it takes the link's
-   colour in every state, and there is no icon font behind it.
-   -------------------------------------------------------------------------- */
-
-.gh { display: inline-flex; align-items: center; gap: 0.5rem; text-decoration: none; }
-.gh__mark { flex: none; width: 1rem; height: 1rem; }
-.gh__stars {
-  padding-left: 0.5rem;
-  border-left: 1px solid var(--line);
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  font-weight: 400;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-  text-transform: none;
-  color: var(--text-meta);
-}
-.gh:hover .gh__stars { color: var(--text-dim); }
-
-/* In the masthead the count stands alone; the noun is still spoken. */
-.masthead__gh .gh__mark { width: 0.95rem; height: 0.95rem; }
-.masthead__gh .gh__stars-noun,
-.visually-hidden {
-  position: absolute;
-  width: 1px; height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-.footer__gh { margin-bottom: 2.25rem; color: var(--text-dim); font-size: 0.93rem; }
-.footer__gh .gh__mark { width: 1.15rem; height: 1.15rem; color: var(--text); }
-.footer__gh:hover { color: var(--text); }
-.footer__gh:hover .gh__label { text-decoration: underline; text-decoration-color: var(--flag); }
-
 /* --- hero ----------------------------------------------------------------- */
 
 .hero {
@@ -395,6 +356,50 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   letter-spacing: 0.15em;
 }
 
+/* --- GitHub link ------------------------------------------------------------
+   The mark, the word, and the star count baked in at build time. The count is
+   a measured value, so it is set in the Data voice and parted from the label
+   by a hairline rather than a badge. The mark is GitHub's own, inlined once
+   per use as a filled 16px path in currentColor: it takes the link's
+   colour in every state, and there is no icon font behind it.
+   -------------------------------------------------------------------------- */
+
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.gh { display: inline-flex; align-items: center; gap: 0.5rem; text-decoration: none; }
+.gh__mark { flex: none; width: 1rem; height: 1rem; }
+.gh__stars {
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text-meta);
+}
+.gh:hover .gh__stars { color: var(--text-dim); }
+
+/* In the masthead the count stands alone; the noun is still spoken. */
+.masthead__gh .gh__mark { width: 0.95rem; height: 0.95rem; }
+.masthead__gh .gh__stars-noun,
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.footer__gh { margin-bottom: 2.25rem; color: var(--text-dim); font-size: 0.93rem; }
+.footer__gh .gh__mark { width: 1.15rem; height: 1.15rem; color: var(--text); }
+.footer__gh:hover { color: var(--text); }
+.footer__gh:hover .gh__label { text-decoration: underline; text-decoration-color: var(--flag); }
+
+/* The masthead sits on footage, and the fence in this frame is as bright as
+   its labels, so they borrow the comparison tags' legibility shadow. */
+.masthead__nav a { text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8); }
+
 /* --- buttons -------------------------------------------------------------- */
 
 .button {
@@ -414,6 +419,11 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 
 .button--ghost { border-color: var(--line); color: var(--text); align-self: stretch; justify-content: center; }
 .button--ghost:hover { border-color: var(--flag); color: var(--flag); }
+
+/* The secondary action in the hero: the source, in the primary's two-line
+   shape so the pair reads as one row of choices, weighted by fill alone. */
+.button--gh .button__label { display: inline-flex; align-items: center; gap: 0.55rem; }
+.button--gh .gh__mark { width: 1.05rem; height: 1.05rem; }
 
 /* --- download acknowledgement ---------------------------------------------
    A download link leaves the page sitting there with no sign the click landed,
@@ -448,6 +458,10 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   padding: clamp(3.5rem, 8vw, 7rem) var(--gutter);
 }
 .section--wide { max-width: 84rem; }
+/* Two sections in a row would otherwise stack both pads (224px on a wide
+   screen) into a gap that reads as the end of the page. The second keeps half,
+   so the rhythm stays generous but still reads as one argument. */
+.section + .section { padding-top: clamp(1.75rem, 4vw, 3.5rem); }
 
 .section__title {
   font-size: clamp(1.65rem, 3.1vw, 2.6rem);
