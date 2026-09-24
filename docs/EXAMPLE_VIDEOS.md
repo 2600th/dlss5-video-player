@@ -7,7 +7,11 @@ trailers, picked for what DLSS 5 changes most: faces, skin, hair, cloth and
 cinematic lighting, in real-engine footage rather than pre-rendered CG. Each
 one is under three minutes, carries little on-screen text, and is open to an
 anonymous session at up to 2160p. The start screen shows as many as fit its
-width, in this order, so the strongest go first.
+width, in this order, so the strongest go first, each with its YouTube
+thumbnail (fetched at run time, not shipped; see
+[Usage](USAGE.md#open-render-and-compare) for what that request is and how to
+turn it off). A tile's title is the game's name, which fits its width; the
+table below names each trailer in full.
 
 Every figure below was read on 24 September 2026 with the bundled yt-dlp
 2026.08.19, run with the player's own flags (`--no-config --no-cache-dir

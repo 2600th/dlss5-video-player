@@ -128,7 +128,7 @@
         {
           "@type": "Question",
           "name": "Does it upload my video anywhere?",
-          "acceptedAnswer": { "@type": "Answer", "text": "No. Rendering runs on your GPU and the cache stays on your disk. The player goes online to fetch a YouTube link you paste, and once a day to ask GitHub whether there is a new release, which [Updates] Enabled=0 in its settings file turns off." }
+          "acceptedAnswer": { "@type": "Answer", "text": "No. Rendering runs on your GPU and the cache stays on your disk. The player goes online to fetch a YouTube link you paste, and once a day to ask GitHub whether there is a new release, which [Updates] Enabled=0 in its settings file turns off. The start screen also fetches the seven built-in trailers' thumbnails from YouTube's image server, then again once a month, which [Start] ThumbnailFetch=0 turns off." }
         },
         {
           "@type": "Question",
@@ -679,6 +679,9 @@
         player goes online to fetch a YouTube link you paste, and once a day
         to ask GitHub whether there is a new release, which
         <code>[Updates] Enabled=0</code> in its settings file turns off.
+        The start screen also fetches the seven built-in trailers' thumbnails
+        from YouTube's image server, then again once a month, which
+        <code>[Start] ThumbnailFetch=0</code> turns off.
       </p>
     </details>
     <details class="faq__item" id="faq-upscale">

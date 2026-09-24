@@ -108,8 +108,8 @@ the render covered the whole video. Press `D` at the start to get one.
   decoded footage.
 - **Tunes the model.** Neural settings live at `Ctrl+N`. Change one while paused
   and that frame re-renders, so you judge on the picture.
-- **Comes with test material.** Six official game trailers under
-  **File > Game trailers**, each under three minutes.
+- **Comes with test material.** Seven official game trailers under
+  **File > Game trailers** and on the start screen, each under three minutes.
 
 ## What's new in 0.25.0
 
@@ -217,8 +217,8 @@ never triggers a new render.
 - **Not supported:** subtitle display or burn-in, HDR, a render queue, or
   resuming an interrupted render after a restart.
 - **YouTube:** public, non-DRM videos only, no login. Age-restricted videos can
-  arrive as a 640x360 stream (three of the six bundled trailers do), and the
-  status line tells you when that happens. See
+  arrive as a 640x360 stream (none of the seven bundled trailers is
+  age-restricted), and the status line tells you when that happens. See
   [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
 - **Disk space.** The cache keeps renders until the drive falls below 20 GB
   free, then deletes the least recently used first. **Advanced > Clear Neural
@@ -229,6 +229,10 @@ never triggers a new render.
 - **Updates.** The menu bar shows `↑ Update <version>` when a new release is
   out. **Advanced > Check for updates** checks now, and `[Updates] Enabled=0` in
   `DLSSVideoPlayer.ini` turns off the daily check.
+- **Trailer thumbnails.** The start screen fetches the seven trailers'
+  thumbnails from YouTube's image server (`i.ytimg.com`) the first time it is
+  shown, then again only when a cached one is a month old. `[Start]
+  ThumbnailFetch=0` turns that off; see [Usage](docs/USAGE.md#open-render-and-compare).
 
 ## Building and contributing
 

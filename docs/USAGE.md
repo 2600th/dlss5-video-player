@@ -25,6 +25,27 @@ before a row is left out, and the trailers are left out first. The checks that
 touch the disk run in the background, so the screen fills in a moment after
 the window appears.
 
+Each trailer tile shows that trailer's YouTube thumbnail, and fetching those is
+the one thing the start screen does over the network. The first time the start
+screen is on screen, the player asks `i.ytimg.com`, YouTube's image server, for
+the thumbnails of the seven built-in trailers, over HTTPS, and nothing else: no
+other host, no video, no account and no cookies, with the player's name and
+version as its user agent. As with any web image, YouTube sees your IP address
+and which of those seven pictures were asked for. The pictures are kept under
+`thumbs\` in the cache folder and asked for again only once they are 30 days
+old, so most launches make no request at all. Offline, or when a request fails
+or times out, a tile keeps its plain placeholder, or the older picture if it has
+one, and nothing waits for it. A trailer you have rendered shows a frame of your
+render instead. To stop the requests, set this in `DLSSVideoPlayer.ini`:
+
+```ini
+[Start]
+ThumbnailFetch=0
+```
+
+Pictures already cached still show. **Clear Neural Cache** leaves them; delete
+the `thumbs` folder to remove them.
+
 Open a local photo, GIF or video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
 select a trailer under **File > Game trailers**. Opening media never starts a
 whole-video render. A YouTube URL plays from its stream as soon as it resolves;
@@ -501,7 +522,8 @@ reduced processing scale are kept apart under `Samples75` and `Samples50`;
 until a rung has one, its forecast is the source-scale one made cheaper by the
 pixels the smaller model no longer processes. Delete the section
 to fall back to the generation's prior. Keep the player in a writable folder
-to persist preferences.
+to persist preferences. `[Start] ThumbnailFetch=0` stops the start screen
+fetching trailer thumbnails (see [Open, render and compare](#open-render-and-compare)).
 
 **DLSS > Encoder settings** holds the `[Encoding]` keys, kept apart from the
 model settings because they apply to the next render. Every one that changes the
