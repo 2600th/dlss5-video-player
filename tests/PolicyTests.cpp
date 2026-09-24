@@ -7698,6 +7698,16 @@ struct ScopedEnvironmentVariable {
 
 size_t count_named_processes(std::wstring_view executableName);
 bool wait_for_named_process_count(std::wstring_view executableName,size_t expected,std::chrono::milliseconds timeout);
+// How long a child the decoder closed may take to be gone. Under
+// AddressSanitizer the fake ffmpeg/ffprobe are copies of this instrumented
+// executable, whose start and exit are several times slower: on CI's runner a
+// 500 ms wait missed. A leaked child never exits, so the longer wait keeps the
+// leak check and drops only the latency one.
+#if defined(__SANITIZE_ADDRESS__)
+constexpr std::chrono::milliseconds kChildExitWait{5000};
+#else
+constexpr std::chrono::milliseconds kChildExitWait{500};
+#endif
 
 struct MediaFixture {
     std::filesystem::path directory;
@@ -7808,7 +7818,7 @@ void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
         auto decoder=VideoDecoderTestAccess::Create(fixture.directory);CHECK(decoder->Open(L"https://media.invalid/exit",MediaSourceKind::YouTube));VideoFrame frame;
         VideoReadResult result=VideoReadResult::NotReady;for(int i=0;i<50&&result==VideoReadResult::NotReady;++i){result=decoder->ReadNextAvailable(frame);Sleep(5);}CHECK(result==VideoReadResult::EndOfStream||result==VideoReadResult::Error);
     }
-    Sleep(50);CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,std::chrono::milliseconds{500}));CHECK(wait_for_named_process_count(L"ffprobe.exe",beforeProbe,std::chrono::milliseconds{500}));
+    Sleep(50);CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,kChildExitWait));CHECK(wait_for_named_process_count(L"ffprobe.exe",beforeProbe,kChildExitWait));
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
 }
 
@@ -9747,9 +9757,9 @@ void video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_netwo
         CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
     }
     CHECK(wait_for_named_process_count(L"ffprobe.exe",beforeProbe,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
     CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
     DWORD beforeHandles=0,afterHandles=0;
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
 
@@ -9763,9 +9773,9 @@ void video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_netwo
             CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
             decoder.reset();
             CHECK(wait_for_named_process_count(L"ffprobe.exe",beforeProbe,
-                                               std::chrono::milliseconds{500}));
+                                               kChildExitWait));
             CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,
-                                               std::chrono::milliseconds{500}));
+                                               kChildExitWait));
         }
     }
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);
