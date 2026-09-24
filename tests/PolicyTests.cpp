@@ -7793,6 +7793,19 @@ void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
     // before it counted those as a leak and the first read could miss its
     // deadline - but only when this case ran on its own; in the full suite an
     // earlier case had already paid both.
+    //
+    // The child counts are taken BEFORE it, though. Taken after, they could
+    // include the warm-up's own child while it was still exiting - slow under
+    // AddressSanitizer - and once it was gone the count sat below the baseline,
+    // so no wait could ever match it (CI saw exactly that, intermittently).
+    const size_t beforeFfmpeg=count_named_processes(L"ffmpeg.exe");const size_t beforeProbe=count_named_processes(L"ffprobe.exe");
+    const auto childrenBack=[&](const char* when){
+        const bool ffmpeg=wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,kChildExitWait);
+        const bool ffprobe=wait_for_named_process_count(L"ffprobe.exe",beforeProbe,kChildExitWait);
+        if(!ffmpeg||!ffprobe)std::cout<<"  children "<<when<<": ffmpeg "<<count_named_processes(L"ffmpeg.exe")<<" (expected "<<beforeFfmpeg
+                                         <<"), ffprobe "<<count_named_processes(L"ffprobe.exe")<<" (expected "<<beforeProbe<<")\n";
+        return ffmpeg&&ffprobe;
+    };
     {
         auto warm=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::milliseconds{75});
         if(warm->Open(L"https://media.invalid/stallmid",MediaSourceKind::YouTube)){
@@ -7801,7 +7814,7 @@ void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
         }
         warm->Close();
     }
-    const size_t beforeFfmpeg=count_named_processes(L"ffmpeg.exe");const size_t beforeProbe=count_named_processes(L"ffprobe.exe");
+    CHECK(childrenBack("after the warm-up"));
     DWORD beforeHandles=0,afterHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
     for(int cycle=0;cycle<4;++cycle){
         auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::milliseconds{75});
@@ -7818,7 +7831,7 @@ void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
         auto decoder=VideoDecoderTestAccess::Create(fixture.directory);CHECK(decoder->Open(L"https://media.invalid/exit",MediaSourceKind::YouTube));VideoFrame frame;
         VideoReadResult result=VideoReadResult::NotReady;for(int i=0;i<50&&result==VideoReadResult::NotReady;++i){result=decoder->ReadNextAvailable(frame);Sleep(5);}CHECK(result==VideoReadResult::EndOfStream||result==VideoReadResult::Error);
     }
-    Sleep(50);CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,kChildExitWait));CHECK(wait_for_named_process_count(L"ffprobe.exe",beforeProbe,kChildExitWait));
+    CHECK(childrenBack("at the end"));
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
 }
 
