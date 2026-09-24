@@ -1015,6 +1015,39 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
         neural_worker_detail::BuildWorkerArguments(reducedAndUpscaled, metadata, pause, false);
     const auto upscaledView = view(upscaledArguments);
     CHECK(!neural_worker_detail::ParseWorkerArguments(upscaledView).has_value());
+    // Super Resolution's history travels only off Temporal, so every job before the
+    // choice keeps its command line. Per-frame belongs to an upscaling job without
+    // the model - the export's SR stage on its own - and is refused anywhere else,
+    // because the model runs on the carrier's frames.
+    for (const auto& argument : normal) CHECK(argument != L"--sr-history");
+    if (parsedNormal) CHECK(parsedNormal->request.upscalingHistory == UpscalingHistory::Temporal);
+    NeuralRenderRequest perFrame = request;
+    perFrame.outputWidth = request.width * 2;
+    perFrame.outputHeight = request.height * 2;
+    perFrame.requireNeural = false;
+    perFrame.upscalingHistory = UpscalingHistory::PerFrame;
+    const auto perFrameArguments = neural_worker_detail::BuildWorkerArguments(perFrame, metadata, pause, false);
+    CHECK(std::ranges::find(perFrameArguments, std::wstring(L"per-frame")) != perFrameArguments.end());
+    const auto perFrameView = view(perFrameArguments);
+    const auto parsedPerFrame = neural_worker_detail::ParseWorkerArguments(perFrameView);
+    CHECK(parsedPerFrame.has_value());
+    if (parsedPerFrame) {
+        CHECK(parsedPerFrame->request.upscalingHistory == UpscalingHistory::PerFrame);
+        CHECK(!parsedPerFrame->request.requireNeural);
+    }
+    auto badHistory = perFrameArguments;
+    for (size_t index = 0; index + 1 < badHistory.size(); ++index)
+        if (badHistory[index] == L"--sr-history") badHistory[index + 1] = L"perframe";
+    const auto badHistoryView = view(badHistory);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badHistoryView).has_value());
+    for (const bool neural : {true, false}) {
+        NeuralRenderRequest refused = perFrame;
+        refused.requireNeural = neural;
+        if (!neural) refused.outputWidth = refused.outputHeight = 0;
+        const auto refusedArguments = neural_worker_detail::BuildWorkerArguments(refused, metadata, pause, false);
+        const auto refusedView = view(refusedArguments);
+        CHECK(!neural_worker_detail::ParseWorkerArguments(refusedView).has_value());
+    }
     auto duplicated = normal;
     duplicated.emplace_back(L"--width");
     duplicated.emplace_back(L"1920");

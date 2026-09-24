@@ -5052,6 +5052,34 @@ void neural_zero_motion_test_ships_on_and_is_a_cache_key_term_test()
     CHECK(!NeuralMotionIdentityTerm(NeuralZeroMotionTest(std::nullopt)).empty());
 }
 
+// Super Resolution's history (w5-mv): Temporal on a fresh install, stored by name,
+// reset on every frame only in a Super Resolution session that asked for Per-frame,
+// and never on a carrier the neural model runs on - so no cached render, and no
+// cache key, depends on the choice. The menu block is contiguous in the enum's order.
+void upscaling_history_defaults_to_temporal_and_never_reaches_the_model_test()
+{
+    CHECK(kDefaultUpscalingHistory == UpscalingHistory::Temporal);
+    for (const UpscalingHistory history : {UpscalingHistory::Temporal, UpscalingHistory::PerFrame})
+        CHECK(ParseUpscalingHistory(UpscalingHistoryName(history)) == std::optional<UpscalingHistory>(history));
+    CHECK(UpscalingHistoryName(UpscalingHistory::PerFrame) == "per-frame");
+    CHECK(UpscalingHistoryName(UpscalingHistory::Temporal) == "temporal");
+    for (const std::string_view bad : {"", "Temporal", "perframe", "per_frame", "1"})
+        CHECK(!ParseUpscalingHistory(bad).has_value());
+
+    // Only a Super Resolution session has a history to discard every frame.
+    CHECK(UpscalingResetsEveryFrame(UpscalingHistory::PerFrame, true));
+    CHECK(!UpscalingResetsEveryFrame(UpscalingHistory::PerFrame, false));
+    CHECK(!UpscalingResetsEveryFrame(UpscalingHistory::Temporal, true));
+    CHECK(!UpscalingResetsEveryFrame(UpscalingHistory::Temporal, false));
+
+    // A carrier the model runs on keeps Temporal whatever the viewer chose.
+    CHECK(CarrierUpscalingHistory(UpscalingHistory::PerFrame, true) == UpscalingHistory::Temporal);
+    CHECK(CarrierUpscalingHistory(UpscalingHistory::PerFrame, false) == UpscalingHistory::PerFrame);
+    CHECK(CarrierUpscalingHistory(UpscalingHistory::Temporal, false) == UpscalingHistory::Temporal);
+
+    CHECK_EQ(app_menu::IDM_UPSCALE_HISTORY_TEMPORAL + 1, app_menu::IDM_UPSCALE_HISTORY_PER_FRAME);
+}
+
 void processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test()
 {
     CHECK_EQ(uint32_t{100}, kDefaultProcessingScale);
@@ -12821,6 +12849,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(live_forecast_scales_by_the_processing_rung_test),
     TEST_CASE(render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test),
     TEST_CASE(neural_zero_motion_test_ships_on_and_is_a_cache_key_term_test),
+    TEST_CASE(upscaling_history_defaults_to_temporal_and_never_reaches_the_model_test),
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
     TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),
     TEST_CASE(untagged_hd_video_decodes_as_bt709_and_only_it_test),

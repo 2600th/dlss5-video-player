@@ -1425,7 +1425,11 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         if(!m_outputInUAV)Barrier(cmd,m_dlssOutput.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);m_outputInUAV=true;
         const bool timed=m_timestampHeap&&m_timestampReadback&&m_timestampFrequency;
         if(timed)cmd->EndQuery(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u);
-        used=m_dlss.Evaluate(cmd,m_dlssColor.Get(),m_dlssOutput.Get(),m_depth.Get(),m_motion.Get(),temporalReset,frameTimeMs);
+        // Per-frame Super Resolution discards the history here and nowhere else: the
+        // guides, the flow engine and the reset log keep following the stream, so
+        // switching back to Temporal picks up from a history that was never broken.
+        const bool resetHistory=temporalReset||UpscalingResetsEveryFrame(m_upscalingHistory,m_preserveSource);
+        used=m_dlss.Evaluate(cmd,m_dlssColor.Get(),m_dlssOutput.Get(),m_depth.Get(),m_motion.Get(),resetHistory,frameTimeMs);
         // EvaluateFeature binds NGX's own descriptor heaps on the list and leaves them
         // there, exactly as CreateFeature does above. The backbuffer pass below then
         // bound tables out of m_srvHeap against a heap that was no longer current -

@@ -18,6 +18,7 @@
 #include "OpticalFlowNvof.h"
 #include "PresentScalePolicy.h"
 #include "TemporalStabilityPolicy.h"
+#include "UpscalingPolicy.h"
 
 #include <functional>
 
@@ -365,6 +366,12 @@ public:
     // per frame, so settable at any time; it changes the motion guide and therefore
     // the neural output, which is why the caller keys the render by it.
     void SetZeroMotionTest(bool on) { m_zeroMotionTest = on; }
+
+    // Super Resolution's history (UpscalingPolicy.h). PerFrame resets the evaluate's
+    // history on every frame of a Super Resolution session, so each output is the
+    // single-frame upscale of that frame; a DLAA session ignores it. Read per frame,
+    // so the menu can switch it mid-playback and the next frame starts over.
+    void SetUpscalingHistory(UpscalingHistory history) { m_upscalingHistory = history; }
 
     // Tearing is opt-in and belongs only to a renderer nobody watches. The offline
     // carrier presents into a hidden window purely so the neural add-on sees a present
@@ -909,6 +916,7 @@ private:
     bool m_recreateRequested = false;
     bool m_preserveSource = false;
     bool m_zeroMotionTest = false;
+    UpscalingHistory m_upscalingHistory = kDefaultUpscalingHistory;
     // True when a caller asked for the capture readback ring at Initialize.
     bool m_captureOutput=false;
     uint64_t m_framesPresented = 0;

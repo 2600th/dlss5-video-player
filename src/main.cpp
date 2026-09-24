@@ -387,6 +387,7 @@ static constexpr int IDC_EX_MULTIPLIER = 7505;
 static constexpr int IDC_EX_SUMMARY = 7506;
 static constexpr int IDC_EX_RUN = 7507;
 static constexpr int IDC_EX_CLOSE = 7508;
+static constexpr int IDC_EX_HISTORY = 7509;
 
 static constexpr int IDC_TIMECODE_EDIT = 7501;
 static constexpr int IDC_TIMECODE_SET_IN = 7502;
@@ -1547,6 +1548,13 @@ static uint32_t ReadProcessingScale(const std::filesystem::path& settings){
     return IsProcessingScaleRung(saved)?saved:kDefaultProcessingScale;
 }
 
+// The saved Super Resolution history, by name; anything else is the default.
+static UpscalingHistory ReadUpscalingHistory(const std::filesystem::path& settings){
+    wchar_t saved[32]{};
+    GetPrivateProfileStringW(L"Playback",L"UpscalingHistory",L"temporal",saved,static_cast<DWORD>(std::size(saved)),settings.c_str());
+    return ParseUpscalingHistory(WideToUtf8(saved)).value_or(kDefaultUpscalingHistory);
+}
+
 // Everything a neural render writes into the add-on's [RenoDX.DLSS5]: the
 // Neural settings, and the model's place against the carrier's upscale that
 // the processing scale needs (PreUpscaleOverride says when that is written).
@@ -1596,6 +1604,9 @@ struct StageExportJob {
     // whatever this says: a reduced model input and a Super Resolution output
     // are one carrier's two jobs, and it can only do one of them.
     uint32_t processingScale{kDefaultProcessingScale};
+    // Super Resolution's history for an upscaling pass without the model; a pass
+    // that runs the model keeps Temporal (CarrierUpscalingHistory).
+    UpscalingHistory upscalingHistory{kDefaultUpscalingHistory};
     // Written to the add-on before a neural pass. The dialog's tooltip has
     // always said the neural stage "runs the neural model with the settings
     // from Neural settings", but nothing wrote them: the export used whatever
@@ -1652,6 +1663,7 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
             request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
         }
         if(plan.requireNeural&&!upscales)request.processingScale=job.processingScale;
+        if(upscales)request.upscalingHistory=CarrierUpscalingHistory(job.upscalingHistory,plan.requireNeural);
         const wchar_t* passKey=plan.requireNeural
             ?(plan.outputWidth!=job.sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
             :L"export.progress.pass_sr";
@@ -4172,6 +4184,7 @@ private:
         m_gpuSourceConversion=GetPrivateProfileIntW(L"Encoding",L"GpuSourceConversion",0,SettingsPath().c_str())!=0;
         m_nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,SettingsPath().c_str())),1,7);
         m_processingScale=ReadProcessingScale(SettingsPath());
+        m_upscalingHistory=ReadUpscalingHistory(SettingsPath());
         m_neuralSettings={};LoadNeuralSettings(SettingsPath(),m_neuralSettings);
         const int mode=static_cast<int>(GetPrivateProfileIntW(L"Comparison",L"Mode",0,SettingsPath().c_str()));
         m_comparison={};
@@ -4390,6 +4403,7 @@ private:
         WritePrivateProfileStringW(L"Encoding",L"GpuSourceConversion",m_gpuSourceConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"NvencPreset",std::to_wstring(m_nvencPreset).c_str(),SettingsPath().c_str());
         WritePrivateProfileStringW(L"NeuralRender",L"ProcessingScale",std::to_wstring(m_processingScale).c_str(),SettingsPath().c_str());
+        WritePrivateProfileStringW(L"Playback",L"UpscalingHistory",Utf8ToWide(std::string(UpscalingHistoryName(m_upscalingHistory))).c_str(),SettingsPath().c_str());
         SaveNeuralSettings(SettingsPath(),m_neuralSettings);
         WritePrivateProfileStringW(L"Comparison",L"Mode",std::to_wstring(static_cast<int>(m_comparison.mode)).c_str(),SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"Mix",m_comparison.strength);
@@ -4924,6 +4938,9 @@ private:
                                MF_BYCOMMAND);
             CheckMenuRadioItem(menu,IDM_PROCESSING_SCALE_FIRST,IDM_PROCESSING_SCALE_LAST,
                                app_menu::CommandForProcessingScale(m_processingScale),MF_BYCOMMAND);
+            CheckMenuRadioItem(menu,IDM_UPSCALE_HISTORY_TEMPORAL,IDM_UPSCALE_HISTORY_PER_FRAME,
+                               m_upscalingHistory==UpscalingHistory::PerFrame?IDM_UPSCALE_HISTORY_PER_FRAME:IDM_UPSCALE_HISTORY_TEMPORAL,
+                               MF_BYCOMMAND);
             // Live only while an HDR source is on an HDR display: anywhere else there
             // is no HDR original to compare at SDR.
             const bool hdrCompare=m_loaded&&m_renderer&&m_renderer->HdrOutputActive()&&
@@ -5462,6 +5479,22 @@ private:
 
     static constexpr int kNeuralDesignW=466,kNeuralDesignH=756;
 
+    // Playback takes it on the next frame (the renderer reads it per frame, and a
+    // paused frame is drawn again so the picture shows it); an export takes it when
+    // it starts. Nothing cached depends on it.
+    void SetUpscalingHistory(UpscalingHistory history){
+        if(history==m_upscalingHistory){SyncFeatureMenuState();return;}
+        m_upscalingHistory=history;
+        LOG("Super Resolution history set to "<<UpscalingHistoryName(history)<<".");
+        SaveVideoSettings();
+        if(m_renderer){
+            m_renderer->SetUpscalingHistory(history);
+            if(!m_playing&&UpscalingActive())if(const auto last=m_lastPlaybackFrame)RenderVideoFrame(*last,false);
+        }
+        if(m_exportStagesWnd&&IsWindow(m_exportStagesWnd))SyncExportStageControls(m_exportStagesWnd);
+        SyncFeatureMenuState();
+    }
+
     // Like a preset: the next render takes it, a paused frame re-previews with
     // it, and a render already running finishes at the scale it started with.
     void SetProcessingScale(uint32_t percent){
@@ -5676,7 +5709,7 @@ private:
     // the settings, while this is a one-off at a size and a rate the viewer
     // picked. "Save converted video" remains the way to keep the render you are
     // already watching.
-    static constexpr int kExportDesignW=470,kExportDesignH=368;
+    static constexpr int kExportDesignW=470,kExportDesignH=402;
 
     uint32_t ExportMaxMultiplier()const{
         // 1 + the runtime's generated-frames-per-pair. Unmeasured reads as 2, the
@@ -5719,14 +5752,18 @@ private:
         CreateSettingsGroupHeading(h,L"export.stages.group_stages",8);
         CreateNeuralCheck(h,IDC_EX_UPSCALE,L"export.stages.upscale",16,32,300,L"export.tip.upscale");
         CreateNeuralCombo(h,IDC_EX_RESOLUTION,L"export.stages.resolution",70,{L"1080p",L"1440p",L"2160p"});
-        CreateNeuralCheck(h,IDC_EX_NEURAL,L"export.stages.neural",16,112,300,L"export.tip.neural");
-        CreateNeuralCheck(h,IDC_EX_FRAMEGEN,L"export.stages.framegen",16,152,300,L"export.tip.framegen");
-        CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",190,{L"2×",L"3×",L"4×",L"5×"});
-        CreateSettingsGroupHeading(h,L"export.stages.group_result",230);
-        DialogControl(h,L"STATIC",L"",SS_LEFT,16,254,436,34,IDC_EX_SUMMARY);
-        DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,288,436,34);
-        DialogButton(h,L"export.stages.run",IDC_EX_RUN,232,330,120,30,true);
-        DialogButton(h,L"export.stages.close",IDC_EX_CLOSE,362,330,90,30);
+        {
+            const std::wstring temporal=T(L"export.stages.history_temporal"),perFrame=T(L"export.stages.history_per_frame");
+            CreateNeuralCombo(h,IDC_EX_HISTORY,L"export.stages.history",104,{temporal.c_str(),perFrame.c_str()},L"export.tip.history");
+        }
+        CreateNeuralCheck(h,IDC_EX_NEURAL,L"export.stages.neural",16,146,300,L"export.tip.neural");
+        CreateNeuralCheck(h,IDC_EX_FRAMEGEN,L"export.stages.framegen",16,186,300,L"export.tip.framegen");
+        CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",224,{L"2×",L"3×",L"4×",L"5×"});
+        CreateSettingsGroupHeading(h,L"export.stages.group_result",264);
+        DialogControl(h,L"STATIC",L"",SS_LEFT,16,288,436,34,IDC_EX_SUMMARY);
+        DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,322,436,34);
+        DialogButton(h,L"export.stages.run",IDC_EX_RUN,232,364,120,30,true);
+        DialogButton(h,L"export.stages.close",IDC_EX_CLOSE,362,364,90,30);
         SyncExportStageControls(h);
         CaptureSettingsDesignLayout(h);
     }
@@ -5740,10 +5777,14 @@ private:
         int rung=1;for(size_t i=0;i<std::size(kUpscaleRungHeights);++i)if(kUpscaleRungHeights[i]==m_exportSelection.targetHeight)rung=int(i);
         select(IDC_EX_RESOLUTION,rung);
         select(IDC_EX_MULTIPLIER,std::clamp(int(m_exportSelection.multiplier),2,5)-2);
+        select(IDC_EX_HISTORY,m_upscalingHistory==UpscalingHistory::PerFrame?1:0);
         // A rung you cannot choose and a rate you cannot reach are greyed, not
         // hidden: the control staying visible is what tells the user the stage
         // exists and why it is unavailable here.
         if(HWND c=GetDlgItem(h,IDC_EX_RESOLUTION))EnableWindow(c,m_exportSelection.upscale);
+        // Only Super Resolution on its own has a history to choose: with the model
+        // on the same carrier the pass keeps Temporal, and the tooltip says why.
+        if(HWND c=GetDlgItem(h,IDC_EX_HISTORY))EnableWindow(c,m_exportSelection.upscale&&!m_exportSelection.neural);
         if(HWND c=GetDlgItem(h,IDC_EX_MULTIPLIER))EnableWindow(c,m_exportSelection.frameGeneration&&ExportMaxMultiplier()>2);
         const ExportPlan plan=CurrentExportPlan();
         std::wstring summary;
@@ -5766,6 +5807,9 @@ private:
         m_exportSelection.frameGeneration=checked(IDC_EX_FRAMEGEN);
         m_exportSelection.targetHeight=kUpscaleRungHeights[std::clamp(sel(IDC_EX_RESOLUTION,1),0,int(std::size(kUpscaleRungHeights))-1)];
         m_exportSelection.multiplier=uint32_t(std::clamp(sel(IDC_EX_MULTIPLIER,0),0,3)+2);
+        // One choice for playback and the export, so the menu and this row agree.
+        const UpscalingHistory history=sel(IDC_EX_HISTORY,0)==1?UpscalingHistory::PerFrame:UpscalingHistory::Temporal;
+        if(history!=m_upscalingHistory){SetUpscalingHistory(history);return;}
         SyncExportStageControls(h);
     }
 
@@ -5788,7 +5832,7 @@ private:
             // drawn, movable and inert - the exact failure the neural settings
             // dialog shipped with when stacking was added.
             if(((id==IDC_EX_UPSCALE||id==IDC_EX_NEURAL||id==IDC_EX_FRAMEGEN)&&code==BN_CLICKED)||
-               ((id==IDC_EX_RESOLUTION||id==IDC_EX_MULTIPLIER)&&code==CBN_SELCHANGE)){ReadExportStageControls(h);return 0;}
+               ((id==IDC_EX_RESOLUTION||id==IDC_EX_MULTIPLIER||id==IDC_EX_HISTORY)&&code==CBN_SELCHANGE)){ReadExportStageControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -5831,6 +5875,7 @@ private:
         if(destination.empty())return;
 
         LOG("Stage export starting: upscale="<<m_exportSelection.upscale
+            <<" history="<<UpscalingHistoryName(CarrierUpscalingHistory(m_upscalingHistory,m_exportSelection.neural))
             <<" neural="<<m_exportSelection.neural<<" framegen="<<m_exportSelection.frameGeneration
             <<" output="<<plan.outputWidth<<"x"<<plan.outputHeight<<" fps="<<plan.outputFps
             <<" passes="<<ExportStageCount(plan)<<" source="<<WideToUtf8(source.wstring()));
@@ -5841,6 +5886,7 @@ private:
         job.sourceWidth=m_decoder.Width();job.sourceHeight=m_decoder.Height();
         job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
         job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
+        job.upscalingHistory=m_upscalingHistory;
         job.holdDuplicates=m_frameGenHoldDuplicates;
         HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{
@@ -6258,6 +6304,7 @@ private:
         const auto renderStart=Clock::now();
         // An HDR original decoded for an HDR display is PQ, and says so per frame.
         m_renderer->SetNextSourcePq(f.pq);
+        m_renderer->SetUpscalingHistory(m_upscalingHistory);
         bool ok=m_renderer->RenderFrame(f.bgra.data(),f.bgra.size(),g.guideGridRGBA32F.data(),g.guideGridRGBA32F.size()*sizeof(float),g.gridW,g.gridH,r,g.motionVectors,ms);
         m_renderMsTotal+=std::chrono::duration<double,std::milli>(Clock::now()-renderStart).count();
         ++m_renderMsFrames;
@@ -10709,6 +10756,8 @@ private:
         case IDM_UPSCALE_1080:SetUpscaleTarget(1080);break;
         case IDM_UPSCALE_1440:SetUpscaleTarget(1440);break;
         case IDM_UPSCALE_2160:SetUpscaleTarget(2160);break;
+        case IDM_UPSCALE_HISTORY_TEMPORAL:SetUpscalingHistory(UpscalingHistory::Temporal);break;
+        case IDM_UPSCALE_HISTORY_PER_FRAME:SetUpscalingHistory(UpscalingHistory::PerFrame);break;
         case IDM_FRAME_GENERATION:if(m_frameGenWorker.joinable())CancelFrameGeneration();else StartFrameGeneration();break;
         case IDM_SHOW_FRAMEGEN_OUTPUT:ShowFrameGenerationOutput();break;
         case IDM_FRAMEGEN_2X:SetFrameGenerationPreference(1);break;
@@ -11021,6 +11070,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // The resolution the model runs at, one of kProcessingScaleRungs. 100 on a
     // fresh install and never moved down by anything but the user.
     uint32_t m_processingScale=kDefaultProcessingScale;
+    // Super Resolution's history for playback and for an export's SR stage on its
+    // own (UpscalingPolicy.h). Temporal on a fresh install.
+    UpscalingHistory m_upscalingHistory=kDefaultUpscalingHistory;
     NeuralSettings m_neuralSettings;
     // Frame-accurate in/out markers on the loaded source's timeline.
     RangeMarkers m_markers;
@@ -11363,6 +11415,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         job.nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,settings.c_str())),1,7);
         job.neuralSettings=neuralSettings;
         job.processingScale=command.processingScale?*command.processingScale:ReadProcessingScale(settings);
+        job.upscalingHistory=ReadUpscalingHistory(settings);
 
         wchar_t summary[256];
         swprintf_s(summary,L"%u x %u at %.4g fps -> %u x %u at %.4g fps, %u pass%s",width,height,fps,

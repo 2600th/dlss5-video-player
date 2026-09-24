@@ -87,6 +87,60 @@ inline bool SuperResolutionCarrier(uint32_t modelWidth, uint32_t modelHeight,
            (outputWidth != modelWidth || outputHeight != modelHeight);
 }
 
+// ---- Super Resolution history ---------------------------------------------
+//
+// Whether DLSS Super Resolution accumulates over frames (Temporal, the default
+// and what it always did) or starts over on every frame (PerFrame: each output
+// is DLSS's single-frame upscale of that frame alone).
+//
+// On decoded video neither beats a plain scaler. DLSS SR is built for rendered
+// frames - jittered, aliased, noise-free point samples - and decoded video is
+// none of those, so accumulating it adds blur and ringing rather than detail
+// (docs/measurements/sr-quality-20260924). Per-frame gives up the history for
+// the single-frame picture. Measured 960x540 -> 1080p on six clips, it scored
+// 0.8-19 VMAF above Temporal on five and 1.3 below on a held frame, and bicubic
+// scored above both everywhere. Temporal's output changes less from frame to
+// frame than the source (up to 1.2 luma levels less), which is what "steadier"
+// means here: it calms grain and trails motion. Neither is right for every clip,
+// so the viewer picks, with the numbers beside the choice;
+// docs/measurements/sr-history-20260924/REPORT.md has them.
+//
+// Playback's Super Resolution and an export's Super Resolution stage follow the
+// choice. A carrier that also runs the neural model never does: the model runs
+// on that carrier's frames, what a per-frame reset there would do to it was not
+// measured, and keeping Temporal leaves every cached render - a reduced
+// processing scale's carrier, the export's SR-plus-neural pass - and its cache
+// key exactly as they were.
+enum class UpscalingHistory : uint8_t { Temporal, PerFrame };
+inline constexpr UpscalingHistory kDefaultUpscalingHistory = UpscalingHistory::Temporal;
+
+// Stored by name, so a value a later build adds is not misread by index.
+inline constexpr std::string_view UpscalingHistoryName(UpscalingHistory history) noexcept {
+    return history == UpscalingHistory::PerFrame ? "per-frame" : "temporal";
+}
+
+inline std::optional<UpscalingHistory> ParseUpscalingHistory(std::string_view text) noexcept {
+    if (text == "temporal") return UpscalingHistory::Temporal;
+    if (text == "per-frame") return UpscalingHistory::PerFrame;
+    return std::nullopt;
+}
+
+// The history a job's carrier runs with: the viewer's choice, unless the
+// neural model runs on the same carrier, which keeps its history (above).
+inline constexpr UpscalingHistory CarrierUpscalingHistory(UpscalingHistory requested,
+                                                          bool neuralOnCarrier) noexcept {
+    return neuralOnCarrier ? UpscalingHistory::Temporal : requested;
+}
+
+// Whether a Super Resolution evaluate discards its history on this frame for
+// the choice alone - a first frame, a seek or a cut resets it anyway. Only a
+// session that upscales has a Super Resolution history to discard: the DLAA
+// carrier a neural render at the source's size runs on is never touched.
+inline constexpr bool UpscalingResetsEveryFrame(UpscalingHistory history,
+                                                bool superResolutionSession) noexcept {
+    return superResolutionSession && history == UpscalingHistory::PerFrame;
+}
+
 // ---- Processing scale ----------------------------------------------------
 //
 // The resolution the neural model runs at, as a percentage of the source. At

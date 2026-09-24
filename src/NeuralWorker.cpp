@@ -837,6 +837,10 @@ bool ValidRequest(const NeuralRenderRequest& request)
     if (!IsProcessingScaleRung(request.processingScale)) return false;
     if (request.processingScale != kDefaultProcessingScale && request.outputWidth &&
         (request.outputWidth != request.width || request.outputHeight != request.height)) return false;
+    // Per-frame Super Resolution needs Super Resolution and no model on the carrier.
+    if (request.upscalingHistory != kDefaultUpscalingHistory &&
+        (request.requireNeural || !request.outputWidth ||
+         (request.outputWidth == request.width && request.outputHeight == request.height))) return false;
     return true;
 }
 
@@ -1198,6 +1202,12 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"--processing-scale");
         arguments.emplace_back(std::to_wstring(request.processingScale));
     }
+    // Absent means temporal, which is every job before the choice existed.
+    if (request.upscalingHistory != kDefaultUpscalingHistory) {
+        const std::string_view history = UpscalingHistoryName(request.upscalingHistory);
+        arguments.emplace_back(L"--sr-history");
+        arguments.emplace_back(history.begin(), history.end());
+    }
     const std::string guides = CanonicalGuideControls(request.guides);
     arguments.emplace_back(L"--guides");
     arguments.emplace_back(guides.begin(), guides.end());
@@ -1295,7 +1305,8 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
-               OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, KeyCount };
+               OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
+               KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1307,7 +1318,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // that binary can actually do.
         L"--output-width", L"--output-height", L"--require-neural", L"--processing-scale",
         // Absent at the defaults, for the same reason.
-        L"--temporal"};
+        L"--temporal", L"--sr-history"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1438,6 +1449,12 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
             narrow_text::StrictAscii(*values[Temporal]).value_or(std::string{}));
         if (!temporal) return std::nullopt;
         request.temporal = *temporal;
+    }
+    if (values[UpscalingHistoryKey]) {
+        const auto history = ParseUpscalingHistory(
+            narrow_text::StrictAscii(*values[UpscalingHistoryKey]).value_or(std::string{}));
+        if (!history) return std::nullopt;
+        request.upscalingHistory = *history;
     }
     if (values[GpuColorConversion]) {
         uint64_t enabled = 0;

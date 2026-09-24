@@ -26,7 +26,11 @@
 // pixel. That is how the question "does this guide reach the consumer" is
 // answered for the upscaling feature, which is a different NGX feature from the
 // neural rendering the helper drives.
-int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControls& controls,const wchar_t* rawOut,uint32_t frames);
+// A sixth argument, `per-frame`, renders the same frames with Super Resolution's
+// history reset on every frame (UpscalingHistory::PerFrame), for the A/B in
+// docs/measurements/sr-history-20260924.
+int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControls& controls,const wchar_t* rawOut,uint32_t frames,
+                  UpscalingHistory history=kDefaultUpscalingHistory);
 
 // `device-loss` as the third argument runs the renderer's failure paths on the real
 // GPU instead, which no headless test reaches: a Present that refuses a frame whose
@@ -52,7 +56,9 @@ int RunHdrOutputProbe(const wchar_t* source);
 // score beside SR's, through the same BGRA path, without asserting an order between
 // them: on band-limited video DLSS SR measured below bicubic on every clip tried,
 // frame 0 included, where no history or motion vector is involved at all - see
-// docs/measurements/sr-quality-20260924/REPORT.md.
+// docs/measurements/sr-quality-20260924/REPORT.md. It then renders the held frame
+// again with Per-frame history and fails (10) unless every frame comes out
+// byte-identical, which is what a reset on every frame of identical input gives.
 int RunSrQualityProbe(const wchar_t* ffmpegDirectory,const wchar_t* workDirectory);
 // The generated original, an FFmpeg lavfi source at 1080p30: a Mandelbrot zoom,
 // because it has detail at every scale for the engine to be wrong about.
@@ -61,12 +67,13 @@ inline constexpr wchar_t kSrQualitySource[]=L"mandelbrot=s=1920x1080:r=30";
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if(argc==4&&std::wstring_view(argv[2])==L"sr-quality")return RunSrQualityProbe(argv[1],argv[3]);
-    if(argc==6){
+    if(argc==6||(argc==7&&std::wstring_view(argv[6])==L"per-frame")){
         const std::wstring wide(argv[4]);
         std::string text;for(const wchar_t c:wide){if(c>0x7F)return 2;text.push_back(char(c));}
         const auto controls=ParseGuideControls(text);
         if(!controls)return 2;
-        return RunGuideProbe(argv[1],std::wcstoul(argv[2],nullptr,10),*controls,argv[3],std::wcstoul(argv[5],nullptr,10));
+        return RunGuideProbe(argv[1],std::wcstoul(argv[2],nullptr,10),*controls,argv[3],std::wcstoul(argv[5],nullptr,10),
+                             argc==7?UpscalingHistory::PerFrame:kDefaultUpscalingHistory);
     }
     if(argc==4&&std::wstring_view(argv[3])==L"device-loss")return RunDeviceLossProbe(argv[1],std::wcstoul(argv[2],nullptr,10));
     if(argc==3&&std::wstring_view(argv[2])==L"hdr-output")return RunHdrOutputProbe(argv[1]);
@@ -132,7 +139,8 @@ int wmain(int argc,wchar_t** argv) {
     MFShutdown();CoUninitialize();return code;
 }
 
-int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControls& controls,const wchar_t* rawOut,uint32_t frames)
+int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControls& controls,const wchar_t* rawOut,uint32_t frames,
+                  UpscalingHistory history)
 {
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
     int code=1;
@@ -148,6 +156,7 @@ int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControl
         if(renderer->Initialize(window,decoder.Width(),decoder.Height(),target.width,target.height,gw,gh,
             NVSDK_NGX_PerfQuality_Value_MaxQuality,true,true)&&renderer->DLSSAvailable()){
             TemporalGuideGenerator guides;guides.SetControls(controls);
+            renderer->SetUpscalingHistory(history);
             VideoFrame frame;uint32_t count=0;bool ok=true;
             std::ofstream out(std::filesystem::path(rawOut),std::ios::binary|std::ios::trunc);
             const float frameMs=float(1000/decoder.FrameRate());
@@ -159,7 +168,7 @@ int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControl
                 if(ok){out.write(reinterpret_cast<const char*>(captured.pixels.data()),std::streamsize(captured.pixels.size()));++count;}
             }
             out.close();
-            std::cout<<"guides="<<CanonicalGuideControls(controls)
+            std::cout<<"guides="<<CanonicalGuideControls(controls)<<" history="<<UpscalingHistoryName(history)
                 <<" frames="<<count<<" output="<<target.width<<"x"<<target.height
                 <<" evaluations="<<renderer->DLSSEvaluations()<<"\n";
             code=ok&&count==frames?0:5;
@@ -506,7 +515,8 @@ double MeanOf(const std::vector<double>& values,size_t from,size_t to)
 // The clip through the real Super Resolution path exactly as an export's SR
 // stage runs it - preserve-source, the capture ring, guides from the frames -
 // written raw for scoring. False when any frame did not come through DLSS.
-bool RenderSuperResolution(const std::filesystem::path& source,const std::filesystem::path& raw,uint32_t& frames)
+bool RenderSuperResolution(const std::filesystem::path& source,const std::filesystem::path& raw,uint32_t& frames,
+                           UpscalingHistory history=kDefaultUpscalingHistory)
 {
     frames=0;
     VideoDecoder decoder;
@@ -522,6 +532,7 @@ bool RenderSuperResolution(const std::filesystem::path& source,const std::filesy
                NVSDK_NGX_PerfQuality_Value_MaxQuality,true,true)&&renderer->DLSSAvailable()&&
            renderer->OutputW()==target.width&&renderer->OutputH()==target.height){
             TemporalGuideGenerator guides;VideoFrame frame;ok=true;
+            renderer->SetUpscalingHistory(history);
             std::ofstream out(raw,std::ios::binary|std::ios::trunc);
             const float frameMs=float(1000.0/decoder.FrameRate());
             while(ok&&decoder.ReadNext(frame)){
@@ -583,6 +594,29 @@ int RunSrQualityProbe(const wchar_t* ffmpegDirectory,const wchar_t* workDirector
         results.push_back(std::move(result));
         if(!ok)break;
     }
+    // Per-frame history (UpscalingPolicy.h) resets the evaluate on every frame, so a
+    // held frame is the same single-frame upscale sixty times over: every captured
+    // frame must be byte-identical to the first. A per-frame choice that never reached
+    // the evaluate would accumulate instead, and the frames would drift apart.
+    bool perFrameHeld=false;
+    if(ok){
+        uint32_t frames=0;
+        const std::filesystem::path held=work/L"still-sr-per-frame.raw";
+        if(RenderSuperResolution(work/L"still-540.mkv",held,frames,UpscalingHistory::PerFrame)&&frames>=20){
+            std::ifstream in(held,std::ios::binary);
+            const size_t frameBytes=size_t(1920)*1080*4u;
+            std::vector<char> first(frameBytes),next(frameBytes);
+            perFrameHeld=bool(in.read(first.data(),std::streamsize(frameBytes)));
+            uint32_t same=perFrameHeld?1u:0u;
+            while(perFrameHeld&&in.read(next.data(),std::streamsize(frameBytes))){
+                if(next!=first){perFrameHeld=false;break;}
+                ++same;
+            }
+            perFrameHeld=perFrameHeld&&same==frames;
+            std::cout<<"sr-quality: per-frame held frame "<<(perFrameHeld?"identical":"DIFFERS")<<" across "<<frames<<" frames\n";
+        }
+        std::filesystem::remove(held,error);
+    }
     int code=8;
     if(ok&&results.size()==2){
         const Result& moving=results[0];const Result& still=results[1];
@@ -594,7 +628,7 @@ int RunSrQualityProbe(const wchar_t* ffmpegDirectory,const wchar_t* workDirector
         // A held frame must hold its score. With nothing moving there is nothing new
         // to accumulate, so the last ten frames may only match or beat the first ten;
         // the engine's field on identical frames took them down by more than ten VMAF.
-        code=stillLast>=stillFirst-1.0?0:9;
+        code=stillLast>=stillFirst-1.0?(perFrameHeld?0:10):9;
     }
     MFShutdown();CoUninitialize();return code;
 }

@@ -234,6 +234,20 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(upscaleOutput, IDM_UPSCALE_2160, L"menu.upscale_2160");
     CheckMenuRadioItem(upscaleOutput,IDM_UPSCALE_AUTO,IDM_UPSCALE_2160,IDM_UPSCALE_AUTO,MF_BYCOMMAND);
     AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),localizer.Get(L"menu.upscale_output").c_str());
+    // Whether Super Resolution accumulates over frames or upscales each one on its
+    // own. Neither beats a plain scaler on decoded video, and which of the two does
+    // better depends on the clip, so the choice carries what it measured in the
+    // same greyed-statement form the processing scale uses. Numbers and method in
+    // UpscalingPolicy.h and docs/measurements/sr-history-20260924.
+    HMENU upscaleHistory=CreatePopupMenu();
+    AppendMenuW(upscaleHistory, MF_STRING | MF_GRAYED, 0,
+                localizer.Get(L"menu.upscale_history_measured").c_str());
+    AppendMenuW(upscaleHistory, MF_SEPARATOR, 0, nullptr);
+    add(upscaleHistory, IDM_UPSCALE_HISTORY_TEMPORAL, L"menu.upscale_history_temporal");
+    add(upscaleHistory, IDM_UPSCALE_HISTORY_PER_FRAME, L"menu.upscale_history_per_frame");
+    CheckMenuRadioItem(upscaleHistory,IDM_UPSCALE_HISTORY_TEMPORAL,IDM_UPSCALE_HISTORY_PER_FRAME,
+                       IDM_UPSCALE_HISTORY_TEMPORAL,MF_BYCOMMAND);
+    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleHistory),localizer.Get(L"menu.upscale_history").c_str());
     AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
 
     // --- Frame generation: the verb and the rate it targets. ---------------

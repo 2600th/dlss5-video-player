@@ -101,8 +101,11 @@ the render covered the whole video. Press `D` at the start to get one.
   run in NVIDIA's order.
 - **Raises the frame rate.** **DLSS > Generate frames** writes a copy at 2x to 5x
   the original rate, then plays it.
-- **Upscales on playback.** Optional DLSS Super Resolution to 1080p, 1440p or
-  2160p, matched to your monitor by default.
+- **Upscales on playback, if you want it.** Optional DLSS Super Resolution to
+  1080p, 1440p or 2160p, matched to your monitor by default, with a Temporal or
+  Per-frame history. It is off by default. On video it scored below a plain bicubic
+  upscale on every clip measured, because it is built for rendered games, not
+  decoded footage.
 - **Tunes the model.** Neural settings live at `Ctrl+N`. Change one while paused
   and that frame re-renders, so you judge on the picture.
 - **Comes with test material.** Six official game trailers under
@@ -208,8 +211,9 @@ never triggers a new render.
 - **Save converted video copies the cached 8-bit render as it is.** It doesn't
   bake in adjustments or upscaling, or restore HDR. Use **Export with DLSS
   stages** to bake in a larger size.
-- **Super Resolution alone isn't offered in that export.** The runtime always
-  applies the neural pass, so both options produced identical files.
+- **DLSS Super Resolution doesn't beat a plain scaler on video.** Measured
+  against bicubic on six clips, it scored lower on all of them, with either
+  history setting. It is there for its look, not for detail.
 - **Not supported:** subtitle display or burn-in, HDR, a render queue, or
   resuming an interrupted render after a restart.
 - **YouTube:** public, non-DRM videos only, no login. Age-restricted videos can

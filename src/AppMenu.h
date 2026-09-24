@@ -163,6 +163,10 @@ inline constexpr UINT IDM_NEURAL_PRESET_CUSTOM = 479;
 // kProcessingScaleRungs (UpscalingPolicy.h): Source 100% first, then 75, 50.
 inline constexpr UINT IDM_PROCESSING_SCALE_FIRST = 480;
 inline constexpr UINT IDM_PROCESSING_SCALE_LAST = 482;
+// Super Resolution's history (UpscalingHistory, UpscalingPolicy.h), its own
+// contiguous radio block in the enum's order: Temporal, the default, first.
+inline constexpr UINT IDM_UPSCALE_HISTORY_TEMPORAL = 484;
+inline constexpr UINT IDM_UPSCALE_HISTORY_PER_FRAME = 485;
 // Right-justified affordance appended to the menu bar itself, not a submenu.
 inline constexpr UINT IDM_UPDATE_AVAILABLE = 461;
 // Help > Keyboard shortcuts, the menu route to the ? / F1 cheat sheet.

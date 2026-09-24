@@ -390,6 +390,21 @@ target: a 4K source reports "source meets output" and stays off, and so does a
 "display below 1080 lines", which is a different refusal from the first and says
 so. Neural rendering itself preserves source resolution.
 
+**Upscaling is off by default because, on video, it does not beat a plain
+scaler.** DLSS Super Resolution is built for rendered games: jittered, aliased,
+noise-free samples. Decoded video is none of those. Measured 960x540 to 1080p on
+six clips, a bicubic upscale scored higher VMAF than DLSS on every one
+(`docs/measurements/sr-quality-20260924` and `sr-history-20260924`). Turn it on if
+you prefer its look, not because it recovers detail.
+
+**DLSS > Upscaling history** chooses how it uses earlier frames. **Temporal
+(steadier)**, the default, accumulates them. Its picture changes less from frame to
+frame than the source, which calms grain and also trails motion. **Per-frame
+(sharper on some clips)** upscales every frame on its own. It scored 0.8 to 19 VMAF
+above Temporal on five of the six clips and 1.3 below on a held frame. The greyed
+line at the top of the submenu and each item's right-hand column give the measured
+range. The same choice is the **History** row of **Export with DLSS stages**.
+
 **Video > YouTube source quality** selects 1080p, 1440p or 2160p. At the selected
 resolution, the player chooses the highest advertised video bitrate across
 available codecs and containers, with the highest-bitrate separate audio stream
@@ -717,6 +732,13 @@ Neural rendering unticked and the helper starts with the neural add-on
 disabled, so the file is DLSS Super Resolution alone. The render is refused
 rather than written if the add-on turns out to have run anyway. With Neural
 rendering ticked, the pass uses the look set in **Neural settings**.
+
+**History** (under the output height) is the same choice as **DLSS > Upscaling
+history**: Temporal or Per-frame, with the measured VMAF and steadiness in its
+tooltip. It applies only to Super Resolution on its own. With Neural rendering
+ticked it is greyed and the pass keeps Temporal, because the model runs on the same
+frames. Cached renders are therefore never affected. `--render` uses the saved
+choice.
 
 The file is written in the container its name asks for. The Save dialog
 offers MKV (the default) and MP4 for a video, GIF (the default), MP4 and MKV

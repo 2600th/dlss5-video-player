@@ -8,6 +8,7 @@
 #include "TemporalGuides.h"
 #include "TemporalMetrics.h"
 #include "TemporalSettings.h"
+#include "UpscalingPolicy.h"
 
 #include <windows.h>
 
@@ -98,6 +99,12 @@ struct NeuralRenderRequest {
     // parent) puts the model on the reduced input. Only for a job whose output
     // is the source size: it is refused beside an upscaling output.
     uint32_t processingScale{100};
+    // Super Resolution's history (UpscalingPolicy.h): Temporal, as every job
+    // before it, or PerFrame, which resets the carrier's history on every frame.
+    // Only for a job that upscales and runs no neural pass - the export's Super
+    // Resolution stage on its own; ValidRequest refuses it anywhere else, because
+    // the model runs on the carrier's frames and a reset there was never measured.
+    UpscalingHistory upscalingHistory{kDefaultUpscalingHistory};
     // How readily a scene cut resets the history (TemporalSettings.h). Defaults to
     // what every job did before the setting existed.
     TemporalSettings temporal{};

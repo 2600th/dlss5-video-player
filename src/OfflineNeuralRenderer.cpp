@@ -2019,6 +2019,9 @@ struct ProductionEvaluatorAdapter {
     // (NeuralMotionPolicy.h), set before Initialize like the temporal choices. A root
     // constant, so a reused device takes the new job's value with the guide settings.
     bool zeroMotionTest{false};
+    // The Super Resolution carrier's history (UpscalingPolicy.h), per job. Temporal
+    // for any job the model runs on; the request is refused otherwise.
+    UpscalingHistory upscalingHistory{kDefaultUpscalingHistory};
     bool ApplyGuideFiles(const FrameIdentity& id,GuideFrame& guide){
         std::string error;
         if(guide_files::Apply(guideFiles,id.frameNumber,guide,&error))return true;
@@ -2027,7 +2030,8 @@ struct ProductionEvaluatorAdapter {
     }
     void ApplyGuideSettings(const GuideControls& controls){
         guides.SetControls(controls);guides.SetSceneCutSensitivity(temporal.sceneCuts);
-        if(renderer){renderer->SetTemporalStability(temporal.stability);renderer->SetZeroMotionTest(zeroMotionTest);}
+        if(renderer){renderer->SetTemporalStability(temporal.stability);renderer->SetZeroMotionTest(zeroMotionTest);
+            renderer->SetUpscalingHistory(upscalingHistory);}
     }
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
@@ -2873,6 +2877,10 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     state.evaluator.temporal=request.temporal;
     state.evaluator.guideFiles=request.guideFiles;
     state.evaluator.zeroMotionTest=NeuralZeroMotionTest(request.guideFiles.zeroMotionTest);
+    state.evaluator.upscalingHistory=CarrierUpscalingHistory(request.upscalingHistory,request.requireNeural);
+    if(state.evaluator.upscalingHistory!=kDefaultUpscalingHistory)
+        LOG("Super Resolution history: "<<UpscalingHistoryName(state.evaluator.upscalingHistory)
+            <<" - the carrier starts over on every frame.");
     // One line per job: two renders that differ only here are different pictures,
     // and a log that does not say which one it made cannot tell them apart.
     LOG("Flow zero-motion test at source size: "<<(state.evaluator.zeroMotionTest?"on":"off")
