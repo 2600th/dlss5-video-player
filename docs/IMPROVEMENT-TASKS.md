@@ -65,17 +65,13 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 
 # P0 — Fix now
 
+Nothing open.
+
 ---
 
 # P1 — Next
 
-## Player: reliability and quality-neutral performance
-
-## Pipeline: helper, cache, runtime
-
-## Release and CI
-
-## Docs and site
+Nothing open.
 
 ---
 
@@ -91,21 +87,18 @@ cache-key term, and any trade-off ships as a ladder with a labelled default.
 
 `M-L` · **Pipeline** · _the harness half shipped: `depth=file:` / `mv=file:` guide modes_
 
+**Blocker:** needs torch and a model download, so it is the owner's to run.
+
 The harness is in: offline depth and flow can be fed to the worker from
 files and A/B'd through `tools/benchmark` (see its README for the exact
 steps), with near/far clips `depth-pan` and `depth-subject`. Feeding the
 built-in guides back through files is byte-identical.
 
-**What is left** needs torch and a model download, so it is the owner's to
-run: generate Video Depth Anything Small depth for the corpus, normalised
-over each clip (not per frame), and A/B it. The first harness result sets
-expectations: even *exact* synthetic depth moves the output by at most
-0.03 dB PSNR, so depth has little headroom on this pipeline; flow is the
+What is left: generate Video Depth Anything Small depth for the corpus,
+normalised over each clip (not per frame), and A/B it. The first harness
+result sets expectations: even *exact* synthetic depth moves the output by at
+most 0.03 dB PSNR, so depth has little headroom on this pipeline; flow is the
 more promising guide (P3.6).
-
----
-
-## Player UX
 
 ---
 
@@ -116,25 +109,30 @@ more promising guide (P3.6).
 
 `M` · **Pipeline, Release** · unverified
 
+**Blocker:** nobody has confirmed the signed DLL is usable this way; that
+needs an RTX 50 card.
+
 Driver 616.64 enables DLSS 5 officially on RTX 50 and downloads its models to
 `%ProgramData%\NVIDIA\NGX\models`. If a usable signed neural-rendering DLL can
 be found there for an app that is not on NVIDIA's list, preferring it on RTX
 50 would remove the "modified, unsigned" warning for those users. Record
 which runtime ran in the receipt. Keep the community build for RTX 20-40.
-**Nobody has yet confirmed the signed DLL is usable this way.** Check that
-before planning any work.
 
 ---
 
 <a id="p36"></a>
 ### P3.6 · Neural optical flow as an export-only rung
 
-`M-L` · **Pipeline** · _gated by P2.4_
+`M-L` · **Pipeline** · _gated by P2.4's harness_
+
+**Blocker:** no evidence yet that better flow helps; motion vectors measured
+only +0.297 dB on the cuts-motion clip.
 
 SEA-RAFT's smallest model runs 1080p at about 21 fps on a 3090, and an ONNX
 export exists. That is too slow for live playback, but acceptable for export.
-Keep NVOFA for live. Build this only if P2.4's harness shows a gain: motion
-vectors measured only +0.297 dB on the cuts-motion clip.
+Keep NVOFA for live. Before any C++ work, run the cheap offline experiment:
+precompute SEA-RAFT flow in Python and feed it through the P2.4 guide harness
+(`mv=file:`). Build the rung only if that shows a gain.
 
 ---
 
@@ -143,9 +141,12 @@ vectors measured only +0.297 dB on the cuts-motion clip.
 
 `S` · **Release**
 
+**Blocker:** moving history to LFS or release assets rewrites it, which is the
+owner's call.
+
 - **Media in history:** `docs/media/neural-comparison-demo.mp4` is stored
-  three times (9.1, 7.9 and 7.2 MB). There is also a 5.3 MB benchmark fixture
-  and a 4.2 MB webp, and the pack is 60 MB.
+  five times (9.1, 7.9, 7.2, 6.3 and 5.3 MB; the 5.3 MB one lives on as the
+  benchmark fixture). There is also a 4.2 MB webp, and the pack is 60 MB.
 - **Stray build output:** a 775 MB `build/` directory sits in the tree
   (gitignored, but still there).
 
@@ -163,13 +164,13 @@ are not proposed again.
 | Item | Why not |
 | --- | --- |
 | **Custom model loading (.pth/.onnx)** | Structurally impossible: NGX feature 18 has fixed weights. chaiNNer-style tools are a different category. |
-| **Watch folders** | Requested at Topaz since 2022 and never shipped, with no sign that users urgently need it. P2.10's CLI covers the batch case. |
+| **Watch folders** | Requested at Topaz since 2022 and never shipped, with no sign that users urgently need it. The `--render` command line covers the batch case. |
 | **Stabilization, deinterlacing, colorization, face restoration** | Each needs a model we cannot obtain. Inferior versions dilute a single-model product. |
 | **8K/16K output, 480 fps frame generation** | Marketing checkboxes that no panel can show. Cadence-aware multiple selection is the right design, so say that instead. |
 | **Cloud rendering / credits / tiering** | Being MIT and free is an asset against a closed competitor. |
 | **Linux or mobile ports, multi-GPU splitting of one render, "auto" model recommendation** | Feature 18 on Windows D3D12 is the product. Separate GPU choices for AI and for NVENC is the useful form (`GpuPreference.cpp`). |
-| **Full zero-copy decode/encode rewrite** | The ffmpeg child is load-bearing: codec coverage, process isolation for the runtime lock, and the benchmark harness. Only the narrow encode side is worth doing (P3.7). |
-| **AV1 export** | Needs a 40-series NVENC. HEVC Main10 (P2.3) covers the need everywhere. |
+| **Full zero-copy decode/encode rewrite** | The ffmpeg child is load-bearing: codec coverage, process isolation for the runtime lock, and the benchmark harness. Only the narrow encode side was worth doing, and it shipped as direct NVENC. |
+| **AV1 export** | Needs a 40-series NVENC. The High rung's HEVC Main10 covers the need everywhere. |
 
 ---
 ---
@@ -232,8 +233,7 @@ do not suggest them again.**
   - The DLSS SDK is pinned to a commit.
   - The package has an exact allowlist and zip-bomb and traversal limits.
   - CMake refuses to ship a build with test seams compiled in.
-- **SHA-256 has exactly one implementation.** That is the pattern P1.16
-  should copy.
+- **SHA-256 has exactly one implementation.**
 - **The update check** uses `WINHTTP_FLAG_SECURE`, bounded timeouts, a
   body-size cap, and downgrade protection.
 - **Zero /W4 warnings**, `#pragma once` everywhere, no `#if 0`, and no
