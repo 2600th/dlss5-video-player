@@ -7280,7 +7280,22 @@ void youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test()
 
 void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
 {
-    MediaFixture fixture;const size_t beforeFfmpeg=count_named_processes(L"ffmpeg.exe");const size_t beforeProbe=count_named_processes(L"ffprobe.exe");
+    MediaFixture fixture;
+    // One untimed cycle first. The first decoder a process opens creates handles
+    // that live for the whole process (the kill-on-close job, the log, the
+    // thread pool) and pays a cold start for the fake child, so a baseline taken
+    // before it counted those as a leak and the first read could miss its
+    // deadline - but only when this case ran on its own; in the full suite an
+    // earlier case had already paid both.
+    {
+        auto warm=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::milliseconds{75});
+        if(warm->Open(L"https://media.invalid/stallmid",MediaSourceKind::YouTube)){
+            VideoFrame frame;const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{5};
+            while(warm->ReadNextAvailable(frame)==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline)Sleep(5);
+        }
+        warm->Close();
+    }
+    const size_t beforeFfmpeg=count_named_processes(L"ffmpeg.exe");const size_t beforeProbe=count_named_processes(L"ffprobe.exe");
     DWORD beforeHandles=0,afterHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
     for(int cycle=0;cycle<4;++cycle){
         auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::milliseconds{75});
