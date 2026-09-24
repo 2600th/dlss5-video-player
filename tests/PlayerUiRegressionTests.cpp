@@ -1513,9 +1513,45 @@ struct PlayerAppTestAccess {
             ScreenToClient(dialog, &corner);
             CHECK(corner.x <= client.right && corner.y <= client.bottom);
             CHECK(client.bottom - corner.y <= MulDiv(60, int(larger), 96));
+            // Every settings dialog fits a 1080p screen at 175%: its window
+            // inside a 1920x1032 work area at 168 dpi.
+            RECT fit{0, 0, MulDiv(dialogCase.designW, 168, 96), MulDiv(dialogCase.designH, 168, 96)};
+            AdjustWindowRectForDpi(fit, style, FALSE, exStyle, 168);
+            CHECK(fit.right - fit.left <= 1920 && fit.bottom - fit.top <= 1032);
+            // Group headings are drawn as labels, and trackbars as the player's
+            // slider: the native paint is skipped.
+            struct Found { HWND heading = nullptr; HWND track = nullptr; } found;
+            EnumChildWindows(dialog, [](HWND child, LPARAM parameter) -> BOOL {
+                auto& f = *reinterpret_cast<Found*>(parameter);
+                wchar_t kind[32]{};
+                GetClassNameW(child, kind, 32);
+                if (!f.heading && std::wstring_view(kind) == L"Static" && (GetWindowLongPtrW(child, GWL_STYLE) & SS_TYPEMASK) == SS_OWNERDRAW) f.heading = child;
+                if (!f.track && std::wstring_view(kind) == TRACKBAR_CLASSW) f.track = child;
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&found));
+            if (dialogCase.window != &PlayerApp::m_exportStagesWnd) CHECK(found.heading != nullptr);
+            if (found.heading) {
+                HDC headingDc = CreateCompatibleDC(nullptr);
+                HBITMAP headingBitmap = CreateCompatibleBitmap(GetDC(nullptr), 400, 40);
+                const HGDIOBJ headingOld = SelectObject(headingDc, headingBitmap);
+                DRAWITEMSTRUCT heading{};
+                heading.CtlType = ODT_STATIC; heading.hwndItem = found.heading; heading.hDC = headingDc; heading.rcItem = RECT{0, 0, 400, 30};
+                drawnText.clear();
+                CHECK_EQ(LRESULT{TRUE}, SendMessageW(dialog, WM_DRAWITEM, 0, reinterpret_cast<LPARAM>(&heading)));
+                CHECK(!drawnText.empty());
+                SelectObject(headingDc, headingOld); DeleteObject(headingBitmap); DeleteDC(headingDc);
+            }
+            if (found.track) {
+                HDC trackDc = GetDC(found.track);
+                NMCUSTOMDRAW draw{};
+                draw.hdr.hwndFrom = found.track; draw.hdr.code = NM_CUSTOMDRAW; draw.dwDrawStage = CDDS_PREPAINT; draw.hdc = trackDc;
+                CHECK_EQ(LRESULT{CDRF_SKIPDEFAULT}, SendMessageW(dialog, WM_NOTIFY, 0, reinterpret_cast<LPARAM>(&draw)));
+                ReleaseDC(found.track, trackDc);
+            }
             DestroyWindow(dialog);
             CHECK(app.*dialogCase.window == nullptr);
             CHECK(app.m_dialogFonts.find(dialog) == app.m_dialogFonts.end());
+            CHECK(app.m_dialogHeadingFonts.find(dialog) == app.m_dialogHeadingFonts.end());
         }
     }
 

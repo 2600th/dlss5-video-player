@@ -660,6 +660,47 @@ static void DrawSliderKnob(HDC dc,const slider::Geometry& g,bool enabled,bool fo
     SelectObject(dc,oldHollow);SelectObject(dc,oldRingPen);DeleteObject(ringPen);
 }
 
+// A settings dialog's trackbar, drawn as the player's slider. The native
+// control stays - keyboard, accessibility, TBM_* and WM_HSCROLL all keep
+// working - and only its paint is replaced (NM_CUSTOMDRAW, CDRF_SKIPDEFAULT).
+// The knob sits where the control's own thumb is, so the pointer grabs what
+// it sees; the fill runs from the value where the setting does nothing
+// (kSliderOriginProperty, a position + 1) to the value, so a row at its
+// default reads as untouched.
+static constexpr const wchar_t* kSliderOriginProperty=L"DLSSVideo.SliderOrigin";
+static void DrawDialogSlider(const NMCUSTOMDRAW& draw)
+{
+    const HWND track=draw.hdr.hwndFrom;
+    RECT client{};GetClientRect(track,&client);
+    const int width=client.right-client.left,height=client.bottom-client.top;
+    if(width<=0||height<=0)return;
+    const HDC target=draw.hdc;
+    const HDC dc=CreateCompatibleDC(target);
+    const HBITMAP bitmap=dc?CreateCompatibleBitmap(target,width,height):nullptr;
+    if(!dc||!bitmap){if(bitmap)DeleteObject(bitmap);if(dc)DeleteDC(dc);return;}
+    const HGDIOBJ oldBitmap=SelectObject(dc,bitmap);
+    FillRect(dc,&client,DarkDialogBrush());
+    const UINT dpi=ActiveWindowDpi(track);
+    const int lo=int(SendMessageW(track,TBM_GETRANGEMIN,0,0)),hi=int(SendMessageW(track,TBM_GETRANGEMAX,0,0));
+    const int pos=int(SendMessageW(track,TBM_GETPOS,0,0));
+    RECT channel{};SendMessageW(track,TBM_GETCHANNELRECT,0,reinterpret_cast<LPARAM>(&channel));
+    RECT thumb{};SendMessageW(track,TBM_GETTHUMBRECT,0,reinterpret_cast<LPARAM>(&thumb));
+    // The native thumb travels between these two centres; the rail is laid on
+    // exactly that span (slider::Layout insets by the knob's rest radius).
+    const int half=std::max<int>(1,(thumb.right-thumb.left)/2),inset=slider::Dip(slider::kKnobRestDip,dpi);
+    const RECT area{channel.left+half-inset,0,channel.right-half+inset,height};
+    const double span=double(std::max(1,hi-lo));
+    const INT_PTR origin=reinterpret_cast<INT_PTR>(GetPropW(track,kSliderOriginProperty));
+    const double from=origin>0?double(origin-1-lo)/span:0.0;
+    const bool enabled=IsWindowEnabled(track)!=FALSE,dragging=GetCapture()==track;
+    slider::Geometry g=slider::Layout(area,double(pos-lo)/span,from,dragging?1.0:0.0,dpi);
+    if(thumb.right>thumb.left)g.knob.x=(thumb.left+thumb.right)/2;
+    DrawSliderRail(dc,g,enabled);
+    DrawSliderKnob(dc,g,enabled,GetFocus()==track&&(SendMessageW(track,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS)==0,dpi);
+    BitBlt(target,0,0,width,height,dc,0,0,SRCCOPY);
+    SelectObject(dc,oldBitmap);DeleteObject(bitmap);DeleteDC(dc);
+}
+
 static void DrawDarkPushButton(const DRAWITEMSTRUCT& item)
 {
     const bool enabled=(item.itemState&ODS_DISABLED)==0,pressed=(item.itemState&ODS_SELECTED)!=0;
@@ -5750,10 +5791,16 @@ private:
         if(isDefault)MarkDefaultButton(button);
         return button;
     }
-    void CreateAdjustmentRow(HWND h,int id,const wchar_t* labelKey,int y,const wchar_t* tipKey=nullptr){
-        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16,y,116,20);
-        HWND track=DialogControl(h,TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS,132,y-6,236,30,id,DialogAnchor::StretchTrack);
-        HWND value=DialogControl(h,L"STATIC",L"",SS_RIGHT,370,y,64,20,id+100,DialogAnchor::RightValue);
+    // `origin` is the track position where the setting does nothing - the fill
+    // runs from it (DrawDialogSlider) - and `x` shifts the row into a second
+    // column. A row in a column layout (`columned`, or any shifted row) keeps
+    // its size when the dialog is resized, so it never grows into its neighbour.
+    void CreateAdjustmentRow(HWND h,int id,const wchar_t* labelKey,int y,const wchar_t* tipKey=nullptr,int origin=-1,int x=0,bool columned=false){
+        const bool column=columned||x!=0;
+        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116,20);
+        HWND track=DialogControl(h,TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS,132+x,y-6,column?218:236,30,id,column?DialogAnchor::Fixed:DialogAnchor::StretchTrack);
+        HWND value=DialogControl(h,L"STATIC",L"",SS_RIGHT,(column?352:370)+x,y,64,20,id+100,column?DialogAnchor::Fixed:DialogAnchor::RightValue);
+        if(track&&origin>=0)SetPropW(track,kSliderOriginProperty,reinterpret_cast<HANDLE>(static_cast<INT_PTR>(origin+1)));
         AddTip(h,label,tipKey);AddTip(h,track,tipKey);AddTip(h,value,tipKey);
     }
 
@@ -5826,13 +5873,26 @@ private:
             result=reinterpret_cast<LRESULT>(DarkControlColor(m,w,dark_mode::Text));return true;
         case WM_DRAWITEM:{
             const auto* item=reinterpret_cast<const DRAWITEMSTRUCT*>(l);
+            if(item&&item->CtlType==ODT_STATIC){DrawDialogHeading(*item);result=TRUE;return true;}
             if(!item||item->CtlType!=ODT_BUTTON)return false;
             DrawDarkPushButton(*item);result=TRUE;return true;
         }
-        case WM_DPICHANGED:RescaleSettingsDialog(h,HIWORD(w),reinterpret_cast<const RECT*>(l));result=0;return true;
-        case WM_DESTROY:RemoveChildProperties(h,{kDefaultButtonProperty,kDialogAnchorProperty});return false;
+        case WM_NOTIFY:{
+            const auto* header=reinterpret_cast<const NMHDR*>(l);
+            if(!header||header->code!=NM_CUSTOMDRAW)return false;
+            wchar_t kind[32]{};GetClassNameW(header->hwndFrom,kind,int(std::size(kind)));
+            if(std::wstring_view(kind)!=TRACKBAR_CLASSW)return false;
+            const auto* draw=reinterpret_cast<const NMCUSTOMDRAW*>(l);
+            if(draw->dwDrawStage!=CDDS_PREPAINT){result=CDRF_SKIPDEFAULT;return true;}
+            DrawDialogSlider(*draw);result=CDRF_SKIPDEFAULT;return true;
+        }
+        case WM_DPICHANGED:
+            if(const auto font=m_dialogHeadingFonts.find(h);font!=m_dialogHeadingFonts.end()){DeleteObject(font->second);m_dialogHeadingFonts.erase(font);}
+            RescaleSettingsDialog(h,HIWORD(w),reinterpret_cast<const RECT*>(l));result=0;return true;
+        case WM_DESTROY:RemoveChildProperties(h,{kDefaultButtonProperty,kDialogAnchorProperty,kSliderOriginProperty});return false;
         case WM_NCDESTROY:
             if(const auto font=m_dialogFonts.find(h);font!=m_dialogFonts.end()){DeleteObject(font->second);m_dialogFonts.erase(font);}
+            if(const auto font=m_dialogHeadingFonts.find(h);font!=m_dialogHeadingFonts.end()){DeleteObject(font->second);m_dialogHeadingFonts.erase(font);}
             return false;
         default:return false;
         }
@@ -5852,22 +5912,27 @@ private:
         AdjustWindowRectForDpi(rc,style,FALSE,exStyle,dpi);return rc;
     }
 
+    // Each row's origin is its neutral position (SyncAdjustmentControls'
+    // mapping of the default ColorSettings), so a row at its default shows no
+    // fill and a changed one shows how far it moved and which way.
     void BuildAdjustmentControls(HWND h){
-        CreateAdjustmentRow(h,IDC_ADJ_BRIGHTNESS,L"adjustments.brightness",28);
-        CreateAdjustmentRow(h,IDC_ADJ_CONTRAST,L"adjustments.contrast",78);
-        CreateAdjustmentRow(h,IDC_ADJ_SATURATION,L"adjustments.saturation",128);
-        CreateAdjustmentRow(h,IDC_ADJ_GAMMA,L"adjustments.gamma",178);
-        CreateAdjustmentRow(h,IDC_ADJ_TEMPERATURE,L"adjustments.temperature",228);
-        CreateAdjustmentRow(h,IDC_ADJ_TINT,L"adjustments.tint",278);
-        CreateAdjustmentRow(h,IDC_ADJ_NEURAL_STRENGTH,L"adjustments.neural_strength",328,L"adjustments.neural_strength.tip");
-        DialogControl(h,L"STATIC",T(L"adjustments.note").c_str(),SS_LEFT,16,372,418,38,0,DialogAnchor::StretchNote);
-        DialogButton(h,L"adjustments.reset",IDC_ADJ_RESET,252,418,86,30);
-        DialogButton(h,L"adjustments.close",IDC_ADJ_CLOSE,348,418,86,30,true);
+        CreateSettingsGroupHeading(h,L"adjustments.group_picture",12);
+        CreateAdjustmentRow(h,IDC_ADJ_BRIGHTNESS,L"adjustments.brightness",40,nullptr,200);
+        CreateAdjustmentRow(h,IDC_ADJ_CONTRAST,L"adjustments.contrast",82,nullptr,100);
+        CreateAdjustmentRow(h,IDC_ADJ_SATURATION,L"adjustments.saturation",124,nullptr,100);
+        CreateAdjustmentRow(h,IDC_ADJ_GAMMA,L"adjustments.gamma",166,nullptr,100);
+        CreateAdjustmentRow(h,IDC_ADJ_TEMPERATURE,L"adjustments.temperature",208,nullptr,100);
+        CreateAdjustmentRow(h,IDC_ADJ_TINT,L"adjustments.tint",250,nullptr,100);
+        CreateSettingsGroupHeading(h,L"adjustments.group_compare",292);
+        CreateAdjustmentRow(h,IDC_ADJ_NEURAL_STRENGTH,L"adjustments.neural_strength",320,L"adjustments.neural_strength.tip",100);
+        DialogControl(h,L"STATIC",T(L"adjustments.note").c_str(),SS_LEFT,16,360,418,38,0,DialogAnchor::StretchNote);
+        DialogButton(h,L"adjustments.reset",IDC_ADJ_RESET,252,404,86,30);
+        DialogButton(h,L"adjustments.close",IDC_ADJ_CLOSE,348,404,86,30,true);
         SyncAdjustmentControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kAdjustDesignW=466,kAdjustDesignH=502;
+    static constexpr int kAdjustDesignW=466,kAdjustDesignH=448;
 
     void ShowAdjustments(){
         if(m_adjustWnd&&IsWindow(m_adjustWnd)){ShowWindow(m_adjustWnd,SW_SHOWNORMAL);SetForegroundWindow(m_adjustWnd);return;}
@@ -5980,9 +6045,9 @@ private:
     // generator so the debug views reflect them without a re-render.
     void ApplyLiveGuideControls(){m_guides.SetControls(m_renderGuides);m_guides.SetSceneCutSensitivity(m_temporalSettings.sceneCuts);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
 
-    void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr){
-        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16,y,116,20);
-        HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132,y-3,160,200,id);
+    void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr,int x=0){
+        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116,20);
+        HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132+x,y-3,160,200,id);
         for(const wchar_t* item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item));
         AddTip(h,label,tipKey);AddTip(h,combo,tipKey);
     }
@@ -6005,56 +6070,89 @@ private:
     // answer the same question before you read any of their labels. "Look" is
     // what the model does to the picture, "Quality and render time" is what it
     // costs, "Guides" is what it is given to work from.
-    void CreateSettingsGroupHeading(HWND h,const wchar_t* key,int y){
-        DialogControl(h,L"STATIC",T(key).c_str(),SS_LEFT,16,y,436,18);
+    //
+    // Drawn as a label, not as one more line of text (DrawDialogHeading): small,
+    // semibold, upper case and tracked, in the quiet text colour, with a
+    // hairline running on to the column's edge - DESIGN.md's label voice, so
+    // the three or four groups read as structure before any control does.
+    void CreateSettingsGroupHeading(HWND h,const wchar_t* key,int y,int x=0,int width=436){
+        DialogControl(h,L"STATIC",T(key).c_str(),SS_OWNERDRAW,16+x,y,width,18);
+    }
+    HFONT DialogHeadingFont(HWND h){
+        if(const auto found=m_dialogHeadingFonts.find(h);found!=m_dialogHeadingFonts.end())return found->second;
+        HFONT font=CreateFontW(-Sd(h,11),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
+        if(font)m_dialogHeadingFonts[h]=font;
+        return font?font:DialogFont(h);
+    }
+    void DrawDialogHeading(const DRAWITEMSTRUCT& item){
+        const HWND dialog=GetParent(item.hwndItem);
+        FillRect(item.hDC,&item.rcItem,DarkDialogBrush());
+        wchar_t text[128]{};GetWindowTextW(item.hwndItem,text,int(std::size(text)));
+        for(wchar_t& character:text)character=static_cast<wchar_t>(towupper(character));
+        const HGDIOBJ oldFont=SelectObject(item.hDC,DialogHeadingFont(dialog));
+        const int oldExtra=SetTextCharacterExtra(item.hDC,std::max(1,Sd(dialog,1)));
+        SetBkMode(item.hDC,TRANSPARENT);SetTextColor(item.hDC,dark_mode::QuietText);
+        RECT r=item.rcItem;DrawTextW(item.hDC,text,-1,&r,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        // Measured with the tracking in effect: DT_CALCRECT leaves the extra
+        // spacing out, and the rule then started inside the last word.
+        SIZE extent{};GetTextExtentPoint32W(item.hDC,text,int(wcslen(text)),&extent);
+        SetTextCharacterExtra(item.hDC,oldExtra);SelectObject(item.hDC,oldFont);
+        const LONG ruleLeft=item.rcItem.left+extent.cx+Sd(dialog,10),mid=(item.rcItem.top+item.rcItem.bottom)/2;
+        if(ruleLeft<item.rcItem.right){RECT rule{ruleLeft,mid,item.rcItem.right,mid+1};HBRUSH line=CreateSolidBrush(dark_mode::Rule);FillRect(item.hDC,&rule,line);DeleteObject(line);}
     }
 
+    // Two columns: what the model does to the picture on the left, what it
+    // costs and what it works from on the right. One column was 756 dip tall,
+    // 1,323 px at 175%, taller than a 1080p screen's work area; this is 418.
+    static constexpr int kNeuralColumn=448;
     void BuildNeuralSettingControls(HWND h){
-        CreateSettingsGroupHeading(h,L"neural.settings.group_look",12);
-        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",38,L"neural.tip.intensity");
-        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",84,L"neural.tip.structure");
-        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",130,L"neural.tip.tone");
-        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",176,L"neural.tip.skin");
-        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",222,L"neural.tip.color");
-        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",268,{L"Default",L"Natural",L"Cinematic"},L"neural.tip.style");
-        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,306,236,L"neural.tip.automask");
+        constexpr int right=kNeuralColumn;
+        CreateSettingsGroupHeading(h,L"neural.settings.group_look",12,0,400);
+        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",40,L"neural.tip.intensity",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",82,L"neural.tip.structure",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",124,L"neural.tip.tone",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",166,L"neural.tip.skin",0,0,true);
+        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",208,L"neural.tip.color",100,0,true);
+        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",250,{L"Default",L"Natural",L"Cinematic"},L"neural.tip.style");
+        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,286,236,L"neural.tip.automask");
         // Stacking, which arrived with RenoDX 6.x. Its own group because it
         // costs render time rather than changing the model's look: a second
         // pass measured 780,048 -> 932,019 bytes of output over the same
         // 72-frame range and took 9.81 s against 8.01 s.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",346);
-        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",376,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes");
-        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132,414,300,L"neural.tip.chained");
-        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",454);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,482,116,L"neural.tip.guide_mv");
-        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,482,80,L"neural.tip.guide_depth");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",12,right,400);
+        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",40,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",right);
+        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+right,74,284,L"neural.tip.chained");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",112,right,400);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+right,138,116,L"neural.tip.guide_mv");
+        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+right,138,80,L"neural.tip.guide_depth");
         // What the render does across time rather than to one frame: when a cut
         // resets the history. A ladder, not a slider - every rung is a measured
         // point (SceneCut.h), and Default is the one labelled recommended.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",522);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",176,right,400);
         {
             const std::wstring cuts[]={T(L"neural.scene_cuts.default"),T(L"neural.scene_cuts.more"),
                                        T(L"neural.scene_cuts.less"),T(L"neural.scene_cuts.off")};
-            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",552,
-                              {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts");
+            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",204,
+                              {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts",right);
             // A ladder with Off first and the default, for the reason the policy
             // header gives: it trades detail in motion for steadiness, and a
             // default never moves down a ladder to buy something else.
             const std::wstring stability[]={T(L"neural.stability.off"),T(L"neural.stability.low"),
                                             T(L"neural.stability.medium"),T(L"neural.stability.high")};
-            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",586,
-                              {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability");
+            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",238,
+                              {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability",right);
         }
-        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,626,418,38,0,DialogAnchor::StretchNote);
-        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,120,672,86,30);
-        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,216,672,122,30,true);
-        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,348,672,86,30);
+        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,326,848,38,0,DialogAnchor::StretchNote);
+        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,550,374,86,30);
+        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,646,374,122,30,true);
+        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,778,374,86,30);
         AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
         SyncNeuralSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kNeuralDesignW=466,kNeuralDesignH=756;
+    static constexpr int kNeuralDesignW=880,kNeuralDesignH=418;
 
     // Playback takes it on the next frame (the renderer reads it per frame, and a
     // paused frame is drawn again so the picture shows it); an export takes it when
@@ -6235,25 +6333,34 @@ private:
         SaveVideoSettings();
     }
 
+    // Grouped by what each switch acts on, in the order a frame meets them:
+    // the colour conversion, the encoder writing the cache, and what the
+    // model is given.
     void BuildEncoderSettingControls(HWND h){
-        CreateNeuralCheck(h,IDC_ES_GPU_CONVERT,L"encoder.settings.gpu_convert",132,28,236,L"encoder.tip.gpu_convert");
-        CreateNeuralCheck(h,IDC_ES_GPU_SOURCE,L"encoder.settings.gpu_source",132,52,236,L"encoder.tip.gpu_source");
-        CreateNeuralCombo(h,IDC_ES_NVENC_PRESET,L"encoder.settings.nvenc_preset",84,{L"p1 (fastest)",L"p2",L"p3",L"p4",L"p5",L"p6",L"p7 (best quality)"},L"encoder.tip.nvenc_preset");
+        CreateSettingsGroupHeading(h,L"encoder.group_conversion",12);
+        CreateNeuralCheck(h,IDC_ES_GPU_CONVERT,L"encoder.settings.gpu_convert",16,38,418,L"encoder.tip.gpu_convert");
+        CreateNeuralCheck(h,IDC_ES_GPU_SOURCE,L"encoder.settings.gpu_source",16,62,418,L"encoder.tip.gpu_source");
+        CreateSettingsGroupHeading(h,L"encoder.group_cache",98);
+        CreateNeuralCombo(h,IDC_ES_NVENC_PRESET,L"encoder.settings.nvenc_preset",126,{L"p1 (fastest)",L"p2",L"p3",L"p4",L"p5",L"p6",L"p7 (best quality)"},L"encoder.tip.nvenc_preset");
         // The rung names say what each one writes; the tooltip carries the measured
         // size and time beside each, the way the preset's does.
-        CreateNeuralCombo(h,IDC_ES_CACHE_QUALITY,L"encoder.settings.cache_quality",116,{T(L"encoder.quality.standard").c_str(),T(L"encoder.quality.high").c_str(),T(L"encoder.quality.lossless").c_str()},L"encoder.tip.cache_quality");
-        if(HWND combo=GetDlgItem(h,IDC_ES_CACHE_QUALITY))SetWindowPos(combo,nullptr,0,0,302,200,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
-        CreateNeuralCheck(h,IDC_ES_CAPTURE_DITHER,L"encoder.settings.capture_dither",132,144,300,L"encoder.tip.capture_dither");
-        CreateNeuralCheck(h,IDC_ES_DEBAND,L"encoder.settings.deband",132,168,300,L"encoder.tip.deband");
-        CreateNeuralCheck(h,IDC_ES_EXPOSURE,L"encoder.settings.exposure",132,192,300,L"encoder.tip.exposure");
-        DialogControl(h,L"STATIC",T(L"encoder.settings.note").c_str(),SS_LEFT,16,226,418,38,0,DialogAnchor::StretchNote);
-        DialogButton(h,L"encoder.settings.reset",IDC_ES_RESET,252,272,86,30);
-        DialogButton(h,L"encoder.settings.close",IDC_ES_CLOSE,348,272,86,30,true);
+        CreateNeuralCombo(h,IDC_ES_CACHE_QUALITY,L"encoder.settings.cache_quality",160,{T(L"encoder.quality.standard").c_str(),T(L"encoder.quality.high").c_str(),T(L"encoder.quality.lossless").c_str()},L"encoder.tip.cache_quality");
+        // In design units like every other control: the raw 302 px this was
+        // set to was 173 dip at 175%, which cut "CQ 16" off the rung's name.
+        if(HWND combo=GetDlgItem(h,IDC_ES_CACHE_QUALITY))SetWindowPos(combo,nullptr,0,0,Sd(h,302),Sd(h,200),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        CreateNeuralCheck(h,IDC_ES_CAPTURE_DITHER,L"encoder.settings.capture_dither",132,192,300,L"encoder.tip.capture_dither");
+        CreateSettingsGroupHeading(h,L"encoder.group_model",228);
+        CreateNeuralCheck(h,IDC_ES_DEBAND,L"encoder.settings.deband",16,254,418,L"encoder.tip.deband");
+        CreateNeuralCheck(h,IDC_ES_EXPOSURE,L"encoder.settings.exposure",16,278,418,L"encoder.tip.exposure");
+        // Three lines: at 38 dip the note's third line was cut off.
+        DialogControl(h,L"STATIC",T(L"encoder.settings.note").c_str(),SS_LEFT,16,314,418,58,0,DialogAnchor::StretchNote);
+        DialogButton(h,L"encoder.settings.reset",IDC_ES_RESET,252,380,86,30);
+        DialogButton(h,L"encoder.settings.close",IDC_ES_CLOSE,348,380,86,30,true);
         SyncEncoderSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kEncoderDesignW=466,kEncoderDesignH=338;
+    static constexpr int kEncoderDesignW=466,kEncoderDesignH=424;
 
     void ShowEncoderSettings(){
         if(m_encoderWnd&&IsWindow(m_encoderWnd)){ShowWindow(m_encoderWnd,SW_SHOWNORMAL);SetForegroundWindow(m_encoderWnd);return;}
@@ -11758,6 +11865,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     std::map<HWND,SettingsDesignLayout> m_settingsDesignLayout;
     // The font each open dialog draws in, made at its dpi and freed with it.
     std::map<HWND,HFONT> m_dialogFonts;
+    // The group headings' label face, per dialog, at that dialog's dpi.
+    std::map<HWND,HFONT> m_dialogHeadingFonts;
     POINT m_renderMouse{};
     bool m_renderMouseKnown=false,m_dragSplit=false;
     // The press on the picture in progress, and whether it is holding the original up.

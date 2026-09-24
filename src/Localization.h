@@ -329,7 +329,7 @@ private:
             {L"neural.settings.style", L"Style"}, {L"neural.settings.automask", L"Automatic mask"},
             {L"neural.settings.guides", L"Guides"}, {L"neural.settings.guide_mv", L"Motion vectors"}, {L"neural.settings.guide_depth", L"Depth"},
             {L"neural.settings.passes", L"Neural passes"}, {L"neural.settings.chained", L"Keep temporal history per pass"},
-            {L"neural.settings.group_look", L"Look"},
+            {L"neural.settings.group_look", L"Look"}, {L"adjustments.group_picture", L"Picture"}, {L"adjustments.group_compare", L"Comparison"}, {L"encoder.group_conversion", L"Color conversion"}, {L"encoder.group_cache", L"Cache encoding"}, {L"encoder.group_model", L"What the model is given"},
             {L"neural.settings.group_cost", L"Quality and render time"},
             {L"neural.settings.group_guides", L"Guides sent to the model"},
             {L"neural.settings.group_temporal", L"Across frames"},
