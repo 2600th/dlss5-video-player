@@ -11,7 +11,7 @@
 A 24.8-second, silent video: 1920x1080, 30 fps, 744 frames, H.264. GitHub
 strips `<video>` tags from Markdown, so the README shows
 `neural-comparison-preview.webp` instead: the same cut at 800 px and 8 fps.
-Everything in it was rendered at the player's **default** neural settings.
+The poster is its frame 45. Everything in it was rendered at the player's **default** neural settings.
 
 ## What's in it
 
