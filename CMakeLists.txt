@@ -46,6 +46,9 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
 # the object libraries below (57 compiles for the whole tree, down from 181),
 # the long pole is the largest of those, player_app, with 13 TUs.
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/MP>)
+# main.cpp outgrew the default COFF section limit under /fsanitize=address
+# (C1128 on CI's ASan build); /bigobj lifts it for every configuration.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
 
 # Every target is at zero warnings under /W4, so a new one is an error rather
 # than a line nobody reads in a green build log.

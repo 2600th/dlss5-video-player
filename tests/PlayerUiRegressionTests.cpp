@@ -1438,35 +1438,38 @@ struct PlayerAppTestAccess {
         const bool visible = IsWindowVisible(app.m_hwnd) != FALSE;
         WINDOWPLACEMENT moved = original;
         moved.showCmd = SW_SHOWNOACTIVATE;
-        // Sized to fit the work area this runs on. Windows shrinks a placement
-        // that does not fit, and CI's virtual display is smaller than 1500x900:
-        // the test then read back Windows' correction, not the player's save.
-        // (Placement rectangles are in work-area coordinates.)
+        // Sized to the screen this runs on, between two floors: Windows shrinks
+        // a placement the work area cannot hold, and the player refuses to
+        // restore one smaller than its minimum window (window_placement::Usable).
+        // CI's virtual display is smaller than the 1500x900 this used, so the
+        // test read back Windows' correction. (Placement rectangles are in
+        // work-area coordinates.)
         RECT work{};
         REQUIRE(SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) != FALSE);
-        const LONG width = std::min<LONG>(1500, (work.right - work.left) - 240);
-        const LONG height = std::min<LONG>(900, (work.bottom - work.top) - 180);
-        REQUIRE(width > 200 && height > 200);
-        moved.rcNormalPosition = RECT{120, 90, 120 + width, 90 + height};
+        const POINT minimum = MinimumPlayerWindowTrackSize(app.m_hwnd, ActiveWindowDpi(app.m_hwnd));
+        const LONG width = std::max<LONG>(minimum.x, std::min<LONG>(1500, (work.right - work.left) - 80));
+        const LONG height = std::max<LONG>(minimum.y, std::min<LONG>(900, (work.bottom - work.top) - 80));
+        REQUIRE(40 + width <= work.right - work.left && 40 + height <= work.bottom - work.top);
+        moved.rcNormalPosition = RECT{40, 40, 40 + width, 40 + height};
         SetWindowPlacement(app.m_hwnd, &moved);
         app.SaveWindowPlacement();
         wchar_t text[128]{};
         GetPrivateProfileStringW(L"Window", L"Placement", L"", text, 128, app.SettingsPath().c_str());
         const auto saved = window_placement::Parse(text);
         REQUIRE(saved.has_value());
-        CHECK(saved->normal.left == 120 && saved->normal.right == 120 + width);
+        CHECK(saved->normal.left == 40 && saved->normal.right == 40 + width);
         // Somewhere else, then restored.
-        moved.rcNormalPosition = RECT{60, 60, 60 + width, 60 + height};
+        moved.rcNormalPosition = RECT{20, 20, 20 + width, 20 + height};
         SetWindowPlacement(app.m_hwnd, &moved);
         app.RestoreWindowPlacement();
         WINDOWPLACEMENT restored{sizeof(restored)};
         GetWindowPlacement(app.m_hwnd, &restored);
-        CHECK_EQ(LONG{120}, restored.rcNormalPosition.left);
+        CHECK_EQ(LONG{40}, restored.rcNormalPosition.left);
         // Off every screen: left where it is.
         WritePrivateProfileStringW(L"Window", L"Placement", L"-40000,-40000,-38000,-38800,0", app.SettingsPath().c_str());
         app.RestoreWindowPlacement();
         GetWindowPlacement(app.m_hwnd, &restored);
-        CHECK_EQ(LONG{120}, restored.rcNormalPosition.left);
+        CHECK_EQ(LONG{40}, restored.rcNormalPosition.left);
         WritePrivateProfileStringW(L"Window", L"Placement", nullptr, app.SettingsPath().c_str());
         original.showCmd = SW_SHOWNOACTIVATE;
         SetWindowPlacement(app.m_hwnd, &original);
