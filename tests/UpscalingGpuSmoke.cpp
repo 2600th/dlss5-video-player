@@ -7,8 +7,10 @@
 #include "VideoDecoder.h"
 #include "UpscalingPolicy.h"
 #include "Utf8Text.h"
+#include "SubtitlePolicy.h"
 #include <d3d12sdklayers.h>
 #include <mfapi.h>
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <sstream>
@@ -64,6 +66,13 @@ int RunSrQualityProbe(const wchar_t* ffmpegDirectory,const wchar_t* workDirector
 // because it has detail at every scale for the engine to be wrong about.
 inline constexpr wchar_t kSrQualitySource[]=L"mandelbrot=s=1920x1080:r=30";
 
+// `subtitle-upload` as the only argument checks and times the subtitle overlay's
+// upload: a picture uploaded after others must compose exactly as on a renderer
+// that never saw them, and the time SetSubtitleOverlay takes on the calling (UI)
+// thread is printed for a moving two-line 3840x2160 subtitle and for a canvas
+// covered edge to edge. Needs no source clip.
+int RunSubtitleUploadProbe();
+
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if(argc==4&&std::wstring_view(argv[2])==L"sr-quality")return RunSrQualityProbe(argv[1],argv[3]);
@@ -77,6 +86,7 @@ int wmain(int argc,wchar_t** argv) {
     }
     if(argc==4&&std::wstring_view(argv[3])==L"device-loss")return RunDeviceLossProbe(argv[1],std::wcstoul(argv[2],nullptr,10));
     if(argc==3&&std::wstring_view(argv[2])==L"hdr-output")return RunHdrOutputProbe(argv[1]);
+    if(argc==2&&std::wstring_view(argv[1])==L"subtitle-upload")return RunSubtitleUploadProbe();
     if(argc!=3)return 2; // source path, target height (1440 or 2160)
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
     int code=1;
@@ -551,6 +561,28 @@ bool RenderSuperResolution(const std::filesystem::path& source,const std::filesy
     return ok;
 }
 
+// A premultiplied subtitle canvas: transparent, with one opaque-ish band where a
+// line of text would sit.
+std::vector<uint8_t> SubtitleCanvas(uint32_t w,uint32_t h,uint32_t left,uint32_t top,uint32_t right,uint32_t bottom,uint8_t value){
+    std::vector<uint8_t> canvas(size_t(w)*h*4u,0);
+    for(uint32_t y=top;y<bottom;++y)for(uint32_t x=left;x<right;++x){
+        uint8_t* p=&canvas[(size_t(y)*w+x)*4u];p[0]=uint8_t(value/2+(x%7)*3);p[1]=value;p[2]=uint8_t(value-(y%5)*4);p[3]=value;
+    }
+    return canvas;
+}
+
+bool ShowSubtitle(D3D12Renderer& renderer,const std::vector<uint8_t>& canvas,uint32_t w,uint32_t h){
+    const subtitle::PixelBox bounds=subtitle::NonZeroBounds(canvas.data(),w,h);
+    return renderer.SetSubtitleOverlay(canvas.data(),w,h,&bounds);
+}
+
+struct UploadTimes{double median=0,p95=0,max=0;};
+UploadTimes Summarize(std::vector<double> ms){
+    std::sort(ms.begin(),ms.end());
+    if(ms.empty())return {};
+    return {ms[ms.size()/2],ms[std::min(ms.size()-1,ms.size()*95/100)],ms.back()};
+}
+
 } // namespace
 
 int RunSrQualityProbe(const wchar_t* ffmpegDirectory,const wchar_t* workDirectory)
@@ -631,4 +663,92 @@ int RunSrQualityProbe(const wchar_t* ffmpegDirectory,const wchar_t* workDirector
         code=stillLast>=stillFirst-1.0?(perFrameHeld?0:10):9;
     }
     MFShutdown();CoUninitialize();return code;
+}
+
+int RunSubtitleUploadProbe()
+{
+    Microsoft::WRL::ComPtr<ID3D12Debug> debug;
+    const bool debugLayer=SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)));
+    if(debugLayer)debug->EnableDebugLayer();
+    using Access=D3D12RendererTestAccess;
+    constexpr uint32_t sourceW=640,sourceH=360,windowW=1280,windowH=720;
+    const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(sourceW,sourceH,30.0);
+    const std::vector<uint8_t> grey(size_t(sourceW)*sourceH*4u,90);
+    // One renderer per question, each with the window compositor the player has.
+    const auto make=[&](HWND window){
+        auto renderer=MakeD3D12Renderer();
+        renderer->SetPresentFollowsWindow(true);
+        bool ok=renderer->Initialize(window,sourceW,sourceH,sourceW,sourceH,gw,gh,DefaultNeuralCarrierQuality());
+        if(ok){renderer->SetDLSS(false);ok=renderer->RenderFrame(grey.data(),grey.size(),nullptr,0,gw,gh,true,false,33.3f);}
+        if(!ok)renderer.reset();
+        return renderer;
+    };
+    const auto composed=[](D3D12Renderer& renderer){
+        std::vector<uint8_t> rgba;uint32_t w=0,h=0;
+        if(!renderer.PresentCurrent()||!renderer.CaptureComposedView(rgba,w,h))rgba.clear();
+        return rgba;
+    };
+    HWND window=CreateWindowExW(0,L"STATIC",L"subtitle upload probe",WS_POPUP,0,0,windowW,windowH,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+    int code=1;
+    {
+        // Correctness at 1:1, window-sized canvases: a picture uploaded after others
+        // composes exactly as it does on a renderer that never saw them - the rows the
+        // earlier ones covered are cleared, whether they were shown, hidden in between,
+        // or replaced before any present took them.
+        const auto a=SubtitleCanvas(windowW,windowH,200,600,1000,660,220);
+        const auto b=SubtitleCanvas(windowW,windowH,400,100,900,160,180);
+        const auto c=SubtitleCanvas(windowW,windowH,50,300,1230,420,140);
+        auto fresh=make(window);
+        std::vector<uint8_t> onlyB,onlyC;
+        bool ok=fresh!=nullptr;
+        if(ok){ok=ShowSubtitle(*fresh,b,windowW,windowH);onlyB=composed(*fresh);}
+        if(ok){fresh.reset();fresh=make(window);ok=fresh&&ShowSubtitle(*fresh,c,windowW,windowH);if(ok)onlyC=composed(*fresh);}
+        fresh.reset();
+        auto renderer=make(window);
+        ok=ok&&renderer!=nullptr&&!onlyB.empty()&&!onlyC.empty();
+        bool shownThenB=false,hiddenThenB=false,unpresentedThenC=false;
+        if(ok){
+            shownThenB=ShowSubtitle(*renderer,a,windowW,windowH)&&!composed(*renderer).empty()&&
+                       ShowSubtitle(*renderer,b,windowW,windowH)&&composed(*renderer)==onlyB;
+            hiddenThenB=ShowSubtitle(*renderer,a,windowW,windowH)&&!composed(*renderer).empty()&&
+                        renderer->SetSubtitleOverlay(nullptr,0,0)&&!composed(*renderer).empty()&&
+                        ShowSubtitle(*renderer,b,windowW,windowH)&&composed(*renderer)==onlyB;
+            unpresentedThenC=ShowSubtitle(*renderer,a,windowW,windowH)&&ShowSubtitle(*renderer,b,windowW,windowH)&&
+                             ShowSubtitle(*renderer,c,windowW,windowH)&&composed(*renderer)==onlyC;
+        }
+        const DebugLayerReport correctness=ok?ReadDebugLayer(Access::Device(*renderer),"subtitle-correctness"):DebugLayerReport{};
+
+        // Cost on the calling (UI) thread at 3840x2160: a two-line subtitle that moves
+        // between two places, the way a karaoke or positioned ASS line does, and a
+        // canvas covered edge to edge, the worst case.
+        constexpr uint32_t W=3840,H=2160;
+        const auto line1=SubtitleCanvas(W,H,720,1860,3120,2000,230);
+        const auto line2=SubtitleCanvas(W,H,760,1720,3080,1860,200);
+        const auto full1=SubtitleCanvas(W,H,0,0,W,H,120),full2=SubtitleCanvas(W,H,0,0,W,H,60);
+        const auto time=[&](const std::vector<uint8_t>& one,const std::vector<uint8_t>& two){
+            std::vector<double> ms;
+            const subtitle::PixelBox boxes[]={subtitle::NonZeroBounds(one.data(),W,H),subtitle::NonZeroBounds(two.data(),W,H)};
+            for(uint32_t i=0;ok&&i<60;++i){
+                const auto& canvas=i%2?two:one;
+                const auto start=std::chrono::steady_clock::now();
+                ok=renderer->SetSubtitleOverlay(canvas.data(),W,H,&boxes[i%2]);
+                ms.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+                ok=ok&&renderer->PresentCurrent();
+            }
+            if(!ms.empty())ms.erase(ms.begin()); // the first allocates the 4K texture
+            return Summarize(std::move(ms));
+        };
+        const UploadTimes lines=ok?time(line1,line2):UploadTimes{};
+        const UploadTimes full=ok?time(full1,full2):UploadTimes{};
+        const DebugLayerReport timing=ok?ReadDebugLayer(Access::Device(*renderer),"subtitle-timing"):DebugLayerReport{};
+        std::cout<<"subtitle-upload: correctness shownThenB="<<shownThenB<<" hiddenThenB="<<hiddenThenB
+                 <<" unpresentedThenC="<<unpresentedThenC<<"\n"
+                 <<"  3840x2160 moving two-line subtitle, UI-thread ms: median="<<lines.median<<" p95="<<lines.p95<<" max="<<lines.max<<"\n"
+                 <<"  3840x2160 full-canvas picture,    UI-thread ms: median="<<full.median<<" p95="<<full.p95<<" max="<<full.max<<"\n"
+                 <<"  debugLayer="<<(debugLayer?"on":"off")<<" errors="<<correctness.errors+timing.errors<<"\n";
+        code=ok&&shownThenB&&hiddenThenB&&unpresentedThenC&&correctness.errors==0&&timing.errors==0?0:6;
+        renderer.reset();
+    }
+    DestroyWindow(window);
+    return code;
 }

@@ -21,6 +21,8 @@
 #include "UpscalingPolicy.h"
 #include "ExposurePolicy.h"
 
+#include "SubtitlePolicy.h"
+
 #include <functional>
 
 struct D3D12RendererTestAccess;
@@ -578,7 +580,10 @@ public:
     // the cache capture. Copied into an upload buffer now and onto the GPU by the next
     // frame or present, like the comparison reference; only a new size drains the
     // queue. Null hides it. False when the renderer has no window compositor.
-    bool SetSubtitleOverlay(const uint8_t* premultipliedBgra, uint32_t width, uint32_t height);
+    // `drawn` bounds every non-zero pixel of the picture (subtitle::NonZeroBounds);
+    // with it only what changed since the last picture is copied, without it all of it.
+    bool SetSubtitleOverlay(const uint8_t* premultipliedBgra, uint32_t width, uint32_t height,
+                            const subtitle::PixelBox* drawn = nullptr);
     bool SubtitleOverlayShown() const { return m_subtitleShown || m_subtitlePending; }
     // The picture on screen, drawn again into an offscreen target of the present's own
     // size with the present's own constants and program - so a saved comparison is what
@@ -891,6 +896,9 @@ private:
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_subtitleFootprint{};
     uint32_t m_subtitleW = 0, m_subtitleH = 0, m_subtitleUploadSlot = 0;
     bool m_subtitlePending = false, m_subtitleInCopyDest = false, m_subtitleShown = false;
+    // What the subtitle texture holds (or will, once the pending copy lands) outside
+    // of which it is all zeroes, and the rectangle the pending copy rewrites.
+    subtitle::PixelBox m_subtitleHeld, m_subtitleDirty;
     uint32_t m_labelAtlasW = 0, m_labelAtlasH = 0, m_labelRowHeight = 0;
     std::array<uint32_t, 4> m_labelWidths{};
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap; // 2 timestamps per frame slot

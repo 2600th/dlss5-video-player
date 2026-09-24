@@ -605,10 +605,10 @@ void SubtitleOverlay::RunSession(uint64_t generation)
         // exactly the start and has to get it.
         if (first && kind == subtitle::Kind::Text) frame->pts = std::min(frame->pts, start);
         // Most frames are "nothing on screen", and holding 8 MB of zeroes for
-        // each would be most of the memory this uses.
-        const uint8_t* pixels = frame->bgra.data();
-        bool any = false;
-        for (size_t at = 3; at < frameBytes; at += 4) if (pixels[at]) { any = true; break; }
+        // each would be most of the memory this uses. The box is also what the
+        // UI thread copies to the GPU, so it is found here, on this thread.
+        frame->drawn = subtitle::NonZeroBounds(frame->bgra.data(), canvas.width, canvas.height);
+        const bool any = !frame->drawn.Empty();
         if (!any) std::vector<uint8_t>().swap(frame->bgra);
         // ffmpeg repeats a bitmap picture at the end of its display; the same
         // picture again is not a change.

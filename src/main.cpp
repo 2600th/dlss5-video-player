@@ -2790,7 +2790,7 @@ private:
         if(frame==m_subtitleFrame)return;
         m_subtitleFrame=frame;
         if(!frame||frame->Empty()){m_renderer->SetSubtitleOverlay(nullptr,0,0);return;}
-        if(!m_renderer->SetSubtitleOverlay(frame->bgra.data(),frame->width,frame->height))
+        if(!m_renderer->SetSubtitleOverlay(frame->bgra.data(),frame->width,frame->height,&frame->drawn))
             LOG("Subtitles: the renderer did not take a "<<frame->width<<"x"<<frame->height<<" picture.");
     }
     void RecordRecent(const NeuralJobCompletion& completion,bool preserveCache=false){

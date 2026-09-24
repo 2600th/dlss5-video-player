@@ -25,6 +25,9 @@ struct Frame {
     double pts = 0.0;
     uint32_t width = 0, height = 0;
     std::vector<uint8_t> bgra;
+    // Every non-zero pixel of `bgra` is inside this: found by the reader, off the
+    // UI thread, so the renderer uploads only what changes (see NonZeroBounds).
+    PixelBox drawn;
 
     bool Empty() const { return bgra.empty(); }
 };

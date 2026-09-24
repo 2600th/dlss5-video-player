@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <map>
 #include <optional>
@@ -298,6 +299,56 @@ inline double CanvasRate(double videoFps)
 inline bool CanvasUsable(uint32_t width, uint32_t height)
 {
     return width >= 16 && height >= 16 && width <= 16384 && height <= 16384;
+}
+
+// A rectangle of canvas pixels, right and bottom exclusive; empty when it
+// covers none. What a subtitle picture actually draws on is a line or two of
+// text on an otherwise transparent canvas, and the canvas is the size of the
+// picture on screen - 33 MB of BGRA at 3840x2160 - so the renderer uploads the
+// rectangles that changed rather than the canvas (D3D12Renderer::SetSubtitleOverlay).
+struct PixelBox {
+    uint32_t left = 0, top = 0, right = 0, bottom = 0;
+
+    bool Empty() const { return right <= left || bottom <= top; }
+    uint64_t Area() const { return Empty() ? 0 : uint64_t(right - left) * (bottom - top); }
+    friend bool operator==(const PixelBox&, const PixelBox&) = default;
+};
+
+inline PixelBox Union(const PixelBox& a, const PixelBox& b)
+{
+    if (a.Empty()) return b.Empty() ? PixelBox{} : b;
+    if (b.Empty()) return a;
+    return {std::min(a.left, b.left), std::min(a.top, b.top), std::max(a.right, b.right), std::max(a.bottom, b.bottom)};
+}
+
+// The smallest box holding every pixel of a `width` x `height` BGRA canvas that
+// is not all zeroes. Any byte counts, not just alpha: the compositor adds a
+// premultiplied colour whatever its alpha says, so a stray colour under zero
+// alpha is still drawn and must still be uploaded. Empty for a clear canvas.
+inline PixelBox NonZeroBounds(const uint8_t* bgra, uint32_t width, uint32_t height)
+{
+    PixelBox box{width, height, 0, 0};
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint8_t* row = bgra + size_t(y) * width * 4u;
+        uint32_t first = width;
+        for (uint32_t x = 0; x < width; ++x) {
+            uint32_t pixel = 0;
+            std::memcpy(&pixel, row + size_t(x) * 4u, 4);
+            if (pixel) { first = x; break; }
+        }
+        if (first == width) continue;
+        uint32_t last = first;
+        for (uint32_t x = width; x-- > first + 1;) {
+            uint32_t pixel = 0;
+            std::memcpy(&pixel, row + size_t(x) * 4u, 4);
+            if (pixel) { last = x; break; }
+        }
+        box.left = std::min(box.left, first);
+        box.right = std::max(box.right, last + 1);
+        box.top = std::min(box.top, y);
+        box.bottom = y + 1;
+    }
+    return box.Empty() ? PixelBox{} : box;
 }
 
 // Which frames the child writes: every one of them, with its time, on the

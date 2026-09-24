@@ -2037,11 +2037,14 @@ bool D3D12Renderer::CreateSubtitleResources(uint32_t width,uint32_t height){
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
     srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(texture.Get(),&srv,SRVCPU(SubtitleSRV));
     m_subtitle=std::move(texture);m_subtitleInCopyDest=true;m_subtitleW=width;m_subtitleH=height;
+    // A new texture's contents are not ours to assume, so the first picture on it
+    // is copied whole.
+    m_subtitleHeld={0,0,width,height};m_subtitleDirty={};
     LOG("Subtitle overlay allocated: "<<width<<"x"<<height<<" with "<<ReferenceUploads<<" uploads.");
     return true;
 }
 
-bool D3D12Renderer::SetSubtitleOverlay(const uint8_t*premultipliedBgra,uint32_t width,uint32_t height){
+bool D3D12Renderer::SetSubtitleOverlay(const uint8_t*premultipliedBgra,uint32_t width,uint32_t height,const subtitle::PixelBox*drawn){
     if(!premultipliedBgra){
         // Hiding needs no GPU work: the compositor stops reading the texture.
         if(m_subtitleShown||m_subtitlePending)m_presentStale=true;
@@ -2057,7 +2060,32 @@ bool D3D12Renderer::SetSubtitleOverlay(const uint8_t*premultipliedBgra,uint32_t 
     // ReferenceUploads away.
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot)||!WaitForFrameSlot((slot+ReferenceUploads)%FrameCount))return false;
-    CopyMappedRows(m_subtitleMapped[slot%ReferenceUploads],m_subtitleFootprint,premultipliedBgra,size_t(width)*4u,height);
+    // Only what changes is copied: the rectangle this picture draws in, joined with
+    // the one the texture already holds text in (which has to be cleared), and with
+    // any copy not yet recorded - pending, or dropped by a hide - since the texture
+    // has not seen it. A subtitle is a line or two on a transparent canvas the size
+    // of the picture on screen, so this is a few MB at 3840x2160 instead of 33 on
+    // every change, on the UI thread, up to 30 times a second for animated ASS. The
+    // caller finds `drawn` off this thread (SubtitleOverlay's reader); without it
+    // the whole canvas is taken as drawn.
+    const auto clip=[&](subtitle::PixelBox box){
+        box.right=std::min(box.right,width);box.bottom=std::min(box.bottom,height);
+        return box.Empty()?subtitle::PixelBox{}:box;
+    };
+    const subtitle::PixelBox picture=clip(drawn?*drawn:subtitle::PixelBox{0,0,width,height});
+    const subtitle::PixelBox dirty=clip(subtitle::Union(subtitle::Union(m_subtitleHeld,picture),m_subtitleDirty));
+    if(!dirty.Empty()){
+        uint8_t*mapped=m_subtitleMapped[slot%ReferenceUploads]+m_subtitleFootprint.Offset;
+        const size_t pitch=size_t(m_subtitleFootprint.Footprint.RowPitch),tight=size_t(width)*4u;
+        const size_t columns=size_t(dirty.left)*4u,span=size_t(dirty.right-dirty.left)*4u;
+        // Whole rows at a pitch equal to the tight row (3840 and 1920 wide) are one
+        // contiguous block, as in CopyMappedRows: a canvas-wide change stays one copy.
+        if(span==tight&&pitch==tight)
+            std::memcpy(mapped+size_t(dirty.top)*pitch,premultipliedBgra+size_t(dirty.top)*tight,span*(dirty.bottom-dirty.top));
+        else for(uint32_t y=dirty.top;y<dirty.bottom;++y)
+            std::memcpy(mapped+size_t(y)*pitch+columns,premultipliedBgra+size_t(y)*tight+columns,span);
+    }
+    m_subtitleHeld=picture;m_subtitleDirty=dirty;
     m_subtitleUploadSlot=slot;m_subtitlePending=true;m_presentStale=true;
     return true;
 }
@@ -2067,9 +2095,14 @@ void D3D12Renderer::RecordSubtitleUpload(ID3D12GraphicsCommandList*cmd,uint32_t 
     if(!m_subtitleInCopyDest)Barrier(cmd,m_subtitle.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
     D3D12_TEXTURE_COPY_LOCATION d{};d.pResource=m_subtitle.Get();d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     D3D12_TEXTURE_COPY_LOCATION s{};s.pResource=m_subtitleUpload[slot%ReferenceUploads].Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;s.PlacedFootprint=m_subtitleFootprint;
-    cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+    // The rectangle SetSubtitleOverlay rewrote, at the same place in both; the rest
+    // of the upload buffer is an older picture and is never read.
+    if(!m_subtitleDirty.Empty()){
+        const D3D12_BOX box{m_subtitleDirty.left,m_subtitleDirty.top,0,m_subtitleDirty.right,m_subtitleDirty.bottom,1};
+        cmd->CopyTextureRegion(&d,m_subtitleDirty.left,m_subtitleDirty.top,0,&s,&box);
+    }
     Barrier(cmd,m_subtitle.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    m_subtitleInCopyDest=false;m_subtitlePending=false;m_subtitleShown=true;
+    m_subtitleInCopyDest=false;m_subtitlePending=false;m_subtitleShown=true;m_subtitleDirty={};
 }
 
 bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){

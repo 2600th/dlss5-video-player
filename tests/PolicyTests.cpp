@@ -12254,6 +12254,41 @@ void subtitle_command_lines_escape_paths_for_both_filtergraph_parsers_test()
 
 // Frames come only when the picture changes, so the one on screen is the newest
 // that has started; a seek is answered from them only when they bracket it.
+// The subtitle overlay uploads what changes, not the canvas: the reader finds the
+// box around every non-zero pixel off the UI thread, and the renderer copies the
+// union of that box, the one the texture already holds, and any copy not yet made.
+void subtitle_canvas_bounds_hold_every_drawn_pixel_test()
+{
+    using subtitle::PixelBox;
+    constexpr uint32_t w = 64, h = 32;
+    std::vector<uint8_t> canvas(size_t(w) * h * 4u, 0);
+    CHECK(subtitle::NonZeroBounds(canvas.data(), w, h).Empty());
+    CHECK(subtitle::NonZeroBounds(canvas.data(), w, h) == PixelBox{});
+    const auto set = [&](uint32_t x, uint32_t y, size_t channel, uint8_t value) {
+        canvas[(size_t(y) * w + x) * 4u + channel] = value;
+    };
+    // Alpha alone, then a colour under zero alpha: the compositor adds a
+    // premultiplied colour whatever its alpha, so both are drawn and both count.
+    set(10, 20, 3, 255);
+    CHECK(subtitle::NonZeroBounds(canvas.data(), w, h) == (PixelBox{10, 20, 11, 21}));
+    set(40, 5, 1, 7);
+    CHECK(subtitle::NonZeroBounds(canvas.data(), w, h) == (PixelBox{10, 5, 41, 21}));
+    // The edges are inclusive of the canvas's own last row and column.
+    set(w - 1, h - 1, 0, 1);
+    set(0, 0, 2, 1);
+    CHECK(subtitle::NonZeroBounds(canvas.data(), w, h) == (PixelBox{0, 0, w, h}));
+    CHECK_EQ(uint64_t(w) * h, subtitle::NonZeroBounds(canvas.data(), w, h).Area());
+
+    // Union ignores an empty box and never grows one out of nothing.
+    const PixelBox a{10, 20, 30, 25}, b{5, 22, 12, 40};
+    CHECK(subtitle::Union(a, b) == (PixelBox{5, 20, 30, 40}));
+    CHECK(subtitle::Union(a, {}) == a);
+    CHECK(subtitle::Union({}, b) == b);
+    CHECK(subtitle::Union({}, {}).Empty());
+    CHECK(subtitle::Union(PixelBox{3, 3, 3, 9}, {}).Empty());
+    CHECK_EQ(uint64_t{0}, (PixelBox{8, 1, 4, 9}).Area());
+}
+
 void subtitle_timing_follows_the_clock_and_the_delay_test()
 {
     using namespace subtitle;
@@ -13240,6 +13275,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(subtitle_text_encoding_is_detected_test),
     TEST_CASE(subtitle_command_lines_escape_paths_for_both_filtergraph_parsers_test),
     TEST_CASE(subtitle_timing_follows_the_clock_and_the_delay_test),
+    TEST_CASE(subtitle_canvas_bounds_hold_every_drawn_pixel_test),
     TEST_CASE(subtitle_choice_round_trips_through_the_settings_file_test),
     TEST_CASE(youtube_helper_refusals_each_say_which_one_happened_test),
     TEST_CASE(source_digest_is_computed_once_per_file_and_never_survives_a_change_test),
