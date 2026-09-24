@@ -51,6 +51,33 @@ struct UpdateFetchResult {
     std::wstring error;
 };
 
+// One blocking HTTPS GET through WinHTTP, shared by the release check and the
+// start screen's trailer thumbnails so both keep the same transport rules:
+// TLS only (WINHTTP_FLAG_SECURE), the system proxy, one timeout per stage, a
+// body cap enforced while reading, and a stop that closes the request handle
+// under a blocked call. `host`, `path` and `headers` are copied, so views of
+// temporaries are fine. With followRedirects off a 3xx is returned as a
+// status and never followed, which is what keeps a host allowlist honest.
+struct HttpsGetRequest {
+    std::wstring_view host;
+    std::wstring_view path;
+    std::wstring_view headers;
+    size_t maximumBodyBytes{};
+    uint32_t timeoutMilliseconds{8000};
+    bool followRedirects{true};
+};
+
+struct HttpsGetResult {
+    // Cancelled carries no error: a stop is not a failure to report.
+    enum class Outcome { Ok, Cancelled, TransportFailed, HttpStatus, TooLarge };
+    Outcome outcome{Outcome::Cancelled};
+    uint32_t status{};
+    std::string body;
+    std::wstring error;   // TransportFailed only: "<stage> failed (0x...)."
+};
+
+HttpsGetResult HttpsGet(const HttpsGetRequest& request, std::stop_token stop);
+
 // Blocking HTTPS GET of the release array. Holds no global state, so it is
 // safe to run on a std::jthread. Cancellation returns ok=false with an empty
 // error.

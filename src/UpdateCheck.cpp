@@ -176,13 +176,6 @@ private:
     std::atomic<HINTERNET> handle_;
 };
 
-UpdateFetchResult TransportFailure(std::wstring_view stage)
-{
-    UpdateFetchResult result;
-    result.error = std::wstring(stage) + L" failed (" + HexValue(GetLastError()) + L").";
-    return result;
-}
-
 } // namespace
 
 std::optional<SemanticVersion> ParseSemanticVersion(std::string_view text)
@@ -317,40 +310,56 @@ UpdateCheckDecision DecideUpdateCheck(bool enabled, int64_t lastCheckedUnix, int
                                                         : UpdateCheckDecision::UseCache;
 }
 
-UpdateFetchResult FetchLatestReleaseTag(std::stop_token stop)
+HttpsGetResult HttpsGet(const HttpsGetRequest& request, std::stop_token stop)
 {
-    UpdateFetchResult result;
+    HttpsGetResult result;
     if (stop.stop_requested()) return result;
+    const auto transportFailure = [](std::wstring_view stage) {
+        HttpsGetResult failed;
+        failed.outcome = HttpsGetResult::Outcome::TransportFailed;
+        failed.error = std::wstring(stage) + L" failed (" + HexValue(GetLastError()) + L").";
+        return failed;
+    };
+    // WinHTTP takes NUL-terminated strings; a view need not be one.
+    const std::wstring host(request.host), path(request.path), headers(request.headers);
+    const int timeout = static_cast<int>(request.timeoutMilliseconds);
 
     InternetHandle session(WinHttpOpen(kUserAgent.data(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
-    if (!session) return TransportFailure(L"WinHttpOpen");
-    if (!WinHttpSetTimeouts(session.get(), kTimeoutMilliseconds, kTimeoutMilliseconds,
-                            kTimeoutMilliseconds, kTimeoutMilliseconds)) {
-        return TransportFailure(L"WinHttpSetTimeouts");
+    if (!session) return transportFailure(L"WinHttpOpen");
+    if (!WinHttpSetTimeouts(session.get(), timeout, timeout, timeout, timeout)) {
+        return transportFailure(L"WinHttpSetTimeouts");
     }
 
-    InternetHandle connection(WinHttpConnect(session.get(), kApiHost.data(),
+    InternetHandle connection(WinHttpConnect(session.get(), host.c_str(),
                                              INTERNET_DEFAULT_HTTPS_PORT, 0));
-    if (!connection) return TransportFailure(L"WinHttpConnect");
+    if (!connection) return transportFailure(L"WinHttpConnect");
 
-    InternetHandle request(WinHttpOpenRequest(connection.get(), L"GET", kApiPath.data(), nullptr,
-                                              WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                              WINHTTP_FLAG_SECURE));
-    if (!request) return TransportFailure(L"WinHttpOpenRequest");
-    if (!WinHttpAddRequestHeaders(request.get(), kRequestHeaders.data(),
-                                  static_cast<DWORD>(kRequestHeaders.size()),
+    InternetHandle requestHandleOwner(WinHttpOpenRequest(connection.get(), L"GET", path.c_str(), nullptr,
+                                                         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                                         WINHTTP_FLAG_SECURE));
+    if (!requestHandleOwner) return transportFailure(L"WinHttpOpenRequest");
+    if (!request.followRedirects) {
+        DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        if (!WinHttpSetOption(requestHandleOwner.get(), WINHTTP_OPTION_REDIRECT_POLICY, &policy,
+                              static_cast<DWORD>(sizeof(policy)))) {
+            return transportFailure(L"WinHttpSetOption");
+        }
+    }
+    if (!headers.empty() &&
+        !WinHttpAddRequestHeaders(requestHandleOwner.get(), headers.c_str(),
+                                  static_cast<DWORD>(headers.size()),
                                   WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) {
-        return TransportFailure(L"WinHttpAddRequestHeaders");
+        return transportFailure(L"WinHttpAddRequestHeaders");
     }
 
     // From here every call can block on the network. A stop closes the request
     // handle under it, the call fails, and the failure reads as a cancel.
-    const HINTERNET requestHandle = request.get();
-    CancellableRequest cancellable(std::move(request));
+    const HINTERNET requestHandle = requestHandleOwner.get();
+    CancellableRequest cancellable(std::move(requestHandleOwner));
     const std::stop_callback closeOnStop(stop, [&cancellable] { cancellable.Close(); });
-    const auto failure = [&stop](std::wstring_view stage) {
-        return stop.stop_requested() ? UpdateFetchResult{} : TransportFailure(stage);
+    const auto failure = [&](std::wstring_view stage) {
+        return stop.stop_requested() ? HttpsGetResult{} : transportFailure(stage);
     };
 
     if (stop.stop_requested()) return result;
@@ -371,35 +380,56 @@ UpdateFetchResult FetchLatestReleaseTag(std::stop_token stop)
                              WINHTTP_NO_HEADER_INDEX)) {
         return failure(L"WinHttpQueryHeaders");
     }
+    result.status = status;
     if (status != HTTP_STATUS_OK) {
-        result.error = L"GitHub returned HTTP status " + std::to_wstring(status) + L".";
+        result.outcome = HttpsGetResult::Outcome::HttpStatus;
         return result;
     }
 
-    std::string body;
     for (;;) {
-        if (stop.stop_requested()) return result;
+        if (stop.stop_requested()) return HttpsGetResult{};
         DWORD available = 0;
         if (!WinHttpQueryDataAvailable(requestHandle, &available)) {
             return failure(L"WinHttpQueryDataAvailable");
         }
         if (available == 0) break;
-        if (body.size() + available > kMaximumBodyBytes) {
-            result.error = L"The release feed was larger than the 256 KiB limit.";
+        if (result.body.size() + available > request.maximumBodyBytes) {
+            result.body.clear();
+            result.outcome = HttpsGetResult::Outcome::TooLarge;
             return result;
         }
-        const size_t offset = body.size();
-        body.resize(offset + available);
+        const size_t offset = result.body.size();
+        result.body.resize(offset + available);
         DWORD read = 0;
-        if (stop.stop_requested()) return result;
-        if (!WinHttpReadData(requestHandle, body.data() + offset, available, &read)) {
+        if (stop.stop_requested()) return HttpsGetResult{};
+        if (!WinHttpReadData(requestHandle, result.body.data() + offset, available, &read)) {
             return failure(L"WinHttpReadData");
         }
-        body.resize(offset + read);
+        result.body.resize(offset + read);
         if (read == 0) break;
     }
+    result.outcome = HttpsGetResult::Outcome::Ok;
+    return result;
+}
 
-    const auto tag = ParseNewestReleaseTag(body);
+UpdateFetchResult FetchLatestReleaseTag(std::stop_token stop)
+{
+    UpdateFetchResult result;
+    const HttpsGetResult response =
+        HttpsGet({kApiHost, kApiPath, kRequestHeaders, kMaximumBodyBytes, kTimeoutMilliseconds, true}, stop);
+    switch (response.outcome) {
+    case HttpsGetResult::Outcome::Ok: break;
+    case HttpsGetResult::Outcome::Cancelled: return result;
+    case HttpsGetResult::Outcome::TransportFailed: result.error = response.error; return result;
+    case HttpsGetResult::Outcome::HttpStatus:
+        result.error = L"GitHub returned HTTP status " + std::to_wstring(response.status) + L".";
+        return result;
+    case HttpsGetResult::Outcome::TooLarge:
+        result.error = L"The release feed was larger than the 256 KiB limit.";
+        return result;
+    }
+
+    const auto tag = ParseNewestReleaseTag(response.body);
     if (!tag) {
         result.error = L"The release feed did not name a usable release tag.";
         return result;

@@ -275,7 +275,8 @@ add_library(player_app OBJECT
     src/NeuralReceipt.cpp src/NeuralReceipt.h
     src/NeuralSettings.cpp src/NeuralSettings.h
     src/RangeSelection.cpp src/RangeSelection.h
-    src/UpdateCheck.cpp src/UpdateCheck.h)
+    src/UpdateCheck.cpp src/UpdateCheck.h
+    src/TrailerThumbnail.cpp src/TrailerThumbnail.h src/TrailerThumbnailPolicy.h)
 set(PLAYER_OBJECT_LIBRARIES player_media player_render player_neural player_app)
 foreach(object_library IN LISTS PLAYER_OBJECT_LIBRARIES)
     target_link_libraries(${object_library} PUBLIC dlss_video_player_common PRIVATE dlss_video_player_shipped_code)

@@ -117,6 +117,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "ExportPipeline.h"
 #include "RenderCommandLine.h"
 #include "UpdateCheck.h"
+#include "TrailerThumbnail.h"
 #include "SynchronizedPlayback.h"
 #include "StatusChipPolicy.h"
 #include "ToolbarTipPolicy.h"
@@ -7472,7 +7473,7 @@ private:
         }
         return facts;
     }
-    struct StartTile{bool trailer{};size_t index{};std::wstring title,detail,badge;std::string renderKey;};
+    struct StartTile{bool trailer{};size_t index{};std::wstring title,detail,badge;std::string renderKey;std::wstring thumbId;};
     // Recent videos first, as the File menu lists them; then every trailer
     // that is not already one of them. A trailer that was opened before is a
     // recent video, with its render and its badge.
@@ -7489,6 +7490,8 @@ private:
                 if(name.empty())name=entry.youtube?entry.source:std::filesystem::path(entry.source).filename().wstring();
                 StartTile tile{false,index,name,T(entry.youtube?L"start.tile.youtube":L"start.tile.local"),{},entry.renderKey};
                 if(!entry.renderKey.empty()){std::scoped_lock lock(m_startAnswers->mutex);const auto found=m_startAnswers->renders.find(entry.renderKey);if(found!=m_startAnswers->renders.end())tile.badge=found->second.badge;}
+                // A curated trailer opened before keeps its thumbnail, under its render's frame.
+                if(entry.youtube)for(const auto& example:kExampleVideos)if(entry.source==example.url)tile.thumbId=trailer_thumbnail::VideoIdFromWatchUrl(example.url).value_or(std::wstring());
                 tiles.push_back(std::move(tile));
             }
             return tiles;
@@ -7498,7 +7501,7 @@ private:
         for(size_t index=0;index<kExampleVideos.size();++index){
             const auto& example=kExampleVideos[index];
             if(std::any_of(recent.begin(),recent.end(),[&](const RecentMediaEntry& entry){return entry.youtube&&entry.source==example.url;}))continue;
-            tiles.push_back(StartTile{true,index,std::wstring(example.title),std::wstring(example.channel),{},{}});
+            tiles.push_back(StartTile{true,index,std::wstring(example.title),std::wstring(example.channel),{},{},trailer_thumbnail::VideoIdFromWatchUrl(example.url).value_or(std::wstring())});
         }
         return tiles;
     }
@@ -7528,8 +7531,22 @@ private:
                                                safeModeLink,StartTiles(false).size(),StartTiles(true).size(),
                                                StartPanelText(lines,safeModeLink),!YouTubePlaybackAvailable());
     }
+    // Once, the first time the start screen is really on screen with trailers to
+    // show: not while a file is open, and never without a cache to keep the
+    // pictures in, so a month of launches costs about seven requests.
+    // [Start] ThumbnailFetch=0 keeps it off the network; a picture already
+    // cached still shows.
+    void StartTrailerThumbnails(){
+        if(m_trailerThumbnails->Started()||!StartScreenShown()||!YouTubePlaybackAvailable()||m_cacheRoot.empty())return;
+        std::vector<std::wstring> ids;
+        for(const auto& example:kExampleVideos)if(auto id=trailer_thumbnail::VideoIdFromWatchUrl(example.url))ids.push_back(std::move(*id));
+        const bool fetch=GetPrivateProfileIntW(L"Start",L"ThumbnailFetch",1,SettingsPath().c_str())!=0;
+        LOG("Trailer thumbnails: "<<ids.size()<<" trailers, network fetch "<<(fetch?"on":"off ([Start] ThumbnailFetch=0)")<<".");
+        m_trailerThumbnails->Start(std::move(ids),{m_cacheRoot,fetch,Dip(start_screen::kTileWidthDip),{}},m_hwnd,WM_START_SCREEN);
+    }
     void SyncStartScreen(){
         if(m_loaded||!m_hwnd)return;
+        StartTrailerThumbnails();
         std::vector<std::string> keys;
         if(m_recent)for(const auto& entry:m_recent->Entries())keys.push_back(entry.renderKey);
         if(m_startRequested&&keys==m_startRequestedKeys)return;
@@ -7590,21 +7607,29 @@ private:
         HBRUSH surface=CreateSolidBrush(ui_palette::Inactive);FillRect(dc,&thumb,surface);DeleteObject(surface);
         std::optional<TimelineMediaWorker::Thumbnail> picture;
         if(!content.renderKey.empty()){std::scoped_lock lock(m_startAnswers->mutex);const auto found=m_startAnswers->renders.find(content.renderKey);if(found!=m_startAnswers->renders.end())picture=found->second.thumbnail;}
-        if(picture&&picture->size.cx>0&&picture->size.cy>0){
+        // The user's own neural frame first; without one, a curated trailer's
+        // YouTube thumbnail (16:9 already, so it fills the tile); without that,
+        // the placeholder glyph.
+        std::shared_ptr<const TrailerPicture> poster;
+        if(!picture&&!content.thumbId.empty())poster=m_trailerThumbnails->Picture(content.thumbId);
+        const SIZE pictureSize=picture?picture->size:poster?poster->size:SIZE{};
+        const uint8_t* pictureBits=picture?picture->bgra.data():poster?poster->bgra.data():nullptr;
+        if(pictureBits&&pictureSize.cx>0&&pictureSize.cy>0){
             // Fitted, not stretched: a render keeps its own aspect on the tile.
-            const double scale=std::min(double(thumb.right-thumb.left)/picture->size.cx,double(thumb.bottom-thumb.top)/picture->size.cy);
-            const int w=int(picture->size.cx*scale),h=int(picture->size.cy*scale);
+            const double scale=std::min(double(thumb.right-thumb.left)/pictureSize.cx,double(thumb.bottom-thumb.top)/pictureSize.cy);
+            const int w=int(pictureSize.cx*scale),h=int(pictureSize.cy*scale);
             const int x=thumb.left+(int(thumb.right-thumb.left)-w)/2,y=thumb.top+(int(thumb.bottom-thumb.top)-h)/2;
-            BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=picture->size.cx;info.bmiHeader.biHeight=-picture->size.cy;
+            BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=pictureSize.cx;info.bmiHeader.biHeight=-pictureSize.cy;
             info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
             SetStretchBltMode(dc,HALFTONE);
-            const uint8_t* pixels=picture->bgra.data();std::vector<uint8_t> lifted;
+            // The hover lift brightens whichever picture the tile shows.
+            const uint8_t* pixels=pictureBits;std::vector<uint8_t> lifted;
             if(hover>0.0){
-                lifted=picture->bgra;const double amount=hover*kTileBrighten;
+                lifted.assign(pictureBits,pictureBits+size_t(pictureSize.cx)*size_t(pictureSize.cy)*4u);const double amount=hover*kTileBrighten;
                 for(size_t at=0;at<lifted.size();++at)if(at%4!=3)lifted[at]=uint8_t(lifted[at]+std::lround((255-lifted[at])*amount));
                 pixels=lifted.data();
             }
-            StretchDIBits(dc,x,y,w,h,0,0,picture->size.cx,picture->size.cy,pixels,&info,DIB_RGB_COLORS,SRCCOPY);
+            StretchDIBits(dc,x,y,w,h,0,0,pictureSize.cx,pictureSize.cy,pixels,&info,DIB_RGB_COLORS,SRCCOPY);
         }else if(m_iconFont){
             const wchar_t glyph=GlyphForIcon(content.trailer?UiIcon::YouTube:UiIcon::Open);
             const HGDIOBJ old=SelectObject(dc,m_iconFont);SetTextColor(dc,ui_palette::SecondaryText);RECT box=thumb;
@@ -11822,6 +11847,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     StartHover m_startHover=StartHover::None;size_t m_startHoverIndex=0;
     std::map<int,chrome_motion::Fade> m_tileFades;bool m_tilesWereMoving=false;
     std::jthread m_startWorker;
+    // The curated trailers' YouTube thumbnails, fetched once the start screen
+    // is first shown (TrailerThumbnail.h).
+    std::unique_ptr<TrailerThumbnails> m_trailerThumbnails=std::make_unique<TrailerThumbnails>();
     bool m_shortcutSheetOpen=false;HWND m_shortcutWnd=nullptr;std::vector<ShortcutGroup> m_shortcutGroups;
     shortcut_sheet::Metrics m_shortcutMetrics{};shortcut_sheet::Layout m_shortcutLayout{};
     // Drives Tick while a modal loop owns the thread; see StartModalTick.

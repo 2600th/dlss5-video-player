@@ -317,6 +317,9 @@ struct PlayerAppTestAccess {
         CHECK(app.m_hwnd != nullptr);
         CHECK(app.m_uiResources.Load(GetModuleHandleW(nullptr)));
         app.UpdateFontsForDpi(96);
+        // From the first window on, the start screen could ask for the trailer
+        // thumbnails; a test run must never reach i.ytimg.com.
+        CHECK(WritePrivateProfileStringW(L"Start", L"ThumbnailFetch", L"0", app.SettingsPath().c_str()));
     }
 
     static void old_source_policy_requests_a_fresh_resolution_test()
@@ -2046,6 +2049,128 @@ struct PlayerAppTestAccess {
         std::filesystem::remove_all(directory);
     }
 
+    // The trailer tiles' YouTube thumbnails (TrailerThumbnail.h): every curated
+    // trailer's tile asks for its own id, the picture fills the tile once it is
+    // there, a render's own frame still wins over it, and the fetch starts only
+    // with a cache to keep the pictures in. Nothing here reaches the network:
+    // the suite runs with [Start] ThumbnailFetch=0 from its first window on.
+    static void start_screen_trailer_thumbnails_test()
+    {
+        PlayerApp& app = fixture->app;
+        REQUIRE(!app.m_loaded);
+        const auto trailers = app.StartTiles(true);
+        REQUIRE(!trailers.empty());
+        for (const auto& tile : trailers) {
+            CHECK(tile.thumbId == trailer_thumbnail::VideoIdFromWatchUrl(kExampleVideos[tile.index].url));
+            CHECK(!tile.thumbId.empty());
+        }
+        // A curated trailer opened before keeps its thumbnail on its recent tile;
+        // a pasted link does not get one.
+        {
+            auto saved = std::move(app.m_recent);
+            const auto directory = app.SettingsPath().parent_path() / L"start-thumbs";
+            std::filesystem::create_directories(directory);
+            app.m_recent = std::make_unique<RecentMediaHistory>(directory / L"recent.dat");
+            RecentMediaEntry curated{};
+            curated.youtube = true; curated.title = L"Curated";
+            curated.id = utf8_text::FromWide(trailer_thumbnail::VideoIdFromWatchUrl(kExampleVideos[1].url).value_or(L""));
+            app.m_recent->Remember(curated);
+            RecentMediaEntry pasted{};
+            pasted.youtube = true; pasted.id = "aaaaaaaaaaa"; pasted.title = L"Pasted";
+            app.m_recent->Remember(pasted);
+            const auto recent = app.StartTiles(false);
+            REQUIRE(recent.size() == 2);
+            CHECK(recent[0].thumbId.empty());
+            CHECK(recent[1].thumbId == trailer_thumbnail::VideoIdFromWatchUrl(kExampleVideos[1].url));
+            // The opened trailer leaves the trailer row for the recent one.
+            for (const auto& tile : app.StartTiles(true)) CHECK(tile.index != 1);
+            app.m_recent = std::move(saved);
+            std::filesystem::remove_all(directory);
+        }
+
+        // Drawn into a real 32-bit surface, so the pixels can be read back.
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(info.bmiHeader); info.bmiHeader.biWidth = 192; info.bmiHeader.biHeight = -150;
+        info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HDC dc = CreateCompatibleDC(nullptr);
+        REQUIRE(dc != nullptr);
+        HBITMAP surface = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        REQUIRE(surface != nullptr && bits != nullptr);
+        const HGDIOBJ oldBitmap = SelectObject(dc, surface);
+        const RECT tile{0, 0, 192, 150};
+        const RECT thumb = start_screen::TileThumbnail(tile, 96);
+        const auto centre = [&] {
+            GdiFlush();
+            const auto* pixel = static_cast<const uint8_t*>(bits) +
+                                (size_t((thumb.top + thumb.bottom) / 2) * 192 + size_t((thumb.left + thumb.right) / 2)) * 4;
+            return RGB(pixel[2], pixel[1], pixel[0]);
+        };
+        const auto solid = [](LONG width, LONG height, uint8_t b, uint8_t g, uint8_t r) {
+            std::vector<uint8_t> bgra(size_t(width) * height * 4);
+            for (size_t i = 0; i < bgra.size(); i += 4) { bgra[i] = b; bgra[i + 1] = g; bgra[i + 2] = r; bgra[i + 3] = 255; }
+            return bgra;
+        };
+        auto saved = std::move(app.m_trailerThumbnails);
+        app.m_trailerThumbnails = std::make_unique<TrailerThumbnails>();
+        const auto& first = trailers[0];
+        app.DrawStartTile(dc, tile, first, false);
+        CHECK(centre() != RGB(250, 20, 20));   // the placeholder until a picture arrives
+        auto poster = std::make_shared<TrailerPicture>();
+        poster->size = SIZE{16, 9}; poster->bgra = solid(16, 9, 20, 20, 250);
+        app.m_trailerThumbnails->Publish(first.thumbId, poster);
+        app.DrawStartTile(dc, tile, first, false);
+        CHECK(centre() == RGB(250, 20, 20));
+        // Another tile's picture is not this one's.
+        app.DrawStartTile(dc, tile, trailers[1], false);
+        CHECK(centre() != RGB(250, 20, 20));
+        // The user's own render frame outranks the publisher's thumbnail.
+        {
+            const std::string key(64, 'e');
+            auto answers = std::make_shared<StartScreenAnswers>();
+            StartScreenAnswers::Render render{};
+            render.thumbnail = TimelineMediaWorker::Thumbnail{1, 0, SIZE{16, 9}, solid(16, 9, 250, 20, 20)};
+            answers->renders[key] = render;
+            const auto previous = app.m_startAnswers;
+            app.m_startAnswers = answers;
+            auto rendered = first;
+            rendered.renderKey = key;
+            app.DrawStartTile(dc, tile, rendered, false);
+            CHECK(centre() == RGB(20, 20, 250));
+            app.m_startAnswers = previous;
+        }
+        SelectObject(dc, oldBitmap);
+        DeleteObject(surface);
+        DeleteDC(dc);
+
+        // The fetch starts once, only with the start screen up and a cache to
+        // keep the pictures in; here the off switch keeps it off the network,
+        // and with nothing cached every tile keeps its placeholder.
+        const NeuralPlaybackLifecycle lifecycle = app.m_neuralLifecycle;
+        app.m_neuralLifecycle.state = NeuralPlaybackState::Idle;
+        const auto cacheRoot = app.m_cacheRoot;
+        app.m_trailerThumbnails = std::make_unique<TrailerThumbnails>();
+        app.m_cacheRoot.clear();
+        app.StartTrailerThumbnails();
+        CHECK(!app.m_trailerThumbnails->Started());
+        const auto root = app.SettingsPath().parent_path() / L"start-thumbs-cache";
+        std::filesystem::remove_all(root);
+        app.m_cacheRoot = root;
+        CHECK_EQ(0u, GetPrivateProfileIntW(L"Start", L"ThumbnailFetch", 1, app.SettingsPath().c_str()));
+        app.StartTrailerThumbnails();
+        CHECK(app.m_trailerThumbnails->Started());
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!app.m_trailerThumbnails->Finished() && std::chrono::steady_clock::now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        CHECK(app.m_trailerThumbnails->Finished());
+        CHECK(app.m_trailerThumbnails->Picture(first.thumbId) == nullptr);
+        CHECK(!std::filesystem::exists(root / L"thumbs"));
+        app.m_cacheRoot = cacheRoot;
+        app.m_neuralLifecycle = lifecycle;
+        app.m_trailerThumbnails = std::move(saved);
+        std::filesystem::remove_all(root);
+    }
+
     static void source_menus_are_disabled_without_media_test()
     {
         PlayerApp& app = fixture->app;
@@ -2555,6 +2680,7 @@ struct PlayerAppTestAccess {
         UI_CASE(dark_menu_bar_test),
         UI_CASE(media_controls_and_thumbnail_buttons_test),
         UI_CASE(start_screen_test),
+        UI_CASE(start_screen_trailer_thumbnails_test),
         UI_CASE(source_menus_are_disabled_without_media_test),
         UI_CASE(source_menus_return_after_a_cancelled_job_test),
         UI_CASE(loading_feedback_test),
