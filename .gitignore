@@ -18,6 +18,11 @@
 /external/nvof/*
 !/external/nvof/nvOpticalFlowCommon.h
 !/external/nvof/nvOpticalFlowD3D12.h
+# The NVENC API header is under the same kind of file-scoped MIT notice, pinned from
+# FFmpeg's nv-codec-headers (THIRD_PARTY.md has the tag and its SHA-256).
+!/external/nvenc/
+/external/nvenc/*
+!/external/nvenc/nvEncodeAPI.h
 /external/runtime/
 /streamline/
 /Streamline/

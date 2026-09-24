@@ -100,6 +100,20 @@ else()
     message(WARNING "NVIDIA Optical Flow SDK headers are missing from ${NVOF_SDK}. They ship with this repository, so this build will fall back to the CPU motion estimator - see docs/BUILDING.md.")
 endif()
 
+# The NVENC API header lives in external/nvenc under the same file-scoped MIT notice,
+# pinned from FFmpeg's nv-codec-headers. It lets the neural capture be encoded straight
+# from the D3D12 texture (NvencDirect.cpp); nvEncodeAPI64.dll comes from the driver at
+# run time and no import library is linked. Absent, every render takes the ffmpeg
+# encoder child, which is also the fallback when the driver refuses the direct path.
+set(NVENC_SDK "${CMAKE_SOURCE_DIR}/external/nvenc" CACHE PATH "Path to the NVENC API header (nvEncodeAPI.h)")
+if(EXISTS "${NVENC_SDK}/nvEncodeAPI.h")
+    set(NVENC_FOUND TRUE)
+    message(STATUS "NVENC API header found at ${NVENC_SDK}; direct D3D12 encoding enabled.")
+else()
+    set(NVENC_FOUND FALSE)
+    message(WARNING "The NVENC API header is missing from ${NVENC_SDK}. It ships with this repository, so this build will encode every neural render through the ffmpeg child - see docs/BUILDING.md.")
+endif()
+
 # Control Flow Guard and CET shadow stacks for the two shipped binaries. The
 # compiler and linker already default to /GS, /DYNAMICBASE, /NXCOMPAT and
 # /HIGHENTROPYVA; they are spelled out so a toolset that stops defaulting them

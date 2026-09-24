@@ -156,6 +156,23 @@ to its own CPU motion estimator, which is also what happens on a pre-Turing
 card or an older driver. The `NVOFA ready:` line in `DLSSVideoPlayer.log` tells
 you which backend actually came up.
 
+## Direct NVENC encoding
+
+The neural render's capture can be encoded by NVENC straight from the D3D12
+texture, instead of being read back and piped to an ffmpeg child. The one header
+that takes, `nvEncodeAPI.h`, is in `external/nvenc`, pinned from FFmpeg's
+`nv-codec-headers` under NVIDIA's file-scoped MIT notice (see
+[third-party notices](../THIRD_PARTY.md)); `nvEncodeAPI64.dll` comes from the
+installed driver. CMake reports it and `NVENC_SDK` overrides the location:
+
+```
+-- NVENC API header found at .../external/nvenc; direct D3D12 encoding enabled.
+```
+
+Without the header, or on a driver whose NVENC API is older than 13.1, every
+render is encoded by the ffmpeg child as before. `NeuralWorker.log` says which
+encoder each render used.
+
 ## Add the experimental runtime
 
 Every file in `packaging/runtime-lock.json` is reproducible byte-for-byte from

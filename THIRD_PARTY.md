@@ -60,6 +60,25 @@ Nothing else from the SDK is included. Its samples, helper classes and binaries
 are covered by NVIDIA's separate licence agreement, and `nvofapi64.dll` is a
 driver component loaded by name at run time, never redistributed here.
 
+## NVIDIA Video Codec SDK (NVENC API header)
+
+Source: https://github.com/FFmpeg/nv-codec-headers, tag `n13.1.15.0` (commit
+`0a6fba9a2820628b8103464f4c8753ee05838baa`)
+
+The neural render's cache capture can be encoded straight from the GPU through
+NVENC's D3D12 interface. The one header that needs, `nvEncodeAPI.h` (NVENC API
+13.1), is vendored unmodified in `external/nvenc` from FFmpeg's copy of it, which
+is the file FFmpeg itself builds `hevc_nvenc` against. NVIDIA licenses it under
+MIT in its own copyright block, scoped to that file; the notice, the pinned tag
+and the file's SHA-256
+(`8776fddcb8febc6aec4d73989b1f21831eb30306bc583da55b4bf0c14a1dc228`) are in
+`THIRD_PARTY_LICENSES/nvidia-video-codec-MIT.txt`.
+
+Nothing else from the Video Codec SDK is included and no NVIDIA import library is
+linked. `nvEncodeAPI64.dll` is a driver component, loaded from the system
+directory at run time after its catalog signature is verified, and never
+redistributed here.
+
 ## ReShade
 
 Source and license: https://github.com/crosire/reshade
