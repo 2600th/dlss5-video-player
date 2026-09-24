@@ -166,6 +166,9 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 
 .masthead__nav { display: flex; gap: clamp(0.9rem, 2vw, 1.9rem); }
 .masthead__nav a { color: var(--text-dim); text-decoration: none; }
+/* A 24px target (WCAG 2.5.8) without moving the label: the padding grows the
+   hit box and the negative margin gives the room straight back. */
+.masthead__nav a { padding-block: 0.45rem; margin-block: -0.45rem; }
 .masthead__nav a:hover { color: var(--text); }
 
 /* --- hero ----------------------------------------------------------------- */
@@ -641,6 +644,11 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 }
 .scene__files a { margin-left: 0.6rem; color: var(--text-dim); }
 .scene__link { text-decoration: none; }
+/* Vertical padding widens the hit box to 24px (WCAG 2.5.8); on the inline
+   file links it leaves the line box, and the layout, exactly as it was. */
+.scene__files a, .scene__link { padding-block: 0.45rem; }
+/* The link alone is a flex item, so it hands the padding back the same way. */
+.scene__link { margin-block: -0.45rem; }
 .scene__link:hover, .scene__files a:hover { color: var(--text); }
 
 .scene__caption {
