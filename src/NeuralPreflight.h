@@ -199,7 +199,62 @@ struct NeuralModelStore {
     // between them waiting for the store to go quiet.
     uint32_t reads{1};
     std::chrono::milliseconds waited{};
+    // Rewritten files trusted at once because their bytes hash to the last
+    // settled read of the same path at the same size (ModelStoreMemo).
+    uint32_t trustedRewrites{};
+    // Every content-hashed file of this read, for the memo to remember when
+    // the read is settled: root-qualified path, size, SHA-256.
+    struct Hashed { std::wstring key; uintmax_t size{}; int64_t writeTime{}; std::string digest; };
+    std::vector<Hashed> hashed;
 };
+
+// The last settled read's content hash of each small model-store file, so a
+// rewrite that put back exactly those bytes is trusted without sitting out the
+// quiet period. NGX rewrites its three config files on every initialisation,
+// the player's own included, and does so for about 6 s after a file is
+// opened: the render key of the first D press slept 4.0-5.9 s of 7.1-7.2 s
+// waiting them out, on files whose bytes had not changed.
+//
+// Only a matching size AND hash is trusted, so a truncated or part-written
+// file (the torn read fe7efdd guards against) can never pass; a file whose
+// content really changed does not match and waits the quiet period exactly as
+// before.
+//
+// It also closes a hole the quiet period alone has: a file caught empty while
+// its write time still shows the last settled write. NGX truncates a config
+// and the new write time lands only when it is done, so that read is "quiet"
+// and was trusted. Measured once in 26 fast reads: a settled digest b0f90e42
+// (the store with nvngx_deny_list.txt empty) at player start. Different bytes
+// under the memo's own write time are a rewrite in progress, and unsettled.
+//
+// Entries are learned only from two settled reads, taken apart, that agree
+// (the eviction's pair, NeuralModelStoresAgree), never from one read, so a
+// torn read that slipped past both rules still cannot be remembered.
+// Persisted beside the cache so the first D press after a start benefits.
+class ModelStoreMemo {
+public:
+    [[nodiscard]] bool Trusts(const std::wstring& key, uintmax_t size, const std::string& digest) const;
+    // True when the file differs from the memo while its write time is still
+    // the memo's: a rewrite that has not stamped its time yet.
+    [[nodiscard]] bool Contradicts(const std::wstring& key, uintmax_t size, int64_t writeTime,
+                                   const std::string& digest) const;
+    // Records an agreed pair's hashes; nothing unless both reads are settled
+    // and agree. Returns whether anything changed.
+    bool Remember(const NeuralModelStore& first, const NeuralModelStore& second);
+    bool Load(const std::filesystem::path& file);
+    bool Save(const std::filesystem::path& file) const;
+    [[nodiscard]] size_t Size() const { return entries_.size(); }
+
+private:
+    struct Entry { uintmax_t size{}; int64_t writeTime{}; std::string digest; };
+    std::vector<std::pair<std::wstring, Entry>> entries_;
+};
+
+// Where ResolveNeuralModelStore keeps its memo: a file beside the cache. Unset,
+// resolves use no memo and behave exactly as fe7efdd's rule alone.
+void UseNeuralModelStoreMemo(std::filesystem::path file);
+// Teaches that memo an agreed pair (the cache eviction's two reads) and saves it.
+void RememberAgreedNeuralModelStores(const NeuralModelStore& first, const NeuralModelStore& second);
 
 // How long a file in the store must have gone unwritten before its bytes are
 // trusted as the store's rather than as a rewrite in progress. Measured: NGX
@@ -209,6 +264,10 @@ inline constexpr std::chrono::milliseconds kModelStoreQuietPeriod{2000};
 // How long ResolveNeuralModelStore waits for a store that is being written to
 // go quiet before it returns an unsettled read.
 inline constexpr std::chrono::milliseconds kModelStoreSettlePatience{10000};
+// How often a resolve with a memo reads again while a file is mid-rewrite: a
+// read costs 65-81 ms on the reference machine, so this keeps it under a
+// third of one core while it waits.
+inline constexpr std::chrono::milliseconds kModelStoreMemoPoll{250};
 // How far apart eviction's two reads of the store are (NeuralModelStoresAgree):
 // longer than any rewrite measured, so both cannot land inside one.
 inline constexpr std::chrono::seconds kEvictionModelStoreGap{5};
@@ -238,7 +297,8 @@ bool NeuralModelStoresAgree(const NeuralModelStore& first, const NeuralModelStor
 NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
                                         std::wstring_view driverVersion,
                                         std::stop_token stop = {},
-                                        std::chrono::milliseconds quietPeriod = kModelStoreQuietPeriod);
+                                        std::chrono::milliseconds quietPeriod = kModelStoreQuietPeriod,
+                                        const ModelStoreMemo* memo = nullptr);
 // Digests `roots` until a read is settled, sleeping out each read's
 // `settlesIn`, for at most `patience`; returns the last read, settled or not.
 // A stop returns at once.
@@ -246,8 +306,10 @@ NeuralModelStore DigestSettledNeuralModelStore(std::span<const NeuralModelRoot> 
                                                std::wstring_view driverVersion,
                                                std::stop_token stop = {},
                                                std::chrono::milliseconds quietPeriod = kModelStoreQuietPeriod,
-                                               std::chrono::milliseconds patience = kModelStoreSettlePatience);
+                                               std::chrono::milliseconds patience = kModelStoreSettlePatience,
+                                               ModelStoreMemo* memo = nullptr);
 // The same over RegisteredNeuralModelRoots(): what the render identity carries.
+// Uses and updates the memo UseNeuralModelStoreMemo named, if any.
 NeuralModelStore ResolveNeuralModelStore(std::wstring_view driverVersion,
                                          std::stop_token stop = {},
                                          std::chrono::milliseconds patience = kModelStoreSettlePatience);

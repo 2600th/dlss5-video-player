@@ -2451,6 +2451,7 @@ private:
             <<std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-modelStoreStarted).count()<<" ms files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest
             <<(NeuralModelStoreSettled(modelStore)?"":" (unsettled: the key may not match a later read)")
             <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{})
+            <<(modelStore.trustedRewrites?" trustedRewrites="+std::to_string(modelStore.trustedRewrites):std::string{})
             <<(modelStore.reads>1?" reads="+std::to_string(modelStore.reads)+" waited="+std::to_string(modelStore.waited.count())+"ms on "+WideToUtf8(modelStore.youngestFile):std::string{}));
         identity_=NeuralCacheIdentity{*sourceDigest_,width_,height_,DLSS_VIDEO_PLAYER_VERSION,GpuGenerationPathName(in_.gpu),*runtimeDigest_,NeuralRenderPipelineIdentity(in_.gpuSourceConversion,KeyedNvencPreset(in_.nvencPreset,in_.cacheQuality),KeyedGpuColorConversion(in_.gpuColorConversion,in_.cacheQuality))+ProcessingScaleIdentityTerm(in_.processingScale)+UntaggedColorIdentityTerm(untaggedBt709_)+toneMapTerm_+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({in_.captureDither,in_.cacheQuality,in_.sourceDeband,in_.suppliedExposure}),false,*settingsDigest_,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(in_.driverVersion),modelStore.digest};renderKey_=BuildNeuralCacheKey(identity_);completion_->renderKey=renderKey_;completion_->range=range;completion_->settings=settings;completion_->guides=guides;completion_->temporal=temporal;
         LOG("Checking neural cache key="<<renderKey_<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
@@ -2767,6 +2768,9 @@ public:
         if(historyCache.Valid()){
             m_cacheRoot=historyCache.Root();
             SaveCacheSettings();
+            // Beside the cache, so a start's first D press already knows which
+            // model-store bytes it may trust through NGX's rewrites.
+            UseNeuralModelStoreMemo(m_cacheRoot/L"model-store-memo.txt");
             LOG("Neural cache directory: "<<WideToUtf8(m_cacheRoot.wstring()));
             m_recent=std::make_unique<RecentMediaHistory>(historyCache.Root()/L"recent-videos.dat");
             if(!m_recent->Load())LOG("Recent videos could not be loaded; existing file preserved until next successful playback.");
@@ -2890,6 +2894,10 @@ public:
                     std::this_thread::sleep_for(kEvictionModelStoreGap);
                     confirm=ResolveNeuralModelStore(driverVersion);
                 }
+                // The agreed pair is also the only thing the model-store memo
+                // learns from (ModelStoreMemo): one read can be torn, two agreeing
+                // 5 s apart are the store.
+                RememberAgreedNeuralModelStores(models,confirm);
                 if(runtime&&NeuralModelStoresAgree(models,confirm))
                     current=cache_eviction::Identity{DLSS_VIDEO_PLAYER_VERSION,NeuralCacheInstallation(),*runtime,WideToUtf8(driverVersion),models.digest};
                 else LOG("Cache eviction is not judging entries by identity: runtime="<<(runtime?"resolved":"unavailable")

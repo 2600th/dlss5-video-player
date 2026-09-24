@@ -706,6 +706,25 @@ which can mean hours of GPU time or a stream that has since gone away. If it
 passes on a correct one, the orphans stay until the next start or the
 free-space floor.
 
+**Bytes the store is known to hold are trusted through a rewrite.** The quiet
+period cost the first `D` after opening a file 7-10 s: NGX keeps rewriting its
+three config files for about 6 s after the player's own initialisation, and the
+render key slept through all of it for files whose bytes had not changed.
+`ModelStoreMemo` (persisted as `model-store-memo.txt` beside the cache) holds each
+small file's size, write time and hash from the last pair of eviction reads that
+agreed. A recently written file whose size and hash equal its entry is trusted at
+once. A truncated or part-written file cannot match, and genuinely changed
+content does not, so both wait out the quiet period exactly as before; while
+the memo has entries the resolve reads again every `kModelStoreMemoPoll` (250 ms)
+rather than every 2 s. The memo also closes a gap in the quiet rule: a file caught
+empty while its write time still shows the last settled write read as quiet, and
+twice at player start it produced a settled `a69cdc79…` or `b0f90e42…`. A file
+whose bytes differ from its entry under the entry's own write time is now a
+rewrite in progress. The memo learns only from an agreed pair, never from one
+read. Measured on the fixture (RTX 4080 SUPER): the key's model-store resolve fell
+from 9.7-10.5 s to 0.07-0.43 s once the memo held the store, and the cold start
+from 17.9-21.9 s to 7.9-9.0 s.
+
 **Two runtime file sets exist, and they are deliberately different sizes.**
 `LockedRuntimeFileNames()` is the thirteen files hashed into `runtimeDigest` - the
 twelve vendor modules plus `NeuralWorker.exe` - and it is the set a preflight

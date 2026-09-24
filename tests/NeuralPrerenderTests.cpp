@@ -803,6 +803,67 @@ void model_store_read_mid_rewrite_is_unsettled_and_waited_out_test()
     CHECK_EQ(whole.digest, rewritten.digest);
     CHECK(!NeuralModelStoreSettled(rewritten));
 
+    // With an agreed pair remembered (ModelStoreMemo), the same bytes written
+    // back are trusted at once, while a truncated file and genuinely changed
+    // content are held to the quiet period exactly as before.
+    ModelStoreMemo memo;
+    CHECK(!memo.Remember(rewritten, rewritten));  // unsettled reads teach nothing
+    CHECK(!memo.Remember(whole, torn));           // nor do two that disagree
+    CHECK(memo.Remember(whole, whole));
+    CHECK(!memo.Remember(whole, whole));
+    const auto readRemembering = [&] { return DigestNeuralModelStore(roots, L"32.0.16.1047", {}, kModelStoreQuietPeriod, &memo); };
+    WriteBytes(server, serverBytes);
+    const auto sameBytes = readRemembering();
+    CHECK(NeuralModelStoreSettled(sameBytes));
+    CHECK_EQ(whole.digest, sameBytes.digest);
+    CHECK_EQ(uint32_t{1}, sameBytes.trustedRewrites);
+    WriteBytes(server, "");
+    const auto truncated = readRemembering();
+    CHECK(!NeuralModelStoreSettled(truncated));
+    CHECK_EQ(uint32_t{0}, truncated.trustedRewrites);
+    WriteBytes(server, serverBytes.substr(0, serverBytes.size() / 2));
+    CHECK(!NeuralModelStoreSettled(readRemembering()));
+    // Truncated with its old write time still showing - NGX's rewrite before
+    // the new time lands - reads as quiet to the quiet rule alone, and as a
+    // rewrite in progress to the memo.
+    age(1h);
+    WriteBytes(server, "");
+    const auto rememberedTime = [&] {
+        for (const auto& file : whole.hashed) if (file.key.find(L"nvngx_server_config.txt") != std::wstring::npos) return file.writeTime;
+        return int64_t{0};
+    }();
+    std::filesystem::last_write_time(server, std::filesystem::file_time_type(std::filesystem::file_time_type::duration(rememberedTime)));
+    CHECK(NeuralModelStoreSettled(read()));          // the hole, without a memo
+    CHECK(!NeuralModelStoreSettled(readRemembering()));
+    // Genuinely changed content waits the quiet period out, then settles.
+    const std::string changedBytes = "[dlss]\napp_E658700 = 310.9.1\n[driver]\nversion = 1\n";
+    WriteBytes(server, changedBytes);
+    const auto changed = readRemembering();
+    CHECK(!NeuralModelStoreSettled(changed));
+    const auto changedStarted = std::chrono::steady_clock::now();
+    const auto changedSettled = DigestSettledNeuralModelStore(roots, L"32.0.16.1047", {}, 300ms, 5s, &memo);
+    CHECK(std::chrono::steady_clock::now() - changedStarted >= 250ms);
+    CHECK(NeuralModelStoreSettled(changedSettled));
+    CHECK(changedSettled.digest != whole.digest);
+    // An agreed pair teaches the memo the new bytes; it persists and reloads.
+    CHECK(memo.Remember(changedSettled, DigestNeuralModelStore(roots, L"32.0.16.1047", {}, 300ms, &memo)));
+    WriteBytes(server, changedBytes);
+    CHECK(NeuralModelStoreSettled(readRemembering()));
+    const auto memoFile = fixture.Path() / L"model-store-memo.txt";
+    CHECK(memo.Save(memoFile));
+    ModelStoreMemo reloaded;
+    CHECK(reloaded.Load(memoFile));
+    CHECK_EQ(memo.Size(), reloaded.Size());
+    WriteBytes(server, changedBytes);
+    CHECK(NeuralModelStoreSettled(DigestNeuralModelStore(roots, L"32.0.16.1047", {}, kModelStoreQuietPeriod, &reloaded)));
+    // A damaged line is skipped, never trusted.
+    WriteBytes(memoFile, "12\t5\tnot-a-digest\tsomething\n");
+    ModelStoreMemo damaged;
+    CHECK(damaged.Load(memoFile));
+    CHECK_EQ(size_t{0}, damaged.Size());
+    WriteBytes(server, serverBytes);
+    age(1h);
+
     // The resolve waits a rewrite out: truncate, then write back 150 ms later
     // on another thread, as NGX does, while the settled read runs.
     WriteBytes(server, "");

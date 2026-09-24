@@ -2,6 +2,7 @@
 
 #include "NeuralCache.h"
 #include "Utf8Text.h"
+#include "AtomicFile.h"
 
 #include <windows.h>
 #include <knownfolders.h>
@@ -14,6 +15,7 @@
 #include <cwctype>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -151,6 +153,7 @@ struct ModelStoreFile {
     // left. See NeuralModelStore::recentlyWrittenFiles.
     bool recent{};
     std::chrono::milliseconds settlesIn{};
+    bool trusted{};      // recent, but its bytes are the memo's: see ModelStoreMemo
 };
 
 // Which NGX features the neural pass evaluates, as the model store names them.
@@ -240,10 +243,17 @@ std::optional<std::string> HashNeuralPassSelector(const std::filesystem::path& p
 
 // One root's listing, or nothing when the root cannot be walked whole: a
 // partial listing would digest as though the files it missed did not exist.
+std::wstring ModelStoreMemoKey(const std::wstring& rootSpelling, const std::wstring& relative)
+{
+    return rootSpelling + L"|" + relative;
+}
+
 std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoot& root,
                                                             std::stop_token stop,
-                                                            std::chrono::milliseconds quietPeriod)
+                                                            std::chrono::milliseconds quietPeriod,
+                                                            const ModelStoreMemo* memo)
 {
+    const std::wstring rootSpelling = LowerWide(root.directory.generic_wstring());
     namespace fs = std::filesystem;
     std::error_code error;
     if (!fs::is_directory(root.directory, error) || error) return std::nullopt;
@@ -292,6 +302,19 @@ std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoo
                                              : Sha256File(entry.path(), stop))
                 file.digest = *digest;
             else file.unreadable = true;
+        }
+        // A rewrite that put back the bytes the last settled read hashed is
+        // the store's, not a moment's: only an equal size and hash pass, which
+        // no truncated or part-written file can produce.
+        if (memo && !file.digest.empty()) {
+            const std::wstring key = ModelStoreMemoKey(rootSpelling, file.relative);
+            if (file.recent && memo->Trusts(key, file.size, file.digest)) {
+                file.recent = false;
+                file.trusted = true;
+            } else if (!file.recent && memo->Contradicts(key, file.size, file.writeTime, file.digest)) {
+                file.recent = true;
+                file.settlesIn = kModelStoreMemoPoll;
+            }
         }
         files.push_back(std::move(file));
     };
@@ -357,7 +380,8 @@ std::vector<NeuralModelRoot> RegisteredNeuralModelRoots()
 NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
                                         std::wstring_view driverVersion,
                                         std::stop_token stop,
-                                        std::chrono::milliseconds quietPeriod)
+                                        std::chrono::milliseconds quietPeriod,
+                                        const ModelStoreMemo* memo)
 {
     NeuralModelStore store;
     // Canonical form 2: form 1 listed every feature, and the size and write
@@ -369,7 +393,7 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
     std::string canonical = "model-store=2\n";
     for (const NeuralModelRoot& root : roots) {
         const std::wstring spelling = LowerWide(root.directory.generic_wstring());
-        const auto files = CollectModelRoot(root, stop, quietPeriod);
+        const auto files = CollectModelRoot(root, stop, quietPeriod, memo);
         canonical += "root=" + utf8_text::FromWide(spelling);
         if (!files) {
             // An unreadable root still belongs in the digest: a machine that
@@ -407,6 +431,9 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
             ++store.files;
             if (!file.digest.empty()) ++store.contentHashedFiles;
             if (file.unreadable) ++store.unreadableFiles;
+            if (file.trusted) ++store.trustedRewrites;
+            if (!file.digest.empty())
+                store.hashed.push_back({ModelStoreMemoKey(spelling, file.relative), file.size, file.writeTime, file.digest});
             if (file.recent) {
                 ++store.recentlyWrittenFiles;
                 if (file.settlesIn >= store.settlesIn) store.youngestFile = file.relative;
@@ -452,7 +479,8 @@ NeuralModelStore DigestSettledNeuralModelStore(std::span<const NeuralModelRoot> 
                                                std::wstring_view driverVersion,
                                                std::stop_token stop,
                                                std::chrono::milliseconds quietPeriod,
-                                               std::chrono::milliseconds patience)
+                                               std::chrono::milliseconds patience,
+                                               ModelStoreMemo* memo)
 {
     const auto begun = std::chrono::steady_clock::now();
     const auto deadline = begun + patience;
@@ -460,7 +488,7 @@ NeuralModelStore DigestSettledNeuralModelStore(std::span<const NeuralModelRoot> 
     std::chrono::milliseconds slept{};
     std::wstring waitedOn;
     for (;;) {
-        NeuralModelStore store = DigestNeuralModelStore(roots, driverVersion, stop, quietPeriod);
+        NeuralModelStore store = DigestNeuralModelStore(roots, driverVersion, stop, quietPeriod, memo);
         store.reads = ++reads;
         store.waited = slept;
         if (!store.youngestFile.empty()) waitedOn = store.youngestFile;
@@ -470,8 +498,14 @@ NeuralModelStore DigestSettledNeuralModelStore(std::span<const NeuralModelRoot> 
         if (now >= deadline) return store;
         // A little past the youngest file's quiet period, so the next read
         // does not land on its last millisecond; never past the deadline.
+        // With a memo, sooner: a file caught mid-rewrite is usually whole again
+        // within 35-160 ms, and whole again means trusted at once, so the read
+        // is repeated every kModelStoreMemoPoll rather than after the full 2 s.
+        // A file that stays different still waits the quiet period out, since
+        // it only settles by aging past it.
         auto wait = std::min<std::chrono::steady_clock::duration>(
             store.settlesIn + std::chrono::milliseconds(50), deadline - now);
+        if (memo && memo->Size() > 0) wait = std::min<std::chrono::steady_clock::duration>(wait, kModelStoreMemoPoll);
         while (wait > std::chrono::steady_clock::duration::zero() && !stop.stop_requested()) {
             const auto slice = std::min<std::chrono::steady_clock::duration>(wait, std::chrono::milliseconds(50));
             std::this_thread::sleep_for(slice);
@@ -482,12 +516,137 @@ NeuralModelStore DigestSettledNeuralModelStore(std::span<const NeuralModelRoot> 
     }
 }
 
+bool ModelStoreMemo::Trusts(const std::wstring& key, uintmax_t size, const std::string& digest) const
+{
+    for (const auto& [candidate, entry] : entries_)
+        if (candidate == key) return entry.size == size && entry.digest == digest && !digest.empty();
+    return false;
+}
+
+bool ModelStoreMemo::Contradicts(const std::wstring& key, uintmax_t size, int64_t writeTime,
+                                 const std::string& digest) const
+{
+    for (const auto& [candidate, entry] : entries_)
+        if (candidate == key) return entry.writeTime == writeTime && (entry.size != size || entry.digest != digest);
+    return false;
+}
+
+bool ModelStoreMemo::Remember(const NeuralModelStore& first, const NeuralModelStore& second)
+{
+    if (!NeuralModelStoresAgree(first, second)) return false;
+    bool changed = false;
+    for (const auto& file : second.hashed) {
+        // Both reads saw these bytes: the file is in `first` with the same hash.
+        const bool both = std::ranges::any_of(first.hashed, [&](const auto& other) {
+            return other.key == file.key && other.size == file.size && other.digest == file.digest;
+        });
+        if (!both) continue;
+        const Entry entry{file.size, file.writeTime, file.digest};
+        auto found = std::ranges::find_if(entries_, [&](const auto& pair) { return pair.first == file.key; });
+        if (found == entries_.end()) {
+            entries_.push_back({file.key, entry});
+            changed = true;
+        } else if (found->second.size != entry.size || found->second.digest != entry.digest ||
+                   found->second.writeTime != entry.writeTime) {
+            found->second = entry;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+// One line per file: size, tab, write time, tab, 64 hex characters, tab, the
+// UTF-8 key. A line that does not parse is skipped rather than trusted, so a
+// damaged memo can only make a read wait, never let one through.
+bool ModelStoreMemo::Load(const std::filesystem::path& file)
+{
+    std::ifstream input(file, std::ios::binary);
+    if (!input) return false;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::array<size_t, 3> tabs{};
+        size_t from = 0;
+        bool parsed = true;
+        for (size_t& tab : tabs) {
+            tab = line.find('\t', from);
+            if (tab == std::string::npos) { parsed = false; break; }
+            from = tab + 1;
+        }
+        if (!parsed) continue;
+        const std::string size = line.substr(0, tabs[0]), written = line.substr(tabs[0] + 1, tabs[1] - tabs[0] - 1),
+                          digest = line.substr(tabs[1] + 1, tabs[2] - tabs[1] - 1);
+        const auto digits = [](const std::string& text, bool sign) {
+            return !text.empty() && std::ranges::all_of(text.substr(sign && text[0] == '-' ? 1 : 0), [](char c) { return c >= '0' && c <= '9'; }) &&
+                   text != "-" && text.size() <= 20;
+        };
+        if (!digits(size, false) || !digits(written, true)) continue;
+        if (digest.size() != 64 || !std::ranges::all_of(digest, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) continue;
+        const auto key = utf8_text::ToWideStrict(line.substr(tabs[2] + 1));
+        if (!key || key->empty()) continue;
+        std::erase_if(entries_, [&](const auto& pair) { return pair.first == *key; });
+        entries_.push_back({*key, {static_cast<uintmax_t>(std::stoull(size)), std::stoll(written), digest}});
+    }
+    return true;
+}
+
+bool ModelStoreMemo::Save(const std::filesystem::path& file) const
+{
+    std::string text;
+    for (const auto& [key, entry] : entries_) {
+        const auto utf8 = utf8_text::FromWideStrict(key);
+        if (!utf8) continue;
+        text += std::to_string(entry.size) + '\t' + std::to_string(entry.writeTime) + '\t' + entry.digest + '\t' + *utf8 + '\n';
+    }
+    return atomic_file::Replace(file, text).failed == atomic_file::Step::None;
+}
+
+namespace {
+std::mutex g_modelStoreMemoMutex;
+std::filesystem::path g_modelStoreMemoFile;
+std::optional<ModelStoreMemo> g_modelStoreMemo;
+} // namespace
+
+void UseNeuralModelStoreMemo(std::filesystem::path file)
+{
+    std::lock_guard lock(g_modelStoreMemoMutex);
+    g_modelStoreMemoFile = std::move(file);
+    g_modelStoreMemo.reset();
+}
+
 NeuralModelStore ResolveNeuralModelStore(std::wstring_view driverVersion, std::stop_token stop,
                                          std::chrono::milliseconds patience)
 {
     const std::vector<NeuralModelRoot> roots = RegisteredNeuralModelRoots();
+    // The memo is copied out and merged back, never held across the read: two
+    // resolves (the cache's eviction and a render key) may wait at once, and
+    // one must not queue behind the other's quiet period.
+    std::filesystem::path file;
+    ModelStoreMemo memo;
+    {
+        std::lock_guard lock(g_modelStoreMemoMutex);
+        file = g_modelStoreMemoFile;
+        if (!file.empty()) {
+            if (!g_modelStoreMemo) {
+                g_modelStoreMemo.emplace();
+                g_modelStoreMemo->Load(file);
+            }
+            memo = *g_modelStoreMemo;
+        }
+    }
     return DigestSettledNeuralModelStore(roots, driverVersion, std::move(stop), kModelStoreQuietPeriod,
-                                         patience);
+                                         patience, file.empty() ? nullptr : &memo);
+}
+
+void RememberAgreedNeuralModelStores(const NeuralModelStore& first, const NeuralModelStore& second)
+{
+    std::lock_guard lock(g_modelStoreMemoMutex);
+    if (g_modelStoreMemoFile.empty()) return;
+    if (!g_modelStoreMemo) {
+        g_modelStoreMemo.emplace();
+        g_modelStoreMemo->Load(g_modelStoreMemoFile);
+    }
+    if (g_modelStoreMemo->Remember(first, second)) g_modelStoreMemo->Save(g_modelStoreMemoFile);
 }
 
 NeuralRuntimeBanner ParseNeuralRuntimeBanner(std::string_view reshadeLog)
