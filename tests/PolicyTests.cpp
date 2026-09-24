@@ -2203,6 +2203,44 @@ void chrome_motion_toast_rises_holds_and_goes_and_a_second_one_does_not_bounce_t
     CHECK(kToastIn.count() >= 120 && kToastIn.count() <= 220 && kToastOut.count() >= 120 && kToastOut.count() <= 220);
 }
 
+void chrome_motion_band_reveals_only_new_coverage_left_to_right_test()
+{
+    using namespace chrome_motion;
+    using I = BandGrowth::Interval;
+    const Clock::time_point start{};
+    BandGrowth band;
+    // The first observation is shown as it is: retained coverage does not replay.
+    CHECK(!band.Observe({{0, 100}}, start, true));
+    CHECK(band.Hidden(start).empty());
+    // A segment extends the span: only 100..160 reveals, from its left.
+    CHECK(band.Observe({{0, 160}}, start, true));
+    auto hidden = band.Hidden(start);
+    REQUIRE(hidden.size() == 1);
+    CHECK(hidden[0].start == 100 && hidden[0].end == 160);
+    const auto half = band.Hidden(start + kBandGrow / 2);
+    REQUIRE(half.size() == 1);
+    CHECK(half[0].start > 130 && half[0].end == 160);   // ease-out: past halfway
+    CHECK(band.Hidden(start + kBandGrow).empty());
+    CHECK(!band.Animating(start + kBandGrow));
+    // A hole filled between two spans reveals only the hole.
+    BandGrowth merge;
+    merge.Observe({{0, 100}, {200, 300}}, start, true);
+    CHECK(merge.Observe({{0, 300}}, start, true));
+    hidden = merge.Hidden(start);
+    REQUIRE(hidden.size() == 1);
+    CHECK(hidden[0].start == 100 && hidden[0].end == 200);
+    // Without motion nothing eases.
+    BandGrowth still;
+    still.Observe({{0, 100}}, start, false);
+    CHECK(!still.Observe({{0, 200}}, start, false));
+    CHECK(still.Hidden(start).empty());
+    // After a reset the next observation is a first one again.
+    band.Reset();
+    CHECK(!band.Observe({{0, 500}}, start, true));
+    CHECK(kBandGrow.count() >= 120 && kBandGrow.count() <= 220);
+    (void)I{};
+}
+
 void chrome_motion_render_complete_glow_sweeps_once_and_only_for_a_render_watched_happening_test()
 {
     using namespace chrome_motion;
@@ -14291,6 +14329,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(chrome_motion_fades_ease_without_overshoot_and_honour_reduced_motion_test),
     TEST_CASE(chrome_motion_compare_mark_slides_from_the_old_mode_to_the_new_test),
     TEST_CASE(chrome_motion_toast_rises_holds_and_goes_and_a_second_one_does_not_bounce_test),
+    TEST_CASE(chrome_motion_band_reveals_only_new_coverage_left_to_right_test),
     TEST_CASE(chrome_motion_render_complete_glow_sweeps_once_and_only_for_a_render_watched_happening_test),
     TEST_CASE(failed_icon_font_uses_label_only_presentation_test),
     TEST_CASE(button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test),

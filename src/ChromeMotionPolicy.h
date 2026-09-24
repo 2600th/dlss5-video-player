@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <utility>
+#include <vector>
 
 // The player chrome's motion, as numbers. DESIGN.md "Player" is the spec this
 // implements: motion says where something came from or went, it is short
@@ -198,6 +200,70 @@ public:
 
 private:
     std::optional<Clock::time_point> shownAt_;
+};
+
+// The render band growing: when a segment lands, the coverage it adds is
+// revealed left to right over 180 ms (ease-out) instead of appearing in one
+// step, so the band reads as growing where the render works. Only coverage
+// that is new since the last observation eases; what was already shown stays.
+// The first observation of a session (retained coverage, a cached range)
+// appears as it is. Without motion nothing eases.
+inline constexpr std::chrono::milliseconds kBandGrow{180};
+
+class BandGrowth {
+public:
+    struct Interval { int64_t start{}; int64_t end{}; };
+    // `spans` sorted and disjoint, as the coverage lane draws them. Returns
+    // whether a reveal started.
+    bool Observe(const std::vector<Interval>& spans, Clock::time_point now, bool motion)
+    {
+        bool started = false;
+        if (seen_ && motion) {
+            for (const Interval& span : spans) {
+                // The parts of `span` not inside any previous span.
+                int64_t cursor = span.start;
+                for (const Interval& old : last_) {
+                    if (old.end <= cursor || old.start >= span.end) continue;
+                    if (old.start > cursor) { growths_.push_back({{cursor, old.start}, now}); started = true; }
+                    cursor = std::max(cursor, old.end);
+                    if (cursor >= span.end) break;
+                }
+                if (cursor < span.end) { growths_.push_back({{cursor, span.end}, now}); started = true; }
+            }
+        }
+        std::erase_if(growths_, [&](const Growth& g) { return now - g.at >= kBandGrow; });
+        last_ = spans;
+        seen_ = true;
+        return started;
+    }
+    void Reset()
+    {
+        last_.clear();
+        growths_.clear();
+        seen_ = false;
+    }
+    // The stretches still hidden: [revealed edge, interval end) of each reveal
+    // in progress.
+    [[nodiscard]] std::vector<Interval> Hidden(Clock::time_point now) const
+    {
+        std::vector<Interval> hidden;
+        for (const Growth& g : growths_) {
+            const double t = std::chrono::duration<double>(now - g.at).count() /
+                             std::chrono::duration<double>(kBandGrow).count();
+            if (t >= 1.0) continue;
+            const double e = EaseOut(t);
+            const int64_t edge = g.interval.start + static_cast<int64_t>(std::llround(double(g.interval.end - g.interval.start) * e));
+            if (edge < g.interval.end) hidden.push_back({edge, g.interval.end});
+        }
+        return hidden;
+    }
+    [[nodiscard]] bool Animating(Clock::time_point now) const { return !Hidden(now).empty(); }
+
+private:
+    struct Growth { Interval interval; Clock::time_point at; };
+    std::vector<Interval> last_;
+    std::vector<Growth> growths_;
+    bool seen_{false};
 };
 
 // The once-per-render glow. `Sweep` is where the highlight has got to across

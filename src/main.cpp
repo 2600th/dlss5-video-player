@@ -3096,6 +3096,8 @@ private:
     static constexpr UINT_PTR kGlowTimerId=0xD15C;
     // A toast's next change: every frame while it moves, the hold's end while it sits.
     static constexpr UINT_PTR kToastTimerId=0xD15D;
+    // The render band's reveal of a landed segment; 180 ms at a time.
+    static constexpr UINT_PTR kBandTimerId=0xD15E;
     static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
     // How long a live or cached pair may stay NotReady before the player stops
     // waiting for it. A segment source is reopened at every boundary and after
@@ -7970,6 +7972,19 @@ private:
         m_glowTimer=m_hwnd?SetTimer(m_hwnd,kGlowTimerId,m_activityMotionEnabled?chrome_motion::kPlaybackFrameMs:UINT(chrome_motion::kCompleteGlow.count()),nullptr):0;
         InvalidatePlaybackProgress();
     }
+    // New coverage from a landed segment eases in along the lane; the timer
+    // runs at the playback rate for the 180 ms of each reveal only.
+    void ObserveBandGrowth(){
+        if(!m_liveSession){m_bandGrowth.Reset();return;}
+        std::vector<chrome_motion::BandGrowth::Interval> spans;
+        for(const CoverageSpan& span:LiveCoverage())spans.push_back({span.start100ns,span.end100ns});
+        if(m_bandGrowth.Observe(spans,Clock::now(),m_activityMotionEnabled)&&!m_bandTimer&&m_hwnd)
+            m_bandTimer=SetTimer(m_hwnd,kBandTimerId,chrome_motion::kPlaybackFrameMs,nullptr);
+    }
+    void AnimateBandGrowth(){
+        InvalidatePlaybackProgress();
+        if(!m_bandGrowth.Animating(Clock::now())&&m_bandTimer){KillTimer(m_hwnd,m_bandTimer);m_bandTimer=0;}
+    }
     void AnimateCompletionGlow(){
         InvalidatePlaybackProgress();
         if(!m_completeGlow.Animating(Clock::now())&&m_glowTimer){KillTimer(m_hwnd,m_glowTimer);m_glowTimer=0;}
@@ -8057,6 +8072,7 @@ private:
         // "Render 100%" a moment before the last hole is published, so the
         // chips can be unchanged on the call that sees the session finish.
         if(m_completionLatch.Observe(m_liveSession&&m_liveSegments!=nullptr,LiveSessionFinished()))StartCompletionGlow();
+        ObserveBandGrowth();
         const status_chips::Snapshot chips=BuildStatusChips();
         if(chips==m_cachedChips)return;
         bool layoutChanged=false;
@@ -8806,6 +8822,16 @@ private:
                 }
             else{RECT band{rendered.left,tr.bottom-coverageLane,rendered.right,tr.bottom};FillRect(dc,&band,nb);}
             DeleteObject(nb);
+            // What a segment just added is revealed left to right (BandGrowth):
+            // the part not revealed yet is still the empty lane.
+            if(m_liveSession){
+                HBRUSH lane=CreateSolidBrush(RGB(68,71,77));
+                for(const auto& hidden:m_bandGrowth.Hidden(Clock::now())){
+                    RECT cover{markerX(hidden.start),tr.bottom-coverageLane,markerX(hidden.end),tr.bottom};
+                    if(cover.right>cover.left)FillRect(dc,&cover,lane);
+                }
+                DeleteObject(lane);
+            }
             DrawCompletionGlow(dc,RECT{rendered.left,tr.bottom-coverageLane,rendered.right,tr.bottom});
         }
         // Where the render is working right now, hatched, from the head of
@@ -11384,7 +11410,7 @@ private:
         case dark_mode::WM_UAHDRAWMENU:if(DrawDarkMenuBar(h,reinterpret_cast<const dark_mode::UAHMENU*>(l)))return TRUE;break;
         case dark_mode::WM_UAHDRAWMENUITEM:if(DrawDarkMenuBarItem(h,reinterpret_cast<const dark_mode::UAHDRAWMENUITEM*>(l)))return TRUE;break;
         case WM_NCPAINT:case WM_NCACTIVATE:{const LRESULT result=DefWindowProcW(h,m,w,l);PaintMenuBarSeparator(h);return result;}
-        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}if(w==kHoverTimerId){AnimateHover();return 0;}if(w==kGlowTimerId){AnimateCompletionGlow();return 0;}if(w==kToastTimerId){AnimateToast();return 0;}break;
+        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}if(w==kHoverTimerId){AnimateHover();return 0;}if(w==kGlowTimerId){AnimateCompletionGlow();return 0;}if(w==kToastTimerId){AnimateToast();return 0;}if(w==kBandTimerId){AnimateBandGrowth();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
         case WM_ENTERSIZEMOVE:m_inSizeMove=true;StartModalTick();break;
@@ -11672,7 +11698,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     std::array<chrome_motion::Fade,static_cast<size_t>(ToolbarAction::None)+1> m_hoverFades{};uint32_t m_hoverAnimating=0;UINT_PTR m_hoverTimer=0;
     chrome_motion::Glow m_completeGlow;chrome_motion::CompletionLatch m_completionLatch;UINT_PTR m_glowTimer=0;
     chrome_motion::Toast m_toast;
-    std::optional<WINDOWPLACEMENT> m_placementBeforeFullscreen;std::wstring m_toastText;COLORREF m_toastMark=ui_palette::PrimaryBlue;UINT_PTR m_toastTimer=0;
+    std::optional<WINDOWPLACEMENT> m_placementBeforeFullscreen;
+    chrome_motion::BandGrowth m_bandGrowth;UINT_PTR m_bandTimer=0;std::wstring m_toastText;COLORREF m_toastMark=ui_palette::PrimaryBlue;UINT_PTR m_toastTimer=0;
     Clock::time_point m_liveSessionStartedAt{};
     // The sliders' hover (knob size) and the volume's value bubble, which
     // lingers slider::kBubbleLingerMs after a drag ends before it fades.
