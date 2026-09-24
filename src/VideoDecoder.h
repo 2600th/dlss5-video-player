@@ -10,6 +10,7 @@
 #include "PixelLayout.h"
 #include "UntaggedColorPolicy.h"
 #include "HdrPolicy.h"
+#include "HdrToneMapGpu.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -284,8 +285,17 @@ public:
     // What a render keyed on the decoded pixels adds for this source; empty
     // for SDR. Known after any open, OpenMetadata included.
     std::string ToneMapIdentityTerm() const {
-        return hdr_policy::ToneMapIdentityTerm(SourceHdrSignal(), m_source.hdrPeakNits);
+        return hdr_policy::ToneMapIdentityTerm(SourceHdrSignal(), m_source.hdrPeakNits, ToneMapsItself());
     }
+    // Whether this source's tone map is the decoder's own integer pass
+    // (HdrToneMap.h, on the GPU or its CPU twin) rather than ffmpeg's float chain.
+    bool ToneMapsItself() const {
+        return hdr_tonemap::Supported(m_source.color, m_source.width, m_source.height);
+    }
+    // Whether the running child emits P010 for that pass, and where the last
+    // frame of it was tone mapped - for the log and the throughput probe.
+    bool DecodingP010() const { return m_ffmpegP010; }
+    bool LastToneMapOnGpu() const { return m_lastToneMapGpu; }
     // Asks for an HDR source to be decoded as PQ BT.2020 in ten bits (VideoFrame::pq)
     // instead of tone mapped, for an HDR display to show the original as graded.
     // A presentation request and nothing else: an SDR source ignores it, and the
@@ -482,6 +492,11 @@ private:
     // SetHdrPresentation's request, and what the running child was started with.
     bool m_hdrPresentation = false;
     bool m_ffmpegPq = false;
+    // The running child emits P010 that the decoder tone maps itself (HdrToneMap.h),
+    // with this table: built once per source and peak, kept across restarts.
+    bool m_ffmpegP010 = false;
+    bool m_lastToneMapGpu = false;
+    std::shared_ptr<const hdr_tonemap::Table> m_toneMapTable;
     uint32_t m_sourceGeneration = 0;
     bool m_restartDiscontinuity = false;
     MediaSourceKind m_sourceKind = MediaSourceKind::LocalFile;

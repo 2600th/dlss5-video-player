@@ -69,6 +69,19 @@ it.
 Playback preserves the decoded source dimensions. Selecting an SR output never
 downsamples a source to fit a nominal DLSS quality ratio.
 
+An HDR source is tone mapped to SDR on decode (`HdrPolicy.h`). For a BT.2020
+stream with even dimensions - every HDR10 and HLG file - ffmpeg hands over P010
+and the decoder runs the curve itself (`HdrToneMap.h`): a 65^3 table of the
+curve in linear light, built once per source and peak in double, and per pixel a
+fixed-point Y'CbCr conversion, a tetrahedral interpolation and a threshold search
+for the 8-bit code - integer arithmetic throughout, so the D3D11 compute pass
+(`HdrToneMapGpu.cpp`) and its CPU twin produce identical bytes and the render key
+(`|hdr-sdr-hable-v2-lut65-...`) names the algorithm, not the device. 4K: 84.7 fps
+end to end against ffmpeg's float chain's 30.7 (which took 89 s of CPU time for
+300 frames); against that chain the bytes are within one code value for 99.1 %
+of PQ samples and 96 % of HLG ones. Any other matrix, or odd geometry, keeps
+ffmpeg's chain and the v1 key term.
+
 ## Timing
 
 Audio is the preferred master clock. The video side checks decoded timestamps against that clock. Frames that are too late are discarded and temporal history is reset rather than slowing playback.

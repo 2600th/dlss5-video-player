@@ -158,6 +158,7 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     }
     swap(m_ffmpegEmittedFrames,other.m_ffmpegEmittedFrames);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
     swap(m_hdrPresentation,other.m_hdrPresentation);swap(m_ffmpegPq,other.m_ffmpegPq);
+    swap(m_ffmpegP010,other.m_ffmpegP010);swap(m_lastToneMapGpu,other.m_lastToneMapGpu);swap(m_toneMapTable,other.m_toneMapTable);
     swap(m_ffmpegSpawnFirstFrame,other.m_ffmpegSpawnFirstFrame);swap(m_ffmpegFirstSourceFrame,other.m_ffmpegFirstSourceFrame);
     swap(m_restartFirstFrameMs,other.m_restartFirstFrameMs);swap(m_drainMsPerFrame,other.m_drainMsPerFrame);
     swap(m_seekTiming,other.m_seekTiming);swap(m_seekStart,other.m_seekStart);swap(m_seekTargetSeconds,other.m_seekTargetSeconds);swap(m_seekTimingPending,other.m_seekTimingPending);
@@ -473,7 +474,8 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     // so a refusal can tell "says BT.2020" from "says nothing".
     m_source.color.matrix = colorSpace.empty() ? ColorMatrix::Unspecified :
         colorSpace == "bt709" ? ColorMatrix::Bt709 :
-        (colorSpace == "bt470bg" || colorSpace == "smpte170m") ? ColorMatrix::Bt601 : ColorMatrix::Other;
+        (colorSpace == "bt470bg" || colorSpace == "smpte170m") ? ColorMatrix::Bt601 :
+        colorSpace == "bt2020nc" ? ColorMatrix::Bt2020Ncl : ColorMatrix::Other;
     m_source.color.range = colorRange == "tv" ? ColorRange::Limited :
         colorRange == "pc" ? ColorRange::Full : ColorRange::Unspecified;
     m_source.color.primaries = colorPrimaries.empty() ? ColorPrimaries::Unspecified :
@@ -898,22 +900,34 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     const hdr_policy::HdrSignal hdr = hdr_policy::SignalOf(m_source.color);
     // Or kept HDR, as PQ in ten bits, when the presentation asked for it.
     const bool pq = hdr != hdr_policy::HdrSignal::Sdr && m_hdrPresentation && !nv12;
+    // Or handed over as P010 for the decoder's own tone map (HdrToneMap.h), which
+    // runs on the GPU: ffmpeg's float chain took every core for 30 fps at 4K.
+    const bool p010 = hdr != hdr_policy::HdrSignal::Sdr && !pq && !nv12 && ToneMapsItself();
+    if (p010) {
+        const double peak = m_source.hdrPeakNits > 0.0 ? m_source.hdrPeakNits : hdr_policy::ToneMapPeakNits(hdr, 0.0, 0.0);
+        const bool full = m_source.color.range == ColorRange::Full;
+        if (!m_toneMapTable || m_toneMapTable->signal != hdr || m_toneMapTable->peakNits != peak ||
+            m_toneMapTable->fullRange != full)
+            m_toneMapTable = std::make_shared<const hdr_tonemap::Table>(hdr_tonemap::MakeTable(hdr, peak, full));
+    }
     if (hdr != hdr_policy::HdrSignal::Sdr) {
         const bool matrixDeclared = m_source.color.matrix != ColorMatrix::Unspecified;
-        const std::wstring toneMap = pq ? hdr_policy::PqPresentationFilter(hdr, matrixDeclared) :
+        const std::wstring toneMap = p010 ? std::wstring() : pq ? hdr_policy::PqPresentationFilter(hdr, matrixDeclared) :
             hdr_policy::SdrToneMapFilter(
                 hdr, m_source.hdrPeakNits > 0.0 ? m_source.hdrPeakNits : hdr_policy::ToneMapPeakNits(hdr, 0.0, 0.0),
                 matrixDeclared) + L",format=bgra";
+        const std::wstring then = toneMap.empty() ? std::wstring() : L"," + toneMap;
         if (acceleration == FFmpegAcceleration::Cuda)
             args << L"-vf scale_cuda=" << m_source.width << L":" << m_source.height
-                 << L":format=p010:interp_algo=bicubic:passthrough=0,hwdownload,format=p010le," << toneMap << L" ";
+                 << L":format=p010:interp_algo=bicubic:passthrough=0,hwdownload,format=p010le" << then << L" ";
         else if (acceleration == FFmpegAcceleration::D3D11Va)
             args << L"-vf hwdownload,format=p010le,scale=" << m_source.width << L":" << m_source.height
-                 << L":flags=bicubic," << toneMap << L" ";
+                 << L":flags=bicubic" << (p010 ? L",format=p010le" : L"") << then << L" ";
         else if (m_source.nativeWidth && m_source.nativeHeight && (m_source.width != m_source.nativeWidth || m_source.height != m_source.nativeHeight))
-            args << L"-vf scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic," << toneMap << L" ";
+            args << L"-vf scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic"
+                 << (p010 ? L",format=p010le" : L"") << then << L" ";
         else
-            args << L"-vf " << toneMap << L" ";
+            args << L"-vf " << (p010 ? L"format=p010le" : toneMap.c_str()) << L" ";
     } else if (acceleration == FFmpegAcceleration::Cuda) {
         args << L"-vf scale_cuda=" << m_source.width << L":" << m_source.height
              << L":format=nv12:interp_algo=bicubic:passthrough=0,hwdownload,format=nv12";
@@ -934,7 +948,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     if (m_source.stillImage) args << L"-frames:v 1 ";
     if (m_source.gif && m_source.durationSec > seekSeconds)
         args << L"-t " << std::fixed << std::setprecision(6) << (m_source.durationSec - seekSeconds) << L" ";
-    args << L"-pix_fmt " << (nv12 ? L"nv12" : pq ? L"x2bgr10le" : L"bgra") << L" -fps_mode cfr -r "
+    args << L"-pix_fmt " << (nv12 ? L"nv12" : pq ? L"x2bgr10le" : p010 ? L"p010le" : L"bgra") << L" -fps_mode cfr -r "
          << std::fixed << std::setprecision(6) << m_source.fps
          << L" -f rawvideo pipe:1";
 
@@ -988,6 +1002,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     m_ffmpegSpawnFirstFrame = m_ffmpegFirstSourceFrame = FirstFrameAtOrAfter(seekSeconds,m_source.fps);
     m_ffmpegAcceleration = acceleration;
     m_ffmpegPq = pq;
+    m_ffmpegP010 = p010;
     m_pendingFrame.clear();m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
     m_restartDiscontinuity = false;
     if(m_seekTimingPending){
@@ -996,7 +1011,8 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     }
     const char* accelerationName = acceleration == FFmpegAcceleration::Cuda ? "CUDA decode + GPU scale" :
         acceleration == FFmpegAcceleration::D3D11Va ? "D3D11VA decode" : "software decode";
-    LOG("FFmpeg raw " << (nv12 ? "NV12" : pq ? "PQ R10G10B10A2" : "BGRA") << " process started with " << accelerationName << ".");
+    LOG("FFmpeg raw " << (nv12 ? "NV12" : pq ? "PQ R10G10B10A2" : p010 ? "P010 (tone mapped by the decoder)" : "BGRA")
+        << " process started with " << accelerationName << ".");
     return true;
 }
 
@@ -1054,6 +1070,7 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
         // is the sort of log that sends the next reader to a debugger.
         const char* matrix = m_source.color.matrix == ColorMatrix::Bt709 ? "bt709" :
             m_source.color.matrix == ColorMatrix::Bt601 ? "bt601" :
+            m_source.color.matrix == ColorMatrix::Bt2020Ncl ? "bt2020nc" :
             m_source.color.matrix == ColorMatrix::Other ? "other" : "unspecified";
         const char* range = m_source.color.range == ColorRange::Limited ? "tv" :
             m_source.color.range == ColorRange::Full ? "pc" : "unspecified";
@@ -1244,12 +1261,16 @@ std::string VideoDecoder::LastErrorOutput() const {
 
 VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std::stop_token stop,bool block) {
     if (!m_ffmpegStdout) return VideoReadResult::EndOfStream;
-    const size_t frameBytes = FrameBytes(m_source.layout, m_source.width, m_source.height);
+    const size_t outputBytes = FrameBytes(m_source.layout, m_source.width, m_source.height);
+    // What one frame is on the pipe: the output itself, or the P010 the decoder
+    // tone maps into it (HdrToneMap.h). The P010 buffer is this decoder's own and
+    // is kept from frame to frame; the output buffers come from the pool.
+    const size_t frameBytes = m_ffmpegP010 ? hdr_tonemap::P010FrameBytes(m_source.width, m_source.height) : outputBytes;
     if (!frameBytes) return VideoReadResult::Error;
   for(;;){
     if(stop.stop_requested())return VideoReadResult::Cancelled;
     if(m_pendingFrame.size()!=frameBytes){
-        m_pendingFrame=TakeRecycledBuffer(frameBytes);
+        if(!m_ffmpegP010)m_pendingFrame=TakeRecycledBuffer(frameBytes);
         if(m_pendingFrame.size()!=frameBytes){m_pendingFrame.resize(frameBytes);m_frameBufferFills.fetch_add(1,std::memory_order_relaxed);}
         m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
     }
@@ -1363,11 +1384,24 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     // The buffer stays put, so skipping costs nothing but the pipe read.
     if(sourceFrame<m_ffmpegFirstSourceFrame)continue;
 
-    out.bgra.swap(m_pendingFrame);
+    if(m_ffmpegP010){
+        std::vector<uint8_t> bgra=TakeRecycledBuffer(outputBytes);
+        if(bgra.size()!=outputBytes){bgra.resize(outputBytes);m_frameBufferFills.fetch_add(1,std::memory_order_relaxed);}
+        const bool gpu=hdr_tonemap::ToneMapFrame(*m_toneMapTable,m_pendingFrame.data(),m_source.width,m_source.height,bgra.data())==hdr_tonemap::Path::Gpu;
+        if(m_ffmpegEmittedFrames==1||gpu!=m_lastToneMapGpu)
+            LOG("HDR tone map: "<<m_source.width<<"x"<<m_source.height<<" P010 to BGRA on the "<<(gpu?"GPU":"CPU")<<" ("
+                <<hdr_policy::ToneMapIdentityTerm(SourceHdrSignal(),m_source.hdrPeakNits,true).substr(1)<<").");
+        m_lastToneMapGpu=gpu;
+        out.bgra.swap(bgra);
+        // The caller's previous buffer goes back to the pool; the P010 one stays.
+        RecycleFrameBuffer(std::move(bgra));
+    }else{
+        out.bgra.swap(m_pendingFrame);
+        RecycleFrameBuffer(std::move(m_pendingFrame));
+        m_pendingFrame.clear();
+    }
     out.layout = m_source.layout;
     out.pq = m_ffmpegPq;
-    RecycleFrameBuffer(std::move(m_pendingFrame));
-    m_pendingFrame.clear();
     const int64_t timelineFrame=sourceFrame-m_ffmpegFirstSourceFrame;
     out.timestamp100ns = m_ffmpegSeekBase100ns +
         static_cast<int64_t>((static_cast<double>(timelineFrame) / m_source.fps) * 10000000.0);

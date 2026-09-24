@@ -32,6 +32,10 @@ enum class ColorMatrix {
     // ffprobe's bt470bg and smpte170m: the same coefficients, 625- and
     // 525-line, and the shader has one set for both.
     Bt601,
+    // ffprobe's bt2020nc, the HDR10 and HLG matrix. Named because the decoder's
+    // own tone map (HdrToneMap.h) implements exactly this one; the NV12 pass
+    // does not, so it refuses it like Other.
+    Bt2020Ncl,
     Other,
 };
 
@@ -84,6 +88,7 @@ inline SourceNv12Conversion SourceNv12ConversionFor(const SourceColorDescription
         case ColorMatrix::Bt601:
             return full ? SourceNv12Conversion::Bt601Full : SourceNv12Conversion::Bt601Limited;
         case ColorMatrix::Unspecified:
+        case ColorMatrix::Bt2020Ncl:
         case ColorMatrix::Other:
             break;
     }

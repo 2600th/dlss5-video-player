@@ -265,7 +265,11 @@ once per video, never measured frame by frame, which would make the picture
 pump. The status line says **HDR tone-mapped to SDR** while one is
 loaded. Renders of HDR sources made before this saw the untone-mapped picture,
 flat and grey, and are not served again: the tone map and its peak are part of
-the render's identity.
+the render's identity. The curve runs on the GPU for a BT.2020 stream (every
+HDR10 and HLG file): a 4K HDR video decodes at about 85 fps on an RTX 4080 SUPER,
+where tone mapping on the CPU managed 30 and kept every core busy. A machine
+without a usable GPU runs the same integer arithmetic on the CPU and gets the
+same picture, byte for byte.
 
 On a display Windows has in HDR mode (**Settings > Display > Use HDR**), the
 player presents in HDR. DLSS 5, SDR videos, subtitles and the tags and loupe on

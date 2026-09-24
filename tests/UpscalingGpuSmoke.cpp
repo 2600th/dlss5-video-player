@@ -8,6 +8,7 @@
 #include "UpscalingPolicy.h"
 #include "Utf8Text.h"
 #include "SubtitlePolicy.h"
+#include "HdrToneMapGpu.h"
 #include <d3d12sdklayers.h>
 #include <mfapi.h>
 #include <algorithm>
@@ -73,6 +74,13 @@ inline constexpr wchar_t kSrQualitySource[]=L"mandelbrot=s=1920x1080:r=30";
 // covered edge to edge. Needs no source clip.
 int RunSubtitleUploadProbe();
 
+// `hdr-tonemap <clip> [raw]` holds the decoder's own HDR tone map to its promise
+// (HdrToneMap.h): the GPU pass and the CPU fallback give the same bytes for every
+// table on every ten-bit value, the pace of each on a 4K frame, and the decoder's
+// throughput end to end on an HDR clip, with the first 30 frames written to `raw`
+// for a comparison against ffmpeg's float chain.
+int RunHdrToneMapProbe(const wchar_t* source,const wchar_t* rawOut);
+
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if(argc==4&&std::wstring_view(argv[2])==L"sr-quality")return RunSrQualityProbe(argv[1],argv[3]);
@@ -87,6 +95,7 @@ int wmain(int argc,wchar_t** argv) {
     if(argc==4&&std::wstring_view(argv[3])==L"device-loss")return RunDeviceLossProbe(argv[1],std::wcstoul(argv[2],nullptr,10));
     if(argc==3&&std::wstring_view(argv[2])==L"hdr-output")return RunHdrOutputProbe(argv[1]);
     if(argc==2&&std::wstring_view(argv[1])==L"subtitle-upload")return RunSubtitleUploadProbe();
+    if((argc==3||argc==4)&&std::wstring_view(argv[1])==L"hdr-tonemap")return RunHdrToneMapProbe(argv[2],argc==4?argv[3]:nullptr);
     if(argc!=3)return 2; // source path, target height (1440 or 2160)
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
     int code=1;
@@ -751,4 +760,73 @@ int RunSubtitleUploadProbe()
     }
     DestroyWindow(window);
     return code;
+}
+
+int RunHdrToneMapProbe(const wchar_t* source,const wchar_t* rawOut)
+{
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    int code=1;
+    {
+        // 1. The GPU pass and its CPU twin give the same bytes, for every table the
+        // decoder builds (PQ and HLG, limited and full range), on every ten-bit
+        // sample value including the extremes a stream should never carry.
+        constexpr uint32_t w=1920,h=1080;
+        std::vector<uint8_t> p010(hdr_tonemap::P010FrameBytes(w,h));
+        uint32_t state=0x9E3779B9u;
+        const auto next=[&]{state^=state<<13;state^=state>>17;state^=state<<5;return state;};
+        auto* samples=reinterpret_cast<uint16_t*>(p010.data());
+        for(size_t i=0;i<p010.size()/2;++i){
+            // Mostly a plausible picture, one sample in eight anywhere in 0..1023.
+            const uint32_t value=(next()&7u)?64u+next()%877u:next()%1024u;
+            samples[i]=uint16_t(value<<6);
+        }
+        bool identical=true;uint32_t tables=0;
+        for(const auto signal:{hdr_policy::HdrSignal::Pq,hdr_policy::HdrSignal::Hlg})
+            for(const bool full:{false,true}){
+                const hdr_tonemap::Table table=hdr_tonemap::MakeTable(signal,signal==hdr_policy::HdrSignal::Pq?1000.0:1000.0,full);
+                std::vector<uint8_t> gpu(size_t(w)*h*4u),cpu(size_t(w)*h*4u);
+                const bool ran=hdr_tonemap::ToneMapFrameGpu(table,p010.data(),w,h,gpu.data());
+                hdr_tonemap::ToneMapFrameCpu(table,p010.data(),w,h,cpu.data());
+                size_t differing=0;for(size_t i=0;i<cpu.size();++i)differing+=gpu[i]!=cpu[i];
+                std::cout<<"hdr-tonemap: table "<<(signal==hdr_policy::HdrSignal::Pq?"pq":"hlg")<<(full?" full":" limited")
+                         <<" gpu="<<ran<<" differing bytes="<<differing<<"\n";
+                identical=identical&&ran&&differing==0;++tables;
+            }
+        // 2. The CPU fallback's own pace at 4K, which is what a machine without the
+        // GPU pass decodes at.
+        {
+            constexpr uint32_t W=3840,H=2160;
+            std::vector<uint8_t> big(hdr_tonemap::P010FrameBytes(W,H)),out(size_t(W)*H*4u);
+            auto* s=reinterpret_cast<uint16_t*>(big.data());
+            for(size_t i=0;i<big.size()/2;++i)s[i]=uint16_t((64u+next()%877u)<<6);
+            const hdr_tonemap::Table table=hdr_tonemap::MakeTable(hdr_policy::HdrSignal::Pq,1000.0,false);
+            const auto time=[&](bool gpu){
+                const auto start=std::chrono::steady_clock::now();
+                for(int i=0;i<20;++i){if(gpu)hdr_tonemap::ToneMapFrameGpu(table,big.data(),W,H,out.data());else hdr_tonemap::ToneMapFrameCpu(table,big.data(),W,H,out.data());}
+                return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()/20.0;
+            };
+            time(true);
+            std::cout<<"hdr-tonemap: 3840x2160 frame ms: gpu="<<time(true)<<" cpu="<<time(false)<<"\n";
+        }
+        // 3. The decoder end to end on an HDR clip: frames a second, the path it
+        // took, and the first frames written out for a comparison with ffmpeg's
+        // float chain.
+        VideoDecoder decoder;
+        if(!decoder.OpenSequential(source,MediaSourceKind::LocalFile,{},false)){std::cout<<"could not open the source\n";return 3;}
+        std::cout<<"hdr-tonemap: source "<<decoder.Width()<<"x"<<decoder.Height()<<" term="<<decoder.ToneMapIdentityTerm()
+                 <<" decoderToneMaps="<<decoder.ToneMapsItself()<<"\n";
+        std::ofstream raw;if(rawOut&&*rawOut)raw.open(rawOut,std::ios::binary);
+        VideoFrame frame;uint32_t frames=0;bool allGpu=true;
+        const auto start=std::chrono::steady_clock::now();
+        while(decoder.ReadNext(frame)){
+            if(raw.is_open()&&frames<30)raw.write(reinterpret_cast<const char*>(frame.bgra.data()),std::streamsize(frame.bgra.size()));
+            allGpu=allGpu&&decoder.LastToneMapOnGpu();
+            ++frames;
+        }
+        const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+        std::cout<<"hdr-tonemap: decoded "<<frames<<" frames in "<<seconds<<" s = "<<(seconds>0?frames/seconds:0.0)
+                 <<" fps, p010="<<decoder.DecodingP010()<<" allGpu="<<allGpu<<"\n";
+        code=identical&&tables==4&&frames>0&&allGpu&&decoder.ToneMapsItself()?0:6;
+    }
+    MFShutdown();CoUninitialize();return code;
 }

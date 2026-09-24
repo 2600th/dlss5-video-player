@@ -99,11 +99,15 @@ inline std::wstring SdrToneMapFilter(HdrSignal signal, double peakNits, bool mat
 // The cache-key term a render of an HDR source carries: its input pixels are
 // the tone-mapped ones now, where a render made before saw PQ code values as
 // SDR. The peak is in it because it is in the pixels. Empty for SDR, whose
-// keys do not move.
-inline std::string ToneMapIdentityTerm(HdrSignal signal, double peakNits)
+// keys do not move. v1 is ffmpeg's float chain (SdrToneMapFilter); v2 the
+// decoder's own integer pass over a 65-point table (HdrToneMap.h), the same
+// curve a code value or two apart, whose bytes do not depend on whether the
+// GPU or the CPU ran it - so the device is not in the key.
+inline std::string ToneMapIdentityTerm(HdrSignal signal, double peakNits, bool integerTable = false)
 {
     if (signal == HdrSignal::Sdr) return {};
-    return std::string("|hdr-sdr-hable-v1-") + (signal == HdrSignal::Hlg ? "hlg" : "pq") + "-peak" +
+    return std::string(integerTable ? "|hdr-sdr-hable-v2-lut65-" : "|hdr-sdr-hable-v1-") +
+           (signal == HdrSignal::Hlg ? "hlg" : "pq") + "-peak" +
            std::to_string(static_cast<long long>(std::llround(peakNits)));
 }
 

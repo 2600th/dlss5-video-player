@@ -198,7 +198,7 @@ target_include_directories(dlss_video_player_common INTERFACE
     "${CMAKE_SOURCE_DIR}/src" "${GENERATED_INCLUDE_DIR}" "${DLSS_SDK}/include")
 target_link_directories(dlss_video_player_common INTERFACE "${DLSS_LIB_DIR}")
 target_link_libraries(dlss_video_player_common INTERFACE
-    d3d12 dxgi dxguid d3dcompiler
+    d3d12 d3d11 dxgi dxguid d3dcompiler
     mfplat mfreadwrite mfuuid
     ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt dbghelp
     ${DLSS_NGX_LIBRARY})
@@ -230,6 +230,7 @@ endif()
 # whose PolicyTests build carries a test seam that changes its layout.
 add_library(player_media OBJECT
     src/VideoDecoder.cpp src/VideoDecoder.h
+    src/HdrToneMapGpu.cpp src/HdrToneMapGpu.h src/HdrToneMap.h
     src/MediaSource.cpp src/MediaSource.h
     src/MediaPipeline.cpp src/MediaPipeline.h)
 add_library(player_render OBJECT
