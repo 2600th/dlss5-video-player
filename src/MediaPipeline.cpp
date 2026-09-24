@@ -20,8 +20,6 @@
 #include <sstream>
 #include <thread>
 
-namespace {
-
 std::wstring FrameRateText(double fps)
 {
     std::wostringstream output;
@@ -31,6 +29,8 @@ std::wstring FrameRateText(double fps)
     if (!value.empty() && value.back() == L'.') value.pop_back();
     return value;
 }
+
+namespace {
 
 struct ExportFormat {
     bool mkv{}, mp4{}, gif{}, png{}, jpeg{};
@@ -1222,6 +1222,32 @@ EncodeError ConcatenateMedia(const std::filesystem::path& helperDirectory,
     // covers a 45 GB join on a spinning disk five times over.
     const CaptureResult capture = RunCapture(ffmpeg, arguments, stop,
         MediaDeadline(double(totalBytes) / (10.0 * 1024.0 * 1024.0), std::chrono::minutes{10}, 1.0),
+        64 * 1024);
+    if (!capture.started) return EncodeError::StartFailed;
+    if (capture.cancelled || stop.stop_requested()) return EncodeError::Cancelled;
+    if (capture.timedOut || capture.exitCode != 0 || !std::filesystem::is_regular_file(output, error) || error)
+        return EncodeError::FinishFailed;
+    return EncodeError::None;
+}
+
+EncodeError RemuxVideoStream(const std::filesystem::path& helperDirectory,
+                             const std::filesystem::path& input,
+                             const std::filesystem::path& output,
+                             std::stop_token stop)
+{
+    std::error_code error;
+    if (input.empty() || output.empty() || !std::filesystem::is_regular_file(input, error) || error)
+        return EncodeError::InvalidSpecification;
+    const auto bytes = std::filesystem::file_size(input, error);
+    const auto ffmpeg = FindHelper(helperDirectory, L"ffmpeg.exe");
+    if (ffmpeg.empty()) return EncodeError::HelperMissing;
+    if (stop.stop_requested()) return EncodeError::Cancelled;
+    const std::vector<std::wstring> arguments{
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y", L"-i", input.wstring(),
+        L"-map", L"0:v:0", L"-c", L"copy", L"-f", L"matroska", output.wstring()};
+    // A stream copy is bound by the disk, as ConcatenateMedia's is.
+    const CaptureResult capture = RunCapture(ffmpeg, arguments, stop,
+        MediaDeadline(double(error ? 0 : bytes) / (10.0 * 1024.0 * 1024.0), std::chrono::minutes{10}, 1.0),
         64 * 1024);
     if (!capture.started) return EncodeError::StartFailed;
     if (capture.cancelled || stop.stop_requested()) return EncodeError::Cancelled;

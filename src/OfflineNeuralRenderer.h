@@ -132,6 +132,12 @@ struct NeuralRenderRequest {
     // (ExposurePolicy.h). A cache-key term; the default follows the A/B in
     // docs/measurements/exposure-ab-20260923/.
     bool suppliedExposure{false};
+    // Which encoder writes an NVENC render (EncoderPath in MediaPipeline.h). Not a
+    // key term: the direct path writes the same packets as the ffmpeg child
+    // (NvencDirectPolicy.h, and the NvencDirectIdentitySmoke and
+    // NeuralDirectEncodeSmoke GPU tests that hold it to that). Auto for every job
+    // the player starts; only the benchmark and those tests name a path.
+    EncoderPath encoderPath{EncoderPath::Auto};
 };
 
 struct NeuralRenderProgress {

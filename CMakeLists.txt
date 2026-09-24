@@ -214,7 +214,7 @@ target_link_directories(dlss_video_player_common INTERFACE "${DLSS_LIB_DIR}")
 target_link_libraries(dlss_video_player_common INTERFACE
     d3d12 d3d11 dxgi dxguid d3dcompiler
     mfplat mfreadwrite mfuuid
-    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt dbghelp
+    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt dbghelp wintrust
     ${DLSS_NGX_LIBRARY})
 
 # How the code that ships is compiled, wherever it is compiled: Control Flow
@@ -252,6 +252,7 @@ add_library(player_render OBJECT
     src/DLSSBackend.cpp src/DLSSBackend.h
     src/TemporalGuides.cpp src/TemporalGuides.h
     src/OpticalFlowNvof.cpp src/OpticalFlowNvof.h
+    src/NvencDirect.cpp src/NvencDirect.h src/NvencDirectPolicy.h src/NvencDirectMux.h
     src/RuntimePolicy.cpp src/RuntimePolicy.h)
 add_library(player_neural OBJECT
     src/NeuralWorker.cpp src/NeuralWorker.h
@@ -285,6 +286,12 @@ endforeach()
 if(NVOF_FOUND)
     target_include_directories(player_render PUBLIC "${NVOF_SDK}")
     target_compile_definitions(player_render PUBLIC DLSS_VIDEO_PLAYER_HAS_NVOF)
+endif()
+# The same for the direct NVENC path; its policy header is tested without a GPU,
+# so the tests see the definition the objects were built with.
+if(NVENC_FOUND)
+    target_include_directories(player_render PUBLIC "${NVENC_SDK}")
+    target_compile_definitions(player_render PUBLIC DLSS_VIDEO_PLAYER_HAS_NVENC)
 endif()
 
 add_executable(DLSSVideoPlayer WIN32
@@ -498,6 +505,15 @@ if(BUILD_TESTING)
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
     add_test(NAME NeuralRangeRenderSmoke COMMAND NeuralRangeRenderSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/neural-range-smoke")
+    # Direct NVENC encoding (P3.7) writes the packets the encoder child writes, which
+    # is what lets it share the child's cache key. The first proves it on raw frames
+    # at the encoder, NV12 and P010, with nothing else in the way; the second inside
+    # real renders through feature 18, one per rung the direct path serves.
+    add_test(NAME NvencDirectIdentitySmoke COMMAND MediaGpuSmoke --nvenc-direct-identity
+        "${FFMPEG_STAGED_DIR}" "${CMAKE_BINARY_DIR}/nvenc-direct-identity")
+    add_test(NAME NeuralDirectEncodeSmoke COMMAND NeuralRangeRenderSmoke
+        "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/neural-direct-encode"
+        --direct-encode-identity)
     # The preflight probe, which is what the player runs before its first render
     # and latches the answer from. Every other neural test renders long enough to
     # clear RenoDX 6.x's injection warm-up; this one stops as soon as the probe
@@ -651,12 +667,14 @@ if(BUILD_TESTING)
     # machine with no adapter skips rather than reporting five hard failures.
     set_tests_properties(UpscalingGpuSmoke UpscalingSrQualitySmoke DebugViewGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
         FrameGenerationSmoke FrameGenerationSmokeTextured FrameGenerationSmokeSceneCut
-        FrameGenerationSmokeStreamSource NeuralRangeRenderSmoke
+        FrameGenerationSmokeStreamSource NeuralRangeRenderSmoke NvencDirectIdentitySmoke NeuralDirectEncodeSmoke
         PROPERTIES LABELS gpu SKIP_RETURN_CODE 125)
     # Seconds on an RTX 5090 - the trigger is the preroll, not the pixel count,
     # so this stays at 640x360. The ceiling is for a slower card, not for a
     # hang; a hang is what the timeout is meant to catch.
     set_tests_properties(NeuralRangeRenderSmoke PROPERTIES TIMEOUT 600)
+    # Two encodes of 60 720p frames each way, then four 2 s renders: under a minute.
+    set_tests_properties(NvencDirectIdentitySmoke NeuralDirectEncodeSmoke PROPERTIES TIMEOUT 600)
     # A/V sync had no coverage at all: the audio clock every frame's due time
     # is computed from carried one assertion, that a number handed to Seek was
     # stored. This needs a real render endpoint, so it is labelled `audio` and

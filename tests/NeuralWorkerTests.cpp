@@ -1099,6 +1099,29 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     }
     const auto badExposureView = view(badExposure);
     CHECK(!neural_worker_detail::ParseWorkerArguments(badExposureView).has_value());
+    // The encoder path is the benchmark's and the identity tests' switch (EncoderPath):
+    // absent means Auto, which is every line the player builds, both named paths
+    // survive the round trip, and neither an unknown name nor the default spelled
+    // out is accepted.
+    for (const auto& argument : normal) CHECK(argument != L"--encoder-path");
+    if (parsedNormal) CHECK(parsedNormal->request.encoderPath == EncoderPath::Auto);
+    for (const EncoderPath path : {EncoderPath::Direct, EncoderPath::Ffmpeg}) {
+        NeuralRenderRequest pathed = request;
+        pathed.encoderPath = path;
+        const auto pathedArguments = neural_worker_detail::BuildWorkerArguments(pathed, metadata, pause, false);
+        const auto pathedView = view(pathedArguments);
+        const auto parsedPathed = neural_worker_detail::ParseWorkerArguments(pathedView);
+        CHECK(parsedPathed.has_value());
+        if (parsedPathed) CHECK(parsedPathed->request.encoderPath == path);
+        for (const wchar_t* bad : {L"auto", L"nvenc", L""}) {
+            auto badPath = pathedArguments;
+            for (size_t index = 0; index + 1 < badPath.size(); ++index) {
+                if (badPath[index] == L"--encoder-path") badPath[index + 1] = bad;
+            }
+            const auto badPathView = view(badPath);
+            CHECK(!neural_worker_detail::ParseWorkerArguments(badPathView).has_value());
+        }
+    }
     // The quality rung travels by name, absent meaning Standard - the only rung an
     // older parent can ask for - and a name this build does not know is refused
     // rather than read as the default the parent did not key for.

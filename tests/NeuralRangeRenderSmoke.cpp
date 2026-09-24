@@ -52,6 +52,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -200,6 +201,213 @@ int MeasureProcessingScale(const fs::path& helpers, const fs::path& worker, cons
     return failures ? 1 : 0;
 }
 
+// Runs a helper and returns what it wrote to stdout and stderr, or nothing when
+// it failed.
+std::string CaptureOutput(const fs::path& helper, const std::vector<std::wstring>& arguments, const fs::path& log)
+{
+    if (!Generate(helper, arguments, log)) return {};
+    std::ifstream in(log, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// framemd5 of the first video stream as stored - one line per packet with its
+// timestamps, size and MD5, and the codec private data's - without the line
+// naming the muxing library.
+std::string PacketDigest(const fs::path& helpers, const fs::path& media, const fs::path& log)
+{
+    const std::string text = CaptureOutput(helpers / L"ffmpeg.exe",
+        {L"-v", L"error", L"-nostdin", L"-i", media.wstring(), L"-map", L"0:v:0", L"-c", L"copy",
+         L"-f", L"framemd5", L"-"}, log);
+    std::string kept;
+    size_t start = 0;
+    while (start < text.size()) {
+        const size_t end = text.find('\n', start);
+        const std::string line = text.substr(start, end == std::string::npos ? std::string::npos : end - start + 1);
+        if (line.rfind("#software", 0) != 0) kept += line;
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return kept;
+}
+
+// The render loop's own throughput, from the stage line the helper logs for its
+// last attempt: "measured loop X ms".
+double MeasuredLoopMs(const fs::path& workerLog)
+{
+    std::ifstream log(workerLog);
+    std::string line, last;
+    while (std::getline(log, line))
+        if (line.find("Neural export stage cost per frame") != std::string::npos) last = line;
+    const size_t at = last.find("measured loop ");
+    return at == std::string::npos ? 0.0 : std::atof(last.c_str() + at + 14);
+}
+
+struct CaptureArm {
+    const wchar_t* name;
+    EncoderQuality quality;
+    bool gpuColorConversion;
+};
+
+// The rungs the direct path serves: Standard from a GPU-converted NV12 capture and
+// High from its P010 one. Standard's default BGRA capture keeps the encoder child.
+constexpr CaptureArm kDirectArms[] = {
+    {L"standard-nv12", EncoderQuality::Standard, true},
+    {L"high-p010", EncoderQuality::High, false},
+};
+
+void KeepEvidence(const fs::path& worker, const fs::path& root, const std::wstring& prefix)
+{
+    for (const auto* name : {L"ReShade.log", L"NeuralWorker.log"}) {
+        std::error_code error;
+        fs::copy_file(worker.parent_path() / name, root / (prefix + L"-" + name),
+                      fs::copy_options::overwrite_existing, error);
+    }
+}
+
+// `--direct-encode-identity`: P3.7's contract inside a real render. The same clip
+// is rendered through feature 18 once with the capture encoded by NVENC straight
+// from its D3D12 planes and once through the ffmpeg child, for each rung the
+// direct path serves, and the two cache files must hold the same packets byte for
+// byte - which is what lets the direct path share the child's cache key. The
+// renders themselves are bit-identical run to run, so any difference is the
+// encoder's.
+int DirectEncodeIdentity(const fs::path& helpers, const fs::path& worker, const fs::path& root)
+{
+    constexpr uint32_t kIdentityWidth = 1280, kIdentityHeight = 720;
+    constexpr double kIdentityFps = 30.0, kIdentitySeconds = 2.0;
+    const auto source = root / L"identity-source.mp4";
+    if (!Generate(helpers / L"ffmpeg.exe",
+                  {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi", L"-i",
+                   std::format(L"testsrc2=s={}x{}:r={}:d={}", kIdentityWidth, kIdentityHeight,
+                               int(kIdentityFps), kIdentitySeconds),
+                   L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", source.wstring()},
+                  root / L"source-generation.log")) {
+        std::wcerr << L"FAIL: could not generate the source clip.\n";
+        return 2;
+    }
+    int failures = 0;
+    for (const CaptureArm& arm : kDirectArms) {
+        std::string digests[2];
+        for (const EncoderPath path : {EncoderPath::Direct, EncoderPath::Ffmpeg}) {
+            const std::wstring label = std::wstring(arm.name) + (path == EncoderPath::Direct ? L"-direct" : L"-child");
+            NeuralRenderRequest request{nullptr, source, root / (label + L".mkv"), kIdentityWidth, kIdentityHeight,
+                                        kIdentityFps, kIdentitySeconds};
+            request.quality = arm.quality;
+            request.gpuColorConversion = arm.gpuColorConversion;
+            request.encoderPath = path;
+            const NeuralRenderResult result = RunNeuralWorker(worker, request);
+            KeepEvidence(worker, root, label);
+            std::wcout << label << L": ok=" << result.ok << L" frames=" << result.frameCount
+                       << L" verified=" << result.verifiedNeuralFrames << L'\n';
+            if (!result.ok || result.frameCount != uint64_t(kIdentityFps * kIdentitySeconds) ||
+                result.encoder != EncoderKind::HevcNvenc) {
+                std::wcerr << L"FAIL: " << label << L" did not render: " << result.detail << L'\n';
+                ++failures;
+                continue;
+            }
+            digests[path == EncoderPath::Direct ? 0 : 1] =
+                PacketDigest(helpers, request.stagingVideoPath, root / (label + L".framemd5"));
+        }
+        if (digests[0].empty() || digests[0] != digests[1]) {
+            std::wcerr << L"FAIL: " << arm.name << L": the direct path's packets differ from the encoder "
+                          L"child's; compare the .framemd5 files in " << root.wstring() << L'\n';
+            ++failures;
+        } else {
+            std::wcout << arm.name << L": direct and child packets identical ("
+                       << std::count(digests[0].begin(), digests[0].end(), '\n') << L" digest lines)\n";
+        }
+    }
+    std::wcout << L"evidence: " << root.wstring() << L'\n';
+    return failures ? 1 : 0;
+}
+
+// `--encoder-path-cost WxH [seconds]`: the measurement behind P3.7
+// (docs/measurements/nvenc-direct-20260924/). Renders one generated clip whole
+// through every capture arm - the default BGRA capture, which always takes the
+// child, as the baseline, then each direct-capable rung through the child and
+// through NVENC direct - and prints the render rate: wall clock over the whole
+// helper run, and the render loop's own steady-state rate from its stage line.
+// Not part of the registered smoke: minutes of GPU time at 4K.
+int MeasureEncoderPaths(const fs::path& helpers, const fs::path& worker, const fs::path& root,
+                        uint32_t width, uint32_t height, double seconds, uint32_t repeats)
+{
+    constexpr double kCostFps = 30.0;
+    const auto source = root / L"cost-source.mp4";
+    if (!Generate(helpers / L"ffmpeg.exe",
+                  {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi", L"-i",
+                   std::format(L"testsrc2=s={}x{}:r={}:d={}", width, height, int(kCostFps), seconds),
+                   L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", source.wstring()},
+                  root / L"source-generation.log")) {
+        std::wcerr << L"FAIL: could not generate the " << width << L'x' << height << L" clip.\n";
+        return 2;
+    }
+    struct Arm {
+        const wchar_t* name;
+        EncoderQuality quality;
+        bool gpuColorConversion;
+        EncoderPath path;
+    };
+    const Arm arms[] = {
+        {L"standard-bgra-child", EncoderQuality::Standard, false, EncoderPath::Ffmpeg},
+        {L"standard-nv12-child", EncoderQuality::Standard, true, EncoderPath::Ffmpeg},
+        {L"standard-nv12-direct", EncoderQuality::Standard, true, EncoderPath::Direct},
+        {L"high-p010-child", EncoderQuality::High, false, EncoderPath::Ffmpeg},
+        {L"high-p010-direct", EncoderQuality::High, false, EncoderPath::Direct},
+    };
+    // CPU time of the helper and every child it starts - the ffmpeg encoder among
+    // them - through a job this process joins, less this process's own share.
+    const HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job && !AssignProcessToJobObject(job, GetCurrentProcess())) {
+        CloseHandle(job);
+        return 2;
+    }
+    const auto cpuSeconds = [job] {
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info{};
+        if (!job || !QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &info, sizeof(info), nullptr))
+            return 0.0;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+        const auto ticks = [](const FILETIME& time) {
+            return int64_t((uint64_t(time.dwHighDateTime) << 32) | time.dwLowDateTime);
+        };
+        return double(info.TotalUserTime.QuadPart + info.TotalKernelTime.QuadPart - ticks(kernel) - ticks(user)) / 1e7;
+    };
+    int failures = 0;
+    for (uint32_t repeat = 0; repeat < repeats; ++repeat) {
+        for (const Arm& arm : arms) {
+            const std::wstring label = std::format(L"{}-{}", arm.name, repeat + 1);
+            NeuralRenderRequest request{nullptr, source, root / (label + L".mkv"), width, height, kCostFps, seconds};
+            request.quality = arm.quality;
+            request.gpuColorConversion = arm.gpuColorConversion;
+            request.encoderPath = arm.path;
+            const double cpuBefore = cpuSeconds();
+            const auto started = std::chrono::steady_clock::now();
+            const NeuralRenderResult result = RunNeuralWorker(worker, request);
+            const double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+            const double cpu = cpuSeconds() - cpuBefore;
+            KeepEvidence(worker, root, label);
+            const double loopMs = MeasuredLoopMs(root / (label + L"-NeuralWorker.log"));
+            std::wcout << std::format(L"{}x{} {}: ok={} frames={} elapsed={:.2f}s wall={:.1f} fps "
+                                      L"loop={:.2f} ms ({:.1f} fps) cpu={:.1f}s ({:.1f} ms/frame) "
+                                      L"neuralGpuMs p50={:.2f}\n",
+                                      width, height, label, result.ok ? 1 : 0, result.frameCount, elapsed,
+                                      elapsed > 0.0 ? double(result.frameCount) / elapsed : 0.0, loopMs,
+                                      loopMs > 0.0 ? 1000.0 / loopMs : 0.0, cpu,
+                                      result.frameCount ? cpu * 1000.0 / double(result.frameCount) : 0.0,
+                                      result.timing.neuralGpuMsP50);
+            if (!result.ok) {
+                std::wcerr << L"  detail: " << result.detail << L'\n';
+                ++failures;
+            }
+            std::error_code ignored;
+            fs::remove(request.stagingVideoPath, ignored);
+        }
+    }
+    if (job) CloseHandle(job);
+    std::wcout << L"evidence: " << root.wstring() << L'\n';
+    return failures ? 1 : 0;
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -208,7 +416,12 @@ int wmain(int argc, wchar_t** argv)
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     const bool measureScale =
         (argc == 6 || argc == 7) && std::wstring_view(argv[4]) == L"--processing-scale-cost";
-    if (argc != 4 && !measureScale) {
+    // <ffmpeg-directory> <NeuralWorker.exe> <output-directory> --direct-encode-identity
+    const bool directIdentity = argc == 5 && std::wstring_view(argv[4]) == L"--direct-encode-identity";
+    // ... --encoder-path-cost WxH [seconds] [repeats]
+    const bool measureEncoder =
+        (argc >= 6 && argc <= 8) && std::wstring_view(argv[4]) == L"--encoder-path-cost";
+    if (argc != 4 && !measureScale && !directIdentity && !measureEncoder) {
         std::wcerr << L"Usage: NeuralRangeRenderSmoke <ffmpeg-directory> "
                       L"<NeuralWorker.exe> <output-directory>\n";
         return 2;
@@ -223,6 +436,15 @@ int wmain(int argc, wchar_t** argv)
         std::wcerr << L"FAIL: ffmpeg.exe and NeuralWorker.exe must exist and the run "
                       L"directory must be new.\n";
         return 2;
+    }
+    if (directIdentity) return DirectEncodeIdentity(helpers, worker, root);
+    if (measureEncoder) {
+        unsigned width = 0, height = 0;
+        if (swscanf_s(argv[5], L"%ux%u", &width, &height) != 2 || !width || !height) return 2;
+        const double seconds = argc >= 7 ? _wtof(argv[6]) : 10.0;
+        const unsigned repeats = argc == 8 ? unsigned(_wtoi(argv[7])) : 1u;
+        return MeasureEncoderPaths(helpers, worker, root, width, height, seconds > 0.0 ? seconds : 10.0,
+                                   repeats ? repeats : 1u);
     }
     if (measureScale) {
         unsigned width = 0, height = 0;

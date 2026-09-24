@@ -1,4 +1,5 @@
 #include "D3D12Renderer.h"
+#include "NvencDirect.h"
 #include "D3D12FenceWait.h"
 #include "DebandPolicy.h"
 #include "DitherPolicy.h"
@@ -2129,6 +2130,13 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     return ResolveOldestCapture(capture);
 }
 
+bool D3D12Renderer::SetDirectEncodeSurfaces(NvencSurfacePool*pool){
+    if(m_capturePending)return false;
+    if(pool&&!d3d12_renderer_detail::CaptureFormatIsPlanar(m_captureFormat))return false;
+    m_directSurfaces=pool;
+    return true;
+}
+
 bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     // The readback ring only exists when Initialize was asked for it.
     if(!m_captureOutput)return false;
@@ -2142,6 +2150,24 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     if(!m_cacheReadback[readbackSlot])return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot, &m_captureSubmitSlotWaitNanos))return false;
+    // A direct-encode capture takes its surface before recording anything. When
+    // none is free the encoder is behind, and waiting here is the back pressure the
+    // full pipe to the encoder child used to apply. The wait has the frame fence's
+    // budget: an encoder that frees nothing in that long has stopped.
+    uint32_t directSurface=CaptureReadbackView::kNoDirectSurface;
+    if(planar&&m_directSurfaces){
+        const auto acquired=m_directSurfaces->Acquire(std::chrono::milliseconds(d3d12_renderer_detail::RenderFenceWaitMilliseconds));
+        if(!acquired){
+            LOG("Direct encode: no encode surface came free in "<<d3d12_renderer_detail::RenderFenceWaitMilliseconds
+                <<" ms; the encoder has stopped taking frames.");
+            return false;
+        }
+        directSurface=*acquired;
+    }
+    struct SurfaceGuard{
+        NvencSurfacePool*pool;uint32_t index;
+        ~SurfaceGuard(){if(pool&&index!=CaptureReadbackView::kNoDirectSurface)pool->Release(index);}
+    } surfaceGuard{m_directSurfaces,directSurface};
     if(!DeviceHR(m_allocators[slot]->Reset(),"Reset cache-capture allocator"))return false;
     auto*cmd=m_cmds[slot].Get();
     if(!DeviceHR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset cache-capture command list"))
@@ -2184,6 +2210,20 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
         cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
         Barrier(cmd,plane,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
     };
+    // The direct-encode form of the copy: the two planes become the two planes of one
+    // NV12/P010 surface, which is what NVENC's D3D12 interface reads. Each capture
+    // plane is the format of the surface plane it lands in (R8/R8G8 for NV12,
+    // R16/R16G16 for P010), so it is a plain subresource copy, and the samples are
+    // the ones the readback copy would have handed the encoder child.
+    auto copyPlaneToSurface=[&](ID3D12Resource*plane,ID3D12Resource*surface,UINT subresource){
+        Barrier(cmd,plane,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=surface;
+        destination.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;destination.SubresourceIndex=subresource;
+        D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=plane;
+        source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
+        Barrier(cmd,plane,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    };
     if(planar){
         // The chroma pass reads the same neural output at half resolution, averaging each
         // 2x2 block after conversion.
@@ -2193,8 +2233,18 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
         auto chromaTarget=RTV(FrameCount+4);cmd->OMSetRenderTargets(1,&chromaTarget,FALSE,nullptr);
         cmd->SetPipelineState(m_psoCaptureChroma.Get());
         cmd->DrawInstanced(3,1,0,0);
-        copyPlane(m_captureLuma.Get(),m_lumaFootprint);
-        copyPlane(m_captureChroma.Get(),m_chromaFootprint);
+        if(directSurface!=CaptureReadbackView::kNoDirectSurface){
+            ID3D12Resource*surface=m_directSurfaces->Surface(directSurface);
+            if(!surface)return false;
+            // COMMON on both sides: that is the state the encode engine reads it in.
+            Barrier(cmd,surface,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
+            copyPlaneToSurface(m_captureLuma.Get(),surface,0);
+            copyPlaneToSurface(m_captureChroma.Get(),surface,1);
+            Barrier(cmd,surface,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
+        }else{
+            copyPlane(m_captureLuma.Get(),m_lumaFootprint);
+            copyPlane(m_captureChroma.Get(),m_chromaFootprint);
+        }
     }else{
         copyPlane(m_cacheOutput.Get(),m_cacheFootprint);
     }
@@ -2205,6 +2255,8 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     if(!SignalFrameSlot(slot))return false;
     m_captureFence[readbackSlot]=m_fenceValue;
     m_captureId[readbackSlot]=m_lastRenderedId;
+    // The slot owns the surface from here; resolving it hands it on to the encoder.
+    m_captureSurface[readbackSlot]=directSurface;surfaceGuard.index=CaptureReadbackView::kNoDirectSurface;
     m_captureWrite=(readbackSlot+1u)%CaptureSlots;
     ++m_capturePending;
     return true;
@@ -2289,6 +2341,8 @@ bool D3D12Renderer::RecordTemporalStability(ID3D12GraphicsCommandList*cmd,uint32
 
 bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
     if(!ReserveOldestCapture(view))return false;
+    // A direct-encode capture is waited for by NVENC, on the GPU.
+    if(view.directSurface!=CaptureReadbackView::kNoDirectSurface)return true;
     if(!WaitForFenceValue(view.fenceValue, &m_captureResolveWaitNanos)){
         EndResolveOldestCapture();view=CaptureReadbackView{};return false;
     }
@@ -2308,6 +2362,15 @@ bool D3D12Renderer::ReserveOldestCapture(CaptureReadbackView&view){
     const uint8_t*base=m_cacheReadbackMapped[readbackSlot];
     if(!base||!m_fence){EndResolveOldestCapture();return false;}
     view.fence=m_fence.Get();view.fenceValue=m_captureFence[readbackSlot];
+    view.directSurface=m_captureSurface[readbackSlot];
+    if(view.directSurface!=CaptureReadbackView::kNoDirectSurface){
+        // Nothing to copy out and nothing for the copy thread to wait on: the token
+        // carries the fence value to NVENC instead.
+        view.fence=nullptr;view.bytes=sizeof(NvencDirectToken);
+        view.width=m_outputW;view.height=m_outputH;view.format=m_captureFormat;
+        view.id=m_captureId[readbackSlot];
+        return true;
+    }
     const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&plane=planar?m_lumaFootprint:m_cacheFootprint;
     view.base=base+plane.Offset;
     view.rowPitch=size_t(plane.Footprint.RowPitch);
@@ -2379,6 +2442,10 @@ bool D3D12Renderer::CompleteReservedCapture(const CaptureReadbackView&view){
 
 // static
 void D3D12Renderer::CopyCaptureView(const CaptureReadbackView&view,std::vector<uint8_t>&pixels){
+    if(view.directSurface!=CaptureReadbackView::kNoDirectSurface){
+        WriteNvencDirectToken(NvencDirectToken{NvencDirectToken::kMagic,view.directSurface,view.fenceValue},pixels);
+        return;
+    }
     // Only resize when the caller handed back a differently sized buffer. Constructing a
     // fresh vector here value-initialised a whole frame, over 30 MB of pointless memset
     // per frame at 4K, immediately before overwriting every byte of it.

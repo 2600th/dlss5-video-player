@@ -80,6 +80,9 @@
 #include "PlayerCommandLine.h"
 #include "PlaybackTickPolicy.h"
 #include "NeuralJobPolicy.h"
+#include "NvencDirect.h"
+#include "NvencDirectMux.h"
+#include "NvencDirectPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -13538,6 +13541,272 @@ void neural_job_publishes_only_its_own_run_and_only_what_it_reported_test()
     CHECK(!neural_job::PublishedProbeMatches(failed, 1920, 1080, 60, 20000000, 20000000, tolerance));
 }
 
+// ---- Direct NVENC encoding (P3.7) ---------------------------------------------
+// The direct path has to write the packets the ffmpeg child writes (the GPU
+// smokes NvencDirectIdentitySmoke and NeuralDirectEncodeSmoke hold it to that on
+// hardware). What can be pinned without a GPU is every number it derives the way
+// FFmpeg does, and the hand-off file's layout.
+
+void nvenc_direct_rates_are_the_ones_the_encoder_child_parses_test()
+{
+    using nvenc_direct::Rational;
+    // FrameRateText's decimal parsed back through av_d2q. The NTSC rates do NOT
+    // come back as 24000/1001 and friends: the six-place decimal is not that
+    // fraction, and each of these is what the shipped ffmpeg's -framerate made of
+    // the same text (ffprobe -f rawvideo -framerate 29.97003 reports 979001/32666).
+    // Those are the rates the child configures NVENC with and times packets in.
+    CHECK(nvenc_direct::ChildFrameRate(30.0) == (Rational{30, 1}));
+    CHECK(nvenc_direct::ChildFrameRate(60.0) == (Rational{60, 1}));
+    CHECK(nvenc_direct::ChildFrameRate(25.0) == (Rational{25, 1}));
+    CHECK(nvenc_direct::ChildFrameRate(12.5) == (Rational{25, 2}));
+    CHECK(nvenc_direct::ChildFrameRate(24000.0 / 1001.0) == (Rational{991001, 41333}));
+    CHECK(nvenc_direct::ChildFrameRate(30000.0 / 1001.0) == (Rational{979001, 32666}));
+    CHECK(nvenc_direct::ChildFrameRate(60000.0 / 1001.0) == (Rational{979001, 16333}));
+    CHECK(nvenc_direct::ChildFrameRate(48000.0 / 1001.0) == (Rational{967001, 20166}));
+    CHECK(nvenc_direct::ChildFrameRate(120000.0 / 1001.0) == (Rational{919001, 7666}));
+    CHECK(nvenc_direct::Reduce(1920, 1080, 1024 * 1024) == (Rational{16, 9}));
+    CHECK(nvenc_direct::Reduce(3840, 2160, 1024 * 1024) == (Rational{16, 9}));
+    CHECK(nvenc_direct::Reduce(2578, 1080, 1024 * 1024) == (Rational{1289, 540}));
+    // av_rescale_q into Matroska's milliseconds, rounded half away from zero: the
+    // 24000/1001 grid lands exactly on .5 at frame 12.
+    CHECK_EQ(int64_t{0}, nvenc_direct::FrameMilliseconds(0, {30, 1}));
+    CHECK_EQ(int64_t{33}, nvenc_direct::FrameMilliseconds(1, {30, 1}));
+    CHECK_EQ(int64_t{67}, nvenc_direct::FrameMilliseconds(2, {30, 1}));
+    CHECK_EQ(int64_t{100}, nvenc_direct::FrameMilliseconds(3, {30, 1}));
+    CHECK_EQ(int64_t{42}, nvenc_direct::FrameMilliseconds(1, {24000, 1001}));
+    CHECK_EQ(int64_t{83}, nvenc_direct::FrameMilliseconds(2, {24000, 1001}));
+    CHECK_EQ(int64_t{501}, nvenc_direct::FrameMilliseconds(12, {24000, 1001}));
+    // ...where the child's real 23.976 rate lands just short of it, which is why
+    // the rate has to be the child's and not the fraction it approximates.
+    CHECK_EQ(int64_t{500}, nvenc_direct::FrameMilliseconds(12, {991001, 41333}));
+    CHECK_EQ(int64_t{1543}, nvenc_direct::FrameMilliseconds(37, {991001, 41333}));
+    CHECK_EQ(uint64_t{33333333}, nvenc_direct::DefaultDurationNanoseconds({30, 1}));
+    CHECK_EQ(uint64_t{33366666}, nvenc_direct::DefaultDurationNanoseconds({30000, 1001}));
+}
+
+void nvenc_direct_is_tried_only_where_it_can_write_the_childs_packets_test()
+{
+    using nvenc_direct::Eligibility;
+    using nvenc_direct::Ineligible;
+    CHECK(Eligibility(EncoderKind::HevcNvenc, EncoderPixelFormat::Nv12, false, EncoderPath::Auto) == Ineligible::None);
+    CHECK(Eligibility(EncoderKind::HevcNvenc, EncoderPixelFormat::P010, false, EncoderPath::Direct) == Ineligible::None);
+    // Standard's default capture is BGRA, which the child converts with swscale.
+    CHECK(Eligibility(EncoderKind::HevcNvenc, EncoderPixelFormat::Bgra, false, EncoderPath::Auto) ==
+          Ineligible::PackedCapture);
+    CHECK(Eligibility(EncoderKind::Ffv1, EncoderPixelFormat::P010, false, EncoderPath::Auto) == Ineligible::NotNvenc);
+    CHECK(Eligibility(EncoderKind::H264Software, EncoderPixelFormat::Nv12, false, EncoderPath::Auto) ==
+          Ineligible::NotNvenc);
+    CHECK(Eligibility(EncoderKind::HevcNvenc, EncoderPixelFormat::Nv12, true, EncoderPath::Auto) ==
+          Ineligible::Segmented);
+    CHECK(Eligibility(EncoderKind::HevcNvenc, EncoderPixelFormat::Nv12, false, EncoderPath::Ffmpeg) ==
+          Ineligible::Forced);
+    // The pool covers the capture ring, the B-frames NVENC holds for their anchor,
+    // the lookahead and the unlocked pictures - 11 surfaces for the p5 preset's
+    // frameIntervalP 4, as the session logs - and one bitstream buffer is taken by
+    // every picture not yet locked.
+    CHECK_EQ(11u, nvenc_direct::SurfacePoolSize(4, 4, 0, 2));
+    CHECK_EQ(19u, nvenc_direct::SurfacePoolSize(4, 4, 8, 2));
+    CHECK_EQ(7u, nvenc_direct::SurfacePoolSize(4, 1, 0, 1));
+    CHECK_EQ(7u, nvenc_direct::OutputBufferCount(4, 0, 2));
+    CHECK_EQ(15u, nvenc_direct::OutputBufferCount(4, 8, 2));
+    CHECK_EQ(2u * 1024u * 1024u, nvenc_direct::OutputBufferBytes(1280, 720, false));
+    CHECK_EQ(uint32_t(3840u * 2160u * 3u), nvenc_direct::OutputBufferBytes(3840, 2160, true));
+    // The token a direct capture resolves to round-trips, and nothing else reads as one.
+    std::vector<uint8_t> bytes;
+    WriteNvencDirectToken(NvencDirectToken{NvencDirectToken::kMagic, 7, 123456789}, bytes);
+    NvencDirectToken token;
+    CHECK(ReadNvencDirectToken(bytes, token));
+    CHECK_EQ(7u, token.surface);
+    CHECK_EQ(uint64_t{123456789}, token.fenceValue);
+    bytes[0] ^= 1u;
+    CHECK(!ReadNvencDirectToken(bytes, token));
+    CHECK(!ReadNvencDirectToken(std::vector<uint8_t>(24, 0), token));
+}
+
+#ifdef DLSS_VIDEO_PLAYER_HAS_NVENC
+void nvenc_direct_configures_the_preset_as_hevc_nvenc_does_test()
+{
+    // A preset shaped like the driver's p5/hq answer, with the fields hevc_nvenc
+    // overrides set to something else so each override is visible.
+    NV_ENC_CONFIG preset{};
+    preset.frameIntervalP = 4;
+    preset.gopLength = 0xFFFFFFFFu;
+    preset.rcParams.averageBitRate = 5'000'000;
+    preset.rcParams.vbvBufferSize = 10'000'000;
+    preset.rcParams.multiPass = NV_ENC_TWO_PASS_QUARTER_RESOLUTION;
+    preset.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
+    preset.encodeCodecConfig.hevcConfig.repeatSPSPPS = 1;
+    preset.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+
+    EncoderSpec spec{1920, 1080, 30000.0 / 1001.0, EncoderKind::HevcNvenc, EncoderPixelFormat::Nv12};
+    spec.nvencPreset = 5;
+    NV_ENC_CONFIG config = preset;
+    NV_ENC_INITIALIZE_PARAMS init{};
+    const nvenc_direct::Plan plan =
+        nvenc_direct::ApplyHevcNvencOptions(spec, nvenc_direct::ChildFrameRate(spec.fps), init, config);
+    CHECK(init.encodeGUID == NV_ENC_CODEC_HEVC_GUID);
+    CHECK(init.presetGUID == NV_ENC_PRESET_P5_GUID);
+    CHECK(init.tuningInfo == NV_ENC_TUNING_INFO_HIGH_QUALITY);
+    CHECK_EQ(16u, init.darWidth);
+    CHECK_EQ(9u, init.darHeight);
+    CHECK_EQ(979001u, init.frameRateNum);
+    CHECK_EQ(32666u, init.frameRateDen);
+    CHECK_EQ(1u, init.enablePTD);
+    CHECK_EQ(0u, init.enableEncodeAsync);
+    CHECK_EQ(uint32_t(NV_ENC_SPLIT_AUTO_MODE), uint32_t(init.splitEncodeMode));
+    CHECK(init.encodeConfig == &config);
+    CHECK(init.bufferFormat == NV_ENC_BUFFER_FORMAT_NV12);
+    // g=250 with bf=-1: the length changes, the preset's B-frames stand.
+    CHECK_EQ(250u, config.gopLength);
+    CHECK_EQ(4, config.frameIntervalP);
+    CHECK_EQ(4, plan.frameIntervalP);
+    CHECK_EQ(0u, plan.lookahead);
+    const NV_ENC_RC_PARAMS& rc = config.rcParams;
+    CHECK(rc.rateControlMode == NV_ENC_PARAMS_RC_VBR);
+    CHECK(rc.multiPass == NV_ENC_MULTI_PASS_DISABLED);
+    CHECK_EQ(16u, uint32_t(rc.targetQuality));
+    CHECK_EQ(0u, uint32_t(rc.targetQualityLSB));
+    CHECK_EQ(0u, rc.averageBitRate);
+    CHECK_EQ(0u, rc.vbvBufferSize);
+    CHECK_EQ(800'000'000u, rc.maxBitRate);
+    CHECK_EQ(1u, uint32_t(rc.enableInitialRCQP));
+    CHECK_EQ(26u, rc.initialRCQP.qpInterP);
+    CHECK_EQ(21u, rc.initialRCQP.qpIntra);
+    CHECK_EQ(34u, rc.initialRCQP.qpInterB);
+    CHECK_EQ(0u, uint32_t(rc.enableLookahead));
+    const NV_ENC_CONFIG_HEVC& hevc = config.encodeCodecConfig.hevcConfig;
+    CHECK(config.profileGUID == NV_ENC_HEVC_PROFILE_MAIN_GUID);
+    CHECK_EQ(1u, uint32_t(hevc.disableSPSPPS));
+    CHECK_EQ(0u, uint32_t(hevc.repeatSPSPPS));
+    CHECK_EQ(250u, hevc.idrPeriod);
+    CHECK_EQ(1u, uint32_t(hevc.outputPictureTimingSEI));
+    CHECK_EQ(0u, uint32_t(hevc.outputBufferingPeriodSEI));
+    CHECK_EQ(3u, hevc.sliceMode);
+    CHECK_EQ(1u, hevc.sliceModeData);
+    CHECK_EQ(1u, uint32_t(hevc.chromaFormatIDC));
+    CHECK(hevc.inputBitDepth == NV_ENC_BIT_DEPTH_8 && hevc.outputBitDepth == NV_ENC_BIT_DEPTH_8);
+    CHECK(hevc.numRefL0 == NV_ENC_NUM_REF_FRAMES_AUTOSELECT && hevc.numRefL1 == NV_ENC_NUM_REF_FRAMES_AUTOSELECT);
+    const NV_ENC_CONFIG_HEVC_VUI_PARAMETERS& vui = hevc.hevcVUIParameters;
+    CHECK(vui.colourMatrix == NV_ENC_VUI_MATRIX_COEFFS_BT709);
+    CHECK(vui.colourPrimaries == NV_ENC_VUI_COLOR_PRIMARIES_BT709);
+    CHECK(vui.transferCharacteristics == NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709);
+    CHECK_EQ(0u, vui.videoFullRangeFlag);
+    CHECK_EQ(1u, vui.colourDescriptionPresentFlag);
+    CHECK_EQ(1u, vui.videoSignalTypePresentFlag);
+    CHECK(vui.videoFormat == NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED);
+
+    // High: Main10 from P010 at kHighRungCq.
+    spec.quality = EncoderQuality::High;
+    spec.pixelFormat = EncoderPixelFormat::P010;
+    spec.nvencPreset = 7;
+    config = preset;
+    init = {};
+    nvenc_direct::ApplyHevcNvencOptions(spec, nvenc_direct::ChildFrameRate(spec.fps), init, config);
+    CHECK(init.presetGUID == NV_ENC_PRESET_P7_GUID);
+    CHECK(init.bufferFormat == NV_ENC_BUFFER_FORMAT_YUV420_10BIT);
+    CHECK(config.profileGUID == NV_ENC_HEVC_PROFILE_MAIN10_GUID);
+    CHECK_EQ(kHighRungCq, uint32_t(config.rcParams.targetQuality));
+    CHECK(config.encodeCodecConfig.hevcConfig.inputBitDepth == NV_ENC_BIT_DEPTH_10 &&
+          config.encodeCodecConfig.hevcConfig.outputBitDepth == NV_ENC_BIT_DEPTH_10);
+
+    // A preset that brings its own lookahead keeps it, within the bound FFmpeg's
+    // surface count allows, with scene-cut and B-adaptation left on.
+    config = preset;
+    config.rcParams.enableLookahead = 1;
+    config.rcParams.lookaheadDepth = 8;
+    config.rcParams.disableIadapt = 1;
+    init = {};
+    const nvenc_direct::Plan lookahead =
+        nvenc_direct::ApplyHevcNvencOptions(spec, nvenc_direct::ChildFrameRate(spec.fps), init, config);
+    CHECK_EQ(1u, uint32_t(config.rcParams.enableLookahead));
+    CHECK_EQ(8u, uint32_t(config.rcParams.lookaheadDepth));
+    CHECK_EQ(0u, uint32_t(config.rcParams.disableIadapt));
+    CHECK_EQ(0u, uint32_t(config.rcParams.disableBadapt));
+    CHECK_EQ(8u, lookahead.lookahead);
+}
+#endif
+
+void nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test()
+{
+    namespace mkv = nvenc_direct::mkv;
+    const auto size = [](uint64_t value) {
+        std::vector<uint8_t> out;
+        mkv::AppendSize(out, value);
+        return out;
+    };
+    // Shortest form whose value bits are not all ones - that is "unknown size".
+    CHECK(size(0) == (std::vector<uint8_t>{0x80}));
+    CHECK(size(126) == (std::vector<uint8_t>{0xFE}));
+    CHECK(size(127) == (std::vector<uint8_t>{0x40, 0x7F}));
+    CHECK(size(16382) == (std::vector<uint8_t>{0x7F, 0xFE}));
+    CHECK(size(16383) == (std::vector<uint8_t>{0x20, 0x3F, 0xFF}));
+    std::vector<uint8_t> element;
+    mkv::AppendUnsigned(element, mkv::id::kTimestampScale, 1'000'000);
+    CHECK(element == (std::vector<uint8_t>{0x2A, 0xD7, 0xB1, 0x83, 0x0F, 0x42, 0x40}));
+    element.clear();
+    mkv::AppendUnsigned(element, mkv::id::kTimestamp, 0);
+    CHECK(element == (std::vector<uint8_t>{0xE7, 0x81, 0x00}));
+    // Track 1, a signed relative timestamp, the keyframe flag, then the picture.
+    element.clear();
+    const uint8_t picture[] = {1, 2, 3};
+    mkv::AppendSimpleBlock(element, picture, -5, true);
+    CHECK(element == (std::vector<uint8_t>{0xA3, 0x87, 0x81, 0xFF, 0xFB, 0x80, 1, 2, 3}));
+    element.clear();
+    mkv::AppendSimpleBlock(element, picture, 300, false);
+    CHECK(element == (std::vector<uint8_t>{0xA3, 0x87, 0x81, 0x01, 0x2C, 0x00, 1, 2, 3}));
+
+    // The header: EBML, then a Segment whose eight-byte size is filled in at the
+    // end, the Annex B parameter sets as CodecPrivate and BT.709 limited range.
+    const uint8_t parameterSets[] = {0, 0, 0, 1, 0x40, 0x01, 0xAA};
+    size_t segmentSize = 0;
+    const std::vector<uint8_t> header = mkv::Header(1280, 720, {30, 1}, parameterSets, segmentSize);
+    REQUIRE(header.size() > segmentSize + 8);
+    CHECK((std::vector<uint8_t>(header.begin(), header.begin() + 4)) == (std::vector<uint8_t>{0x1A, 0x45, 0xDF, 0xA3}));
+    CHECK((std::vector<uint8_t>(header.begin() + std::ptrdiff_t(segmentSize) - 4, header.begin() + std::ptrdiff_t(segmentSize))) ==
+          (std::vector<uint8_t>{0x18, 0x53, 0x80, 0x67}));
+    CHECK_EQ(uint8_t{0x01}, header[segmentSize]);
+    const std::string text(header.begin(), header.end());
+    CHECK(text.find("V_MPEGH/ISO/HEVC") != std::string::npos);
+    CHECK(text.find(std::string("\x63\xA2\x87\x00\x00\x00\x01\x40\x01\xAA", 10)) != std::string::npos);
+    CHECK(text.find(std::string("\x55\xB9\x81\x01", 4)) != std::string::npos);  // Range: broadcast
+
+    // A written file's Segment size covers exactly what follows it.
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / ("nvenc-direct-mkv-" + std::to_string(GetCurrentProcessId()) + ".mkv");
+    {
+        mkv::Writer writer;
+        REQUIRE(writer.Open(path, 1280, 720, {30, 1}, parameterSets));
+        CHECK(writer.Write(picture, 0, true));
+        CHECK(writer.Write(picture, 133, false));
+        CHECK(writer.Write(picture, 67, false));
+        CHECK(writer.Write(picture, 8'400, true));
+        CHECK(writer.Close());
+        writer.Release();
+    }
+    std::ifstream in(path, std::ios::binary);
+    const std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    REQUIRE(file.size() > segmentSize + 8);
+    uint64_t declared = 0;
+    for (size_t index = 0; index < 8; ++index) declared = (declared << 8) | file[segmentSize + index];
+    declared &= (uint64_t{1} << 56) - 1u;
+    CHECK_EQ(uint64_t(file.size() - segmentSize - 8), declared);
+    // Two keyframes, two clusters.
+    size_t clusters = 0;
+    for (size_t index = 0; index + 4 <= file.size(); ++index)
+        if (file[index] == 0x1F && file[index + 1] == 0x43 && file[index + 2] == 0xB6 && file[index + 3] == 0x75) ++clusters;
+    CHECK_EQ(size_t{2}, clusters);
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    // Abandon deletes what it wrote.
+    {
+        mkv::Writer writer;
+        REQUIRE(writer.Open(path, 1280, 720, {30, 1}, parameterSets));
+        writer.Abandon();
+    }
+    CHECK(!std::filesystem::exists(path));
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -13899,6 +14168,12 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(seek_requests_coalesce_and_a_seek_at_the_end_retries_before_it_test),
     TEST_CASE(neural_job_checks_the_range_and_what_a_cached_entry_must_agree_with_test),
     TEST_CASE(neural_job_publishes_only_its_own_run_and_only_what_it_reported_test),
+    TEST_CASE(nvenc_direct_rates_are_the_ones_the_encoder_child_parses_test),
+    TEST_CASE(nvenc_direct_is_tried_only_where_it_can_write_the_childs_packets_test),
+#ifdef DLSS_VIDEO_PLAYER_HAS_NVENC
+    TEST_CASE(nvenc_direct_configures_the_preset_as_hevc_nvenc_does_test),
+#endif
+    TEST_CASE(nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test),
 };
 
 

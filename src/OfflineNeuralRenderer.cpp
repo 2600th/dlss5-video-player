@@ -29,6 +29,8 @@
 #include "VideoDecoder.h"
 #include "DLSSBackend.h"
 #include "FrameResample.h"
+#include "NvencDirect.h"
+#include "NvencDirectPolicy.h"
 #include "UpscalingPolicy.h"
 #include "NeuralMotionPolicy.h"
 
@@ -167,6 +169,9 @@ struct StageSamples {
 struct AttemptResult {
     NeuralRenderFailure failure{NeuralRenderFailure::None};
     EncodeError encoderError{EncodeError::None};
+    // The attempt encoded through NVENC straight from the capture (NvencDirect.h)
+    // rather than the ffmpeg child, so an encoder failure has the child to retry on.
+    bool direct{};
     uint64_t frames{};
     uint64_t bytes{};
     // Evaluate calls the neural backend itself completed while this attempt
@@ -209,7 +214,8 @@ void ReportStageTimings(EncoderKind kind, const StageTimers& stages,
     std::ostringstream line;
     line << std::fixed << std::setprecision(2)
          << "Neural export stage cost per frame ("
-         << (kind == EncoderKind::HevcNvenc ? "hevc_nvenc" : kind == EncoderKind::Ffv1 ? "ffv1" : "libx264") << ", "
+         << (kind == EncoderKind::HevcNvenc ? (attempt.direct ? "hevc_nvenc direct" : "hevc_nvenc")
+             : kind == EncoderKind::Ffv1 ? "ffv1" : "libx264") << ", "
          << frames << " frames): total " << MillisPerFrame(accounted, frames)
          << " ms = source " << MillisPerFrame(stages.source, frames)
          << " + submit " << MillisPerFrame(stages.submit, frames)
@@ -976,19 +982,9 @@ public:
     // checked again before a second pass.
     std::optional<NeuralRenderResult> PrepareSoftwareRetry()
     {
-        CancelOutput();
-        std::error_code removeError;std::filesystem::remove(request_.stagingVideoPath, removeError);
-        if (!ReopenAtPreroll()) {
-            if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
-            return Fail(NeuralRenderFailure::Source,
-                        L"The source could not be restarted for software encoding.");
-        }
-        const NeuralRuntimeEvidence retryEvidence=
-            ParseNeuralRuntimeEvidence(evidenceProvider_());
-        if(request_.requireNeural&&!retryEvidence.Valid()){
-            return Fail(NeuralRenderFailure::Neural,
-                        L"Feature 18 evidence was not valid before the software retry.");
-        }
+        if (auto ended = RestartForRetry(L"The source could not be restarted for software encoding.",
+                                         L"Feature 18 evidence was not valid before the software retry."))
+            return ended;
         // The retry is held to the reused-evaluator standard. The first pass
         // already watched the log counter advance, which is what vouches for
         // this process; the counter then stops at 60, and NVENC failing after
@@ -997,6 +993,20 @@ public:
         // that never came, then failing with "evidence did not advance". The
         // backend's per-frame count and the timing floor below still judge
         // every frame this pass captures.
+        holdToLogReceipt_=false;
+        return std::nullopt;
+    }
+
+    // A direct NVENC session that failed once it was running (P3.7): the same
+    // frames go through the ffmpeg child instead, which writes the same packets,
+    // before anything falls back further. Held to the reused-evaluator standard
+    // like the software retry, and for the same reason.
+    std::optional<NeuralRenderResult> PrepareEncoderChildRetry()
+    {
+        directAllowed_ = false;
+        if (auto ended = RestartForRetry(L"The source could not be restarted for the encoder child.",
+                                         L"Feature 18 evidence was not valid before the encoder-child retry."))
+            return ended;
         holdToLogReceipt_=false;
         return std::nullopt;
     }
@@ -1101,6 +1111,54 @@ public:
     }
 
 private:
+    // Puts the job back at its capture start for another pass at the same frames;
+    // the result to return instead when it cannot.
+    std::optional<NeuralRenderResult> RestartForRetry(const wchar_t* sourceFailure, const wchar_t* evidenceFailure)
+    {
+        CancelOutput();
+        std::error_code removeError;std::filesystem::remove(request_.stagingVideoPath, removeError);
+        if (!ReopenAtPreroll()) {
+            if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
+            return Fail(NeuralRenderFailure::Source, sourceFailure);
+        }
+        const NeuralRuntimeEvidence retryEvidence=
+            ParseNeuralRuntimeEvidence(evidenceProvider_());
+        if(request_.requireNeural&&!retryEvidence.Valid())return Fail(NeuralRenderFailure::Neural, evidenceFailure);
+        return std::nullopt;
+    }
+
+    // Encoder selection (P3.7). An NVENC render with a planar capture is encoded by
+    // NVENC straight from the D3D12 capture - no readback of the frame, no pipe -
+    // and writes the packets the ffmpeg child would have (NvencDirectPolicy.h).
+    // Everything else, any render the driver cannot serve that way, and any
+    // attempt after the direct session failed keeps the child. Only the production
+    // adapters have the direct path; the injected ones compile past it and always
+    // take the child.
+    bool SelectDirect(EncoderKind kind, EncoderPixelFormat capture)
+    {
+        if constexpr (requires { evaluator_.PrepareDirectEncode(true); encoder_.UseDirect(nullptr); }) {
+            const nvenc_direct::Ineligible reason =
+                nvenc_direct::Eligibility(kind, capture, writer_.has_value(), request_.encoderPath);
+            std::string unavailable;
+            NvencSurfacePool* pool = nullptr;
+            if (reason == nvenc_direct::Ineligible::None && directAllowed_ &&
+                nvenc_direct::DriverAvailable(&unavailable))
+                pool = evaluator_.PrepareDirectEncode(true);
+            if (!pool) evaluator_.PrepareDirectEncode(false);
+            encoder_.UseDirect(pool);
+            if (pool) LOG("Neural render encoder: NVENC direct from the D3D12 capture.");
+            else LOG("Neural render encoder: the ffmpeg child ("
+                     << (reason != nvenc_direct::Ineligible::None ? std::string(nvenc_direct::IneligibleName(reason))
+                         : !directAllowed_ ? std::string("the direct session failed on this render")
+                         : !unavailable.empty() ? unavailable : std::string("the capture could not take direct surfaces"))
+                     << ").");
+            return pool != nullptr;
+        } else {
+            (void)kind;(void)capture;
+            return false;
+        }
+    }
+
     // One capture pass with one encoder: the preroll evaluated without
     // capture, the receipt gate on the first captured frame, then every frame
     // of the range submitted, pipelined, read back in order and written. The
@@ -1185,18 +1243,38 @@ private:
                              job_.evaluator_.CapturePixelFormat()};
             spec.nvencPreset = job_.request_.nvencPreset;
             spec.quality = job_.request_.quality;
+            attempt_.direct = job_.SelectDirect(kind_, spec.pixelFormat);
+            // A benchmark run that named the direct path is refused rather than moved
+            // onto the child, so a file it measures is never the other path's.
+            if (job_.request_.encoderPath == EncoderPath::Direct && !attempt_.direct) {
+                attempt_.failure = NeuralRenderFailure::Encoder;
+                attempt_.encoderError = EncodeError::StartFailed;return false;
+            }
             if (job_.writer_) {
                 // Segment 0's encoder is armed here and starts while this attempt
                 // prerolls, so the first captured frame never waits for a spawn.
                 job_.writer_->BeginAttempt(spec);
             } else {
-                const EncodeError startError = job_.encoder_.Start(spec, job_.request_.stagingVideoPath);
+                EncodeError startError = job_.encoder_.Start(spec, job_.request_.stagingVideoPath);
+                // A direct session that cannot start falls back here, before a single
+                // frame is captured for it, so the child simply takes the attempt.
+                if (startError != EncodeError::None && startError != EncodeError::Cancelled && attempt_.direct &&
+                    job_.request_.encoderPath == EncoderPath::Auto) {
+                    job_.directAllowed_ = false;
+                    attempt_.direct = job_.SelectDirect(kind_, spec.pixelFormat);
+                    startError = job_.encoder_.Start(spec, job_.request_.stagingVideoPath);
+                }
                 if (startError != EncodeError::None) {
                     attempt_.failure = startError == EncodeError::Cancelled
                         ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
                     attempt_.encoderError = startError;return false;
                 }
             }
+            // What a resolved capture must measure: a frame of pixels for the child, or
+            // the token naming the surface NVENC reads the frame from. Progress keeps
+            // counting the frame's pixels either way, so the byte count means the same.
+            pixelBytes_ = static_cast<size_t>(EncoderFrameBytes(spec.pixelFormat, job_.outputWidth_, job_.outputHeight_));
+            job_.expectedBytes_ = attempt_.direct ? sizeof(NvencDirectToken) : pixelBytes_;
             return true;
         }
 
@@ -1260,7 +1338,7 @@ private:
                 return NeuralRenderFailure::Identity;
             }
             Measure(queued.metric,pixels);
-            const size_t written = pixels.size();
+            const size_t written = attempt_.direct ? pixelBytes_ : pixels.size();
             double writeMs = 0.0;
             EncodeError writeError;
             {
@@ -1548,7 +1626,7 @@ private:
             // segmented job takes ownership of them; the single-file encoder hands
             // them to its feeder thread.
             Measure(SampleSource(frame, evaluation), evaluation.bgra);
-            const uint64_t captured = evaluation.bgra.size();
+            const uint64_t captured = attempt_.direct ? pixelBytes_ : evaluation.bgra.size();
             double writeMs = 0.0;
             EncodeError writeError;
             {
@@ -1593,6 +1671,8 @@ private:
         // throughput numbers. Reset at the top of every iteration.
         double iterationDrainMs_ = 0.0;
         PixelLayout captureLayout_{PixelLayout::Bgra};
+        // One frame of the capture's pixels, whatever travels to the encoder.
+        size_t pixelBytes_{};
         bool prerollEvaluated_ = false;
         bool hasPrevious_ = false;
         int64_t previousTimestamp_ = 0;
@@ -1986,6 +2066,8 @@ private:
     // restarts after the gate opened has nothing left to wait for.
     bool receiptGateOpened_ = false;
     int64_t prerollStart_ = 0;
+    // SelectDirect: false once a direct session failed on this render.
+    bool directAllowed_ = true;
 };
 
 template<class Source, class Evaluator, class Encoder, class Evidence, class Clock, class Paused>
@@ -2008,9 +2090,18 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     EncoderKind selected = request.quality == EncoderQuality::Lossless ? EncoderKind::Ffv1
         : (request.width % 2 || request.height % 2) ? EncoderKind::H264Software : EncoderKind::HevcNvenc;
     AttemptResult attempt = job.RunAttempt(selected);
+    // A direct NVENC session that failed mid-render goes to the ffmpeg child
+    // first (P3.7); a benchmark that named a path gets no fallback at all.
+    if (attempt.failure == NeuralRenderFailure::Encoder && attempt.direct &&
+        request.encoderPath == EncoderPath::Auto) {
+        LOG("NVENC direct failed during the render (encoder error " << int(attempt.encoderError)
+            << "); rendering it again through the ffmpeg child.");
+        if (std::optional<NeuralRenderResult> ended = job.PrepareEncoderChildRetry()) return std::move(*ended);
+        attempt=job.RunAttempt(selected);
+    }
     if (attempt.failure == NeuralRenderFailure::Cancelled)
         return job.Cancelled(L"Neural render was cancelled.");
-    if (attempt.failure == NeuralRenderFailure::Encoder &&
+    if (attempt.failure == NeuralRenderFailure::Encoder && request.encoderPath != EncoderPath::Direct &&
         ShouldRetryWithSoftware(selected, attempt.encoderError)) {
         if (std::optional<NeuralRenderResult> ended = job.PrepareSoftwareRetry()) return std::move(*ended);
         selected=EncoderKind::H264Software;
@@ -2211,6 +2302,9 @@ struct D3D12CaptureCopy {
 using DeferredCapture=DeferredCaptureWorker<D3D12Renderer::CaptureReadbackView,D3D12CaptureCopy>;
 
 struct ProductionEvaluatorAdapter {
+    // The direct NVENC path's surfaces (NvencDirect.h), on the renderer's device.
+    // Declared ahead of the renderer, which points at it, so it outlives it.
+    NvencSurfacePool directSurfaces;
     D3D12RendererOwner renderer;uint64_t successfulEvaluations{};
     TemporalGuideGenerator guides;
     uint32_t width{},height{};
@@ -2363,9 +2457,34 @@ struct ProductionEvaluatorAdapter {
     // holds. The readback worker is joined first: it copies out of mapped
     // memory the renderer owns, which the reset below would unmap under it.
     void Release(){
-        DiscardPending();deferred.Shutdown();renderer.reset();
+        DiscardPending();
+        if(renderer)renderer->SetDirectEncodeSurfaces(nullptr);
+        deferred.Shutdown();renderer.reset();directSurfaces.Reset();
         successfulEvaluations=0;lastFailure=NeuralRenderFailure::None;resolveBroken=false;
         featureReleasedWhileIdle=false;
+    }
+    // Points the capture at the direct path's surfaces for the attempt about to
+    // start, or back at the readback ring. Nothing is pending between attempts,
+    // so every surface a failed attempt left taken is free again. Null when the
+    // capture cannot feed NVENC directly - an 8-bit BGRA capture, or a device the
+    // surfaces cannot be made on - and the attempt keeps the readback.
+    NvencSurfacePool* PrepareDirectEncode(bool on){
+        if(!renderer)return nullptr;
+        const EncoderPixelFormat format=CapturePixelFormat();
+        if(on&&format!=EncoderPixelFormat::Bgra&&
+           directSurfaces.Configure(renderer->Device(),renderer->CaptureFence(),format,renderer->OutputW(),
+                                    renderer->OutputH(),D3D12Renderer::CaptureSlots)){
+            directSurfaces.ReleaseAll();
+            if(renderer->SetDirectEncodeSurfaces(&directSurfaces))return &directSurfaces;
+        }
+        renderer->SetDirectEncodeSurfaces(nullptr);
+        return nullptr;
+    }
+    // A capture that was resolved and dropped - a discard, a cancelled attempt -
+    // still holds the surface its token names.
+    void ReleaseDirectSurface(std::span<const uint8_t> resolved){
+        NvencDirectToken token;
+        if(ReadNvencDirectToken(resolved,token))directSurfaces.Release(token.surface);
     }
     // Hands the feature-18 workset back between jobs, keeping everything else
     // this adapter retains. Only legal with no job running: the pending
@@ -2575,11 +2694,12 @@ struct ProductionEvaluatorAdapter {
         // The posted copy holds a slot, so it has to be joined before the ring can drain.
         std::vector<uint8_t> dropped;
         D3D12Renderer::CaptureReadbackView view;
-        if(deferred.Join(dropped,&view))renderer->CompleteReservedCapture(view);
+        if(deferred.Join(dropped,&view)){renderer->CompleteReservedCapture(view);ReleaseDirectSurface(dropped);}
         resolveBroken=false;
         while(renderer->PendingCaptureCount()){
             CapturedVideoFrame discarded;
             if(!renderer->ResolveOldestCapture(discarded))break;
+            ReleaseDirectSurface(discarded.pixels);
         }
     }
     // What Initialize settled on, which is BGRA unless the GPU conversion was both
@@ -2626,6 +2746,13 @@ struct ProductionEvaluatorAdapter {
 // circulation, so it scales with frame size: ~106 MiB at 2578x1080, ~330 MiB at 4K.
 struct ProductionEncoderAdapter {
     RawVideoEncoder encoder;
+    // The direct NVENC path (NvencDirect.h), which takes the frames in place of the
+    // child when RunJob points this adapter at the capture's surfaces. What travels
+    // through the queue is then a token naming a surface rather than a frame of
+    // pixels; the queue, the worker and the error latch are the same.
+    NvencDirectEncoder direct;
+    NvencSurfacePool* directPool{};
+    bool directActive=false;
     static constexpr size_t QueueCapacity=8;
 
     std::mutex mutex;
@@ -2638,19 +2765,26 @@ struct ProductionEncoderAdapter {
 
     ~ProductionEncoderAdapter(){StopWorker();}
 
+    // Set by RunJob before every Start: the surfaces to encode from, or null for the child.
+    void UseDirect(NvencSurfacePool* pool){directPool=pool;}
+
     EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){
         StopWorker();
         {
             std::lock_guard lock(mutex);
             queue.clear();recycled.clear();latched=EncodeError::None;draining=false;
         }
-        const EncodeError started=encoder.Start(spec,path);
+        direct.Cancel();directActive=false;
+        const EncodeError started=directPool?direct.Start(*directPool,spec,path):encoder.Start(spec,path);
         if(started!=EncodeError::None)return started;
+        directActive=directPool!=nullptr;
         worker=std::jthread([this](std::stop_token workerStop){WorkerLoop(workerStop);});
         return EncodeError::None;
     }
 
-    EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){return encoder.WriteFrame(frame,stop);}
+    EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){
+        return directActive?direct.Encode(frame,false):encoder.WriteFrame(frame,stop);
+    }
 
     EncodeError WriteFrameAsync(std::vector<uint8_t>&& frame,std::stop_token stop){
         std::unique_lock lock(mutex);
@@ -2688,8 +2822,8 @@ struct ProductionEncoderAdapter {
 
     EncodeError Finish(std::stop_token stop){
         const EncodeError flushed=Flush(stop);
-        if(flushed!=EncodeError::None){encoder.Cancel();return flushed;}
-        return encoder.Finish(stop);
+        if(flushed!=EncodeError::None){encoder.Cancel();direct.Cancel();return flushed;}
+        return directActive?direct.Finish(stop):encoder.Finish(stop);
     }
 
     void Cancel(){
@@ -2704,6 +2838,7 @@ struct ProductionEncoderAdapter {
         // worker has been joined is it safe to tear the child down here.
         StopWorker();
         encoder.Cancel();
+        direct.Cancel();
     }
 
     // One fresh ffmpeg pipe per segment; a single-file job never calls this.
@@ -2720,18 +2855,38 @@ private:
     void WorkerLoop(std::stop_token workerStop){
         for(;;){
             std::vector<uint8_t> frame;
+            bool more=false;
             {
                 std::unique_lock lock(mutex);
                 if(!cv.wait(lock,workerStop,[this]{return !queue.empty()||draining;}))return;
                 if(queue.empty())return;
                 frame=std::move(queue.front());queue.pop_front();
+                more=!queue.empty();
             }
             cv.notify_all();
             // Cancellation rides on the worker's own stop token. RawVideoEncoder::WriteFrame
             // installs a stop_callback that terminates the ffmpeg job object, so requesting
             // it releases a blocked WriteFile. Tearing the child down from another thread
             // instead would pull the pipe handle out from under an in-flight write.
-            const EncodeError error=encoder.WriteFrame(frame,workerStop);
+            //
+            // The direct session is told whether another frame is already queued: when
+            // none is, it writes out everything NVENC has finished, so the surfaces those
+            // frames held go back to a capture that may be waiting for one.
+            const EncodeError error=directActive?direct.Encode(frame,more):encoder.WriteFrame(frame,workerStop);
+            // A failed direct session gives every surface back at once - its own and
+            // those of the frames still queued for it, which it will never encode - so
+            // a capture waiting on one goes ahead and meets the latched error at its
+            // write, instead of waiting out the surface timeout first.
+            if(error!=EncodeError::None&&directActive){
+                direct.Cancel();
+                std::lock_guard lock(mutex);
+                if(latched==EncodeError::None)latched=error;
+                for(const auto& queued:queue){
+                    NvencDirectToken token;
+                    if(directPool&&ReadNvencDirectToken(queued,token))directPool->Release(token.surface);
+                }
+                queue.clear();
+            }
             {
                 std::lock_guard lock(mutex);
                 if(error!=EncodeError::None&&latched==EncodeError::None)latched=error;

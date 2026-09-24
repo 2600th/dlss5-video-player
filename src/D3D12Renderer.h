@@ -106,6 +106,7 @@ struct D3D12RendererTestHooks {
 };
 
 class D3D12Renderer;
+class NvencSurfacePool;
 // Drains the queue within the teardown budget before deleting. A renderer whose
 // drain did not complete - and whose device is not gone - may still have command
 // lists executing, and deleting it would release their resources and the NGX
@@ -313,6 +314,11 @@ public:
         uint64_t fenceValue = 0;
         d3d12_renderer_detail::FenceWaitResult waitResult = d3d12_renderer_detail::FenceWaitResult::Completed;
         uint64_t waitNanos = 0;
+        // A direct-encode capture (SetDirectEncodeSurfaces): the surface the planes
+        // were copied into. The copy then produces an NvencDirectToken naming it and
+        // `fenceValue`, which NVENC waits on itself, so nothing waits on the CPU.
+        static constexpr uint32_t kNoDirectSurface = UINT32_MAX;
+        uint32_t directSurface = kNoDirectSurface;
     };
 
     // Asynchronous capture. EnqueueEvaluatedFrameCapture records the cache draw and the
@@ -351,6 +357,19 @@ public:
     // on any thread while the renderer keeps working, and it fans out on its own worker
     // pool rather than the default one for that reason.
     static void CopyCaptureView(const CaptureReadbackView& view, std::vector<uint8_t>& pixels);
+
+    // Direct NVENC encoding (NvencDirect.h). With a pool set, a planar capture copies
+    // its two planes into one of the pool's NV12/P010 surfaces instead of the readback
+    // ring, and resolving it yields an NvencDirectToken in place of pixels, which the
+    // encoder hands to NVENC with the capture fence to wait on. Null goes back to the
+    // readback ring, which stays allocated so a render can fall back to the ffmpeg
+    // child without a new device. Only with no capture pending; false when one is,
+    // or when the capture is not planar.
+    bool SetDirectEncodeSurfaces(NvencSurfacePool* pool);
+    bool DirectEncodeActive() const { return m_directSurfaces != nullptr; }
+    // What a direct-encode pool is created on and waits for.
+    ID3D12Device* Device() const { return m_device.Get(); }
+    ID3D12Fence* CaptureFence() const { return m_fence.Get(); }
 
     // Selects what the next Initialize builds its capture resources for. Ignored once
     // Initialize has run, and downgraded to Bgra when the output size is odd, so callers
@@ -915,6 +934,10 @@ private:
     // the same reason: the alternative is a Map/Unmap pair on every frame.
     const uint64_t* m_timestampMapped = nullptr;
     uint64_t m_captureFence[CaptureSlots]{};
+    // The direct-encode surface each capture slot's frame was copied into, or
+    // CaptureReadbackView::kNoDirectSurface for one read back.
+    uint32_t m_captureSurface[CaptureSlots]{};
+    NvencSurfacePool* m_directSurfaces = nullptr;
     // Identity of the frame each readback slot holds, recorded at enqueue and handed
     // back when the slot resolves, so a ring that fell out of step is caught rather
     // than trusted.

@@ -20,6 +20,33 @@ enum class EncoderKind {
     Ffv1,
 };
 
+// Which encoder writes an NVENC render (NvencDirectPolicy.h). Auto is every
+// render's default: NVENC fed straight from the D3D12 capture where the render is
+// eligible, the ffmpeg child otherwise and whenever the direct session cannot
+// start. The other two exist for the benchmark and the identity test, which have
+// to know which path produced a file: Direct fails the job rather than fall back,
+// Ffmpeg never tries. Only a helper's command line carries them (--encoder-path);
+// the player never sets one.
+enum class EncoderPath { Auto, Direct, Ffmpeg };
+
+constexpr std::string_view EncoderPathName(EncoderPath path)
+{
+    switch (path) {
+    case EncoderPath::Direct: return "direct";
+    case EncoderPath::Ffmpeg: return "ffmpeg";
+    case EncoderPath::Auto: break;
+    }
+    return "auto";
+}
+
+constexpr bool ParseEncoderPath(std::wstring_view text, EncoderPath& path)
+{
+    if (text == L"auto") { path = EncoderPath::Auto; return true; }
+    if (text == L"direct") { path = EncoderPath::Direct; return true; }
+    if (text == L"ffmpeg") { path = EncoderPath::Ffmpeg; return true; }
+    return false;
+}
+
 enum class EncodeError {
     None,
     InvalidSpecification,
@@ -245,6 +272,12 @@ struct ProbeResult {
     std::string pixelFormat;
 };
 
+// The frame rate as the encoder child is told it (`-framerate`): the decimal to six
+// places, trailing zeros dropped. The direct NVENC path derives its rate from this
+// same text (nvenc_direct::ChildFrameRate), because what the child encodes with is
+// what FFmpeg parses back out of it.
+std::wstring FrameRateText(double fps);
+
 std::vector<std::wstring> BuildMaterializeArguments(const MaterializeRequest& request);
 std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
                                                 const std::filesystem::path& output);
@@ -321,6 +354,16 @@ private:
 // and dimensions, which finalized neural segments of one job do.
 EncodeError ConcatenateMedia(const std::filesystem::path& helperDirectory,
                              std::span<const std::filesystem::path> parts,
+                             const std::filesystem::path& output,
+                             std::stop_token stop = {});
+
+// Stream-copies the first video stream of `input` into a Matroska `output` through
+// FFmpeg's muxer, with nothing re-encoded. The direct NVENC path writes its
+// pictures to a minimal Matroska of its own (NvencDirectMux.h) and this turns that
+// into the cache file, so the file is laid out, indexed and tagged by the same
+// muxer the encoder child writes with.
+EncodeError RemuxVideoStream(const std::filesystem::path& helperDirectory,
+                             const std::filesystem::path& input,
                              const std::filesystem::path& output,
                              std::stop_token stop = {});
 
