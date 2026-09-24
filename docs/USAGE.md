@@ -369,7 +369,9 @@ Press `F11` or double-click the image to enter fullscreen. The menu and controls
 hide immediately. Move the mouse to reveal them; they hide again after 2.5
 seconds idle. Dragging, an open menu/dialog or keyboard control focus keeps
 them visible. `Tab` reveals controls for keyboard access; `Esc`/`F11` restores
-the window (an active render or download consumes `Esc` to cancel first).
+the window. `Esc` always leaves fullscreen first and never stops a render
+there; in a window, `Esc` stops a live render, a neural job, a conversion or a
+YouTube download.
 
 Press `?` or `F1` (or **Help > Keyboard shortcuts**) for a sheet of every
 shortcut, grouped by the menu it belongs to, plus the keys no menu names

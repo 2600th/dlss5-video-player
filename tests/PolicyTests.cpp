@@ -61,6 +61,7 @@
 #include "StatusChipPolicy.h"
 #include "ToolbarTipPolicy.h"
 #include "ChromeMotionPolicy.h"
+#include "EscapeKeyPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -1371,6 +1372,34 @@ void status_chips_carry_the_rate_the_drops_and_the_render_test()
     // No dropped frames is a fine state, so the chip says it quietly.
     CHECK(At(playing, Chip::Dropped).quiet);
     CHECK(!At(Build(true, {}, 60.0, 60.0, 4), Chip::Dropped).quiet);
+}
+
+void escape_leaves_fullscreen_before_it_stops_anything_test()
+{
+    using escape_key::Action;
+    using escape_key::Resolve;
+    // Everything running at once, in fullscreen: Esc gives the desktop back
+    // and leaves the render alone.
+    escape_key::State busy{false, true, true, true, true, true};
+    CHECK(Resolve(busy) == Action::LeaveFullscreen);
+    // The sheet is closed before anything else, fullscreen included.
+    busy.shortcutSheetOpen = true;
+    CHECK(Resolve(busy) == Action::CloseShortcutSheet);
+    // In a window the old order stands: the longest-running thing first.
+    escape_key::State window{false, false, true, true, true, true};
+    CHECK(Resolve(window) == Action::CancelFrameGeneration);
+    window.frameGenerationCancellable = false;
+    CHECK(Resolve(window) == Action::StopLiveSession);
+    window.liveSession = false;
+    CHECK(Resolve(window) == Action::CancelNeuralJob);
+    window.neuralJob = false;
+    CHECK(Resolve(window) == Action::CancelYouTube);
+    window.resolvingYouTube = false;
+    CHECK(Resolve(window) == Action::None);
+    // The sheet and the tooltip say the same thing.
+    const Localizer localizer;
+    CHECK(localizer.Get(L"shortcuts.escape").starts_with(L"Leave fullscreen"));
+    CHECK(localizer.Get(L"toolbar.tip.fullscreen").find(L"Esc or F11 leaves") != std::wstring::npos);
 }
 
 void toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test()
@@ -14001,6 +14030,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test),
     TEST_CASE(player_status_formats_exact_runtime_and_playback_states_test),
     TEST_CASE(status_chips_carry_the_rate_the_drops_and_the_render_test),
+    TEST_CASE(escape_leaves_fullscreen_before_it_stops_anything_test),
     TEST_CASE(toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test),
     TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),
     TEST_CASE(status_chips_keep_fixed_places_and_give_the_line_the_rest_test),
