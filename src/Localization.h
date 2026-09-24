@@ -282,7 +282,7 @@ private:
             {L"neural.phase.preflight", L"Probing neural runtime"}, {L"neural.phase.paused", L"Paused"},
             {L"neural.phase.recovering", L"Recovering"},
             {L"neural.live.title", L"Neural rendering from here"},
-            {L"neural.live.buffering", L"Buffering neural frames"},
+            {L"neural.live.buffering", L"Buffering neural frames"}, {L"warmup.title", L"Starting the neural render"}, {L"warmup.cache", L"checking what is already rendered"}, {L"warmup.runtime", L"checking the neural runtime"}, {L"warmup.model", L"preparing the model on the GPU"}, {L"warmup.first", L"rendering the first second"},
             {L"neural.live.lead", L"buffered"},
             // Which way the play press that arrived during buffering points: the
             // button state alone was invisible, so a second press cancelled it.

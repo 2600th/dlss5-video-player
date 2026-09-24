@@ -79,8 +79,12 @@ inline std::wstring DroppedText(uint64_t dropped)
     return L"Dropped " + std::to_wstring(dropped);
 }
 
-inline std::wstring RenderText(double fraction, std::optional<double> etaSeconds)
+inline std::wstring RenderText(double fraction, std::optional<double> etaSeconds, bool starting = false)
 {
+    // Before the first rendered second lands there is no percentage and no
+    // pace, so no ETA either: one made from the forecast sat at "0% · ETA
+    // 0:10" for the whole 17-22 s cold start and never moved.
+    if (starting) return L"Render \u00b7 starting";
     const long long percent = std::llround(std::clamp(fraction, 0.0, 1.0) * 100.0);
     // 99.6% is not rendered; only a render that is done may say 100.
     const long long shown = fraction < 1.0 ? std::min<long long>(percent, 99) : percent;
@@ -142,6 +146,8 @@ struct RenderProgress {
     bool active{};
     double fraction{};
     std::optional<double> etaSeconds;
+    // A live render that has not published its first second yet.
+    bool starting{};
 };
 
 inline Snapshot Build(bool mediaLoaded, RenderProgress render, double renderedFps, double sourceFps,
@@ -150,7 +156,7 @@ inline Snapshot Build(bool mediaLoaded, RenderProgress render, double renderedFp
     Snapshot snapshot{};
     if (!mediaLoaded) return snapshot;
     if (render.active) {
-        At(snapshot, Chip::Render) = Content{true, RenderText(render.fraction, render.etaSeconds),
+        At(snapshot, Chip::Render) = Content{true, RenderText(render.fraction, render.etaSeconds, render.starting),
                                              RenderFlashKey(render.fraction), false};
     }
     // A still image has no rate; the chip would only ever say "0 / 0 fps".

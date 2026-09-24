@@ -124,6 +124,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "EscapeKeyPolicy.h"
 #include "InitialWindowPolicy.h"
 #include "SliderPolicy.h"
+#include "WarmUpPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -7890,6 +7891,7 @@ private:
             const CoverageSpan range{m_liveRange.start100ns,m_liveRange.end100ns};
             const double fraction=LiveSessionFinished()?1.0:std::min(CoveredFraction(LiveCoverage(),range),0.999);
             const double remaining=(1.0-fraction)*double(range.Width())*1e-7;
+            if(WarmUpStep()!=warm_up::Step::None)return {true,fraction,std::nullopt,true};
             return {true,fraction,status_chips::SecondsToFullCoverage(remaining,LivePaceRatio())};
         }
         if(m_previewJob&&NeuralJobActive()&&m_neuralProgress.totalFrames>0){
@@ -8103,7 +8105,7 @@ private:
         case ToolbarAction::PlayPause:{const bool playing=m_playing||LiveResumePending();return{playing?UiIcon::Pause:UiIcon::Play,playing?L"Pause":L"Play",enabled,playing};}
         // A toggle pressed during a seek is queued rather than dropped, and the
         // label says so: a dead-looking key is how it read before.
-        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=m_neuralToggleDeferred?L"Neural Rendering · Queued for the seek":m_previewJob?L"Neural Rendering · Previewing settings":m_previewShown?L"Neural Rendering · Settings preview":enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active,m_previewJob!=0||NeuralJobActive()};}
+        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=m_neuralToggleDeferred?L"Neural Rendering · Queued for the seek":WarmUpStep()!=warm_up::Step::None?L"Neural Rendering · Starting":m_previewJob?L"Neural Rendering · Previewing settings":m_previewShown?L"Neural Rendering · Settings preview":enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active,m_previewJob!=0||NeuralJobActive()};}
         case ToolbarAction::Stop:return{UiIcon::Stop,L"Stop",enabled,false};
         case ToolbarAction::Forward10:return{UiIcon::FastForward,L"10s",enabled,false};
         case ToolbarAction::Mute:return{m_muted?UiIcon::VolumeOff:UiIcon::Volume,m_muted?L"Sound":L"Mute",enabled,m_muted};
@@ -10619,7 +10621,18 @@ private:
     }
     // Lead-in state of an active session, in front of everything else because it
     // is why playback is waiting.
+    // Where a live session's cold start is, while nothing is rendered yet.
+    warm_up::Step WarmUpStep()const{
+        return warm_up::Resolve(m_liveSession,NeuralJobActive(),!LiveCoverage().empty(),m_neuralProgress.phase,m_neuralProgress.completedFrames);
+    }
     std::wstring LiveSessionStatusText()const{
+        // The cold start names its step instead of "0.0 s buffered", which is
+        // true and says nothing for the 17-22 s it lasts.
+        if(const auto step=WarmUpStep();step!=warm_up::Step::None){
+            std::wstring text=T(L"warmup.title")+L" \u00b7 "+T(warm_up::TextKey(step));
+            if(m_liveBuffering)text+=L" \u00b7 "+T(LiveResumePending()?L"neural.live.will_play":L"neural.live.will_stay_paused");
+            return text;
+        }
         wchar_t lead[64]={};swprintf_s(lead,L"%.1f s",LiveLeadSeconds());
         std::wstring text=(m_liveBuffering?T(L"neural.live.buffering"):T(L"neural.live.title"))+L" \u00b7 "+lead+L" "+T(L"neural.live.lead");
         // How much of the video is rendered is the render chip's to say

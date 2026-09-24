@@ -64,6 +64,7 @@
 #include "EscapeKeyPolicy.h"
 #include "InitialWindowPolicy.h"
 #include "SliderPolicy.h"
+#include "WarmUpPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -1519,6 +1520,32 @@ void toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test()
     // Resting reveals, sweeping does not; moving along the bar is immediate.
     CHECK(toolbar_tips::kInitialDelayMs >= 400 && toolbar_tips::kInitialDelayMs <= 600);
     CHECK(toolbar_tips::kReshowDelayMs < 100);
+}
+
+void warm_up_names_the_cold_start_step_and_the_chip_invents_no_eta_test()
+{
+    using warm_up::Resolve;
+    using warm_up::Step;
+    CHECK(Resolve(true, true, false, NeuralRenderPhase::CheckingCache, 0) == Step::CheckingCache);
+    CHECK(Resolve(true, true, false, NeuralRenderPhase::Preflight, 0) == Step::CheckingRuntime);
+    CHECK(Resolve(true, true, false, NeuralRenderPhase::NeuralRendering, 0) == Step::PreparingModel);
+    CHECK(Resolve(true, true, false, NeuralRenderPhase::NeuralRendering, 12) == Step::FirstSecond);
+    // Coverage, no session, or no job: not warming up.
+    CHECK(Resolve(true, true, true, NeuralRenderPhase::NeuralRendering, 0) == Step::None);
+    CHECK(Resolve(false, true, false, NeuralRenderPhase::NeuralRendering, 0) == Step::None);
+    CHECK(Resolve(true, false, false, NeuralRenderPhase::NeuralRendering, 0) == Step::None);
+    const Localizer localizer;
+    for (const Step step : {Step::CheckingCache, Step::CheckingRuntime, Step::PreparingModel, Step::FirstSecond}) {
+        const wchar_t* key = warm_up::TextKey(step);
+        CHECK(key != nullptr);
+        if (key) CHECK(localizer.Get(key) != key);
+    }
+    CHECK(warm_up::TextKey(Step::None) == nullptr);
+    // Starting: no percentage, no ETA, whatever the forecast would say.
+    const auto starting = status_chips::Build(true, {true, 0.0, 10.0, true}, 0.0, 30.0, 0);
+    CHECK(status_chips::At(starting, status_chips::Chip::Render).text == L"Render · starting");
+    const auto running = status_chips::Build(true, {true, 0.3, 10.0, false}, 30.0, 30.0, 0);
+    CHECK(status_chips::At(running, status_chips::Chip::Render).text.find(L"ETA") != std::wstring::npos);
 }
 
 void status_chip_tips_say_what_was_measured_test()
@@ -14168,6 +14195,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(slider_geometry_fills_from_its_origin_and_keeps_the_knob_and_bubble_inside_test),
     TEST_CASE(escape_leaves_fullscreen_before_it_stops_anything_test),
     TEST_CASE(toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test),
+    TEST_CASE(warm_up_names_the_cold_start_step_and_the_chip_invents_no_eta_test),
     TEST_CASE(status_chip_tips_say_what_was_measured_test),
     TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),
     TEST_CASE(status_chips_keep_fixed_places_and_give_the_line_the_rest_test),
