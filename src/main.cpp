@@ -7428,14 +7428,19 @@ private:
         };
         headings(layout.recentHeading,L"start.recent");headings(layout.trailersHeading,L"start.trailers");
         const auto recent=StartTiles(false),trailers=StartTiles(true);
-        for(size_t index=0;index<layout.recentTiles.size()&&index<recent.size();++index)DrawStartTile(dc,layout.recentTiles[index],recent[index],m_startHover==StartHover::Recent&&m_startHoverIndex==index);
-        for(size_t index=0;index<layout.trailerTiles.size()&&index<trailers.size();++index)DrawStartTile(dc,layout.trailerTiles[index],trailers[index],m_startHover==StartHover::Trailer&&m_startHoverIndex==index);
+        for(size_t index=0;index<layout.recentTiles.size()&&index<recent.size();++index)DrawStartTile(dc,layout.recentTiles[index],recent[index],StartTileLevel(StartHover::Recent,index));
+        for(size_t index=0;index<layout.trailerTiles.size()&&index<trailers.size();++index)DrawStartTile(dc,layout.trailerTiles[index],trailers[index],StartTileLevel(StartHover::Trailer,index));
         SetTextColor(dc,ui_palette::SecondaryText);RECT hint=layout.hint;const std::wstring hintText=T(L"start.hint");
         DrawTextW(dc,hintText.c_str(),-1,&hint,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         SelectObject(dc,oldFont);
     }
-    void DrawStartTile(HDC dc,const RECT& tile,const StartTile& content,bool hover){
+    // A tile answers the pointer by lifting: it rises 2 dip, its picture
+    // brightens by 6% and a blue edge fades in, over the toolbar's hover fade.
+    // `hover` is that fade's level, so without animations it is 0 or 1.
+    static constexpr double kTileBrighten=0.06;
+    void DrawStartTile(HDC dc,RECT tile,const StartTile& content,double hover){
         const UINT dpi=ActiveWindowDpi(m_hwnd);
+        OffsetRect(&tile,0,-LONG(std::lround(hover*Dip(2))));
         const RECT thumb=start_screen::TileThumbnail(tile,dpi);
         HBRUSH surface=CreateSolidBrush(ui_palette::Inactive);FillRect(dc,&thumb,surface);DeleteObject(surface);
         std::optional<TimelineMediaWorker::Thumbnail> picture;
@@ -7448,7 +7453,13 @@ private:
             BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=picture->size.cx;info.bmiHeader.biHeight=-picture->size.cy;
             info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
             SetStretchBltMode(dc,HALFTONE);
-            StretchDIBits(dc,x,y,w,h,0,0,picture->size.cx,picture->size.cy,picture->bgra.data(),&info,DIB_RGB_COLORS,SRCCOPY);
+            const uint8_t* pixels=picture->bgra.data();std::vector<uint8_t> lifted;
+            if(hover>0.0){
+                lifted=picture->bgra;const double amount=hover*kTileBrighten;
+                for(size_t at=0;at<lifted.size();++at)if(at%4!=3)lifted[at]=uint8_t(lifted[at]+std::lround((255-lifted[at])*amount));
+                pixels=lifted.data();
+            }
+            StretchDIBits(dc,x,y,w,h,0,0,picture->size.cx,picture->size.cy,pixels,&info,DIB_RGB_COLORS,SRCCOPY);
         }else if(m_iconFont){
             const wchar_t glyph=GlyphForIcon(content.trailer?UiIcon::YouTube:UiIcon::Open);
             const HGDIOBJ old=SelectObject(dc,m_iconFont);SetTextColor(dc,ui_palette::SecondaryText);RECT box=thumb;
@@ -7460,7 +7471,7 @@ private:
             HBRUSH teal=CreateSolidBrush(ui_palette::NeuralCoverage);FillRect(dc,&badge,teal);DeleteObject(teal);
             SetTextColor(dc,ui_palette::Window);DrawTextW(dc,content.badge.c_str(),-1,&badge,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
         }
-        if(hover){HBRUSH edge=CreateSolidBrush(ui_palette::PrimaryBlue);FrameRect(dc,&thumb,edge);DeleteObject(edge);}
+        if(hover>0.0){HBRUSH edge=CreateSolidBrush(chrome_motion::Mix(ui_palette::Window,ui_palette::PrimaryBlue,hover));FrameRect(dc,&thumb,edge);DeleteObject(edge);}
         const int line=Dip(start_screen::kTileTextDip)/2;
         RECT title{tile.left,thumb.bottom+Dip(3),tile.right,thumb.bottom+Dip(3)+line};
         SetTextColor(dc,ui_palette::PrimaryText);DrawTextW(dc,content.title.c_str(),-1,&title,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
@@ -7485,7 +7496,23 @@ private:
     void UpdateStartHover(int x,int y){
         const auto [hover,index]=StartScreenHit(x,y);
         if(hover==m_startHover&&index==m_startHoverIndex)return;
+        const auto now=Clock::now();
+        if(m_startHover==StartHover::Recent||m_startHover==StartHover::Trailer)m_tileFades[StartTileKey(m_startHover,m_startHoverIndex)].Set(false,now,m_activityMotionEnabled);
+        if(hover==StartHover::Recent||hover==StartHover::Trailer)m_tileFades[StartTileKey(hover,index)].Set(true,now,m_activityMotionEnabled);
         m_startHover=hover;m_startHoverIndex=index;if(!m_loaded&&m_hwnd)InvalidateRect(m_hwnd,nullptr,FALSE);
+        if(m_activityMotionEnabled)EnsureHoverTimer();
+    }
+    static int StartTileKey(StartHover kind,size_t index){return static_cast<int>(kind)*64+static_cast<int>(index);}
+    double StartTileLevel(StartHover kind,size_t index)const{
+        const auto found=m_tileFades.find(StartTileKey(kind,index));
+        return found==m_tileFades.end()?0.0:found->second.Level(Clock::now());
+    }
+    // One frame of the tiles' lift; the start screen is repainted whole, as
+    // its hover always was, and only while nothing is playing.
+    bool AnimateStartTiles(Clock::time_point now){
+        bool moving=false;for(const auto& [key,fade]:m_tileFades)moving=moving||fade.Animating(now);
+        if((moving||m_tilesWereMoving)&&!m_loaded&&m_hwnd)InvalidateRect(m_hwnd,nullptr,FALSE);
+        m_tilesWereMoving=moving;return moving;
     }
     // A tile opens what it shows, by the same path as the File menu.
     bool ActivateStartScreen(int x,int y){
@@ -7941,6 +7968,7 @@ private:
         m_hoverAnimating=0;
         m_volumeHot.Reset();m_mixHot.Reset();m_volumeBubble.Reset();m_volumeBubbleOffAt.reset();m_slidersWereMoving=false;
         m_compareFades.clear();m_compareWasMoving=false;
+        m_tileFades.clear();m_tilesWereMoving=false;
         if(m_hoverTimer&&m_hwnd){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
     }
     // One timer frame of the hover fades: repaints only the buttons whose tint
@@ -7959,7 +7987,8 @@ private:
         m_hoverAnimating=animating;
         const bool sliders=AnimateSliders(now);
         const bool compare=AnimateCompareBar(now);
-        if(!animating&&!sliders&&!compare&&m_hoverTimer){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
+        const bool tiles=AnimateStartTiles(now);
+        if(!animating&&!sliders&&!compare&&!tiles&&m_hoverTimer){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
     }
     // The volume slider's geometry at this moment: the knob grows with the
     // hover fade, and the bubble keeps inside the strip, above the button row.
@@ -11465,6 +11494,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     std::shared_ptr<StartScreenAnswers> m_startAnswers=std::make_shared<StartScreenAnswers>();
     bool m_startRequested=false;std::vector<std::string> m_startRequestedKeys;
     StartHover m_startHover=StartHover::None;size_t m_startHoverIndex=0;
+    std::map<int,chrome_motion::Fade> m_tileFades;bool m_tilesWereMoving=false;
     std::jthread m_startWorker;
     bool m_shortcutSheetOpen=false;HWND m_shortcutWnd=nullptr;std::vector<ShortcutGroup> m_shortcutGroups;
     shortcut_sheet::Metrics m_shortcutMetrics{};shortcut_sheet::Layout m_shortcutLayout{};

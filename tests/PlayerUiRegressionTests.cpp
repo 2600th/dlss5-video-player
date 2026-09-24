@@ -1776,6 +1776,37 @@ struct PlayerAppTestAccess {
         CHECK(Contains(app.T(L"start.safe_mode").c_str()));
         CHECK(Contains(std::wstring(kExampleVideos[0].title).c_str()));
         DeleteDC(dc);
+        // A tile lifts under the pointer on the hover timer, and settles back
+        // when the pointer leaves; without animations it changes at once.
+        {
+            const bool motion = app.m_activityMotionEnabled;
+            const NeuralPlaybackLifecycle running = app.m_neuralLifecycle;
+            app.m_neuralLifecycle.state = NeuralPlaybackState::Idle;
+            const RECT tile = layout.trailerTiles.front();
+            const POINT inside{(tile.left + tile.right) / 2, (tile.top + tile.bottom) / 2};
+            for (const bool animated : {true, false}) {
+                app.m_activityMotionEnabled = animated;
+                app.ResetHoverFades();
+                app.UpdateStartHover(-1, -1);
+                app.UpdateStartHover(inside.x, inside.y);
+                CHECK(app.m_startHover == PlayerApp::StartHover::Trailer);
+                const double first = app.StartTileLevel(PlayerApp::StartHover::Trailer, 0);
+                CHECK(animated ? first < 1.0 : first == 1.0);
+                CHECK((app.m_hoverTimer != 0) == animated);
+                std::this_thread::sleep_for(chrome_motion::kHoverOut + std::chrono::milliseconds(30));
+                CHECK_EQ(1.0, app.StartTileLevel(PlayerApp::StartHover::Trailer, 0));
+                app.UpdateStartHover(-1, -1);
+                std::this_thread::sleep_for(chrome_motion::kHoverOut + std::chrono::milliseconds(30));
+                CHECK_EQ(0.0, app.StartTileLevel(PlayerApp::StartHover::Trailer, 0));
+                app.AnimateHover();
+                app.AnimateHover();
+                CHECK_EQ(static_cast<UINT_PTR>(0), app.m_hoverTimer);
+            }
+            app.ResetHoverFades();
+            app.UpdateStartHover(-1, -1);
+            app.m_neuralLifecycle = running;
+            app.m_activityMotionEnabled = motion;
+        }
         // An untitled local file is named by its file name, never its full path.
         {
             auto titled = std::move(app.m_recent);
