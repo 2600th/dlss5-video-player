@@ -2,6 +2,7 @@ import {AbsoluteFill, Composition, Interactive, Sequence, interpolate, registerR
 import {loadFont} from '@remotion/fonts';
 import {Band, EndCard, Motion, PlayerView, Sweep} from './scenes';
 import {clamp, ink} from './brand';
+import {Card, Square, squareTimeline} from './social';
 
 // What the video has to do, in order: show the difference before saying
 // anything, show it survives motion, show the tools the player gives you to
@@ -86,6 +87,12 @@ const Demo = () => {
   );
 };
 
+const squareTotal = squareTimeline[squareTimeline.length - 1].at + squareTimeline[squareTimeline.length - 1].length;
+
 registerRoot(() => (
-  <Composition id="Demo" component={Demo} width={1920} height={1080} fps={30} durationInFrames={Math.round(total * 30)} />
+  <>
+    <Composition id="Demo" component={Demo} width={1920} height={1080} fps={30} durationInFrames={Math.round(total * 30)} />
+    <Composition id="Card" component={Card} width={1200} height={630} fps={30} durationInFrames={1} />
+    <Composition id="Square" component={Square} width={1080} height={1080} fps={30} durationInFrames={Math.round(squareTotal * 30)} />
+  </>
 ));

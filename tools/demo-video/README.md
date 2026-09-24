@@ -43,6 +43,10 @@ ffmpeg -i ../../docs/media/neural-comparison-demo.mp4 -vf "fps=8,scale=800:-2:fl
   -c:v libwebp -quality 50 -compression_level 6 -loop 0 -an ../../docs/media/neural-comparison-preview.webp
 ```
 
+`npm run card` and `npm run square` write the social card and square clip in
+`docs/media/social/` from the same inputs; see
+[docs/media/README.md](../../docs/media/README.md#social).
+
 ## How it fits together
 
 `prepare-inputs.py` fills `public/`:
@@ -51,7 +55,8 @@ ffmpeg -i ../../docs/media/neural-comparison-demo.mp4 -vf "fps=8,scale=800:-2:fl
   render, lossless
 - `lucia-*.mp4` (GTA VI frames 1896–1979): 1920x1080 native-pixel crops, one
   H.264 encode each at the source's own frame rate
-- the player captures, copied as they are
+- the player captures, and the PNG the player saved for the 2 x 2 view
+  (`saved-2x2.png`), copied as they are
 - the site's two fonts, so the video and the website match
 
 It refuses a render that isn't complete and fully verified. It also checks by
@@ -64,6 +69,8 @@ The composition lives in `src/`:
 - `scenes.tsx`: one component per kind of scene - the sweep, the playing
   split, the player window, the render band, the end card
 - `Split.tsx`: the divider that shows source and render side by side
+- `social.tsx`: the 1200x630 card and the 1080x1080 clip, framed from the
+  same inputs
 - `brand.tsx`: the site's colours and the caption style
 
 Every clip scene lasts exactly as long as its clip, so nothing is looped, held

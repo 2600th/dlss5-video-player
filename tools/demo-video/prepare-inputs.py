@@ -11,7 +11,8 @@ Both sides get the same frame indices and the same crop. Stills are lossless
 PNGs of the whole 2560x1440 frame; clips are one H.264 CRF 10 encode each. No
 scaling, retouching or tonal adjustment happens here.
 
-The player captures (the Difference, Side by side and loupe views, and the
+The player captures (the Difference, Side by side and loupe views, the PNG the player's Save
+comparison image wrote for its 2 x 2 view, and the
 render band filling during a live session) are window captures made with
 tools/verification/capture-window.ps1. They are copied as they are: PNG in,
 PNG out.
@@ -36,7 +37,7 @@ STILLS = [('bond', 1122)]
 # name, clip, first frame, count, crop x,y,w,h
 CLIPS = [('gta6', 'lucia', 1896, 84, (130, 150, 1920, 1080))]
 # The captures the composition uses, by the names capture-window gave them.
-CAPTURES = ['difference.png', 'side-by-side.png', 'loupe.png']
+CAPTURES = ['difference.png', 'side-by-side.png', 'loupe.png', 'saved-2x2.png']
 BAND_FRAMES = 'band-*.png'
 
 parser = argparse.ArgumentParser()

@@ -1,5 +1,5 @@
 import React from 'react';
-import {AbsoluteFill, Img, Interactive, staticFile} from 'remotion';
+import {AbsoluteFill, Img, Interactive, staticFile, useVideoConfig} from 'remotion';
 import {Video} from '@remotion/media';
 import {ink} from './brand';
 
@@ -12,7 +12,7 @@ export type Plate = {
   kind: 'still' | 'clip';
   original: string;
   neural: string;
-  // Still only: where the 1920x1080 window sits inside the 2560x1440 frame.
+  // Still only: where the composition's window sits inside the 2560x1440 frame.
   x?: number;
   y?: number;
 };
@@ -34,15 +34,18 @@ export const Split: React.FC<{plate: Plate; divider: number; scale?: number; ori
   origin = '50% 50%',
   labels = 1,
 }) => {
-  const x = divider * 1920;
+  // The composition's own size, so the same split serves the 1920x1080 demo,
+  // the 1200x630 card and the 1080x1080 clip.
+  const {width, height} = useVideoConfig();
+  const x = divider * width;
   return (
     <AbsoluteFill style={{overflow: 'hidden', backgroundColor: ink.ground}}>
       {layer(plate, 'neural', scale, origin)}
-      <AbsoluteFill style={{clipPath: `inset(0 ${1920 - x}px 0 0)`}}>{layer(plate, 'original', scale, origin)}</AbsoluteFill>
-      <div style={{position: 'absolute', left: x - 1, top: 0, width: 2, height: 1080, backgroundColor: ink.text, opacity: divider > 0.001 && divider < 0.999 ? 0.9 : 0}} />
+      <AbsoluteFill style={{clipPath: `inset(0 ${width - x}px 0 0)`}}>{layer(plate, 'original', scale, origin)}</AbsoluteFill>
+      <div style={{position: 'absolute', left: x - 1, top: 0, width: 2, height, backgroundColor: ink.text, opacity: divider > 0.001 && divider < 0.999 ? 0.9 : 0}} />
       <Interactive.Div
         name="LabelOriginal"
-        style={{position: 'absolute', right: 1920 - x + 22, top: 44, opacity: labels * (divider > 0.08 ? 1 : 0), ...chip, color: ink.text, backgroundColor: '#050506cc'}}
+        style={{position: 'absolute', right: width - x + 22, top: 44, opacity: labels * (divider > 0.08 ? 1 : 0), ...chip, color: ink.text, backgroundColor: '#050506cc'}}
       >
         ORIGINAL
       </Interactive.Div>

@@ -76,6 +76,24 @@ before it (12 September) is kept unchanged at
 [`tools/benchmark/fixtures/demo-capture-20260912.mp4`](../../tools/benchmark/fixtures/README.md),
 because the benchmark corpus is cut from it.
 
+## Social
+
+Two files in [`social/`](social/), built by the same Remotion project from the
+same inputs as the video (`npm run card`, `npm run square`):
+
+- [`card-1200x630.jpg`](social/card-1200x630.jpg), 90 KB: a link-preview card.
+  The *007 First Light* frame 1122 pair from the video, both halves scaled to
+  0.62 together, the divider through the face, and the name, one line and a
+  provenance line set over a dark gradient on the left.
+- [`square-1080.mp4`](social/square-1080.mp4), 13 s, 1080x1080, 30 fps, H.264
+  CRF 21, silent, 0.9 MB: the same split face (4 s), the player's Difference
+  view (3 s), the PNG the player's **Save comparison image** wrote for the 2 x 2
+  view, footer included, scaled to the width (3 s), and an end card (3 s).
+
+Nothing in them is new footage or retouched: they are the video's pairs and
+captures, cropped and scaled. Neither is posted anywhere; they are files for
+whoever shares the project.
+
 ## Comparison stills
 
 Five figures in [`stills/`](stills/), each the source frame beside the same

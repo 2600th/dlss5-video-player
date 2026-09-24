@@ -5,7 +5,9 @@
   "scripts": {
     "preview": "remotion studio --no-open",
     "render": "remotion render src/index.tsx Demo ../../docs/media/neural-comparison-demo.mp4",
-    "poster": "remotion still src/index.tsx Demo ../../docs/media/neural-comparison-poster.jpg --frame=45"
+    "poster": "remotion still src/index.tsx Demo ../../docs/media/neural-comparison-poster.jpg --frame=45",
+    "card": "remotion still src/index.tsx Card ../../docs/media/social/card-1200x630.jpg --jpeg-quality=90",
+    "square": "remotion render src/index.tsx Square ../../docs/media/social/square-1080.mp4 --crf=21"
   },
   "dependencies": {
     "@remotion/cli": "4.0.520",
