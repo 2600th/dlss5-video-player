@@ -70,11 +70,67 @@ doesn't make a good opener. Shirtless, club and bedroom shots in GTA VI
 (1:11–1:18, 1:34–1:41, 2:03–2:04) fall outside this repository's content
 standard. Everyone on screen is fully clothed.
 
+## Comparison stills
+
+Five figures in [`stills/`](stills/), each the source frame beside the same
+frame of the player's render, as identical unscaled 700x880 crops. Each has a
+`.provenance.json` beside it with the source URL and SHA-256, the frame and its
+timestamp, the crop, the render's cache key, SHA-256 and verified frame count,
+the neural settings and their digest, the runtime, the GPU and driver, and the
+player commit.
+
+| Figure | Trailer, frame | What it shows |
+| --- | --- | --- |
+| [`007-first-light-bond.png`](stills/007-first-light-bond.png) | 007 First Light, Story Trailer, 1122 (0:18.7) | Skin: pores, the scar, the lips, under lamp light |
+| [`resident-evil-requiem-flashlight.png`](stills/resident-evil-requiem-flashlight.png) | Resident Evil Requiem, 2nd Trailer, 4125 (1:08.8) | Night lighting: a face lit from below by a torch |
+| [`gta6-lucia.png`](stills/gta6-lucia.png) | GTA VI Trailer 2, 1940 (1:04.7) | Hair and skin at golden hour |
+| [`007-first-light-suit.png`](stills/007-first-light-suit.png) | 007 First Light, Story Trailer, 2928 (0:48.8) | Grey hair, a lined face and a wool suit |
+| [`ac-shadows-low-key-limit.png`](stills/ac-shadows-low-key-limit.png) | Assassin's Creed Shadows, Story Trailer, 1987 (1:06.2) | **Where it does not help.** A face in deep shadow under a helmet: the render crushes it towards black and adds speckle, while the lit armour barely changes |
+
+The first four are the strongest frames found in those trailers, not typical
+ones. The last is there so they are not the only evidence: low-key shots like
+it are common in these trailers, and the model makes them worse. The render also
+has flaws in the good figures: in the GTA VI one the sweater's left edge breaks
+into blotches, and in the Resident Evil one the background above the hair picks
+up a smudge.
+
+**How they were made.** Each trailer was opened from **File > Game trailers**
+in a fresh profile at the player's YouTube **Auto** quality (2560x1440, the
+highest bitrate at that height), and rendered whole with **DLSS > Convert &
+export > Convert whole video to neural video** at default settings: Intensity,
+Local tone, Local structure and Color strength 1.0, Skin structure Off, one
+pass. Every render verified all of its
+frames. The source and render were then copied out of the cache, and each figure
+was made with
+[`tools/demo-video/make-face-comparison.py`](../../tools/demo-video/make-face-comparison.py),
+which checks by picture that the render frame is the source frame (it must
+differ least at the manifest's offset, 0 for a whole-video render, than one
+frame either side), for example:
+
+```powershell
+python tools/demo-video/make-face-comparison.py <007>/source.mkv <007 render folder> `
+    --frame 1122 --crop 1170,185,700,880 --output docs/media/stills/007-first-light-bond.png `
+    --provenance docs/media/stills/007-first-light-bond.provenance.json `
+    --source-url https://www.youtube.com/watch?v=trvIyyFt_MM --title "007 First Light - Story Trailer (PlayStation)" `
+    --gpu "NVIDIA GeForce RTX 4080 SUPER" --cache-key <render folder name> --player-commit dced888...
+```
+
+The other four differ only in trailer, frame and crop, which their records
+give. On the two slow 007 shots that check has little margin (for example
+4.62 against 4.70 levels at frame 1122), because the source barely changes
+from frame to frame; a first choice, frame 1104, failed it and was dropped. The
+offset of 0 was confirmed by picture on every trailer, decisively on shots
+with motion.
+
+Renders: RTX 4080 SUPER, driver 610.47 (`32.0.16.1047`), runtime lock
+`310.8.SF-v2`, the player at `dced888` (0.25.0 plus the unreleased work since).
+
 ## Rights
 
 This is an unofficial RenoDX/ReShade experiment, not an NVIDIA product. *The
-Matrix* footage is © Warner Bros. and *Grand Theft Auto VI* footage is ©
-Rockstar Games. They're used to document the software, and the source-code
+Matrix* footage is © Warner Bros., *Grand Theft Auto VI* © Rockstar Games,
+*007 First Light* © IO Interactive, *Resident Evil Requiem* © Capcom and
+*Assassin's Creed Shadows* © Ubisoft. They're used to document the software, and the source-code
 licence doesn't relicense them. Only the finished video, preview, poster and
 edit source are in Git. The sources and renders are not.
 

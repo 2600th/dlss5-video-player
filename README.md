@@ -22,7 +22,7 @@ player's render of the same frame on the right. Rendered by v0.25.0 on an RTX
 4080 SUPER, with Intensity, Local tone and Local structure raised to 2.0 (default
 1.0). [How it was made](docs/media/README.md).
 
-![The Matrix, one frame of Trinity: the source on the left, the same frame from the player's render on the right, identical unscaled 700x880 crops](docs/screenshots/current/face-comparison.png)
+![007 First Light, one frame of Bond: the source on the left, the same frame from the player's render at default settings on the right, identical unscaled 700x880 crops](docs/media/stills/007-first-light-bond.png)
 
 > [!IMPORTANT]
 > Community project, not an NVIDIA product. The neural runtime is a modified,
@@ -177,7 +177,7 @@ Each pair is one paused frame with only the view switched, taken from a live
 2560x1440 session with upscaling off. It shows how the toggle works, not a
 promise that every source gains detail.
 
-![GTA VI Trailer 2, one frame of Lucia: the source on the left, the same frame from the player's render on the right, identical unscaled 700x880 crops](docs/screenshots/current/face-comparison-gta6.png)
+![GTA VI Trailer 2, one frame of Lucia: the source on the left, the same frame from the player's render at default settings on the right, identical unscaled 700x880 crops](docs/media/stills/gta6-lucia.png)
 
 ### DLSS 5 mix
 

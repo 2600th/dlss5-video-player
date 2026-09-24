@@ -1,0 +1,62 @@
+{
+  "figure": "007-first-light-suit.png",
+  "source": {
+    "title": "007 First Light - Story Trailer (PlayStation)",
+    "url": "https://www.youtube.com/watch?v=trvIyyFt_MM",
+    "file": "source.mkv",
+    "sha256": "177eec118b25ab9d1d793cf86363f76880661d5ae811a7c9fbfc089ba752a6f9",
+    "size": "2560x1440",
+    "fps": "19001/317"
+  },
+  "frame": 2928,
+  "timestampApprox": "0:00:48.849",
+  "crop": {
+    "x": 480,
+    "y": 300,
+    "width": 700,
+    "height": 880,
+    "scaled": false
+  },
+  "render": {
+    "cacheKey": "76561c1dcc9171343472cdf42dd44362f8d4ed07cafff59f4bfc56af84ccd3d8",
+    "frame": 2928,
+    "neuralSha256": "f605ed7dc28dda680d8f1cc29b28b2d380d775a9710d23fd291f25982227b837",
+    "verifiedFrames": "5784 / 5784",
+    "encoder": "hevc_nvenc",
+    "rangeStart100ns": 0,
+    "alignmentMad": {
+      "-1": 4.265,
+      "+0": 4.116,
+      "+1": 4.176
+    }
+  },
+  "settingsDigest": "96bf471af434a585db6dbb4e07fadfcdf04eaf95b14bcec341c51a53d78b095a",
+  "settings": {
+    "NRAutoMask": "1",
+    "NRChainedHistory": "1",
+    "NRColorStrength": "1.000000",
+    "NRIntensity": "1.000000",
+    "NRLocalStructure": "1.000000",
+    "NRLocalTone": "1.000000",
+    "NRPasses": "1",
+    "NRPreUpscale": "0",
+    "NRPreset": "0",
+    "NRSkinStructure": "-1.000000",
+    "NRStyle": "0"
+  },
+  "runtime": {
+    "version": "310.8.SF-v2",
+    "digest": "cc452e035ed73972c6927ea78a8056099287c0f3ba783c0eab5a4d84e46e32f4",
+    "models": "59792fa7c7dc8eba8108c6cd938e6d6a3473b773b4cb105b6a39eb17969b18fb"
+  },
+  "player": {
+    "version": "0.25.0",
+    "commit": "dced8888762e5836489a31e858816a8e316fe54d"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+    "driver": "32.0.16.1047"
+  },
+  "made": "2026-09-24",
+  "processing": "Both crops are the same source pixels of the same frame, unscaled. Nothing retouched, sharpened or colour-corrected."
+}

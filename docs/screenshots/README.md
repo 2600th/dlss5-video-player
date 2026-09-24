@@ -8,8 +8,6 @@ for images that have since been replaced are in the git history of this file.
 
 | File | What it shows | Made |
 | --- | --- | --- |
-| `current/face-comparison.png` | The Matrix, source frame 2116, beside the same frame from the player's render. Identical unscaled 700x880 crops | 22 Sep 2026, v0.25.0 |
-| `current/face-comparison-gta6.png` | GTA VI Trailer 2, source frame 1940, the same way | 22 Sep 2026, v0.25.0 |
 | `current/gta6-lucia-original.jpg`, `gta6-lucia-neural.jpg` | That GTA VI frame, whole (2560x1440). The site hero and link card are cut from these | 22 Sep 2026, v0.25.0 |
 | `current/matrix-neural.jpg`, `matrix-original.jpg` | The player paused on Trinity at 1:28, neural view on, then off | 22 Sep 2026, v0.25.0 |
 | `current/neural-playback.jpg`, `original-comparison.jpg` | The player paused on GTA VI at 1:04, neural view on, then off | 22 Sep 2026, v0.25.0 |
@@ -46,14 +44,11 @@ A render starts at its range's first frame, so source frame *n* is render frame
 *n* − 60 for The Matrix and *n* − 54 for GTA VI. A picture check confirmed both
 offsets: each pair differs least at that offset.
 
-**Face comparisons.** Made with `tools/demo-video/make-face-comparison.py`:
-
-```powershell
-python tools/demo-video/make-face-comparison.py matrix.mp4 <matrix render>/neural.mkv `
-    --frame 2116 --neural-frame 2056 --crop 960,186,700,880 --output docs/screenshots/current/face-comparison.png
-python tools/demo-video/make-face-comparison.py gta6.mp4 <gta6 render>/neural.mkv `
-    --frame 1940 --neural-frame 1886 --crop 740,144,700,880 --output docs/screenshots/current/face-comparison-gta6.png
-```
+**Face comparisons.** The two unscaled face figures that used to sit here
+(`face-comparison.png`, The Matrix, and `face-comparison-gta6.png`) were
+replaced on 24 September 2026 by the comparison stills in
+[`docs/media/stills/`](../media/stills/), each with its own provenance record;
+see [docs/media/README.md](../media/README.md#comparison-stills).
 
 **Player captures.** Each pair is one paused frame in a live session, with only
 the view switched:

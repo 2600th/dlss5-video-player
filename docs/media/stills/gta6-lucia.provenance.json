@@ -1,0 +1,62 @@
+{
+  "figure": "gta6-lucia.png",
+  "source": {
+    "title": "Grand Theft Auto VI Trailer 2 (Rockstar Games)",
+    "url": "https://www.youtube.com/watch?v=VQRLujxTm3c",
+    "file": "source.mkv",
+    "sha256": "a91442362a15d3c06ea426c22a9b2626f4a0351195fd693e75aab1aff7ff404c",
+    "size": "2560x1440",
+    "fps": "30/1"
+  },
+  "frame": 1940,
+  "timestampApprox": "0:01:04.667",
+  "crop": {
+    "x": 740,
+    "y": 144,
+    "width": 700,
+    "height": 880,
+    "scaled": false
+  },
+  "render": {
+    "cacheKey": "5e90e19e47fc2aa02b18e9e5fe4e4cf1e3c56f603fb6e96a77eb957e71335063",
+    "frame": 1940,
+    "neuralSha256": "6f9852e09dfd05fd7554ef5e654392176f6a0ece0c950b6e1790aa89e3c8488f",
+    "verifiedFrames": "5002 / 5002",
+    "encoder": "hevc_nvenc",
+    "rangeStart100ns": 0,
+    "alignmentMad": {
+      "-1": 9.791,
+      "+0": 4.971,
+      "+1": 10.25
+    }
+  },
+  "settingsDigest": "96bf471af434a585db6dbb4e07fadfcdf04eaf95b14bcec341c51a53d78b095a",
+  "settings": {
+    "NRAutoMask": "1",
+    "NRChainedHistory": "1",
+    "NRColorStrength": "1.000000",
+    "NRIntensity": "1.000000",
+    "NRLocalStructure": "1.000000",
+    "NRLocalTone": "1.000000",
+    "NRPasses": "1",
+    "NRPreUpscale": "0",
+    "NRPreset": "0",
+    "NRSkinStructure": "-1.000000",
+    "NRStyle": "0"
+  },
+  "runtime": {
+    "version": "310.8.SF-v2",
+    "digest": "cc452e035ed73972c6927ea78a8056099287c0f3ba783c0eab5a4d84e46e32f4",
+    "models": "59792fa7c7dc8eba8108c6cd938e6d6a3473b773b4cb105b6a39eb17969b18fb"
+  },
+  "player": {
+    "version": "0.25.0",
+    "commit": "dced8888762e5836489a31e858816a8e316fe54d"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+    "driver": "32.0.16.1047"
+  },
+  "made": "2026-09-24",
+  "processing": "Both crops are the same source pixels of the same frame, unscaled. Nothing retouched, sharpened or colour-corrected."
+}

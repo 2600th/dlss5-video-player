@@ -1,0 +1,62 @@
+{
+  "figure": "ac-shadows-low-key-limit.png",
+  "source": {
+    "title": "Assassin's Creed Shadows: Story Trailer (Assassin's Creed)",
+    "url": "https://www.youtube.com/watch?v=SHaN4MIGqpo",
+    "file": "source.mkv",
+    "sha256": "e1e668b0879dd129816143c741d2a0947dbab1ec376d9bde1bf568e8f2267219",
+    "size": "2560x1440",
+    "fps": "30/1"
+  },
+  "frame": 1987,
+  "timestampApprox": "0:01:06.233",
+  "crop": {
+    "x": 1080,
+    "y": 180,
+    "width": 700,
+    "height": 880,
+    "scaled": false
+  },
+  "render": {
+    "cacheKey": "3858fe5bdfb5edcf15a86ec8ae43427cbcdbf34e812bfef5d2089a0a555e0a62",
+    "frame": 1987,
+    "neuralSha256": "ff9f8fe026b063556d7114325b1bdd5e2be77ce132cf8d621d5b146852b5a75f",
+    "verifiedFrames": "4532 / 4532",
+    "encoder": "hevc_nvenc",
+    "rangeStart100ns": 0,
+    "alignmentMad": {
+      "-1": 8.837,
+      "+0": 4.157,
+      "+1": 8.847
+    }
+  },
+  "settingsDigest": "96bf471af434a585db6dbb4e07fadfcdf04eaf95b14bcec341c51a53d78b095a",
+  "settings": {
+    "NRAutoMask": "1",
+    "NRChainedHistory": "1",
+    "NRColorStrength": "1.000000",
+    "NRIntensity": "1.000000",
+    "NRLocalStructure": "1.000000",
+    "NRLocalTone": "1.000000",
+    "NRPasses": "1",
+    "NRPreUpscale": "0",
+    "NRPreset": "0",
+    "NRSkinStructure": "-1.000000",
+    "NRStyle": "0"
+  },
+  "runtime": {
+    "version": "310.8.SF-v2",
+    "digest": "cc452e035ed73972c6927ea78a8056099287c0f3ba783c0eab5a4d84e46e32f4",
+    "models": "59792fa7c7dc8eba8108c6cd938e6d6a3473b773b4cb105b6a39eb17969b18fb"
+  },
+  "player": {
+    "version": "0.25.0",
+    "commit": "dced8888762e5836489a31e858816a8e316fe54d"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+    "driver": "32.0.16.1047"
+  },
+  "made": "2026-09-24",
+  "processing": "Both crops are the same source pixels of the same frame, unscaled. Nothing retouched, sharpened or colour-corrected."
+}

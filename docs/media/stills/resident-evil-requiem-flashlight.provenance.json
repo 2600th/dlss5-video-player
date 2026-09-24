@@ -1,0 +1,62 @@
+{
+  "figure": "resident-evil-requiem-flashlight.png",
+  "source": {
+    "title": "Resident Evil Requiem - 2nd Trailer (Resident Evil)",
+    "url": "https://www.youtube.com/watch?v=0wFNN1f6hF8",
+    "file": "source.mkv",
+    "sha256": "afdcc33e5ea2d60d49d0f7091999ed7681ecbb602e1532bbbde7df9370132047",
+    "size": "2560x1440",
+    "fps": "19001/317"
+  },
+  "frame": 4125,
+  "timestampApprox": "0:01:08.819",
+  "crop": {
+    "x": 1060,
+    "y": 40,
+    "width": 700,
+    "height": 880,
+    "scaled": false
+  },
+  "render": {
+    "cacheKey": "914fed207df587dd8c16b5b1f5f0f2ca384492ac471f5e963dcde2e4c69f4780",
+    "frame": 4125,
+    "neuralSha256": "823129ffc6c5d68716363cc30e44cd4fa256a41d01fdf1e2bd66c9fe22fc1027",
+    "verifiedFrames": "9242 / 9242",
+    "encoder": "hevc_nvenc",
+    "rangeStart100ns": 0,
+    "alignmentMad": {
+      "-1": 10.969,
+      "+0": 5.877,
+      "+1": 6.805
+    }
+  },
+  "settingsDigest": "96bf471af434a585db6dbb4e07fadfcdf04eaf95b14bcec341c51a53d78b095a",
+  "settings": {
+    "NRAutoMask": "1",
+    "NRChainedHistory": "1",
+    "NRColorStrength": "1.000000",
+    "NRIntensity": "1.000000",
+    "NRLocalStructure": "1.000000",
+    "NRLocalTone": "1.000000",
+    "NRPasses": "1",
+    "NRPreUpscale": "0",
+    "NRPreset": "0",
+    "NRSkinStructure": "-1.000000",
+    "NRStyle": "0"
+  },
+  "runtime": {
+    "version": "310.8.SF-v2",
+    "digest": "cc452e035ed73972c6927ea78a8056099287c0f3ba783c0eab5a4d84e46e32f4",
+    "models": "59792fa7c7dc8eba8108c6cd938e6d6a3473b773b4cb105b6a39eb17969b18fb"
+  },
+  "player": {
+    "version": "0.25.0",
+    "commit": "dced8888762e5836489a31e858816a8e316fe54d"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+    "driver": "32.0.16.1047"
+  },
+  "made": "2026-09-24",
+  "processing": "Both crops are the same source pixels of the same frame, unscaled. Nothing retouched, sharpened or colour-corrected."
+}

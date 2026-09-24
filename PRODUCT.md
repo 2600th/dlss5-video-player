@@ -93,10 +93,12 @@ Real, in the repository, usable without fabrication:
   `original-comparison.jpg` / `neural-playback.jpg` - one paused frame each,
   only Neural Rendering switched between the two captures (v0.25.0).
   Provenance in `docs/screenshots/README.md`.
-- `docs/screenshots/current/face-comparison.png` (The Matrix) and
-  `face-comparison-gta6.png` (GTA VI) - unscaled matched crops of a source frame
-  and the player's render of it; `gta6-lucia-original.jpg` / `-neural.jpg`, the
-  full frames behind the site hero.
+- `docs/media/stills/` - five unscaled matched crops of a source frame and the
+  player's render of it at default settings (007 First Light, Resident Evil
+  Requiem, GTA VI, and one Assassin's Creed Shadows frame where the render is
+  worse), each with a `.provenance.json`; `docs/screenshots/current/`
+  `gta6-lucia-original.jpg` / `-neural.jpg`, the full frames behind the site
+  hero.
 - `docs/screenshots/current/neural-strength.jpg`, `recent-videos.jpg`,
   `player-start.jpg` (the current UI: the image adjustments window, the File
   menu and the start screen).
