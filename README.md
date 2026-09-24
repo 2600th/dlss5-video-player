@@ -1,28 +1,30 @@
 # DLSS 5 Video Player
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
+_Verified against `main` (dced888) on 2026-09-24._
 
-Run any video, photo or GIF through NVIDIA's DLSS 5 neural renderer and check
-what it did: the original and the render sit on the same frame, one key apart,
-while the rest of the video renders behind you. Free and open source, for
-Windows with an RTX card.
+**Put any video through NVIDIA's DLSS 5 neural renderer, and check every frame
+against the original.**
 
-Other DLSS 5 tools convert files or filter the desktop live. This one renders
-the whole video progressively, keeps every frame, and shows the original and
-the render on the same frame while it is still rendering.
-[How it compares](docs/RELATED_PROJECTS.md).
+[![25-second DLSS 5 Video Player demonstration: a 007 First Light face split between the source and the player's render, GTA VI playing with the divider, then the player's Difference, Side by side and loupe views, and a render filling the timeline while the video plays](docs/media/neural-comparison-preview.webp)](docs/media/neural-comparison-demo.mp4)
+
+**[Watch the 25-second video](docs/media/neural-comparison-demo.mp4)** (1080p, no
+sound): *007 First Light* and *GTA VI* Trailer 2 from the built-in trailer list,
+rendered at **default settings** on an RTX 4080 SUPER, then the player's own
+Difference, Side by side and loupe views. [How it was made](docs/media/README.md).
+
+Run a video, photo or GIF through the model and the original and the render sit
+on the same frame, one key apart, while the rest of the video renders behind
+you. Free and open source, for Windows with an RTX card. Other DLSS 5 tools
+convert files or filter the desktop live; this one renders the whole video
+progressively, keeps every frame, and gives you the tools to see what the model
+changed, and where it didn't help. [How it compares](docs/RELATED_PROJECTS.md).
 
 [Website](https://2600th.github.io/dlss5-video-player/) · [Download](#download) · [First run](#first-run) · [Usage guide](docs/USAGE.md) · [Build it yourself](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-[![20-second DLSS 5 Video Player demonstration: The Matrix and GTA VI, each source frame split down the face against the player's own neural render](docs/media/neural-comparison-preview.webp)](docs/media/neural-comparison-demo.mp4)
+![007 First Light, one frame: the source on the left, the same frame from the player's render at default settings on the right, identical unscaled 700x880 crops](docs/media/stills/007-first-light-bond.png)
 
-**[Watch the full 20-second video](docs/media/neural-comparison-demo.mp4)**
-(1080p, no sound). The Matrix and GTA VI Trailer 2: the source on the left, this
-player's render of the same frame on the right. Rendered by v0.25.0 on an RTX
-4080 SUPER, with Intensity, Local tone and Local structure raised to 2.0 (default
-1.0). [How it was made](docs/media/README.md).
-
-![007 First Light, one frame of Bond: the source on the left, the same frame from the player's render at default settings on the right, identical unscaled 700x880 crops](docs/media/stills/007-first-light-bond.png)
+Unscaled crops of one source frame and the same frame of the player's render.
+[Four more, including one where the model makes the picture worse](docs/media/README.md#comparison-stills).
 
 > [!IMPORTANT]
 > Community project, not an NVIDIA product. The neural runtime is a modified,
@@ -41,6 +43,12 @@ player's render of the same frame on the right. Rendered by v0.25.0 on an RTX
 
 Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run, since
 it has no runtime.
+
+> [!NOTE]
+> The video, the pictures above and the features marked **new** below come from
+> `main`, after v0.25.0: the compare views, subtitles, HDR, the render quality
+> ladder and the command line. The next release will carry them; until then,
+> [build it yourself](docs/BUILDING.md).
 
 ### Check what you downloaded
 
@@ -77,7 +85,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_package.ps1
 3. Open a file (`Ctrl+O`), paste a public YouTube link (`Ctrl+L`), or pick
    something from **File > Game trailers**.
 4. Press `D`. It buffers for a few seconds, then plays the render.
-5. **Video > Compare** shows before and after as a split, a wipe or a blend.
+5. The compare bar under the picture switches between DLSS 5, Original, Split,
+   Wipe, Difference, Side by side and 2 × 2 (in 0.25.0: **Video > Compare**).
 6. **DLSS > Convert & export** saves the rendered video to a file.
 
 **File > Recent videos** reopens a video with its render attached, as long as
@@ -86,30 +95,44 @@ the render covered the whole video. Press `D` at the start to get one.
 ## What it does
 
 - **Renders while you watch.** Press `D` and playback moves onto rendered frames
-  a few seconds later. The rest of the video fills in behind you, nearest first.
+  a few seconds later. The rest of the video fills in behind you, nearest first,
+  and the timeline shows it filling.
 - **Seek anywhere.** Rendered frames play wherever they are on the timeline.
   Elsewhere the original plays at once while the render catches up, and nothing
   already rendered is thrown away.
-- **Compares on the same frame.** Switching between original and render never
-  moves the playhead. Pause, step frames, or use a split, wipe or blend.
-- **Keeps your renders.** A render of the whole video is reused whenever the
-  source, runtime and settings still match.
+- **Shows you what the model did.** *New.* A compare bar under the picture:
+  DLSS 5, Original, Split, Wipe, **Difference** (where the model changed the
+  picture, amplified), **Side by side** and **2 × 2**, a Mix slider from the
+  original to past the render, zoom to 8x, a **loupe** that puts both at 4x
+  under the pointer, and press-and-hold for the original. Every view is one
+  frame at one timestamp, so the playhead never moves when you switch.
+- **Saves the evidence.** *New.* **File > Save comparison image** writes exactly
+  what the picture shows, with a footer that records the video, the frame, the
+  view, a digest of the neural settings and the runtime.
+- **Plays subtitles.** *New.* SRT, ASS, WebVTT, PGS and VobSub, from the file or
+  beside it, drawn after the render so text is never warped by the model.
+- **Handles HDR.** *New.* HDR10 and HLG are tone mapped for the model, which
+  renders in SDR; on an HDR display the original is still shown in HDR.
+- **Keeps your renders, at the quality you choose.** A render of the whole video
+  is reused whenever the source, runtime and settings still match. *New:* a
+  Standard, High (10-bit) or Lossless render quality, and a dithered 8-bit
+  capture by default.
 - **Exports.** PNG or JPEG for photos, GIF for animations, MP4 or MKV for video.
   MKV keeps the source audio, subtitles and chapters without re-encoding.
-- **Combines the DLSS stages.** **Export with DLSS stages** (`Ctrl+S`) writes one
-  file with any mix of Super Resolution, neural rendering and frame generation,
-  run in NVIDIA's order.
+  **Export with DLSS stages** (`Ctrl+S`) runs any mix of Super Resolution,
+  neural rendering and frame generation in NVIDIA's order. *New:* the same
+  export from the command line, `DLSSVideoPlayer.exe --render`.
 - **Raises the frame rate.** **DLSS > Generate frames** writes a copy at 2x to 5x
   the original rate, then plays it.
 - **Upscales on playback, if you want it.** Optional DLSS Super Resolution to
-  1080p, 1440p or 2160p, matched to your monitor by default, with a Temporal or
-  Per-frame history. It is off by default. On video it scored below a plain bicubic
-  upscale on every clip measured, because it is built for rendered games, not
-  decoded footage.
+  1080p, 1440p or 2160p. It is off by default: on video it scored below a plain
+  bicubic upscale on every clip measured, because it is built for rendered
+  games, not decoded footage.
 - **Tunes the model.** Neural settings live at `Ctrl+N`. Change one while paused
   and that frame re-renders, so you judge on the picture.
 - **Comes with test material.** Seven official game trailers under
-  **File > Game trailers** and on the start screen, each under three minutes.
+  **File > Game trailers** and on the start screen, each under three minutes and
+  chosen for faces, skin and light.
 
 ## What's new in 0.25.0
 
@@ -132,7 +155,11 @@ Earlier releases are in [CHANGELOG.md](CHANGELOG.md).
 | Open a file / a YouTube URL | `Ctrl+O` / `Ctrl+L` |
 | Play or pause | `Space` |
 | Neural rendering on or off | `D` |
-| Compare views | **Video > Compare**; `[` and `]` change the blend, `Z` zooms 2x |
+| Compare views | `C` / `Shift+C` step the mode; `X` swaps sides; `[` and `]` change the Mix |
+| Zoom, loupe | `Z` / `Shift+Z` zoom in and out at the pointer; `L` loupe |
+| Save the view as a PNG | `Ctrl+Shift+S` |
+| Subtitles; earlier, later | `V`; `H`, `J` |
+| Every shortcut | `?` or `F1` |
 | Seek ten seconds / step one frame | `Left` / `Right`; `.` |
 | Mark In / Out; clear; go to time | `I` / `O`; `Shift+I`; `Ctrl+G` |
 | Render one frame / four seconds / the marked clip | `F` / `Shift+F` / `Ctrl+R` |
@@ -157,39 +184,38 @@ trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
 
 ## Screenshots
 
-Real captures of the app, all on an RTX 4080 SUPER: the two paused pairs are
-v0.25.0, and the menu, DLSS 5 mix and start-screen shots are this branch's UI.
-Click any image for full size.
+Real captures of the player from `main` at 150% on an RTX 4080 SUPER, on one
+paused frame of *007 First Light* rendered at default settings. Click any image
+for full size.
 
-![File menu with Game trailers, Recent videos and Save comparison image, over a paused neural frame with the compare bar](docs/screenshots/current/recent-videos.jpg)
+![The player in Wipe: the original left of a divider down the face, the DLSS 5 render right of it, with the compare bar below](docs/screenshots/current/compare-wipe.jpg)
 
-### Same frame, original and neural
+![Difference view: where the model changed the picture, amplified 4x, as brightness](docs/screenshots/current/compare-difference.jpg)
+
+![2 x 2 view: original, DLSS 5, Difference and DLSS 5 at Mix 50%, with the toast confirming a saved comparison image](docs/screenshots/current/compare-2x2-toast.jpg)
+
+The file that save wrote, footer and all:
+[`saved-comparison-2x2.png`](docs/screenshots/current/saved-comparison-2x2.png).
+
+![A subtitle drawn over the DLSS 5 frame (a test file that says what it is)](docs/screenshots/current/subtitles.jpg)
+
+![Image adjustments, with the DLSS 5 mix slider, over the DLSS 5 frame](docs/screenshots/current/neural-strength.jpg)
+
+![The Neural settings dialog at its defaults](docs/screenshots/current/neural-settings.jpg)
+
+### Start screen
+
+![Start screen: the capability check, the Open file and Open YouTube URL actions, and the seven game trailers with their thumbnails](docs/screenshots/current/player-start.jpg)
+
+### Same frame, original and neural (v0.25.0)
 
 ![GTA VI Trailer 2 paused at 1:04 in a live session with the neural view attached](docs/screenshots/current/neural-playback.jpg)
 
 ![The same paused GTA VI frame with neural rendering off](docs/screenshots/current/original-comparison.jpg)
 
-![The Matrix paused at 1:28 in a live session with the neural view attached](docs/screenshots/current/matrix-neural.jpg)
-
-![The same paused Matrix frame with neural rendering off](docs/screenshots/current/matrix-original.jpg)
-
-Each pair is one paused frame with only the view switched, taken from a live
-2560x1440 session with upscaling off. It shows how the toggle works, not a
-promise that every source gains detail.
-
-![GTA VI Trailer 2, one frame of Lucia: the source on the left, the same frame from the player's render at default settings on the right, identical unscaled 700x880 crops](docs/media/stills/gta6-lucia.png)
-
-### DLSS 5 mix
-
-![The image adjustments window with the DLSS 5 mix slider over a paused neural frame](docs/screenshots/current/neural-strength.jpg)
-
-`Ctrl+E`, last slider. 0 % is the original, 100 % the model's result, and
-200 % pushes the change further. It blends the frame already on screen, so it
-never triggers a new render.
-
-### Start screen
-
-![Start screen: the capability check, the Open file and Open YouTube URL actions, and a row of game trailers](docs/screenshots/current/player-start.jpg)
+One paused frame with only the view switched, from a v0.25.0 session with
+Intensity, Local tone and Local structure at 2.0 (default 1.0). It shows how the
+toggle works, not a promise that every source gains detail.
 
 [Capture details and footage attribution](docs/screenshots/README.md).
 
@@ -208,13 +234,17 @@ never triggers a new render.
   the optical flow engine. Expect some artifacts.
 - **Frame generation writes a new file.** It takes time and disk space, and a
   stream has to be copied locally first.
-- **Save converted video copies the cached 8-bit render as it is.** It doesn't
-  bake in adjustments or upscaling, or restore HDR. Use **Export with DLSS
-  stages** to bake in a larger size.
+- **Save converted video copies the cached render as it is**: 8-bit at the
+  default Standard quality, 10-bit at High or Lossless. It doesn't bake in
+  adjustments or upscaling, or restore HDR. Use **Export with DLSS stages** to
+  bake in a larger size.
+- **HDR is tone mapped for the model.** The model renders in SDR, so an HDR10
+  or HLG video's render is SDR; the original can still be shown in HDR beside
+  it.
 - **DLSS Super Resolution doesn't beat a plain scaler on video.** Measured
   against bicubic on six clips, it scored lower on all of them, with either
   history setting. It is there for its look, not for detail.
-- **Not supported:** subtitle display or burn-in, HDR, a render queue, or
+- **Not supported:** burning subtitles into an export, a render queue, or
   resuming an interrupted render after a restart.
 - **YouTube:** public, non-DRM videos only, no login. Age-restricted videos can
   arrive as a 640x360 stream (none of the seven bundled trailers is

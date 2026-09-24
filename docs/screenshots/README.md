@@ -11,7 +11,7 @@ for images that have since been replaced are in the git history of this file.
 | `current/gta6-lucia-original.jpg`, `gta6-lucia-neural.jpg` | GTA VI Trailer 2, source frame 1940 and the same frame of the v0.25.0 render (Intensity, Local tone and Local structure 2.0), whole (2560x1440). The site hero and link card are cut from these | 22 Sep 2026, v0.25.0 |
 | `current/matrix-neural.jpg`, `matrix-original.jpg` | The player paused on Trinity at 1:28, neural view on, then off | 22 Sep 2026, v0.25.0 |
 | `current/neural-playback.jpg`, `original-comparison.jpg` | The player paused on GTA VI at 1:04, neural view on, then off | 22 Sep 2026, v0.25.0 |
-| `current/player-start.jpg` | The start screen at 150% on a fresh profile: the capability check and the seven game trailers with their YouTube thumbnails | 24 Sep 2026, `dced888` |
+| `current/player-start.jpg` | The start screen at 150% on a fresh profile: the capability check and the seven game trailers with their YouTube thumbnails | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/compare-wipe.jpg` | 007 First Light paused on frame 1122 in Wipe, the divider down the face, with the compare bar | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/compare-difference.jpg` | The same frame in Difference (x4, brightness only): where the model changed the picture | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/compare-2x2-toast.jpg` | The same frame in 2 x 2 (original, DLSS 5, Difference, DLSS 5 at Mix 50%), with the toast that confirms **Save comparison image** | 24 Sep 2026, `dced888` + `f2ae230` |
@@ -80,8 +80,7 @@ the right (0.0).
 **Hardware and runtime.** RTX 4080 SUPER, driver 610.47 (`32.0.16.1047`),
 runtime lock `310.8.SF-v2`. The player is this repository at `dced888`, plus
 the fix `f2ae230` (cached playback decoded the render in the wrong pixel
-layout and could show a striped picture) for every shot after the start
-screen. Every shot was checked for that artifact; none has it.
+layout and could show a striped picture), applied before any of these shots. Every shot was checked for that artifact; none has it.
 
 **Display.** The player sat on a 1920x1080 display set to 150% scaling for
 these captures (the machine's own setting is 100%; it was put back
