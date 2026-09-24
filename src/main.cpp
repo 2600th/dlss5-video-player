@@ -123,6 +123,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "ChromeMotionPolicy.h"
 #include "EscapeKeyPolicy.h"
 #include "InitialWindowPolicy.h"
+#include "SliderPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -625,6 +626,39 @@ static void DrawRoundedFocusRing(HDC dc,RECT bounds,int radius,COLORREF color,UI
     RoundRect(dc,bounds.left,bounds.top,bounds.right,bounds.bottom,corner*2,corner*2);
     SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(pen);
 }
+// The player's one slider look (slider::Layout gives the geometry): a rounded
+// rail, the stretch from the origin to the value filled in the progress blue,
+// and a round knob with a dark rim so it reads on the fill. The rail and the
+// knob are separate calls so a mark (the Mix's 100% tick) can sit between them.
+static void DrawSliderRail(HDC dc,const slider::Geometry& g,bool enabled)
+{
+    const int radius=std::max<int>(1,(g.track.bottom-g.track.top)/2);
+    const auto pill=[&](const RECT& r,COLORREF color){
+        if(r.right<=r.left)return;
+        HBRUSH brush=CreateSolidBrush(color);HPEN pen=CreatePen(PS_SOLID,1,color);
+        const HGDIOBJ oldBrush=SelectObject(dc,brush),oldPen=SelectObject(dc,pen);
+        RoundRect(dc,r.left,r.top,r.right,r.bottom,radius*2,radius*2);
+        SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(brush);DeleteObject(pen);
+    };
+    pill(g.track,enabled?RGB(68,71,77):ui_palette::Inactive);
+    pill(g.fill,enabled?ui_palette::PrimaryBlue:RGB(78,82,90));
+}
+static void DrawSliderKnob(HDC dc,const slider::Geometry& g,bool enabled,bool focus,UINT dpi)
+{
+    const int r=g.knobRadius;
+    HBRUSH brush=CreateSolidBrush(enabled?RGB(246,246,248):RGB(98,101,108));HPEN pen=CreatePen(PS_SOLID,1,ui_palette::Window);
+    const HGDIOBJ oldBrush=SelectObject(dc,brush),oldPen=SelectObject(dc,pen);
+    Ellipse(dc,g.knob.x-r,g.knob.y-r,g.knob.x+r+1,g.knob.y+r+1);
+    SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(brush);DeleteObject(pen);
+    if(!focus)return;
+    // Keyboard focus: a ring round the knob in the accent, clear of it by 2 dip.
+    const int gap=slider::Dip(2,dpi),width=std::max(1,slider::Dip(2,dpi)),ring=r+gap+width;
+    HPEN ringPen=CreatePen(PS_INSIDEFRAME,width,ui_palette::PrimaryBlue);
+    const HGDIOBJ oldRingPen=SelectObject(dc,ringPen),oldHollow=SelectObject(dc,GetStockObject(NULL_BRUSH));
+    Ellipse(dc,g.knob.x-ring,g.knob.y-ring,g.knob.x+ring+1,g.knob.y+ring+1);
+    SelectObject(dc,oldHollow);SelectObject(dc,oldRingPen);DeleteObject(ringPen);
+}
+
 static void DrawDarkPushButton(const DRAWITEMSTRUCT& item)
 {
     const bool enabled=(item.itemState&ODS_DISABLED)==0,pressed=(item.itemState&ODS_SELECTED)!=0;
@@ -7747,7 +7781,8 @@ private:
     }
     void InvalidateVolumeControls(){
         if(!m_hwnd)return;const auto volume=VolumeRect();if(!volume)return;
-        RECT dirty=*volume;InflateRect(&dirty,Dip(7),Dip(9));RECT c{};GetClientRect(m_hwnd,&c);dirty.right=c.right-Dip(16);InvalidateRect(m_hwnd,&dirty,FALSE);
+        // Up by the bubble's reach, which sits over the knob inside the strip.
+        RECT dirty=*volume;InflateRect(&dirty,Dip(24),Dip(9));dirty.top-=Dip(16);RECT c{};GetClientRect(m_hwnd,&c);dirty.right=c.right-Dip(16);InvalidateRect(m_hwnd,&dirty,FALSE);
     }
     void InvalidateToolbarAction(ToolbarAction action){
         if(!m_hwnd||action==ToolbarAction::None)return;const auto items=FocusableItems();
@@ -7845,6 +7880,7 @@ private:
     void ResetHoverFades(){
         for(auto& fade:m_hoverFades)fade.Reset();
         m_hoverAnimating=0;
+        m_volumeHot.Reset();m_mixHot.Reset();m_volumeBubble.Reset();m_volumeBubbleOffAt.reset();m_slidersWereMoving=false;
         if(m_hoverTimer&&m_hwnd){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
     }
     // One timer frame of the hover fades: repaints only the buttons whose tint
@@ -7861,7 +7897,65 @@ private:
             if(moving)animating|=1u<<index;
         }
         m_hoverAnimating=animating;
-        if(!animating&&m_hoverTimer){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
+        const bool sliders=AnimateSliders(now);
+        if(!animating&&!sliders&&m_hoverTimer){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
+    }
+    // The volume slider's geometry at this moment: the knob grows with the
+    // hover fade, and the bubble keeps inside the strip, above the button row.
+    slider::Geometry VolumeSliderGeometry(const RECT& area,Clock::time_point now)const{
+        RECT c{};GetClientRect(m_hwnd,&c);
+        const RECT bounds{area.left-Dip(24),c.bottom-ControlHeight(),c.right-Dip(16),c.bottom};
+        return slider::Layout(area,m_muted?0.0:double(m_volume),0.0,m_volumeHot.Level(now),ActiveWindowDpi(m_hwnd),bounds);
+    }
+    // The value over the knob while it is dragged. It fades by mixing toward
+    // the surface under it: GDI has no alpha, and the strip is one flat colour.
+    void DrawSliderBubble(HDC dc,const RECT& r,const std::wstring& text,double level,COLORREF under){
+        const int radius=std::max(1,Dip(4));
+        HBRUSH brush=CreateSolidBrush(chrome_motion::Mix(under,ui_palette::Hover,level));HPEN pen=CreatePen(PS_SOLID,1,chrome_motion::Mix(under,RGB(93,97,104),level));
+        const HGDIOBJ oldBrush=SelectObject(dc,brush),oldPen=SelectObject(dc,pen);
+        RoundRect(dc,r.left,r.top,r.right,r.bottom,radius*2,radius*2);
+        SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(brush);DeleteObject(pen);
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,chrome_motion::Mix(under,ui_palette::PrimaryText,level));
+        const HGDIOBJ oldFont=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);RECT t=r;
+        DrawTextW(dc,text.c_str(),-1,&t,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);SelectObject(dc,oldFont);
+    }
+    // Where the pointer and the drags leave the two sliders. Called from every
+    // mouse message that can change it; it only starts fades, AnimateHover runs
+    // them.
+    void SyncSliderHover(){
+        const auto now=Clock::now();
+        const auto volume=VolumeRect();
+        const bool volumeHot=m_dragVolume||(volume&&PtIn(*volume,m_mouseX,m_mouseY));
+        const bool mixHot=m_dragMix||m_compareHover.part==compare_bar::Part::MixTrack;
+        bool changed=false;
+        if(volumeHot!=m_volumeHot.On()){m_volumeHot.Set(volumeHot,now,m_activityMotionEnabled);changed=true;}
+        if(mixHot!=m_mixHot.On()){m_mixHot.Set(mixHot,now,m_activityMotionEnabled);changed=true;}
+        if(m_dragVolume){
+            m_volumeBubbleOffAt.reset();
+            if(!m_volumeBubble.On()){m_volumeBubble.Set(true,now,m_activityMotionEnabled);changed=true;}
+        }else if(m_volumeBubble.On()&&!m_volumeBubbleOffAt){
+            m_volumeBubbleOffAt=now+std::chrono::milliseconds(slider::kBubbleLingerMs);changed=true;
+        }
+        if(!changed)return;
+        InvalidateVolumeControls();InvalidateMixTrack();
+        EnsureHoverTimer();
+    }
+    void EnsureHoverTimer(){if(!m_hoverTimer&&m_hwnd)m_hoverTimer=SetTimer(m_hwnd,kHoverTimerId,chrome_motion::kFrameMs,nullptr);}
+    void InvalidateMixTrack(){
+        if(!m_hwnd||!CompareBarVisible())return;
+        RECT track=CompareBarLayout().mixTrack;if(track.right<=track.left)return;
+        InflateRect(&track,Dip(slider::kKnobHotDip+2),0);InvalidateRect(m_hwnd,&track,FALSE);
+    }
+    // One frame of the sliders' fades; true while any is still moving or a
+    // bubble is waiting out its linger.
+    bool AnimateSliders(Clock::time_point now){
+        if(m_volumeBubbleOffAt&&now>=*m_volumeBubbleOffAt){m_volumeBubbleOffAt.reset();m_volumeBubble.Set(false,now,m_activityMotionEnabled);InvalidateVolumeControls();}
+        const bool volumeMoving=m_volumeHot.Animating(now)||m_volumeBubble.Animating(now);
+        const bool mixMoving=m_mixHot.Animating(now);
+        if(volumeMoving||m_slidersWereMoving)InvalidateVolumeControls();
+        if(mixMoving||m_slidersWereMoving)InvalidateMixTrack();
+        m_slidersWereMoving=volumeMoving||mixMoving;
+        return m_slidersWereMoving||m_volumeBubbleOffAt.has_value();
     }
     double HoverLevel(ToolbarAction action,bool hover)const{
         const size_t index=static_cast<size_t>(action);
@@ -8097,7 +8191,7 @@ private:
         switch(item->part){
         case compare_bar::Part::Mode:SetComparisonMode(CompareBarModes()[size_t(item->index)]);break;
         case compare_bar::Part::ModeMenu:ShowCompareModeMenu(item->bounds);break;
-        case compare_bar::Part::MixTrack:m_dragMix=true;SetCapture(m_hwnd);SetMix(compare_bar::MixFromX(layout.mixTrack,x));break;
+        case compare_bar::Part::MixTrack:m_dragMix=true;SetCapture(m_hwnd);SetMix(compare_bar::MixFromX(layout.mixTrack,x));SyncSliderHover();break;
         case compare_bar::Part::ZoomOut:ZoomBy(-1,false,std::nullopt);break;
         case compare_bar::Part::ZoomIn:ZoomBy(+1,false,std::nullopt);break;
         case compare_bar::Part::Swap:ToggleSwap();break;
@@ -8161,15 +8255,19 @@ private:
             // Folded into one button, the mode is always the selected one: the mark says so.
             case compare_bar::Part::ModeMenu:DrawCompareSegment(dc,item.bounds,CompareModeLabel(m_comparison.mode,item.face==compare_bar::Face::ShortLabel),enabled,true,hovered(item),0,true);break;
             case compare_bar::Part::MixTrack:{
-                const RECT& t=item.bounds;const int mid=(t.top+t.bottom)/2,thick=std::max(1,Dip(2));
-                RECT line{t.left,mid-thick/2,t.right,mid-thick/2+thick};
-                HBRUSH track=CreateSolidBrush(enabled?RGB(94,98,105):RGB(64,67,72));FillRect(dc,&line,track);DeleteObject(track);
-                // 100%, the render untouched, is marked on the track.
-                const int centre=compare_bar::XFromMix(t,1.0f);RECT tick{centre,mid-Dip(5),centre+std::max(1,Dip(1)),mid+Dip(5)};
+                // The player's slider (slider::Layout), filled from 100% - the
+                // render untouched - to the Mix, so more and less read as two
+                // directions. The area is widened by the knob's inset, which
+                // lays the rail exactly on the track MixFromX measures. No
+                // bubble: over this bar it would sit on the picture, and the
+                // value is already read out beside the track.
+                const RECT& t=item.bounds;const int inset=Dip(slider::kKnobRestDip);
+                const slider::Geometry g=slider::Layout(RECT{t.left-inset,t.top,t.right+inset,t.bottom},
+                    double(m_comparison.strength)/2.0,0.5,enabled?m_mixHot.Level(Clock::now()):0.0,ActiveWindowDpi(m_hwnd));
+                DrawSliderRail(dc,g,enabled);
+                const int mid=(t.top+t.bottom)/2,centre=compare_bar::XFromMix(t,1.0f);RECT tick{centre,mid-Dip(5),centre+std::max(1,Dip(1)),mid+Dip(5)};
                 HBRUSH tb=CreateSolidBrush(ui_palette::SecondaryText);FillRect(dc,&tick,tb);DeleteObject(tb);
-                const int x=compare_bar::XFromMix(t,m_comparison.strength),knob=std::max(3,Dip(5));
-                RECT k{x-knob,mid-knob,x+knob,mid+knob};
-                HBRUSH kb=CreateSolidBrush(!enabled?RGB(98,101,108):(m_dragMix||hovered(item)?kCompareMark:ui_palette::PrimaryText));FillRect(dc,&k,kb);DeleteObject(kb);
+                DrawSliderKnob(dc,g,enabled,false,ActiveWindowDpi(m_hwnd));
                 break;}
             case compare_bar::Part::ZoomOut:DrawCompareSegment(dc,item.bounds,L"\u2212",enabled&&m_zoomStep>0,false,hovered(item));break;
             case compare_bar::Part::ZoomIn:DrawCompareSegment(dc,item.bounds,L"+",enabled&&compare_zoom::Step(m_zoomStep,1,ZoomOutputWidth(),ZoomViewWidth(),false)!=m_zoomStep,false,hovered(item));break;
@@ -8360,7 +8458,14 @@ private:
         if(CompareBarVisible())DrawCompareBar(dc);
         const auto toolbarItems=ToolbarItems();
         for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,FocusCueFor(item.action),item.compact,content.working);}
-        const auto volumeRect=LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),toolbarItems);if(volumeRect){const RECT& vr=*volumeRect;HPEN vp=CreatePen(PS_SOLID,std::max(1,Dip(4)),RGB(94,98,105));op=SelectObject(dc,vp);MoveToEx(dc,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(dc,vr.right,(vr.top+vr.bottom)/2);SelectObject(dc,op);DeleteObject(vp);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));const int knob=std::max(3,Dip(5));DrawSolidEllipse(dc,RECT{vx-knob,(vr.top+vr.bottom)/2-knob,vx+knob,(vr.top+vr.bottom)/2+knob},RGB(230,232,235),"Volume knob");}
+        const auto volumeRect=LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),toolbarItems);
+        if(volumeRect){
+            const auto now=Clock::now();
+            const slider::Geometry g=VolumeSliderGeometry(*volumeRect,now);
+            DrawSliderRail(dc,g,true);DrawSliderKnob(dc,g,true,false,ActiveWindowDpi(m_hwnd));
+            const double bubble=m_volumeBubble.Level(now);
+            if(bubble>0.0)DrawSliderBubble(dc,g.bubble,std::to_wstring(int(std::lround(m_volume*100)))+L"%",bubble,ui_palette::ControlSurface);
+        }
         double shown=playback_timing::TimelinePosition(m_dragSeek,m_seekPreview,m_seekPending,m_pendingSeekSec,m_currentSec);RECT tr=TimelineRect();double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;
         // A source that reports no length (a browser-recorded WebM) greys the
         // bar: there is nothing to scale a position against, so it shows no
@@ -10667,7 +10772,7 @@ private:
         // A source with no length has no position to map a click to - every
         // click would seek to the start - so its bar is greyed and inert;
         // Left and Right still seek, which is what the hover says.
-        if(!m_seeking){RECT tr=TimelineRect();if(PtIn(tr,x,y)&&m_decoder.DurationSeconds()>0.0){m_dragSeek=true;m_dragWasPlaying=m_playing;m_lastScrubSeek={};m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateControls();return;}const auto vr=VolumeRect();if(vr&&PtIn(*vr,x,y)){m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}}
+        if(!m_seeking){RECT tr=TimelineRect();if(PtIn(tr,x,y)&&m_decoder.DurationSeconds()>0.0){m_dragSeek=true;m_dragWasPlaying=m_playing;m_lastScrubSeek={};m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateControls();return;}const auto vr=VolumeRect();if(vr&&PtIn(*vr,x,y)){m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);SyncSliderHover();return;}}
         const auto items=ToolbarItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);InvalidateControls();}
     }
 
@@ -10682,8 +10787,8 @@ private:
             }
             RequestSeek(target,m_dragWasPlaying);return;
         }
-        if(m_dragVolume){m_dragVolume=false;if(GetCapture()==m_hwnd)ReleaseCapture();return;}
-        if(m_dragMix){m_dragMix=false;if(GetCapture()==m_hwnd)ReleaseCapture();return;}
+        if(m_dragVolume){m_dragVolume=false;if(GetCapture()==m_hwnd)ReleaseCapture();SyncSliderHover();return;}
+        if(m_dragMix){m_dragMix=false;if(GetCapture()==m_hwnd)ReleaseCapture();SyncSliderHover();return;}
         const ToolbarAction pressed=m_pressedToolbarAction;if(pressed==ToolbarAction::None)return;
         m_pressedToolbarAction=ToolbarAction::None;if(GetCapture()==m_hwnd)ReleaseCapture();
         if(!m_loaded){const auto items=FocusableItems();for(const auto& item:items)if(item.action==pressed){InvalidateRect(m_hwnd,&item.bounds,FALSE);if(PtIn(item.bounds,x,y)&&ToolbarActionEnabled(pressed))ActivateToolbarAction(pressed,item.bounds);break;}return;}
@@ -10699,7 +10804,7 @@ private:
         m_lastScrubSeek=now;RequestSeek(m_seekPreview,false);
     }
     double SecondsFromX(int x)const{RECT r=TimelineRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);double t=double(LONG(x)-r.left)/double(span);return std::clamp(t,0.0,1.0)*m_decoder.DurationSeconds();}
-    void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const RECT& r=*volumeRect;const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);const float volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));const bool changed=volume!=m_volume||m_muted;if(!changed)return;m_volume=volume;m_muted=false;Audio().SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
+    void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const float volume=float(slider::ValueFromX(*volumeRect,x,ActiveWindowDpi(m_hwnd)));const bool changed=volume!=m_volume||m_muted;if(!changed)return;m_volume=volume;m_muted=false;Audio().SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
     void ToggleMute(){m_muted=!m_muted;Audio().SetVolume(m_muted?0.0f:m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
     // With a rendered pair loaded the toggle switches which member is presented.
     // Without one it is how an active session is started, and how it is stopped.
@@ -10896,11 +11001,11 @@ private:
             if(ScreenToClient(h,&point))FullscreenPointerMoved(h,MAKELPARAM(point.x,point.y));
             break;
         }
-        case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}CompareBarMouseMove(m_mouseX,m_mouseY);if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();ScrubToPreview();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));UpdateTimelineHover(m_mouseX,m_mouseY);if(!m_loaded)UpdateStartHover(m_mouseX,m_mouseY);return 0;}
-        case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);SetCompareHover({});if(!m_dragSeek)ClearTimelineHover();return 0;
+        case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}CompareBarMouseMove(m_mouseX,m_mouseY);if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();ScrubToPreview();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));UpdateTimelineHover(m_mouseX,m_mouseY);if(!m_loaded)UpdateStartHover(m_mouseX,m_mouseY);SyncSliderHover();return 0;}
+        case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);SetCompareHover({});if(!m_dragSeek)ClearTimelineHover();SyncSliderHover();return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
-        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();UpdateTimelineHover(m_mouseX,m_mouseY);}if(m_dragVolume)m_dragVolume=false;m_dragMix=false;if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
+        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();UpdateTimelineHover(m_mouseX,m_mouseY);}if(m_dragVolume)m_dragVolume=false;m_dragMix=false;SyncSliderHover();if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
         case WM_SETFOCUS:InvalidateControls();return 0;
         case WM_KILLFOCUS:InvalidateControls();return 0;
         case WM_DROPFILES:{
@@ -11135,6 +11240,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // moving on the last frame, so the frame it lands gets painted too.
     std::array<chrome_motion::Fade,static_cast<size_t>(ToolbarAction::None)+1> m_hoverFades{};uint32_t m_hoverAnimating=0;UINT_PTR m_hoverTimer=0;
     chrome_motion::Glow m_completeGlow;chrome_motion::CompletionLatch m_completionLatch;UINT_PTR m_glowTimer=0;
+    // The sliders' hover (knob size) and the volume's value bubble, which
+    // lingers slider::kBubbleLingerMs after a drag ends before it fades.
+    chrome_motion::Fade m_volumeHot,m_mixHot,m_volumeBubble;std::optional<Clock::time_point> m_volumeBubbleOffAt;bool m_slidersWereMoving=false;
     // Windows' own rule for focus cues: hidden until the keyboard is used to move
     // between controls, hidden again by the mouse. The focused action is always the
     // first enabled one, so without this the Open button wore a ring from launch on.

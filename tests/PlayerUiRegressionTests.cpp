@@ -1298,6 +1298,50 @@ struct PlayerAppTestAccess {
         app.m_loaded = loaded;
     }
 
+    // Dragging the volume raises its bubble and grows its knob; letting go
+    // leaves the bubble up for its linger, then it goes and the timer stops.
+    static void volume_slider_bubble_follows_the_drag_and_lingers_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded, motion = app.m_activityMotionEnabled;
+        const float volume = app.m_volume;
+        const bool muted = app.m_muted;
+        app.m_loaded = true;
+        app.ResetHoverFades();
+        for (const bool animated : {true, false}) {
+            app.m_activityMotionEnabled = animated;
+            const auto slider = app.VolumeRect();
+            REQUIRE(slider.has_value());
+            const POINT at{(slider->left + slider->right) / 2, (slider->top + slider->bottom) / 2};
+            app.m_mouseX = at.x; app.m_mouseY = at.y;
+            app.MouseDown(at.x, at.y);
+            CHECK(app.m_dragVolume);
+            CHECK(app.m_volumeBubble.On());
+            CHECK(app.m_volumeHot.On());
+            CHECK(app.m_hoverTimer != 0);
+            CHECK(std::abs(app.m_volume - 0.5f) < 0.05f);
+            app.MouseUp(at.x, at.y);
+            CHECK(!app.m_dragVolume);
+            CHECK(app.m_volumeBubble.On());
+            CHECK(app.m_volumeBubbleOffAt.has_value());
+            std::this_thread::sleep_for(std::chrono::milliseconds(slider::kBubbleLingerMs + 30));
+            app.AnimateHover();
+            CHECK(!app.m_volumeBubble.On());
+            std::this_thread::sleep_for(chrome_motion::kHoverOut + std::chrono::milliseconds(30));
+            app.m_mouseX = -999; app.m_mouseY = -999;
+            app.SyncSliderHover();
+            std::this_thread::sleep_for(chrome_motion::kHoverOut + std::chrono::milliseconds(30));
+            app.AnimateHover();
+            app.AnimateHover();
+            CHECK_EQ(static_cast<UINT_PTR>(0), app.m_hoverTimer);
+            CHECK_EQ(0.0, app.m_volumeBubble.Level(std::chrono::steady_clock::now()));
+        }
+        app.ResetHoverFades();
+        app.m_volume = volume; app.m_muted = muted;
+        app.m_activityMotionEnabled = motion;
+        app.m_loaded = loaded;
+    }
+
     static void keyboard_cheat_sheet_test()
     {
         PlayerApp& app = fixture->app;
@@ -2236,6 +2280,7 @@ struct PlayerAppTestAccess {
         UI_CASE(toolbar_hover_fades_run_only_while_moving_test),
         UI_CASE(timeline_keeps_the_render_lane_clear_during_a_live_session_test),
         UI_CASE(render_complete_glow_lights_the_lane_then_stops_test),
+        UI_CASE(volume_slider_bubble_follows_the_drag_and_lingers_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),

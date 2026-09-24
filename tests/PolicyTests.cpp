@@ -63,6 +63,7 @@
 #include "ChromeMotionPolicy.h"
 #include "EscapeKeyPolicy.h"
 #include "InitialWindowPolicy.h"
+#include "SliderPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -1416,6 +1417,44 @@ void first_window_takes_a_share_of_the_work_area_and_keeps_the_pill_words_test()
     CHECK(small.cy + 59 <= 700);
     const initial_window::Input cramped{SIZE{800, 600}, SIZE{16, 59}, 156, SIZE{900, 150}};
     CHECK_EQ(LONG{784}, initial_window::ClientSize(cramped).cx);
+}
+
+void slider_geometry_fills_from_its_origin_and_keeps_the_knob_and_bubble_inside_test()
+{
+    for (const UINT dpi : {96u, 168u}) {
+        const RECT area{100, 50, 300, 86};
+        const int inset = slider::Dip(slider::kKnobRestDip, dpi);
+        // A level fills from the left; the knob is whole at both ends.
+        const slider::Geometry zero = slider::Layout(area, 0.0, 0.0, 0.0, dpi);
+        CHECK_EQ(area.left + inset, zero.knob.x);
+        CHECK(zero.fill.right <= zero.fill.left);
+        const slider::Geometry full = slider::Layout(area, 1.0, 0.0, 0.0, dpi);
+        CHECK_EQ(area.right - inset, full.knob.x);
+        CHECK_EQ(full.track.left, full.fill.left);
+        CHECK_EQ(full.track.right, full.fill.right);
+        CHECK_EQ(LONG((area.top + area.bottom) / 2), full.knob.y);
+        // The rail and the pointer agree: the value under the knob is the value.
+        for (const double value : {0.0, 0.25, 0.62, 1.0}) {
+            const slider::Geometry g = slider::Layout(area, value, 0.0, 0.0, dpi);
+            CHECK(std::abs(slider::ValueFromX(area, g.knob.x, dpi) - value) < 0.02);
+        }
+        // A Mix fills from its middle, either way.
+        const slider::Geometry less = slider::Layout(area, 0.3, 0.5, 0.0, dpi);
+        CHECK_EQ(less.knob.x, less.fill.left);
+        CHECK(less.fill.right > less.knob.x);
+        // Hot grows the knob, from rest to the hot size and no further.
+        CHECK_EQ(slider::Dip(slider::kKnobRestDip, dpi), zero.knobRadius);
+        CHECK_EQ(slider::Dip(slider::kKnobHotDip, dpi), slider::Layout(area, 0.5, 0.0, 1.0, dpi).knobRadius);
+        CHECK_EQ(slider::Dip(slider::kKnobHotDip, dpi), slider::Layout(area, 0.5, 0.0, 7.0, dpi).knobRadius);
+        // The bubble sits over the knob, clear of the hot knob, and stays in bounds.
+        const slider::Geometry mid = slider::Layout(area, 0.5, 0.0, 1.0, dpi);
+        CHECK_EQ(mid.knob.x, (mid.bubble.left + mid.bubble.right) / 2);
+        CHECK(mid.bubble.bottom <= mid.knob.y - mid.knobRadius);
+        const RECT bounds{120, 20, 280, 86};
+        const slider::Geometry edge = slider::Layout(area, 1.0, 0.0, 1.0, dpi, bounds);
+        CHECK(edge.bubble.right <= bounds.right && edge.bubble.left >= bounds.left);
+        CHECK(edge.bubble.top >= bounds.top);
+    }
 }
 
 void escape_leaves_fullscreen_before_it_stops_anything_test()
@@ -14075,6 +14114,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(player_status_formats_exact_runtime_and_playback_states_test),
     TEST_CASE(status_chips_carry_the_rate_the_drops_and_the_render_test),
     TEST_CASE(first_window_takes_a_share_of_the_work_area_and_keeps_the_pill_words_test),
+    TEST_CASE(slider_geometry_fills_from_its_origin_and_keeps_the_knob_and_bubble_inside_test),
     TEST_CASE(escape_leaves_fullscreen_before_it_stops_anything_test),
     TEST_CASE(toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test),
     TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),
