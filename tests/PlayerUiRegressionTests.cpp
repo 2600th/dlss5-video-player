@@ -922,6 +922,8 @@ struct PlayerAppTestAccess {
         if (!hadRenderer) app.m_renderer = MakeD3D12Renderer();
         app.m_cachedChips = status_chips::Build(true, {true, 0.42, 75.0}, 58.6, 60.0, 2);
         app.m_cachedStatus = L"Status line";
+        // An earlier case's subtitle shift may have left a toast in the slot.
+        app.m_toast.Hide();
         drawnText.clear();
         RECT client{};
         GetClientRect(app.m_hwnd, &client);
@@ -1392,6 +1394,26 @@ struct PlayerAppTestAccess {
         drawnText.clear();
         app.PaintToast(dc, RECT{0, 0, 600, 30});
         CHECK(Contains(L"Comparison saved: frame.png"));
+        // The slot is the toast's while it holds: the status line is not drawn
+        // at all, behind it or after it.
+        {
+            const NeuralPlaybackLifecycle lifecycle = app.m_neuralLifecycle;
+            app.m_neuralLifecycle.state = NeuralPlaybackState::Idle;
+            const std::wstring status = app.m_cachedStatus;
+            app.m_cachedStatus = L"Status line under the toast";
+            HDC whole = CreateCompatibleDC(nullptr);
+            RECT client{};
+            GetClientRect(app.m_hwnd, &client);
+            HBITMAP canvas = CreateCompatibleBitmap(GetDC(nullptr), client.right, client.bottom);
+            const HGDIOBJ previous = SelectObject(whole, canvas);
+            drawnText.clear();
+            app.RenderUi(whole, client);
+            CHECK(!Contains(L"Status line under the toast"));
+            CHECK(Contains(L"Comparison saved: frame.png"));
+            SelectObject(whole, previous); DeleteObject(canvas); DeleteDC(whole);
+            app.m_cachedStatus = status;
+            app.m_neuralLifecycle = lifecycle;
+        }
         std::this_thread::sleep_for(chrome_motion::kToastIn + chrome_motion::kToastHold + std::chrono::milliseconds(40));
         app.AnimateToast();
         CHECK_EQ(static_cast<UINT_PTR>(0), app.m_toastTimer);

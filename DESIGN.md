@@ -332,7 +332,7 @@ never decorates. The numbers live in `src/ChromeMotionPolicy.h`, with tests.
 | Compare mark | the compare mode changes | slides from the old segment to the new over 160 ms, ease-out | jumps |
 | Comparison tags | the compare mode changes | fade in over 120 ms, ease-out (the compositor's tag alpha) | there at once |
 | Start tile lift | pointer on a tile | rises 2 dip, picture +6% brighter, blue edge, on the hover fade | lands at once |
-| Toast | a file saved, a subtitle shift, a whole video rendered | rises 8 dip into the status row and fades in over 160 ms (ease-out), holds 2.4 s, fades out over 140 ms (ease-in), repainted at 30 Hz; a second one replaces it without rising | there for the hold, then gone |
+| Toast | a file saved, a subtitle shift, a whole video rendered | takes the status row's slot: rises 8 dip and fades in over 160 ms (ease-out) as the line fades out, holds 2.4 s, then fades out over 140 ms (ease-in) as the line returns; repainted at 30 Hz; a second one replaces it without rising | the line and the toast swap for the hold |
 | Rendering-now hatch | a live job is running | drifts with the 50 ms activity timer | still hatch, 1 s repaint |
 
 Rules:
@@ -357,8 +357,9 @@ Rules:
   only where it cannot cover the picture (the volume); the Mix's value is
   already read out beside its track.
 - **Toast**: an Inactive-grey panel with a 4 dip radius and a 3 dip mark on
-  its left edge (teal for a render, the accent otherwise), at the start of the
-  status row; the line moves over for it. It is painted by the strip, never
+  its left edge (teal for a render, the accent otherwise), in the status row's
+  slot: the line crossfades out as the toast comes in and back as it goes, so
+  no part of the line shows behind or after it (without animations they swap). It is painted by the strip, never
   as a window over the picture: a layered popup over the swap chain cost
   frames (6, 6 and 2 dropped at a render's completion, against 0, 0 and 1).
   The status line keeps the same notice after it goes.
