@@ -65,7 +65,8 @@ function Invoke-Build {
     $previous = $env:GA_MEASUREMENT_ID
     try {
         $env:GA_MEASUREMENT_ID = $MeasurementId
-        $buildArgs = @{ OutputPath = $out; ReleaseFixture = (Join-Path $fixtures $Fixture); Quiet = $true }
+        $fixturePath = if ([IO.Path]::IsPathRooted($Fixture)) { $Fixture } else { Join-Path $fixtures $Fixture }
+        $buildArgs = @{ OutputPath = $out; ReleaseFixture = $fixturePath; Quiet = $true }
         if ($RepoFixture) { $buildArgs.RepoFixture = Join-Path $fixtures $RepoFixture }
         & (Join-Path $siteRoot 'build.ps1') @buildArgs | Out-Null
     } finally {
@@ -841,6 +842,32 @@ Test-Case 'the star count is baked in at build time and never fetched by the pag
     Assert-Contains $htmlFull '127 stars' 'the source row states the count in words'
     $js = Read-TextFile -Path (Join-Path $distFull 'main.js')
     Assert-NotContains $js 'stargazers' 'the page makes no star-count request of its own'
+}
+
+Test-Case 'features in main after v0.25.0 are marked New, and the note says so' {
+    $marks = [regex]::Matches($htmlFull, '<span class="new"[^>]*>New</span>').Count
+    Assert-True ($marks -ge 10) "expected the post-0.25.0 features to be marked, found $marks"
+    $text = [regex]::Replace($htmlFull, '\s+', ' ')
+    Assert-Contains $text 'come from <code>main</code>, after v0.25.0' 'the download section says where the pictures and features come from'
+    Assert-Contains $text 'The next release will carry them' 'and when they ship'
+    Assert-NotContains $htmlFull '<!-- unreleased' 'the build removes its fences'
+}
+
+Test-Case 'the New framing is kept or dropped by the release the page offers' {
+    $page = 'a<!-- unreleased --> note<!-- /unreleased --> b <span class="new" title="x">New</span>'
+    Assert-Equal 'a note b <span class="new" title="x">New</span>' (Resolve-UnreleasedMarks -Html $page -ReleaseVersion '0.25.0' -LastWithout '0.25.0') 'kept for the release that lacks them'
+    Assert-Equal 'a note b <span class="new" title="x">New</span>' (Resolve-UnreleasedMarks -Html $page -ReleaseVersion '' -LastWithout '0.25.0') 'kept when no release resolves'
+    Assert-Equal 'a b' (Resolve-UnreleasedMarks -Html $page -ReleaseVersion '0.25.1' -LastWithout '0.25.0') 'dropped once a newer release is offered'
+    Assert-Equal 'a b' (Resolve-UnreleasedMarks -Html $page -ReleaseVersion '0.26.0' -LastWithout '0.25.0') 'dropped for a minor release too'
+
+    # And end to end: a build offering 0.26.0 carries no New and no note.
+    $fixture = Join-Path $tempRoot 'release-next.json'
+    Write-TextFile -Path $fixture -Text ((Read-TextFile -Path (Join-Path $fixtures 'release-full.json')).TrimStart([char]0xFEFF).Replace('0.23.0', '0.26.0'))
+    $html = Get-Html (Invoke-Build -Fixture $fixture -MeasurementId '' -Name 'next')
+    Assert-Contains $html 'v0.26.0' 'the build offers the newer release'
+    Assert-NotContains $html 'class="new"' 'no feature is marked New once the release carries it'
+    Assert-NotContains $html 'The next release will carry them' 'the note is gone'
+    Assert-NotContains $html 'unreleased' 'no fence or note class survives'
 }
 
 $distGa = Invoke-Build -Fixture 'release-full.json' -MeasurementId 'G-TEST1234567' -Name 'ga'

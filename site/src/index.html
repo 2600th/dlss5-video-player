@@ -139,7 +139,7 @@
         {
           "@type": "Question",
           "name": "Can I keep the result?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video, from the player or from a script with --render. MKV keeps the source audio, subtitles and chapters without re-encoding them. Export with DLSS stages writes Super Resolution, neural rendering and frame generation into one file, in NVIDIA's order." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video, from the player, and from the release after v0.25.0 also from a script with --render. MKV keeps the source audio, subtitles and chapters without re-encoding them. Export with DLSS stages writes Super Resolution, neural rendering and frame generation into one file, in NVIDIA's order." }
         }
       ]
     },
@@ -447,7 +447,7 @@
 
   <article class="beat beat--flip">
     <div class="beat__text">
-      <h3 class="beat__title">Compare without moving the playhead</h3>
+      <h3 class="beat__title">Compare without moving the playhead <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></h3>
       <p>
         Split, wipe, side by side or 2&nbsp;×&nbsp;2, all on one timestamp,
         from a compare bar under the picture. Drag the divider across a face,
@@ -462,13 +462,13 @@
         <img src="media/compare-wipe.jpg" width="1902" height="1023" loading="lazy" decoding="async"
              alt="The player in Wipe mode on 007 First Light: the original left of a divider down a face, the DLSS 5 render right of it, with the compare bar below.">
       </picture>
-      <figcaption>Wipe, with the compare bar<span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+      <figcaption>Wipe, with the compare bar <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
     </figure>
   </article>
 
   <article class="beat">
     <div class="beat__text">
-      <h3 class="beat__title">See where the model changed the picture</h3>
+      <h3 class="beat__title">See where the model changed the picture <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></h3>
       <p>
         <strong>Difference</strong> shows the change itself: the render minus
         the original, in linear light, amplified 1× to 32×. The loupe
@@ -489,7 +489,7 @@
 
   <article class="beat beat--flip">
     <div class="beat__text">
-      <h3 class="beat__title">Keep the evidence, with its provenance</h3>
+      <h3 class="beat__title">Keep the evidence, with its provenance <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></h3>
       <p>
         <strong>Save comparison image</strong> writes exactly what the picture
         shows as a PNG, with a footer recording the player version, the video,
@@ -534,17 +534,20 @@
     Every item here is in the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md" rel="noopener">usage guide</a>,
     with the measurements behind it. Nothing is uploaded: the work happens on
     your GPU and the cache sits on your disk.
+    <!-- unreleased --><span class="unreleased-note">Items marked <span class="new" title="In main, after v0.25.0; the next release carries it">New</span> are in
+    <code>main</code>, after v0.25.0: the next release carries them. Until
+    then, <a href="{{REPO_URL}}/blob/main/docs/BUILDING.md" rel="noopener">build it yourself</a>.</span><!-- /unreleased -->
   </p>
 
   <div class="matrix">
     <section class="matrix__group">
       <h3 class="matrix__title">Compare</h3>
       <ul class="matrix__list">
-        <li>Split, wipe, side by side and 2&nbsp;×&nbsp;2, all on one timestamp</li>
-        <li>A Difference view of where the model changed the picture, amplified 1× to 32×</li>
-        <li>A loupe and zoom to 8×, down to single pixels</li>
-        <li>Hold the mouse on the picture to see the original in place</li>
-        <li>Save comparison image: exactly what is on screen, with a provenance footer</li>
+        <li>Split, wipe, side by side and 2&nbsp;×&nbsp;2, all on one timestamp <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
+        <li>A Difference view of where the model changed the picture, amplified 1× to 32× <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
+        <li>A loupe and zoom to 8×, down to single pixels <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
+        <li>Hold the mouse on the picture to see the original in place <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
+        <li>Save comparison image: exactly what is on screen, with a provenance footer <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
       </ul>
     </section>
 
@@ -552,20 +555,20 @@
       <h3 class="matrix__title">Play</h3>
       <ul class="matrix__list">
         <li>Renders while you watch, and seeks anywhere, rendered or not</li>
-        <li>Local files, public YouTube links, photos, animated GIFs and six bundled game trailers</li>
-        <li>HDR10 and HLG tone-mapped for the model on the GPU, and the original shown in HDR on an HDR display</li>
-        <li>Subtitles (SRT, ASS, WebVTT, PGS, VobSub) drawn after the render, so text is never warped</li>
+        <li>Local files, public YouTube links, photos, animated GIFs and the bundled game trailers</li>
+        <li>HDR10 and HLG tone-mapped for the model on the GPU, and the original shown in HDR on an HDR display <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
+        <li>Subtitles (SRT, ASS, WebVTT, PGS, VobSub) drawn after the render, so text is never warped <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
       </ul>
     </section>
 
     <section class="matrix__group">
       <h3 class="matrix__title">Keep and export</h3>
       <ul class="matrix__list">
-        <li>A constant-quality render cache: HEVC at CQ&nbsp;16 by default, 10-bit or lossless if you ask</li>
+        <li>A constant-quality render cache: HEVC at CQ&nbsp;16 by default, 10-bit or lossless if you ask <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
         <li>PNG, JPEG, GIF, MP4 or MKV; MKV keeps the audio, subtitles and chapters untouched</li>
         <li>Super Resolution, neural rendering and frame generation in one file, in NVIDIA&rsquo;s order</li>
         <li>Frame generation from 2× to 5× the frame rate, as a conversion</li>
-        <li>The same export from a script: <code>--render</code>, with exit codes</li>
+        <li>The same export from a script: <code>--render</code>, with exit codes <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></li>
       </ul>
     </section>
 
@@ -588,7 +591,7 @@
         <img src="media/subtitles.jpg" width="1902" height="1023" loading="lazy" decoding="async"
              alt="A subtitle drawn over the DLSS 5 frame of 007 First Light; the text is a test file that says what it is.">
       </picture>
-      <figcaption>Subtitles, drawn after the render<span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+      <figcaption>Subtitles, drawn after the render <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
     </figure>
     <figure class="screen">
       <picture>
@@ -606,7 +609,7 @@
         <img src="media/neural-strength.jpg" width="1902" height="1023" loading="lazy" decoding="async"
              alt="Image adjustments open over a paused 007 First Light frame, the DLSS 5 mix slider at 1.00, with the compare bar below.">
       </picture>
-      <figcaption>The DLSS 5 mix, at its 1.00 default<span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
+      <figcaption>The DLSS 5 mix, at its 1.00 default <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">007 First Light, frame 1122 · 1902×1023 window at 150% · 0.25.0 + main (dced888) · captured 24 September 2026</span></figcaption>
     </figure>
   </div>
 </section>
@@ -655,6 +658,11 @@
     {{VERSION_LABEL}}, published {{RELEASE_DATE}}. Free, with no account and
     no installer: unzip it and run it. Every build is on the
     <a href="{{RELEASE_URL}}" rel="noopener">release page</a> with its checksum.
+    <!-- unreleased --><span class="unreleased-note">The pictures and the video on this
+    page, and the features marked <span class="new" title="In main, after v0.25.0; the next release carries it">New</span>, come from <code>main</code>, after
+    v0.25.0: the compare views, subtitles, HDR, the render quality ladder and the
+    command line. The next release will carry them; until then,
+    <a href="{{REPO_URL}}/blob/main/docs/BUILDING.md" rel="noopener">build it yourself</a>.</span><!-- /unreleased -->
   </p>
 
   <div class="packages">
@@ -680,7 +688,7 @@
         <img src="media/player-start.jpg" width="1902" height="1023" loading="lazy" decoding="async"
              alt="The start screen: the capability check and the seven game trailers with their YouTube thumbnails.">
       </picture>
-      <figcaption>The start screen checks the machine first<span class="beat__tick">fresh profile · 1902×1023 at 150% · 0.25.0 + main (dced888) · thumbnails are YouTube’s, for the trailers’ publishers</span></figcaption>
+      <figcaption>The start screen checks the machine first <span class="new" title="In main, after v0.25.0; the next release carries it">New</span><span class="beat__tick">fresh profile · 1902×1023 at 150% · 0.25.0 + main (dced888) · thumbnails are YouTube’s, for the trailers’ publishers</span></figcaption>
     </figure>
   </div>
 
@@ -783,7 +791,8 @@
       <summary>Can I keep the result?</summary>
       <p>
         Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video,
-        from the player or from a script with <code>--render</code>. MKV keeps
+        from the player, and from the release after v0.25.0 also from a script
+        with <code>--render</code>. MKV keeps
         the source audio, subtitles and chapters without re-encoding them.
         Export with DLSS stages writes Super Resolution, neural rendering and
         frame generation into one file, in NVIDIA's order.

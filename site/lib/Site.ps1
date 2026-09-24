@@ -323,6 +323,32 @@ function Get-MediaSize {
     return $null
 }
 
+function Resolve-UnreleasedMarks {
+    <#  Keeps or removes the page's "in main, after the last release" framing.
+
+        The page shows features that are in main but not in the release its
+        download button offers, marked New, with a note saying the next release
+        carries them. Once a release newer than $LastWithout is what the page
+        offers, that framing is false, so the build removes it: every
+        <!-- unreleased -->...<!-- /unreleased --> block and every New mark.
+        Otherwise it keeps the text and drops only the comment fences. With no
+        resolvable release it keeps the framing, the cautious reading.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Html,
+        [AllowNull()][AllowEmptyString()][string]$ReleaseVersion,
+        [Parameter(Mandatory)][string]$LastWithout
+    )
+    $parsed = $null
+    $carried = [version]::TryParse([string]$ReleaseVersion, [ref]$parsed) -and $parsed -gt [version]$LastWithout
+    $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
+    if ($carried) {
+        $Html = [regex]::Replace($Html, '\s*<!-- unreleased -->.*?<!-- /unreleased -->', '', $options)
+        return [regex]::Replace($Html, ' ?<span class="new"[^>]*>New</span>', '')
+    }
+    return $Html.Replace('<!-- unreleased -->', '').Replace('<!-- /unreleased -->', '')
+}
+
 function Get-VideoDuration {
     <#  An MP4's duration in seconds, from its 'mvhd' box, or $null. The page's
         structured data and sitemap state the demonstration's length; this is

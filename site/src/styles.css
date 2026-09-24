@@ -713,6 +713,27 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 .gallery__note { color: var(--text-dim); max-width: var(--measure); margin-bottom: 0.5rem; }
 #limits .gallery__sub { margin-top: clamp(2.5rem, 5vw, 4rem); margin-bottom: 1.25rem; }
 
+/* --- New: in main, after the last release ----------------------------------
+   A label on the thing it qualifies, in the Label voice and the ink, as the
+   readout keys are: a word, not a badge. build.ps1 removes every one, and the
+   notes that explain them, once the release the page offers carries them.
+   -------------------------------------------------------------------------- */
+
+.new {
+  margin-left: 0.35em;
+  color: var(--flag);
+  font-family: var(--sans);
+  font-size: 0.62rem;
+  font-weight: 650;
+  font-variation-settings: 'wdth' 78;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  white-space: nowrap;
+  vertical-align: 0.1em;
+}
+.beat__title .new { font-size: 0.6rem; vertical-align: 0.3em; }
+.unreleased-note { display: block; margin-top: 0.6rem; }
+
 /* --- screens: the player's own windows under the feature matrix ----------- */
 
 .screens {

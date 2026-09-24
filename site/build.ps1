@@ -256,6 +256,11 @@ $tokens = @{
 
 $html = Expand-Token -Text (Read-TextFile -Path (Join-Path $srcRoot 'index.html')) -Values $tokens
 
+# The page marks what is in main but not yet released. v0.25.0 is the last
+# release without those features; a build that offers a newer one drops the
+# marks and the note, because they would then be false.
+$html = Resolve-UnreleasedMarks -Html $html -ReleaseVersion $release.Version -LastWithout '0.25.0'
+
 # --- 4. write -----------------------------------------------------------------
 
 if (Test-Path $OutputPath) { Remove-Item $OutputPath -Recurse -Force }
