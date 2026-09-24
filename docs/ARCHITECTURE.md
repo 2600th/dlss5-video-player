@@ -1,6 +1,6 @@
 # Architecture
 
-_Verified against main (9d3e6cc) on 2026-09-25._
+_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
 
 ## High-level pipeline
 

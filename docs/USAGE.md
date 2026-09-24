@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-_Verified against main (9d3e6cc) on 2026-09-25._
+_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
 
 The interface is English-only. It does not load external language packs;
 legacy language settings in the INI are ignored.
@@ -238,8 +238,8 @@ still, the modes fold into one button that opens a menu of them:
   1.9, 2.2, 5.3 and 7.2 ms for a 1440p one, whatever size it is shown at, and a
   1440p 30 fps video played at High and in 2 × 2 without dropping a frame.
   RTX VSR needs an NVIDIA RTX GPU, driver 550 or newer, and a player built with
-  the NVIDIA RTX Video SDK (the releases say whether they are, see
-  [BUILDING.md](BUILDING.md)). Where any of that is missing the **RTX VSR**
+  the NVIDIA RTX Video SDK: the complete download is, the core package is
+  not ([BUILDING.md](BUILDING.md)). Where any of that is missing the **RTX VSR**
   segment is grey, its tooltip says which, and `R` shows the same reason. It
   takes an SDR original, so an HDR video is compared at SDR in every view that
   shows RTX VSR.

@@ -1,6 +1,6 @@
 # Third-party components
 
-_Verified against main (9d3e6cc) on 2026-09-25._
+_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
 
 The project source is MIT-licensed, but the release interoperates with and may
 redistribute components under separate terms. No upstream endorsement is
@@ -36,8 +36,9 @@ The **RTX VSR** comparison view uses NVIDIA's RTX Video Super Resolution,
 NGX feature 16. It is optional and off by default: a build compiles it only when
 CMake is given `-DRTX_VIDEO_SDK=<path>` (docs/BUILDING.md), and only such a build
 carries the NVIDIA-signed feature DLL `nvngx_vsr.dll` (1.6.0.0, from the SDK's
-`bin/Windows/x64/rel` folder, unmodified) beside the player. The public CI build
-has no SDK and ships neither the view nor the DLL; `tools/verify_package.ps1`
+`bin/Windows/x64/rel` folder, unmodified) beside the player. The complete
+download is built that way and carries both; the core package, built by CI,
+has no SDK and ships neither the view nor the DLL. `tools/verify_package.ps1`
 allows the DLL at the package root when present and holds it to NVIDIA's
 signature.
 

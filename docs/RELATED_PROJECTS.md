@@ -1,6 +1,6 @@
 # Related DLSS 5 neural-rendering projects
 
-_Verified against 0.25.0 (8afb573) on 2026-09-23._
+_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
 
 Every link, and every fact in "Where this player fits" and "The landscape", was
 checked on the project's public page on 2026-09-23. Star counts are that day's
@@ -10,7 +10,8 @@ and will drift.
 
 This player is built to let you **check** what the neural renderer did. The
 original frame and the render of that same frame sit behind one toggle, a
-split, a wipe or a blend, and switching never moves the playhead.
+split, a wipe, a difference map or a 2 × 2 beside NVIDIA's RTX VSR, and
+switching never moves the playhead.
 
 Among the projects below, it is the only one we found that does all three of
 these at once:

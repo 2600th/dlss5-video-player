@@ -1,6 +1,6 @@
 # DLSS 5 Video Player
 
-_Verified against main (9d3e6cc) on 2026-09-25._
+_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
 
 **Put any video through NVIDIA's DLSS 5 neural renderer, and check every frame
 against the original.**
@@ -28,27 +28,21 @@ Unscaled crops of one source frame and the same frame of the player's render.
 
 > [!IMPORTANT]
 > Community project, not an NVIDIA product. The neural runtime is a modified,
-> unsigned community build. Checked on an RTX 4080 SUPER (v0.25.0) and an RTX
+> unsigned community build. Checked on an RTX 4080 SUPER (v0.26.0) and an RTX
 > 5090 (v0.20.0). Neural rendering needs NVIDIA driver 610.47 or newer.
 > Notices: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Download
 
-**v0.25.0** (2026-09-22): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.25.0)
+**v0.26.0** (2026-09-25): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.26.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.25.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 312 MB |
-| `DLSSVideoPlayer-v0.25.0-core-win64.zip` | Player only, no neural runtime. | 35 MB |
+| `dlss5-video-player-v0.26.0-win64.zip` | Player plus the pinned neural runtime and RTX VSR. This is the one you want. | 327 MB |
+| `DLSSVideoPlayer-v0.26.0-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 35 MB |
 
 Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run, since
 it has no runtime.
-
-> [!NOTE]
-> The video, the pictures above and the features marked **new** below come from
-> `main`, after v0.25.0: the compare views, RTX VSR, subtitles, HDR, the render
-> quality ladder and the command line. The next release will carry them; until then,
-> [build it yourself](docs/BUILDING.md).
 
 ### Check what you downloaded
 
@@ -57,10 +51,10 @@ repository built it.
 
 ```sh
 # Intact: the .sha256 sits beside the zip on the release page.
-sha256sum -c DLSSVideoPlayer-v0.25.0-core-win64.zip.sha256
+sha256sum -c DLSSVideoPlayer-v0.26.0-core-win64.zip.sha256
 
 # Built here: signed SLSA provenance, verified against this repository.
-gh attestation verify DLSSVideoPlayer-v0.25.0-core-win64.zip --repo 2600th/dlss5-video-player
+gh attestation verify DLSSVideoPlayer-v0.26.0-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
 After unpacking, and before the first run, `verify_package.ps1` (inside the
@@ -100,34 +94,35 @@ the render covered the whole video. Press `D` at the start to get one.
 - **Seek anywhere.** Rendered frames play wherever they are on the timeline.
   Elsewhere the original plays at once while the render catches up, and nothing
   already rendered is thrown away.
-- **Shows you what the model did.** *New.* A compare bar under the picture:
+- **Shows you what the model did.** A compare bar under the picture:
   DLSS 5, Original, Split, Wipe, **Difference** (where the model changed the
   picture, amplified), **Side by side** and **2 × 2**, a Mix slider from the
   original to past the render, zoom to 8x, a **loupe** that puts both at 4x
   under the pointer, a mask that limits DLSS 5 to part of the frame, and
   press-and-hold for the original. Every view is one frame at one timestamp,
   so the playhead never moves when you switch.
-- **Compares against NVIDIA's own upscaler.** *New.* In builds made with the
-  optional RTX Video SDK, `R` shows RTX Video Super Resolution of the original
-  as a view of its own and in the 2 × 2, and `Shift+R` compares the other views
-  against it. It never enters a render or the cache.
-- **Saves the evidence.** *New.* **File > Save comparison image** writes exactly
+- **Compares against NVIDIA's own upscaler.** `R` shows RTX Video Super
+  Resolution of the original as a view of its own and in the 2 × 2, and
+  `Shift+R` compares the other views against it. It never enters a render or
+  the cache. In the complete download, and in builds made with the optional RTX
+  Video SDK.
+- **Saves the evidence.** **File > Save comparison image** writes exactly
   what the picture shows, with a footer that records the video, the frame, the
   view, a digest of the neural settings and the runtime.
-- **Plays subtitles.** *New.* SRT, ASS, WebVTT, PGS and VobSub, from the file or
+- **Plays subtitles.** SRT, ASS, WebVTT, PGS and VobSub, from the file or
   beside it, drawn after the render so text is never warped by the model.
-- **Handles HDR.** *New.* HDR10 and HLG are tone mapped for the model, which
+- **Handles HDR.** HDR10 and HLG are tone mapped for the model, which
   renders in SDR; on an HDR display the original is still shown in HDR.
 - **Keeps your renders, at the quality you choose.** A render of the whole video
-  is reused whenever the source, runtime and settings still match. *New:* a
+  is reused whenever the source, runtime and settings still match. Choose a
   Standard, High (10-bit) or Lossless render quality, a dithered 8-bit
   capture by default, and **Advanced > Render report** for the flicker, grain
   and colour shift a render added.
 - **Exports.** PNG or JPEG for photos, GIF for animations, MP4 or MKV for video.
   MKV keeps the source audio, subtitles and chapters without re-encoding.
   **Export with DLSS stages** (`Ctrl+S`) runs any mix of Super Resolution,
-  neural rendering and frame generation in NVIDIA's order. *New:* the same
-  export from the command line, `DLSSVideoPlayer.exe --render`.
+  neural rendering and frame generation in NVIDIA's order, and the same
+  export runs from the command line, `DLSSVideoPlayer.exe --render`.
 - **Raises the frame rate.** **DLSS > Generate frames** writes a copy at 2x to 5x
   the original rate, then plays it.
 - **Upscales on playback, if you want it.** Optional DLSS Super Resolution to
@@ -135,25 +130,36 @@ the render covered the whole video. Press `D` at the start to get one.
   bicubic upscale on every clip measured, because it is built for rendered
   games, not decoded footage.
 - **Tunes the model.** Neural settings live at `Ctrl+N`. Change one while paused
-  and that frame re-renders, so you judge on the picture. *New:* **DLSS >
+  and that frame re-renders, so you judge on the picture. **DLSS >
   Processing scale** runs the model at 75% or 50% of the source, for speed.
-- **Plays like a player.** *New.* Audio passthrough of AC-3, E-AC-3 and DTS to
+- **Plays like a player.** Audio passthrough of AC-3, E-AC-3 and DTS to
   a receiver, and Windows media controls with taskbar thumbnail buttons.
 - **Comes with test material.** Seven official game trailers under
   **File > Game trailers** and on the start screen, each under three minutes and
   chosen for faces, skin and light.
 
-## What's new in 0.25.0
+## What's new in 0.26.0
 
-- **One export, all three stages.** Tick Super Resolution, neural rendering and
-  frame generation in any combination. The dialog shows the size and frame rate
-  you will get before it starts, and progress for each pass as it runs.
-- **Newer runtime.** RenoDX 6.5.3 and DLSS Super Resolution 310.9.1, plus
-  **Neural passes**, which runs the model up to four times per frame.
-- **Neural rendering no longer switches itself off.** The startup check misread
-  the new runtime and disabled neural rendering for the whole session.
-- **Tidier menus and toolbar.** The DLSS menu follows the order the stages run
-  in, and each toolbar button has its own icon, a busy state and hover text.
+**0.26.0** (2026-09-25). Compare views, a second engine to compare against,
+subtitles and HDR, and renders you can keep at the quality you choose.
+
+- **See what the model changed.** A compare bar with Split, Wipe, Difference,
+  Side by side and 2 × 2, a Mix slider, zoom to 8x, a loupe, a mask, and
+  **Save comparison image** with a provenance footer.
+- **RTX VSR beside DLSS 5.** NVIDIA's own video upscaler as a view of its own
+  and in the 2 × 2 (complete download only).
+- **Subtitles and HDR.** Text and picture subtitles drawn over the render, and
+  HDR10/HLG sources tone mapped for the model.
+- **Render quality you choose.** Standard (now constant quality), High (10-bit)
+  or Lossless, a render report, a processing scale, and `--render` for the
+  command line.
+- **Faster and steadier.** The first render starts in about half the time,
+  live sessions no longer drop frames at segment boundaries, and High renders
+  encode straight from the GPU.
+- **A start screen** with seven curated game trailers, a GPU check and recent
+  videos.
+
+Renders made by 0.25.0 are rendered again once: the cache key changed.
 
 Earlier releases are in [CHANGELOG.md](CHANGELOG.md).
 

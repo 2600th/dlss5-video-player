@@ -1,6 +1,6 @@
 # Game trailer examples
 
-_Verified against main (9d3e6cc) on 2026-09-25._
+_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
 
 **File > Game trailers** and the start screen's trailer row offer seven official
 trailers, picked for what DLSS 5 changes most: faces, skin, hair, cloth and

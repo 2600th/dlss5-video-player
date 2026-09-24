@@ -7,7 +7,7 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Unreleased
+## 0.26.0 - 2026-09-25
 
 Renders made before this release are not reused: the cache key changed with the
 new capture defaults, so the first conversion of each video renders it again.

@@ -29,7 +29,10 @@ if (-not (Select-String -LiteralPath (Join-Path $repositoryRoot 'CHANGELOG.md') 
     throw "CHANGELOG.md has no '## $version' section; cut it before tagging."
 }
 
-$lines = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.md')
+# README is UTF-8 without a BOM, which Windows PowerShell 5.1 (the release
+# workflow's shell) reads as the ANSI code page: "2 × 2" reached the notes as
+# "2 Ã— 2". WriteAllText below writes UTF-8, so read it as UTF-8 too.
+$lines = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.md') -Encoding UTF8
 $start = $null
 for ($i = 0; $i -lt $lines.Count; $i++) {
     if ($lines[$i] -match "^\*\*$([regex]::Escape($version))\*\* \(") { $start = $i; break }
@@ -38,8 +41,12 @@ if ($null -eq $start) {
     throw "README.md has no '**$version** (date)' entry under What changed; write it before tagging."
 }
 $end = $lines.Count
+# The entry ends at the next version's entry, the section's next heading, or its
+# "Earlier releases" pointer, whose relative link would be dead on the release
+# page. With one entry under a "What's new" heading, stopping only at the next
+# version copied the rest of README into the notes.
 for ($i = $start + 1; $i -lt $lines.Count; $i++) {
-    if ($lines[$i] -match '^\*\*[0-9]+\.[0-9]+\.[0-9]+\*\* \(') { $end = $i; break }
+    if ($lines[$i] -match '^\*\*[0-9]+\.[0-9]+\.[0-9]+\*\* \(' -or $lines[$i] -match '^#{1,6} ' -or $lines[$i] -match '^Earlier releases ') { $end = $i; break }
 }
 
 # Every guide that describes the current tree carries one line under its title:

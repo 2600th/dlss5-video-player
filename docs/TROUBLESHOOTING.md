@@ -1,6 +1,6 @@
 # Troubleshooting
 
-_Verified against main (9d3e6cc) on 2026-09-25._
+_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
 
@@ -243,8 +243,8 @@ The **RTX VSR** compare view needs an NVIDIA RTX GPU, driver 550 or newer, the
 the NVIDIA RTX Video SDK ([Building](BUILDING.md)). The grey segment's tooltip,
 and the notice `R` shows, name the one that is missing:
 
-- **not in this build** - it was built without `-DRTX_VIDEO_SDK`, as the public
-  CI build is;
+- **not in this build** - it was built without `-DRTX_VIDEO_SDK`, as the core
+  package is; the complete download has it;
 - **needs an NVIDIA RTX GPU** - NGX did not start on this adapter;
 - **needs NVIDIA driver ... or newer** - the driver's NGX reported
   `VSR.NeedsUpdatedDriver`; update the driver;

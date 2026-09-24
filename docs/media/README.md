@@ -1,5 +1,7 @@
 # Player demonstration
 
+_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
+
 [Watch the MP4](neural-comparison-demo.mp4) ·
 [Looping preview](neural-comparison-preview.webp) ·
 [Poster](neural-comparison-poster.jpg) ·

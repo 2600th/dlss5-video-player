@@ -1,5 +1,7 @@
 # Rebuilding the demonstration video
 
+_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
+
 This folder builds `docs/media/neural-comparison-demo.mp4` with
 [Remotion](https://www.remotion.dev) 4.0.520. What the video shows and where its
 footage came from is in [docs/media/README.md](../../docs/media/README.md).
