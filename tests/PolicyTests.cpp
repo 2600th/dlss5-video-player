@@ -62,6 +62,7 @@
 #include "ToolbarTipPolicy.h"
 #include "ChromeMotionPolicy.h"
 #include "EscapeKeyPolicy.h"
+#include "InitialWindowPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -1383,6 +1384,38 @@ void status_chips_carry_the_rate_the_drops_and_the_render_test()
     // No dropped frames is a fine state, so the chip says it quietly.
     CHECK(At(playing, Chip::Dropped).quiet);
     CHECK(!At(Build(true, {}, 60.0, 60.0, 4), Chip::Dropped).quiet);
+}
+
+void first_window_takes_a_share_of_the_work_area_and_keeps_the_pill_words_test()
+{
+    struct Display { LONG w, h; UINT dpi; };
+    // 4K at 175% and 150%, 1440p at 150%, 1080p at 125%: the bar has to keep
+    // its words (full-width pills) on every one of them.
+    for (const Display display : {Display{3840, 2076, 168}, Display{3840, 2076, 144}, Display{2560, 1400, 144},
+                                  Display{1920, 1032, 120}}) {
+        const auto dip = [&](int value) { return MulDiv(value, static_cast<int>(display.dpi), 96); };
+        const SIZE nonClient{dip(16), dip(59)};
+        const initial_window::Input in{SIZE{display.w, display.h}, nonClient, dip(156),
+                                       SIZE{MinimumToolbarClientWidth(display.dpi), MinimumIdleClientHeight(display.dpi)},
+                                       FullPillToolbarClientWidth(display.dpi)};
+        const SIZE client = initial_window::ClientSize(in);
+        CHECK(client.cx + nonClient.cx <= display.w * 0.8 + 1);
+        CHECK(client.cy + nonClient.cy <= display.h * 0.8 + 1);
+        // At least a 16:9 picture's width above the chrome (wider only for the pills).
+        CHECK(double(client.cx) / double(client.cy - dip(156)) >= 16.0 / 9.0 - 0.01);
+        CHECK(client.cx >= FullPillToolbarClientWidth(display.dpi));
+    }
+    // Where the height does not bind, the picture is exactly 16:9.
+    const initial_window::Input wide{SIZE{3840, 2076}, SIZE{28, 103}, 273, SIZE{1489, 262}, 1952};
+    const SIZE fitted = initial_window::ClientSize(wide);
+    CHECK(std::abs(double(fitted.cx) / double(fitted.cy - 273) - 16.0 / 9.0) < 0.01);
+    // A small screen: the minimum wins, and the work area still bounds it.
+    const initial_window::Input tiny{SIZE{1024, 700}, SIZE{16, 59}, 156, SIZE{900, 150}};
+    const SIZE small = initial_window::ClientSize(tiny);
+    CHECK_EQ(LONG{900}, small.cx);
+    CHECK(small.cy + 59 <= 700);
+    const initial_window::Input cramped{SIZE{800, 600}, SIZE{16, 59}, 156, SIZE{900, 150}};
+    CHECK_EQ(LONG{784}, initial_window::ClientSize(cramped).cx);
 }
 
 void escape_leaves_fullscreen_before_it_stops_anything_test()
@@ -14041,6 +14074,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test),
     TEST_CASE(player_status_formats_exact_runtime_and_playback_states_test),
     TEST_CASE(status_chips_carry_the_rate_the_drops_and_the_render_test),
+    TEST_CASE(first_window_takes_a_share_of_the_work_area_and_keeps_the_pill_words_test),
     TEST_CASE(escape_leaves_fullscreen_before_it_stops_anything_test),
     TEST_CASE(toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test),
     TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),

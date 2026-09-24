@@ -122,6 +122,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "ToolbarTipPolicy.h"
 #include "ChromeMotionPolicy.h"
 #include "EscapeKeyPolicy.h"
+#include "InitialWindowPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -2689,27 +2690,33 @@ public:
         w.hIcon=static_cast<HICON>(LoadImageW(hi,MAKEINTRESOURCEW(IDI_DLSS_VIDEO_PLAYER),IMAGE_ICON,GetSystemMetrics(SM_CXICON),GetSystemMetrics(SM_CYICON),LR_SHARED));
         w.hIconSm=static_cast<HICON>(LoadImageW(hi,MAKEINTRESOURCEW(IDI_DLSS_VIDEO_PLAYER),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED));
         RegisterClassExW(&w);
-        // 1440x880 of client is the default, which with the frame, the title
-        // bar and the menu is a 1440x939 window. On any display whose work area
-        // is shorter than that - a 1366x768 laptop, a 1600x900 panel, a 1080p
-        // screen with a tall taskbar - Windows places the window with its
-        // bottom off screen, and the bottom 50 dip of this player's chrome is
-        // the status line and the whole seek bar: the user loses scrubbing
-        // entirely and never sees why. The work area is the ceiling, and the
-        // window keeps its aspect while shrinking into it.
-        RECT rc{0,0,1440,880}; AdjustWindowRect(&rc,WS_OVERLAPPEDWINDOW,TRUE);
+        // The first window is sized from the work area (initial_window): 80%
+        // of it, shaped for a 16:9 picture above the chrome, at the monitor's
+        // dpi. A fixed 1440x880 of client was 823x503 dip at 175%, where every
+        // pill dropped to an icon. The work area is also the ceiling: a frame
+        // taller than it hangs the bottom 50 dip - the status line and the
+        // whole seek bar - under the taskbar, and the user loses scrubbing.
+        const UINT startDpi=ActiveWindowDpi(nullptr);
+        const auto dipAtStart=[&](int value){return MulDiv(value,int(startDpi),USER_DEFAULT_SCREEN_DPI);};
+        RECT nonClient{0,0,0,0};
+        {
+            using AdjustForDpiFn=BOOL(WINAPI*)(LPRECT,DWORD,BOOL,DWORD,UINT);
+            static const auto adjustForDpi=reinterpret_cast<AdjustForDpiFn>(GetProcAddress(GetModuleHandleW(L"user32.dll"),"AdjustWindowRectExForDpi"));
+            if(!adjustForDpi||!adjustForDpi(&nonClient,WS_OVERLAPPEDWINDOW,TRUE,WS_EX_ACCEPTFILES,startDpi))AdjustWindowRectEx(&nonClient,WS_OVERLAPPEDWINDOW,TRUE,WS_EX_ACCEPTFILES);
+        }
+        const SIZE frameExtra{nonClient.right-nonClient.left,nonClient.bottom-nonClient.top};
+        RECT rc{0,0,1440+frameExtra.cx,880+frameExtra.cy};
         RECT work{};
         int windowX=CW_USEDEFAULT,windowY=CW_USEDEFAULT;
         if(SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0)){
             const LONG workWidth=work.right-work.left,workHeight=work.bottom-work.top;
-            const LONG frameWidth=rc.right-rc.left,frameHeight=rc.bottom-rc.top;
             if(workWidth>0&&workHeight>0){
-                if(frameWidth>workWidth||frameHeight>workHeight){
-                    const double scale=std::min(double(workWidth)/double(frameWidth),
-                                                double(workHeight)/double(frameHeight));
-                    rc.right=rc.left+std::max<LONG>(640,LONG(std::lround(frameWidth*scale)));
-                    rc.bottom=rc.top+std::max<LONG>(480,LONG(std::lround(frameHeight*scale)));
-                }
+                const SIZE client=initial_window::ClientSize({SIZE{workWidth,workHeight},frameExtra,
+                    dipAtStart(CONTROL_H_DIP+compare_bar::kBarHeightDip),
+                    SIZE{MinimumToolbarClientWidth(startDpi),MinimumIdleClientHeight(startDpi)},
+                    FullPillToolbarClientWidth(startDpi)});
+                rc=RECT{0,0,client.cx+frameExtra.cx,client.cy+frameExtra.cy};
+                LOG("First window: "<<client.cx<<"x"<<client.cy<<" client at "<<startDpi<<" dpi in a "<<workWidth<<"x"<<workHeight<<" work area.");
                 // Centred, not cascaded. CW_USEDEFAULT offsets each new window
                 // down and right, so a frame sized to exactly the work area
                 // still hangs its bottom - and therefore the seek bar - under
