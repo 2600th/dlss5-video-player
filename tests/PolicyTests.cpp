@@ -2138,6 +2138,42 @@ void chrome_motion_compare_mark_slides_from_the_old_mode_to_the_new_test()
     CHECK(still.At(start) == std::make_pair(LONG{300}, LONG{360}));
 }
 
+void chrome_motion_toast_rises_holds_and_goes_and_a_second_one_does_not_bounce_test()
+{
+    using namespace chrome_motion;
+    const Clock::time_point start{};
+    Toast toast;
+    CHECK(!toast.At(start).visible);
+    CHECK(!toast.NextChange(start).has_value());
+    toast.Show(start);
+    // Rising in: fading up while it climbs to where it settles.
+    const auto early = toast.At(start + kToastIn / 4);
+    CHECK(early.visible && early.alpha > 0.0 && early.alpha < 1.0 && early.rise > 0.0);
+    const auto held = toast.At(start + kToastIn + kToastHold / 2);
+    CHECK(held.alpha == 1.0 && held.rise == 0.0);
+    // Sitting still, the next change is the hold's end, not the next frame.
+    CHECK(toast.NextChange(start + kToastIn + kToastHold / 2).value() > std::chrono::milliseconds(1000));
+    CHECK(toast.NextChange(start + kToastIn / 2).value() == std::chrono::milliseconds(kFrameMs));
+    const auto leaving = toast.At(start + kToastIn + kToastHold + kToastOut / 2);
+    CHECK(leaving.visible && leaving.alpha < 1.0 && leaving.rise == 0.0);
+    CHECK(!toast.At(start + kToastIn + kToastHold + kToastOut).visible);
+    // A second toast while one is up restarts the hold without rising again.
+    Toast again;
+    again.Show(start);
+    const auto later = start + kToastIn + std::chrono::milliseconds(500);
+    again.Show(later);
+    const auto replaced = again.At(later);
+    CHECK(replaced.alpha == 1.0 && replaced.rise == 0.0);
+    CHECK(again.At(later + kToastHold - std::chrono::milliseconds(10)).alpha == 1.0);
+    // Without motion: there for the hold, then gone, never fading.
+    Toast still;
+    still.Show(start);
+    CHECK(still.At(start, false).alpha == 1.0);
+    CHECK(still.At(start + kToastIn + kToastHold - std::chrono::milliseconds(1), false).alpha == 1.0);
+    CHECK(!still.At(start + kToastIn + kToastHold, false).visible);
+    CHECK(kToastIn.count() >= 120 && kToastIn.count() <= 220 && kToastOut.count() >= 120 && kToastOut.count() <= 220);
+}
+
 void chrome_motion_render_complete_glow_sweeps_once_and_only_for_a_render_watched_happening_test()
 {
     using namespace chrome_motion;
@@ -14224,6 +14260,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(active_button_small_text_meets_wcag_contrast_test),
     TEST_CASE(chrome_motion_fades_ease_without_overshoot_and_honour_reduced_motion_test),
     TEST_CASE(chrome_motion_compare_mark_slides_from_the_old_mode_to_the_new_test),
+    TEST_CASE(chrome_motion_toast_rises_holds_and_goes_and_a_second_one_does_not_bounce_test),
     TEST_CASE(chrome_motion_render_complete_glow_sweeps_once_and_only_for_a_render_watched_happening_test),
     TEST_CASE(failed_icon_font_uses_label_only_presentation_test),
     TEST_CASE(button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test),

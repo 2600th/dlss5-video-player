@@ -3039,6 +3039,8 @@ private:
     static constexpr UINT_PTR kHoverTimerId=0xD15B;
     // The render-complete glow along the timeline; runs for its 900 ms only.
     static constexpr UINT_PTR kGlowTimerId=0xD15C;
+    // A toast's next change: every frame while it moves, the hold's end while it sits.
+    static constexpr UINT_PTR kToastTimerId=0xD15D;
     static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
     // How long a live or cached pair may stay NotReady before the player stops
     // waiting for it. A segment source is reopened at every boundary and after
@@ -3296,6 +3298,7 @@ private:
         m_subtitleDelayMs=direction?subtitle::StepDelay(m_subtitleDelayMs,direction):0;
         RememberSubtitleChoice();
         m_sourceNotice=T(L"subtitles.delay")+SubtitleDelayText();UpdateCachedStatus();
+        ShowToast(m_sourceNotice);
         UpdateSubtitleMenu();
     }
     void UpdateSubtitleMenu(){
@@ -5247,7 +5250,9 @@ private:
         if(!m_loaded||!m_renderer)return;
         const auto path=PickComparisonImage(m_hwnd,m_loc,compare_provenance::SuggestedName(m_displayTitle,FormatTimecode(Position100ns(),std::max(1.0,m_decoder.FrameRate()),true)));
         if(path.empty())return;
-        m_sourceNotice=SaveComparisonImageTo(path)?T(L"compare.save.saved")+path.filename().wstring():T(L"compare.save.failed");
+        const bool saved=SaveComparisonImageTo(path);
+        m_sourceNotice=saved?T(L"compare.save.saved")+path.filename().wstring():T(L"compare.save.failed");
+        if(saved)ShowToast(T(L"compare.save.saved")+path.filename().wstring());
         UpdateCachedStatus();
     }
 
@@ -7833,6 +7838,12 @@ private:
     }
     void StartCompletionGlow(){
         m_completeGlow.Start(Clock::now());
+        // The same moment, in words: how much video, and how long it took.
+        if(m_liveRange.end100ns>m_liveRange.start100ns){
+            const double video=double(m_liveRange.end100ns-m_liveRange.start100ns)*1e-7;
+            const double took=std::chrono::duration<double>(Clock::now()-m_liveSessionStartedAt).count();
+            ShowToast(T(L"toast.rendered")+TimeText(video)+T(L"toast.rendered_in")+TimeText(took),ui_palette::NeuralCoverage);
+        }
         LOG("Live session coverage complete; the timeline marks it.");
         if(m_glowTimer&&m_hwnd)KillTimer(m_hwnd,m_glowTimer);
         m_glowTimer=m_hwnd?SetTimer(m_hwnd,kGlowTimerId,m_activityMotionEnabled?chrome_motion::kFrameMs:UINT(chrome_motion::kCompleteGlow.count()),nullptr):0;
@@ -9417,7 +9428,7 @@ private:
             if(ec){LOG("Active neural session could not create its segment directory.");m_liveDirectory.clear();return;}
             m_liveSegments=std::make_shared<NeuralSegmentIndex>();
         }
-        m_liveRange=range;m_liveTarget={};m_liveSession=true;m_liveAttached=false;m_liveRenderFailures=0;
+        m_liveRange=range;m_liveTarget={};m_liveSession=true;m_liveAttached=false;m_liveRenderFailures=0;m_liveSessionStartedAt=Clock::now();
         // The pace clock starts at the first rendered segment, not here: a first
         // watch spends a minute acquiring the source before a frame is rendered,
         // and counting that made a GPU measured at 2x report 0.48x real time.
@@ -9846,6 +9857,74 @@ private:
         // frame-generated source is exactly where the two differ.
         m_liveStartLead=live_session::StartLead(LivePaceRatio(),kLiveStartLead);
         if(m_liveBuffering&&live_session::ShouldResume(view,LiveResumeLead()))ExitLiveBuffering();
+    }
+    // ---- Toasts --------------------------------------------------------------
+    // A short confirmation - a file saved, a subtitle shift, a whole video
+    // rendered - that rises from the strip at the picture's bottom-left, holds
+    // and goes (chrome_motion::Toast). A layered popup owned by the main window,
+    // as the buffering panel is, because the picture is a D3D12 child a sibling
+    // would fight for z-order. It never takes the mouse or the focus, and it
+    // sits in the corner, away from the compare seam and the tags at the top.
+    static LRESULT CALLBACK ToastWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(m==WM_NCCREATE){SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));return DefWindowProcW(h,m,w,l);}
+        auto* app=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+        if(m==WM_NCHITTEST)return HTTRANSPARENT;
+        if(m==WM_MOUSEACTIVATE)return MA_NOACTIVATE;
+        if(m==WM_ERASEBKGND)return 1;
+        if(m==WM_PAINT&&app){PAINTSTRUCT ps{};HDC dc=BeginPaint(h,&ps);RECT c{};GetClientRect(h,&c);app->PaintToast(dc,c);EndPaint(h,&ps);return 0;}
+        if(m==WM_NCDESTROY&&app&&app->m_toastWnd==h)app->m_toastWnd=nullptr;
+        return DefWindowProcW(h,m,w,l);
+    }
+    void ShowToast(std::wstring text,COLORREF mark=ui_palette::PrimaryBlue){
+        if(!m_hwnd||text.empty())return;
+        m_toastText=std::move(text);m_toastMark=mark;
+        if(!m_toastWnd){
+            static constexpr const wchar_t* kClassName=L"DLSSVideoToastClassV1";
+            const HINSTANCE instance=reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd,GWLP_HINSTANCE));
+            WNDCLASSW cls{};cls.lpfnWndProc=ToastWndProcStatic;cls.hInstance=instance;cls.lpszClassName=kClassName;cls.hCursor=LoadCursor(nullptr,IDC_ARROW);
+            if(!RegisterClassW(&cls)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
+            m_toastWnd=CreateWindowExW(WS_EX_LAYERED|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_TRANSPARENT,kClassName,L"",WS_POPUP,0,0,10,10,m_hwnd,nullptr,instance,this);
+            if(!m_toastWnd)return;
+        }
+        LOG("Toast: "<<WideToUtf8(m_toastText));
+        m_toast.Show(Clock::now());
+        AnimateToast();
+    }
+    // Where the toast settles: 16 dip in from the picture area's left, 12 dip
+    // above the strip, sized to its text.
+    RECT ToastRect(double rise)const{
+        RECT area{};if(!m_viewport||!GetWindowRect(m_viewport,&area))return {};
+        HDC dc=GetDC(m_hwnd);SIZE text{};
+        if(dc){const HGDIOBJ old=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);GetTextExtentPoint32W(dc,m_toastText.c_str(),int(m_toastText.size()),&text);SelectObject(dc,old);ReleaseDC(m_hwnd,dc);}
+        const LONG width=std::min<LONG>(text.cx+Dip(3+14+16),std::max<LONG>(Dip(120),area.right-area.left-Dip(32)));
+        const LONG height=Dip(34);
+        const LONG left=area.left+Dip(16),bottom=area.bottom-Dip(12)+LONG(std::lround(rise*Dip(chrome_motion::kToastRiseDip)));
+        return RECT{left,bottom-height,left+width,bottom};
+    }
+    void AnimateToast(){
+        if(!m_toastWnd)return;
+        const auto now=Clock::now();
+        const auto frame=m_toast.At(now,m_activityMotionEnabled);
+        if(!frame.visible){ShowWindow(m_toastWnd,SW_HIDE);if(m_toastTimer){KillTimer(m_hwnd,m_toastTimer);m_toastTimer=0;}m_toast.Hide();return;}
+        const RECT r=ToastRect(frame.rise);
+        const int radius=Dip(8);
+        SetWindowRgn(m_toastWnd,CreateRoundRectRgn(0,0,r.right-r.left+1,r.bottom-r.top+1,radius*2,radius*2),FALSE);
+        SetLayeredWindowAttributes(m_toastWnd,0,BYTE(std::lround(245.0*frame.alpha)),LWA_ALPHA);
+        SetWindowPos(m_toastWnd,HWND_TOP,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+        InvalidateRect(m_toastWnd,nullptr,FALSE);
+        if(const auto next=m_toast.NextChange(now,m_activityMotionEnabled))
+            m_toastTimer=SetTimer(m_hwnd,kToastTimerId,UINT(std::max<long long>(USER_TIMER_MINIMUM,next->count())),nullptr);
+    }
+    void PaintToast(HDC dc,const RECT& c){
+        HBRUSH panel=CreateSolidBrush(ui_palette::Inactive);FillRect(dc,&c,panel);DeleteObject(panel);
+        // The mark says what kind of news it is, as a mark and not a fill: teal
+        // for a render, the accent for a file or a setting.
+        RECT mark{c.left,c.top,c.left+Dip(3),c.bottom};HBRUSH ink=CreateSolidBrush(m_toastMark);FillRect(dc,&mark,ink);DeleteObject(ink);
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,ui_palette::PrimaryText);
+        const HGDIOBJ old=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
+        RECT text{c.left+Dip(3+14),c.top,c.right-Dip(14),c.bottom};
+        DrawTextW(dc,m_toastText.c_str(),-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        SelectObject(dc,old);
     }
     // Buffering panel. A popup owned by the main window, because the video is a
     // D3D12 child window that a sibling would have to fight for z-order.
@@ -11134,7 +11213,7 @@ private:
         case dark_mode::WM_UAHDRAWMENU:if(DrawDarkMenuBar(h,reinterpret_cast<const dark_mode::UAHMENU*>(l)))return TRUE;break;
         case dark_mode::WM_UAHDRAWMENUITEM:if(DrawDarkMenuBarItem(h,reinterpret_cast<const dark_mode::UAHDRAWMENUITEM*>(l)))return TRUE;break;
         case WM_NCPAINT:case WM_NCACTIVATE:{const LRESULT result=DefWindowProcW(h,m,w,l);PaintMenuBarSeparator(h);return result;}
-        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}if(w==kHoverTimerId){AnimateHover();return 0;}if(w==kGlowTimerId){AnimateCompletionGlow();return 0;}break;
+        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}if(w==kHoverTimerId){AnimateHover();return 0;}if(w==kGlowTimerId){AnimateCompletionGlow();return 0;}if(w==kToastTimerId){AnimateToast();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
         case WM_ENTERSIZEMOVE:m_inSizeMove=true;StartModalTick();break;
@@ -11421,6 +11500,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // moving on the last frame, so the frame it lands gets painted too.
     std::array<chrome_motion::Fade,static_cast<size_t>(ToolbarAction::None)+1> m_hoverFades{};uint32_t m_hoverAnimating=0;UINT_PTR m_hoverTimer=0;
     chrome_motion::Glow m_completeGlow;chrome_motion::CompletionLatch m_completionLatch;UINT_PTR m_glowTimer=0;
+    HWND m_toastWnd=nullptr;chrome_motion::Toast m_toast;std::wstring m_toastText;COLORREF m_toastMark=ui_palette::PrimaryBlue;UINT_PTR m_toastTimer=0;
+    Clock::time_point m_liveSessionStartedAt{};
     // The sliders' hover (knob size) and the volume's value bubble, which
     // lingers slider::kBubbleLingerMs after a drag ends before it fades.
     // The compare bar's segment tints by part and index, and its sliding mark.

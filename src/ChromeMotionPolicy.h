@@ -136,6 +136,65 @@ private:
     std::optional<Clock::time_point> started_;
 };
 
+// A toast: a short confirmation that rises from the strip, holds, and goes.
+// In 160 ms (ease-out, rising 8 dip), held 2.4 s, out 140 ms (ease-in). A new
+// toast replaces the one on screen in place: it restarts the hold without
+// rising again, so a quick run of confirmations does not bounce. Without
+// motion it is simply there for the hold and then gone.
+inline constexpr std::chrono::milliseconds kToastIn{160};
+inline constexpr std::chrono::milliseconds kToastHold{2400};
+inline constexpr std::chrono::milliseconds kToastOut{140};
+inline constexpr int kToastRiseDip = 8;
+
+class Toast {
+public:
+    struct Frame {
+        bool visible{};
+        double alpha{};   // 0..1
+        double rise{};    // 0 = settled, 1 = kToastRiseDip below where it settles
+    };
+    void Show(Clock::time_point now)
+    {
+        // Already up: keep it where it is and hold again from now.
+        const Frame current = At(now);
+        shownAt_ = current.visible && current.alpha >= 1.0 ? now - kToastIn : now;
+    }
+    void Hide() { shownAt_.reset(); }
+    [[nodiscard]] Frame At(Clock::time_point now, bool motion = true) const
+    {
+        if (!shownAt_) return {};
+        const auto t = now - *shownAt_;
+        if (t < std::chrono::steady_clock::duration::zero()) return {};
+        if (t >= kToastIn + kToastHold + kToastOut) return {};
+        if (!motion) return t < kToastIn + kToastHold ? Frame{true, 1.0, 0.0} : Frame{};
+        const auto seconds = [](auto d) { return std::chrono::duration<double>(d).count(); };
+        if (t < kToastIn) {
+            const double e = EaseOut(seconds(t) / seconds(kToastIn));
+            return {true, e, 1.0 - e};
+        }
+        if (t < kToastIn + kToastHold) return {true, 1.0, 0.0};
+        return {true, 1.0 - EaseIn(seconds(t - kToastIn - kToastHold) / seconds(kToastOut)), 0.0};
+    }
+    // When the next change is due: soon while it moves, at the end of the hold
+    // while it sits still, nothing once it is gone.
+    [[nodiscard]] std::optional<std::chrono::milliseconds> NextChange(Clock::time_point now, bool motion = true) const
+    {
+        if (!shownAt_) return std::nullopt;
+        const auto t = std::chrono::duration_cast<std::chrono::milliseconds>(now - *shownAt_);
+        const auto end = kToastIn + kToastHold + kToastOut;
+        if (t >= end) return std::nullopt;
+        if (!motion) {
+            if (t < kToastIn + kToastHold) return kToastIn + kToastHold - t;
+            return std::nullopt;
+        }
+        if (t >= kToastIn && t < kToastIn + kToastHold) return kToastIn + kToastHold - t;
+        return std::chrono::milliseconds(kFrameMs);
+    }
+
+private:
+    std::optional<Clock::time_point> shownAt_;
+};
+
 // The once-per-render glow. `Sweep` is where the highlight has got to across
 // the rendered span (0 = its left edge, 1 = past its right edge); `Level` is
 // how lit the whole lane is. The lane lights with the sweep and settles after

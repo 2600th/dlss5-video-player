@@ -1375,6 +1375,30 @@ struct PlayerAppTestAccess {
         app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested;
     }
 
+    // A toast is a popup that never takes focus or the mouse, sits above the
+    // strip at the picture's left, and goes away by itself with its timer.
+    static void toast_confirms_then_goes_with_its_timer_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool motion = app.m_activityMotionEnabled;
+        app.m_activityMotionEnabled = false;
+        app.ShowToast(L"Comparison saved: frame.png");
+        REQUIRE(app.m_toastWnd != nullptr);
+        CHECK(IsWindowVisible(app.m_toastWnd));
+        CHECK((GetWindowLongPtrW(app.m_toastWnd, GWL_EXSTYLE) & (WS_EX_NOACTIVATE | WS_EX_TRANSPARENT)) == (WS_EX_NOACTIVATE | WS_EX_TRANSPARENT));
+        CHECK(GetFocus() != app.m_toastWnd);
+        RECT toast{}, area{};
+        GetWindowRect(app.m_toastWnd, &toast);
+        GetWindowRect(app.m_viewport, &area);
+        CHECK(toast.left >= area.left && toast.bottom <= area.bottom);
+        CHECK(app.m_toastTimer != 0);
+        std::this_thread::sleep_for(chrome_motion::kToastIn + chrome_motion::kToastHold + std::chrono::milliseconds(40));
+        app.AnimateToast();
+        CHECK(!IsWindowVisible(app.m_toastWnd));
+        CHECK_EQ(static_cast<UINT_PTR>(0), app.m_toastTimer);
+        app.m_activityMotionEnabled = motion;
+    }
+
     static void keyboard_cheat_sheet_test()
     {
         PlayerApp& app = fixture->app;
@@ -2362,6 +2386,7 @@ struct PlayerAppTestAccess {
         UI_CASE(render_complete_glow_lights_the_lane_then_stops_test),
         UI_CASE(volume_slider_bubble_follows_the_drag_and_lingers_test),
         UI_CASE(compare_mode_tips_say_why_a_mode_is_greyed_test),
+        UI_CASE(toast_confirms_then_goes_with_its_timer_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
