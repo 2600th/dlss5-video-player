@@ -8,12 +8,18 @@ for images that have since been replaced are in the git history of this file.
 
 | File | What it shows | Made |
 | --- | --- | --- |
-| `current/gta6-lucia-original.jpg`, `gta6-lucia-neural.jpg` | That GTA VI frame, whole (2560x1440). The site hero and link card are cut from these | 22 Sep 2026, v0.25.0 |
+| `current/gta6-lucia-original.jpg`, `gta6-lucia-neural.jpg` | GTA VI Trailer 2, source frame 1940 and the same frame of the v0.25.0 render (Intensity, Local tone and Local structure 2.0), whole (2560x1440). The site hero and link card are cut from these | 22 Sep 2026, v0.25.0 |
 | `current/matrix-neural.jpg`, `matrix-original.jpg` | The player paused on Trinity at 1:28, neural view on, then off | 22 Sep 2026, v0.25.0 |
 | `current/neural-playback.jpg`, `original-comparison.jpg` | The player paused on GTA VI at 1:04, neural view on, then off | 22 Sep 2026, v0.25.0 |
-| `current/neural-strength.jpg` | The image adjustments window with the DLSS 5 mix slider at 1.00, over a paused neural frame of the Mafia: The Old Country trailer | 24 Sep 2026, v0.25.0+ |
-| `current/recent-videos.jpg` | The File menu (Game trailers, Recent videos, Save comparison image) over the same trailer, paused on a neural frame with the compare bar. The history submenu is closed, which keeps local paths out of frame | 24 Sep 2026, v0.25.0+ |
-| `current/player-start.jpg` | The start screen on a fresh profile: the capability check and the game trailers | 24 Sep 2026, v0.25.0+ |
+| `current/player-start.jpg` | The start screen at 150% on a fresh profile: the capability check and the seven game trailers with their YouTube thumbnails | 24 Sep 2026, `dced888` |
+| `current/compare-wipe.jpg` | 007 First Light paused on frame 1122 in Wipe, the divider down the face, with the compare bar | 24 Sep 2026, `dced888` + `f2ae230` |
+| `current/compare-difference.jpg` | The same frame in Difference (x4, brightness only): where the model changed the picture | 24 Sep 2026, `dced888` + `f2ae230` |
+| `current/compare-2x2-toast.jpg` | The same frame in 2 x 2 (original, DLSS 5, Difference, DLSS 5 at Mix 50%), with the toast that confirms **Save comparison image** | 24 Sep 2026, `dced888` + `f2ae230` |
+| `current/saved-comparison-2x2.png` | The file that save wrote: the player's own PNG of the 2 x 2 view with its provenance footer, as saved | 24 Sep 2026, `dced888` + `f2ae230` |
+| `current/subtitles.jpg` | A test subtitle file drawn over the DLSS 5 frame | 24 Sep 2026, `dced888` + `f2ae230` |
+| `current/neural-strength.jpg` | Image adjustments, with the DLSS 5 mix slider at 1.00, over the DLSS 5 frame | 24 Sep 2026, `dced888` + `f2ae230` |
+| `current/neural-settings.jpg` | The Neural settings dialog at its defaults | 24 Sep 2026, `dced888` + `f2ae230` |
+| `current/recent-videos.jpg` | The File menu (Game trailers, Recent videos, Save comparison image) over the Mafia: The Old Country trailer, paused on a neural frame with the compare bar. The history submenu is closed, which keeps local paths out of frame. From the earlier round, at 175%, before the sliders were redrawn | 24 Sep 2026, v0.25.0+ |
 | `2026-09-03/face-comparison.png` | The Witcher IV, frame 3375, source beside render. Kept because the 2 September verification report shows it | 3 Sep 2026, v0.13.0 |
 
 ## 22 September 2026 images
@@ -69,7 +75,56 @@ differs by a mean of 9.5 levels and the Matrix pair by 5.2. A wipe taken in the
 same session matched the original left of its divider (0.16) and the render to
 the right (0.0).
 
-## 24 September 2026 images
+## 24 September 2026 images, second round
+
+**Hardware and runtime.** RTX 4080 SUPER, driver 610.47 (`32.0.16.1047`),
+runtime lock `310.8.SF-v2`. The player is this repository at `dced888`, plus
+the fix `f2ae230` (cached playback decoded the render in the wrong pixel
+layout and could show a striped picture) for every shot after the start
+screen. Every shot was checked for that artifact; none has it.
+
+**Display.** The player sat on a 1920x1080 display set to 150% scaling for
+these captures (the machine's own setting is 100%; it was put back
+afterwards). Each is the window's visible frame, 1902x1023, captured by handle
+with `tools/verification/capture-window.ps1` and cut to DWM's extended frame
+bounds. The tool now asks for per-monitor DPI awareness: before that, a window
+on a monitor scaled unlike the primary (175% here) came back 2240x1204 with the
+player in its top-left corner. `neural-strength.jpg` is two such captures, the
+player and the Image adjustments window placed at its real on-screen offset
+from it (599, 152). Saved once as JPEG at quality 95 with no chroma
+subsampling. `neural-settings.jpg` is the dialog's own capture: the player
+behind a modal dialog came back black.
+
+**Settings.** A fresh profile, so neural settings at their defaults (the
+dialog in `neural-settings.jpg` shows them). The render is a whole-video render
+of *007 First Light - Story Trailer* made through the player's YouTube Auto path
+(see [docs/media/README.md](../media/README.md#comparison-stills)); for these
+shots the cached source was opened as a local file, which found the same render
+in the cache. Frame 1122 (0:18.7), paused with **Go to timecode**. Everything
+was driven by posted window messages; the loupe in the demonstration video and
+the wipe divider needed the real pointer over the picture for a moment.
+
+**The subtitle** is a two-line test file written for this shot, loaded with
+**Load subtitle file**. It says what it is; it is not the trailer's dialogue.
+
+**The saved comparison** is exactly what **File > Save comparison image**
+wrote. Its footer reads: `DLSS 5 Video Player 0.25.0 · 007-First-Light-Story-Trailer`,
+`00:00:18:42 · frame 1122 · 2 × 2 (fourth pane Mix 50%) · Mix 100% · Zoom Fit`,
+`Settings sha256:ee4d77128a1605d2 · Runtime 310.8.SF-v2 · Saved 2026-09-24 16:44:22`.
+The settings digest there is the player's own (canonical settings and guides);
+the render's cache manifest records `96bf471a…` for the same settings under its
+own hashing.
+
+**Not retaken.** `recent-videos.jpg` needs an open menu, which a posted message
+did not open; real input would have taken the pointer and focus from the person
+using the machine. It is from the earlier round and has no playback artifact
+(checked). The GTA VI and Matrix pairs and the full GTA VI frames are v0.25.0
+captures the site still uses.
+
+## 24 September 2026 images, first round
+
+`recent-videos.jpg` is still from this round; the `neural-strength.jpg` and
+`player-start.jpg` described here have since been replaced (above).
 
 **Hardware and runtime.** The 22 September machine and runtime (RTX 4080
 SUPER, driver 610.47, RenoDX 6.5.3, DLSS-NR 310.8.0), at 175% display scaling.
