@@ -15,7 +15,7 @@ namespace warm_up {
 
 enum class Step {
     None,            // not warming up: there is coverage, or no live render
-    CheckingCache,   // the render key, which hashes the model store the first time
+    CheckingCache,   // the render key: mostly waiting out NGX rewriting its model files
     CheckingRuntime, // the preflight probe of the neural runtime
     PreparingModel,  // helper up, feature being armed, no frame out yet
     FirstSecond,     // frames are coming out; the first segment is not published
