@@ -118,7 +118,7 @@
         {
           "@type": "Question",
           "name": "Which GPUs does it need?",
-          "acceptedAnswer": { "@type": "Answer", "text": "An NVIDIA RTX card and driver 610.47 or newer for neural rendering; with an older driver the player says so up front. It has been checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack native FP8 and should be several times slower; nobody has tested one yet. The player itself opens and plays video without one; the render is what needs the hardware." }
+          "acceptedAnswer": { "@type": "Answer", "text": "An NVIDIA RTX card and driver 610.47 or newer for neural rendering; with an older driver the player says so up front. It has been checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack native FP8 and should be several times slower; nobody has tested one yet. The player is built and tested for Windows with an RTX card; on any other GPU its start screen says \"not an RTX GPU, so no DLSS\", and playback there has not been tested." }
         },
         {
           "@type": "Question",
@@ -654,8 +654,9 @@
         with an older driver the player says so up front. It has been checked
         on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack
         native FP8 and should be several times slower; nobody has tested one
-        yet. The player itself opens and plays video without one; the render
-        is what needs the hardware.
+        yet. The player is built and tested for Windows with an RTX card; on
+        any other GPU its start screen says "not an RTX GPU, so no DLSS", and
+        playback there has not been tested.
       </p>
     </details>
     <details class="faq__item" id="faq-speed">

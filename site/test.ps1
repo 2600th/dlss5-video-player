@@ -378,6 +378,9 @@ Test-Case 'the honest limits are stated beside the features' {
     Assert-Contains $limits 'bicubic' 'Super Resolution losing to bicubic on video is stated'
     Assert-Contains $limits 'unsigned' 'the unsigned runtime is stated'
     Assert-Contains $limits 'untested' 'the untested GPU generations are named'
+    # Playback on a GPU that is not an RTX card has never been run, so the page
+    # may say what the start screen reports there, but not that it works.
+    Assert-NotContains $htmlFull 'plays video without' 'no claim that the player works without an RTX card'
 }
 
 Test-Case 'the FAQ answers what a first-time visitor asks' {
