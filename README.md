@@ -156,6 +156,7 @@ Earlier releases are in [CHANGELOG.md](CHANGELOG.md).
 | Play or pause | `Space` |
 | Neural rendering on or off | `D` |
 | Compare views | `C` / `Shift+C` step the mode; `X` swaps sides; `[` and `]` change the Mix |
+| RTX VSR view; compare against it | `R`; `Shift+R` (builds with the RTX Video SDK) |
 | Zoom, loupe | `Z` / `Shift+Z` zoom in and out at the pointer; `L` loupe |
 | Save the view as a PNG | `Ctrl+Shift+S` |
 | Subtitles; earlier, later | `V`; `H`, `J` |

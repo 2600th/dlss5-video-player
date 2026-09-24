@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P1** | | | | |
 | **P2** | | | | |
 | [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | |
-| [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
 | **P3** | | | | |
 | [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | |
 | [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | |
@@ -103,21 +102,6 @@ over each clip (not per frame), and A/B it. The first harness result sets
 expectations: even *exact* synthetic depth moves the output by at most
 0.03 dB PSNR, so depth has little headroom on this pipeline; flow is the
 more promising guide (P3.6).
-
----
-
-<a id="p28"></a>
-### P2.8 · RTX Video Super Resolution as a second engine
-
-`M` · **Pipeline, Player** · _old 3.4_
-
-RTX VSR is trained on compressed video, which is the right model for YouTube
-sources, and the RTX Video SDK supports D3D12. VSR itself is now common;
-**what nobody else can show is the original, DLSS 5 NR and RTX VSR on the
-same frame during a live render.** At 1× it also doubles as a
-compression-cleanup pre-pass.
-
-Ref: [RTX Video SDK](https://developer.nvidia.com/blog/enhancing-low-resolution-sdr-video-with-the-nvidia-rtx-video-sdk/)
 
 ---
 

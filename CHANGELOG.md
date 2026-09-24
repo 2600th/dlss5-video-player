@@ -15,6 +15,14 @@ new capture defaults, so the first conversion of each video renders it again.
 
 ### New
 
+- **RTX Video Super Resolution beside DLSS 5** (`R`), in builds made with
+  NVIDIA's RTX Video SDK: NVIDIA's own video upscaler, run live on the
+  original, as a compare view of its own, in the 2 x 2 next to the original
+  and DLSS 5, and as the picture Split, Wipe, Difference and Side by side
+  compare against (`Shift+R`). Low to Ultra, High by default: 3.2 ms a 1080p
+  frame and 5.3 ms a 1440p one on an RTX 4080 SUPER. It changes only what the
+  window shows, never a render or the cache. Without the SDK the view is
+  greyed and says why.
 - **Subtitles** (**Playback > Subtitles**): the source's text and picture tracks
   or a loaded SRT, ASS, VTT, PGS or VobSub file; a same-named file beside the
   video loads by itself. `V` switches track, `H`/`J` shift it 0.1 s, and both
