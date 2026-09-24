@@ -59,16 +59,15 @@ $fixtures = Join-Path $siteRoot 'fixtures'
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "dlss5-site-test-$PID"
 
 function Invoke-Build {
-    param([string]$Fixture, [string]$MeasurementId, [string]$Name)
+    param([string]$Fixture, [string]$MeasurementId, [string]$Name, [string]$RepoFixture)
     $out = Join-Path $tempRoot $Name
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     $previous = $env:GA_MEASUREMENT_ID
     try {
         $env:GA_MEASUREMENT_ID = $MeasurementId
-        & (Join-Path $siteRoot 'build.ps1') `
-            -OutputPath $out `
-            -ReleaseFixture (Join-Path $fixtures $Fixture) `
-            -Quiet | Out-Null
+        $buildArgs = @{ OutputPath = $out; ReleaseFixture = (Join-Path $fixtures $Fixture); Quiet = $true }
+        if ($RepoFixture) { $buildArgs.RepoFixture = Join-Path $fixtures $RepoFixture }
+        & (Join-Path $siteRoot 'build.ps1') @buildArgs | Out-Null
     } finally {
         if ($null -eq $previous) { Remove-Item Env:GA_MEASUREMENT_ID -ErrorAction SilentlyContinue }
         else { $env:GA_MEASUREMENT_ID = $previous }
@@ -172,10 +171,32 @@ Test-Case 'a malformed measurement id fails the build' {
 }
 
 Write-Host ''
+Write-Host 'GitHub star count' -ForegroundColor Cyan
+
+Test-Case 'a star count reads the way a person says it' {
+    Assert-Equal '0' (Format-StarCount 0) 'zero is a count'
+    Assert-Equal '127' (Format-StarCount 127) 'small counts are exact'
+    Assert-Equal '1,234' (Format-StarCount 1234) 'thousands are grouped'
+    Assert-Equal '12.3k' (Format-StarCount 12345) 'large counts are shortened, never rounded up'
+    Assert-Equal '' (Format-StarCount $null) 'no answer renders nothing, not a zero'
+    Assert-Equal '' (Format-StarCount 'n/a') 'garbage renders nothing'
+}
+
+Test-Case 'no star count still yields a complete link' {
+    $s = Get-StarSummary -Count $null
+    Assert-Equal '' $s.Badge 'no badge without a count'
+    Assert-Equal 'MIT licence' $s.Meta 'the button meta falls back to the licence'
+    $one = Get-StarSummary -Count 1 -AsOf '1 January 2026'
+    Assert-Contains $one.Badge '1<span class="gh__stars-noun"> star</span>' 'one star is singular'
+    Assert-Contains $one.Badge 'when this page was built, 1 January 2026' 'the badge says when it was counted'
+}
+
+Write-Host ''
 Write-Host 'Build output' -ForegroundColor Cyan
 
-$distFull = Invoke-Build -Fixture 'release-full.json' -MeasurementId '' -Name 'full'
+$distFull = Invoke-Build -Fixture 'release-full.json' -MeasurementId '' -Name 'full' -RepoFixture 'repo.json'
 $htmlFull = Get-Html $distFull
+$repoUrl = "https://github.com/$(Get-RepoSlug)"
 
 Test-Case 'no unsubstituted token survives into dist' {
     foreach ($f in Get-ChildItem $distFull -Recurse -Include *.html, *.css, *.js, *.json) {
@@ -526,6 +547,27 @@ Test-Case 'the flip is a state change, not a transition' {
     Assert-True ($css.Contains("[data-view='neural'] .scene__plate--original { visibility: hidden; }")) 'the top plate is shown or hidden outright'
 }
 
+Test-Case 'the GitHub link is in the masthead, beside the downloads and in the footer' {
+    $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
+    foreach ($where in @('masthead__gh', 'pkg__cta--gh', 'footer__gh')) {
+        $m = [regex]::Match($htmlFull, "<a class=`"[^`"]*$where[^`"]*`" href=`"([^`"]+)`"[^>]*>(.*?)</a>", $options)
+        Assert-True $m.Success "a $where link is present"
+        Assert-Equal $repoUrl $m.Groups[1].Value "the $where link points at the repository"
+        Assert-Contains $m.Groups[2].Value '<svg class="gh__mark"' "the $where link carries the inline mark"
+        Assert-Contains $m.Groups[2].Value 'aria-hidden="true"' "the $where mark is hidden from assistive technology"
+        $text = [regex]::Replace($m.Groups[2].Value, '<svg.*?</svg>|<[^>]+>', '', $options).Trim()
+        Assert-True ($text -match 'GitHub|View source') "the $where link has a spoken name without the mark (got '$text')"
+    }
+}
+
+Test-Case 'the star count is baked in at build time and never fetched by the page' {
+    Assert-Contains $htmlFull 'class="gh__stars"' 'the count renders from the repository record'
+    Assert-Contains $htmlFull '127' 'the fixture count reaches the page'
+    Assert-Contains $htmlFull '127 stars' 'the source row states the count in words'
+    $js = Read-TextFile -Path (Join-Path $distFull 'main.js')
+    Assert-NotContains $js 'stargazers' 'the page makes no star-count request of its own'
+}
+
 $distGa = Invoke-Build -Fixture 'release-full.json' -MeasurementId 'G-TEST1234567' -Name 'ga'
 
 Test-Case 'a configured measurement id reaches the page exactly once' {
@@ -550,6 +592,13 @@ Test-Case 'no published release renders a release-list link, not a download' {
     $html = Get-Html $distNone
     Assert-NotContains $html '-win64.zip' 'no package link invented'
     Assert-Contains $html '/releases' 'release list offered instead'
+}
+
+Test-Case 'without a star count the GitHub links render whole, with no empty badge' {
+    $html = Get-Html $distNone
+    Assert-NotContains $html 'gh__stars' 'no count, no badge'
+    Assert-Contains $html 'MIT licence' 'the source row falls back to the licence'
+    Assert-Contains $html 'class="gh masthead__gh"' 'the masthead link is still there'
 }
 
 # --- report -------------------------------------------------------------------

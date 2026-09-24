@@ -168,6 +168,45 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 .masthead__nav a { color: var(--text-dim); text-decoration: none; }
 .masthead__nav a:hover { color: var(--text); }
 
+/* --- GitHub link ------------------------------------------------------------
+   The mark, the word, and the star count baked in at build time. The count is
+   a measured value, so it is set in the Data voice and parted from the label
+   by a hairline rather than a badge. The mark is GitHub's own, inlined once
+   per use as a stroked-free 16px path in currentColor: it takes the link's
+   colour in every state, and there is no icon font behind it.
+   -------------------------------------------------------------------------- */
+
+.gh { display: inline-flex; align-items: center; gap: 0.5rem; text-decoration: none; }
+.gh__mark { flex: none; width: 1rem; height: 1rem; }
+.gh__stars {
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text-meta);
+}
+.gh:hover .gh__stars { color: var(--text-dim); }
+
+/* In the masthead the count stands alone; the noun is still spoken. */
+.masthead__gh .gh__mark { width: 0.95rem; height: 0.95rem; }
+.masthead__gh .gh__stars-noun,
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.footer__gh { margin-bottom: 2.25rem; color: var(--text-dim); font-size: 0.93rem; }
+.footer__gh .gh__mark { width: 1.15rem; height: 1.15rem; color: var(--text); }
+.footer__gh:hover { color: var(--text); }
+.footer__gh:hover .gh__label { text-decoration: underline; text-decoration-color: var(--flag); }
+
 /* --- hero ----------------------------------------------------------------- */
 
 .hero {
@@ -715,6 +754,13 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 
 .pkg__file { color: var(--text-meta); word-break: break-all; }
 
+/* The source row: the secondary action beside the downloads, in their shape. */
+/* Its summary does not stretch: with no checksum beneath it, a stretched
+   summary would push this CTA below the two download buttons. */
+.pkg--source .pkg__summary { flex: none; }
+.pkg__cta--gh { align-items: center; }
+.pkg__cta--gh .gh__mark { flex: none; width: 1rem; height: 1rem; }
+
 .pkg__sum {
   display: inline-flex;
   align-items: center;
@@ -845,7 +891,15 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 
 @media (max-width: 34rem) {
   /* Keep the primary action reachable; the secondary links are the ones to drop. */
-  .masthead__nav a:not(.masthead__nav-primary) { display: none; }
+  .masthead__nav a:not(.masthead__nav-primary):not(.masthead__gh) { display: none; }
+  /* GitHub keeps its place as the mark alone, its name still in the link. The
+     negative margin grows the hit area to 44px without moving the row. */
+  .masthead__gh .gh__label,
+  .masthead__gh .gh__stars {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  .masthead__gh { padding: 0.85rem; margin: -0.85rem -0.85rem -0.85rem -0.35rem; }
+  .masthead__gh .gh__mark { width: 1.1rem; height: 1.1rem; }
   .button { width: 100%; }
   .hero__actions { flex-direction: column; align-items: stretch; }
 }

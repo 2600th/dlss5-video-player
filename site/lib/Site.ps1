@@ -208,6 +208,41 @@ function Get-ChecksumFromResponse {
     return $null
 }
 
+function Format-StarCount {
+    <#  A star count as a person reads it: 127, 1,234, then 12.3k. $null or a
+        non-number yields '' - the caller renders nothing rather than a zero,
+        because an API that did not answer is not a repository nobody starred. #>
+    param([AllowNull()]$Count)
+    if ($null -eq $Count) { return '' }
+    $n = 0L
+    if (-not [long]::TryParse([string]$Count, [ref]$n) -or $n -lt 0) { return '' }
+    $inv = [cultureinfo]::InvariantCulture
+    if ($n -ge 10000) { return ([math]::Floor($n / 100) / 10).ToString('0.0', $inv) + 'k' }
+    return $n.ToString('#,0', $inv)
+}
+
+function Get-StarSummary {
+    <#  The GitHub star count in the three shapes the page uses, fetched at build
+        time only: the page never asks the API itself, so the number is the one
+        from when it was built, and says so in its title.
+
+        With no count every shape is empty or falls back to the licence, so a
+        build whose API call failed still renders a complete, honest link. #>
+    param([AllowNull()]$Count, [string]$AsOf = '')
+
+    $text = Format-StarCount $Count
+    if (-not $text) {
+        return [pscustomobject]@{ Text = ''; Badge = ''; Meta = 'MIT licence' }
+    }
+    $noun = if ($text -eq '1') { 'star' } else { 'stars' }
+    $title = if ($AsOf) { "GitHub stars when this page was built, $AsOf" } else { 'GitHub stars when this page was built' }
+    [pscustomobject]@{
+        Text  = "$text $noun"
+        Badge = "<span class=`"gh__stars`" title=`"$title`">$text<span class=`"gh__stars-noun`"> $noun</span></span>"
+        Meta  = "$text $noun"
+    }
+}
+
 function ConvertTo-HtmlText {
     param([AllowNull()][string]$Text)
     if ($null -eq $Text) { return '' }

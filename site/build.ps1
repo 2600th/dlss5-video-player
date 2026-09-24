@@ -21,11 +21,17 @@
     .\site\build.ps1 -ReleaseFixture site/fixtures/release-core-only.json
     Builds the state where CI has published a release but the complete package
     has not been attached to it yet.
+
+.PARAMETER RepoFixture
+    Read the repository record (its star count) from a JSON file instead of the
+    GitHub API. With -ReleaseFixture and no -RepoFixture the build makes no
+    request and renders the GitHub links without a star count.
 #>
 [CmdletBinding()]
 param(
     [string]$OutputPath,
     [string]$ReleaseFixture,
+    [string]$RepoFixture,
     [switch]$SkipMedia,
     [switch]$RequireRelease,
     [switch]$Quiet
@@ -124,6 +130,21 @@ if ($release.HasDownload) {
     Write-Step 'no published release resolved; the page will link the release list'
 }
 
+# --- 1b. the repository's star count ------------------------------------------
+
+# Fetched here, at build time, and never by the page: a static number costs the
+# visitor nothing and cannot rate-limit. Failing to fetch it is not failing to
+# build - the links render without a count.
+$repoRecord = $null
+if ($RepoFixture) {
+    $repoRecord = (Read-TextFile -Path $RepoFixture) | ConvertFrom-Json
+} elseif (-not $ReleaseFixture) {
+    $repoRecord = Invoke-GitHubApi "repos/$repo"
+}
+$builtOn = (Get-Date).ToUniversalTime().ToString('d MMMM yyyy', [cultureinfo]::InvariantCulture)
+$stars = Get-StarSummary -Count (Get-Property $repoRecord 'stargazers_count' $null) -AsOf $builtOn
+Write-Step $(if ($stars.Text) { "github: $($stars.Text)" } else { 'github: no star count; links render without one' })
+
 # --- 2. analytics -------------------------------------------------------------
 
 $analytics = Get-AnalyticsSnippet -MeasurementId $env:GA_MEASUREMENT_ID `
@@ -166,6 +187,14 @@ $coreBlock = New-PackageBlock -Package $release.Core -Kind 'Core' `
     -Summary 'The player alone, without the neural runtime. Build or supply your own.' `
     -EventName 'core' -Primary $false
 
+# The source sits beside the downloads as a package of its own: the secondary
+# action, in the same row shape, so it reads as an option rather than an ad.
+# One copy of the mark, inlined wherever it is used: no icon font, no request.
+$githubMark = (Read-TextFile -Path ([IO.Path]::Combine($srcRoot, 'partials', 'github-mark.svg'))).Trim()
+
+$sourceBlock = Expand-Token -Text (Read-TextFile -Path ([IO.Path]::Combine($srcRoot, 'partials', 'source.html'))) `
+    -Values @{ REPO_URL = "https://github.com/$repo"; REPO_SLUG = $repo; GITHUB_META = $stars.Meta; GITHUB_MARK = $githubMark }
+
 if (-not $release.HasDownload) {
     $fullBlock = Expand-Token -Text (Read-TextFile -Path ([IO.Path]::Combine($srcRoot, 'partials', 'no-release.html'))) `
         -Values @{ RELEASE_URL = $release.ReleaseUrl }
@@ -205,6 +234,11 @@ $tokens = @{
     PRIMARY_SIZE    = $primarySize
     FULL_PACKAGE    = $fullBlock
     CORE_PACKAGE    = $coreBlock
+    SOURCE_PACKAGE  = $sourceBlock
+    REPO_SLUG       = $repo
+    GITHUB_STARS    = $stars.Badge
+    GITHUB_MARK     = $githubMark
+    GITHUB_META     = $stars.Meta
     ANALYTICS       = $analytics
     BUILT_AT        = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     YEAR            = (Get-Date).ToUniversalTime().Year

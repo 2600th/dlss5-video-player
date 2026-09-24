@@ -184,7 +184,7 @@ Internal structures are all rule-separated grids: the readout is a `7.5rem / 1fr
 
 Two breakpoints, both editorial rather than device-shaped:
 - **60rem** — the hero drops its full-height behaviour and its scrim and becomes a normal block: the comparison figure goes static with a 3:2 crop (taller than the 16:9 source so the face survives a phone's width) and its caption flows beneath. Beats collapse to one column, the readout stacks, and the drag hint is removed.
-- **34rem** — the secondary nav links are hidden and only the primary Download link remains; buttons go full-width in a vertical stack so the primary action lands whole inside the first viewport.
+- **34rem** — the secondary nav links are hidden and only the primary Download link and the GitHub mark remain; buttons go full-width in a vertical stack so the primary action lands whole inside the first viewport.
 
 ## Elevation & Depth
 
@@ -207,7 +207,7 @@ The four `shadow` declarations in the build are legibility and focus devices, no
 
 Square. `border-radius` does not appear once in the stylesheet, including on buttons, the notice, the comparison grip, the play affordance, and the image frames. The form language is the rectangle and the line: 1px hairline borders, 1px–2px solid ticks and seams, 2px outlines on the two interactive marks (the comparison grip and the play frame, both 46–60px squares), and a 1px dashed bottom border as the only "dotted" texture, reserved for the copyable checksum.
 
-Where other systems reach for an icon font or a glyph, this one draws the mark: the list bullet is a 6×1px rule, the FAQ toggle is a cross built from two 1px linear-gradient bars that loses its vertical arm when open, and the grip's two ticks read as a splice mark. The single genuine icon on the page is an inline stroked SVG play triangle.
+Where other systems reach for an icon font or a glyph, this one draws the mark: the list bullet is a 6×1px rule, the FAQ toggle is a cross built from two 1px linear-gradient bars that loses its vertical arm when open, and the grip's two ticks read as a splice mark. The genuine icons on the page are an inline stroked SVG play triangle and GitHub's mark, which is a brand mark rather than an icon the page could draw.
 
 ## Components
 
@@ -222,13 +222,18 @@ Where other systems reach for an icon font or a glyph, this one draws the mark: 
 The only form control is the comparison range, and it is invisible by design (see Signature Component). There are no text inputs, selects, or checkboxes in this system; if one is added, it should be a bottom-hairline field on the ground with a flag focus rule, not a bordered box.
 
 ### Navigation
-A baseline-aligned masthead absolutely positioned over the hero — no background, no blur, no sticky behaviour. Wordmark at left with "DLSS 5" in flag and the rest in paper, set at `wdth` 88 / weight 800. Links are Label-voice uppercase in Paper Dim, going Paper on hover, with a fluid gap. Below 34rem everything except the Download link is dropped rather than folded into a menu. The skip link parks *above* the viewport (not off to the left) because the page sets `overflow-x: hidden`.
+A baseline-aligned masthead absolutely positioned over the hero — no background, no blur, no sticky behaviour. Wordmark at left with "DLSS 5" in flag and the rest in paper, set at `wdth` 88 / weight 800. Links are Label-voice uppercase in Paper Dim, going Paper on hover, with a fluid gap. Below 34rem everything except the Download link and the GitHub mark is dropped rather than folded into a menu. The skip link parks *above* the viewport (not off to the left) because the page sets `overflow-x: hidden`.
 
 ### Readout
 A key/value ledger under a structural rule. Flag-coloured uppercase Label key in a fixed 7.5rem column, mono tabular value in Paper Meta/Dim, one soft hairline per row, no zebra striping, no box. This is the page's canonical way to present measured fact at rest.
 
 ### Package Row
 Not a pricing card: a rule-bottomed column in an auto-fit grid. Flag uppercase kind, dimmed summary held to 34ch, a CTA whose label and size sit on one baseline, the literal filename in mono below it, and a copy-checksum control. The pending variant greys the kind to Paper Meta and swaps the CTA for a link to the release page — a state change carried by greyscale and copy, not by a badge.
+
+The **source** variant is the third column of the same row: kind "Source", the licence and what the code is for, a hairline CTA carrying the GitHub mark with "View source" over the star count (or the licence, when the build had no count), and the repository path in mono where a package names its file. It is the secondary action beside the downloads, in their shape, so it reads as an option rather than an advertisement.
+
+### GitHub Link
+The repository link appears in three places — the masthead, the source row beside the downloads, and the head of the footer — always as the same component: GitHub's own mark as an inline 16px SVG path in `currentColor` (no icon font, `aria-hidden`), the word, and the star count. The count is a measured value, so it is set in the Data voice (mono, tabular, Paper Meta) and parted from the label by a one-pixel hairline, never a pill or badge. It is fetched by `build.ps1` at build time only and its tooltip gives the build date; with no count the component simply omits it. Below 34rem the masthead keeps the mark alone, its label moved to the accessible name, with a 44px hit area grown by negative margin so the row does not move.
 
 ### Checksum Control
 A `<button>` styled as text: mono at 0.72rem in Paper Meta, no background, a 1px dashed bottom border as its only chrome. On hover both text and border go flag; on successful copy the trailing uppercase micro-label swaps to "copied" in flag for 1.8s, then reverts. Confirmation is a word and a colour change on the control itself, never a toast.

@@ -125,7 +125,12 @@
     <a href="#evidence">The difference</a>
     <a href="#how">How it works</a>
     <a class="masthead__nav-primary" href="#download">Download</a>
-    <a href="{{REPO_URL}}" rel="noopener">GitHub</a>
+    <!-- The mark is the one icon most visitors recognise without reading;
+         below 34rem it stands alone, and the label stays in the accessible
+         name. The count is baked at build time, never fetched by the page. -->
+    <a class="gh masthead__gh" href="{{REPO_URL}}" rel="noopener">
+      {{GITHUB_MARK}}<span class="gh__label">GitHub</span>{{GITHUB_STARS}}
+    </a>
   </nav>
 </header>
 
@@ -493,6 +498,7 @@
   <div class="packages">
     {{FULL_PACKAGE}}
     {{CORE_PACKAGE}}
+    {{SOURCE_PACKAGE}}
   </div>
 
   <div class="requires">
@@ -585,6 +591,10 @@
 </main>
 
 <footer class="footer">
+  <a class="gh footer__gh" href="{{REPO_URL}}" rel="noopener">
+    {{GITHUB_MARK}}<span class="gh__label">{{REPO_SLUG}} on GitHub</span>{{GITHUB_STARS}}
+  </a>
+
   <div class="footer__cols">
     <div class="footer__col">
       <h3>Read</h3>

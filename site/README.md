@@ -11,7 +11,7 @@ and copies screenshots out of `docs/`.
 
 ```powershell
 .\site\build.ps1          # writes site/dist
-.\site\test.ps1           # 39 assertions, no network needed
+.\site\test.ps1           # every case runs offline, from fixtures
 ```
 
 Then serve `site/dist` over HTTP - opening `index.html` from the filesystem
@@ -61,6 +61,16 @@ core package and links the release page for the other one.
 
 The page also re-checks the API once per session, but only when its baked data
 is more than 24 hours old, and keeps the baked values on any failure.
+
+## The GitHub star count
+
+`build.ps1` reads the repository's star count from `GET /repos/{owner}/{repo}`
+while it builds, and bakes it into the masthead, the source row beside the
+downloads and the footer, with the build date in its tooltip. The page never
+asks for it: no client-side API call, nothing to rate-limit. When the API does
+not answer, the links render without a count and the source row states the
+licence instead. Builds from a release fixture make no request at all;
+`-RepoFixture site/fixtures/repo.json` supplies a count for the tests.
 
 ## Analytics
 
