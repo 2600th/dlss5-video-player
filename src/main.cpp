@@ -2364,10 +2364,16 @@ private:
     // the add-on settings written for this job and read back as its identity.
     bool PrepareRuntime(){
         runtimeDirectory_=in_.moduleDirectory/L"neural-runtime";
+        const auto runtimeStarted=std::chrono::steady_clock::now();
         runtimeDigest_=BuildRuntimeDigest(runtimeDirectory_,LockedRuntimeFileNames(),stop_);if(!runtimeDigest_){completion_->result.cancelled=stop_.stop_requested();completion_->result.detail=L"The configured neural runtime is incomplete.";return false;}
         // The lock names every drifted file; a mismatch is refused, never repaired by swapping runtimes.
+        const auto lockStarted=std::chrono::steady_clock::now();
         lockChecks_=VerifyRuntimeLock(runtimeDirectory_,EmbeddedRuntimeLock(),stop_);
         if(stop_.stop_requested())return Cancelled();
+        // What the cold start's `request` phase is made of, so a slow first D
+        // press can be pinned on the step that took the time.
+        LOG("Neural runtime identified: digest "<<std::chrono::duration_cast<std::chrono::milliseconds>(lockStarted-runtimeStarted).count()
+            <<" ms, lock check "<<std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-lockStarted).count()<<" ms.");
         if(!RuntimeLockSatisfied(lockChecks_)){const std::wstring drift=DescribeRuntimeLockDrift(lockChecks_);LOG("Neural runtime lock drift; render refused: "<<WideToUtf8(drift));completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"The neural runtime does not match the locked stack: "+drift;return false;}
         // One writer at a time: the settings written below and the
         // helper's proxy log are shared per runtime directory, so a
@@ -2398,10 +2404,13 @@ private:
         // unchanged VERSION. `GpuSourceConversion` is the one conversion
         // switch that does belong in the key, because it changes what the
         // model is shown rather than how the result is encoded.
+        const auto modelStoreStarted=std::chrono::steady_clock::now();
         const auto modelStore=ResolveNeuralModelStore(in_.driverVersion,stop_);
-        LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest
+        LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" in "
+            <<std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-modelStoreStarted).count()<<" ms files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest
             <<(NeuralModelStoreSettled(modelStore)?"":" (unsettled: the key may not match a later read)")
-            <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{}));
+            <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{})
+            <<(modelStore.reads>1?" reads="+std::to_string(modelStore.reads)+" waited="+std::to_string(modelStore.waited.count())+"ms on "+WideToUtf8(modelStore.youngestFile):std::string{}));
         identity_=NeuralCacheIdentity{*sourceDigest_,width_,height_,DLSS_VIDEO_PLAYER_VERSION,GpuGenerationPathName(in_.gpu),*runtimeDigest_,NeuralRenderPipelineIdentity(in_.gpuSourceConversion,KeyedNvencPreset(in_.nvencPreset,in_.cacheQuality),KeyedGpuColorConversion(in_.gpuColorConversion,in_.cacheQuality))+ProcessingScaleIdentityTerm(in_.processingScale)+UntaggedColorIdentityTerm(untaggedBt709_)+toneMapTerm_+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({in_.captureDither,in_.cacheQuality,in_.sourceDeband,in_.suppliedExposure}),false,*settingsDigest_,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(in_.driverVersion),modelStore.digest};renderKey_=BuildNeuralCacheKey(identity_);completion_->renderKey=renderKey_;completion_->range=range;completion_->settings=settings;completion_->guides=guides;completion_->temporal=temporal;
         LOG("Checking neural cache key="<<renderKey_<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
         if(const auto cached=cache_.LookupRender(renderKey_,stop_)){

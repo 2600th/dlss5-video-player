@@ -192,6 +192,13 @@ struct NeuralModelStore {
     // count. `settlesIn` is how much longer the youngest of them needs.
     uint32_t recentlyWrittenFiles{};
     std::chrono::milliseconds settlesIn{};
+    // The youngest of those files, relative to its root: which rewrite a
+    // settled resolve waited out.
+    std::wstring youngestFile;
+    // How many reads DigestSettledNeuralModelStore took, and how long it slept
+    // between them waiting for the store to go quiet.
+    uint32_t reads{1};
+    std::chrono::milliseconds waited{};
 };
 
 // How long a file in the store must have gone unwritten before its bytes are

@@ -819,6 +819,10 @@ void model_store_read_mid_rewrite_is_unsettled_and_waited_out_test()
     // At least the quiet period after the write-back, and nowhere near the patience.
     CHECK(waited >= 300ms);
     CHECK(waited < 4s);
+    // It says how many reads it took, how long it slept, and on which file.
+    CHECK(settled.reads >= 2);
+    CHECK(settled.waited > 0ms && settled.waited <= std::chrono::duration_cast<std::chrono::milliseconds>(waited));
+    CHECK(settled.youngestFile.find(L"nvngx_server_config.txt") != std::wstring::npos);
 
     // No patience: one read, returned as it is.
     WriteBytes(server, "");

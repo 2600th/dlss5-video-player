@@ -409,6 +409,7 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
             if (file.unreadable) ++store.unreadableFiles;
             if (file.recent) {
                 ++store.recentlyWrittenFiles;
+                if (file.settlesIn >= store.settlesIn) store.youngestFile = file.relative;
                 store.settlesIn = std::max(store.settlesIn, file.settlesIn);
             }
             store.bytes += file.size;
@@ -453,9 +454,17 @@ NeuralModelStore DigestSettledNeuralModelStore(std::span<const NeuralModelRoot> 
                                                std::chrono::milliseconds quietPeriod,
                                                std::chrono::milliseconds patience)
 {
-    const auto deadline = std::chrono::steady_clock::now() + patience;
+    const auto begun = std::chrono::steady_clock::now();
+    const auto deadline = begun + patience;
+    uint32_t reads = 0;
+    std::chrono::milliseconds slept{};
+    std::wstring waitedOn;
     for (;;) {
         NeuralModelStore store = DigestNeuralModelStore(roots, driverVersion, stop, quietPeriod);
+        store.reads = ++reads;
+        store.waited = slept;
+        if (!store.youngestFile.empty()) waitedOn = store.youngestFile;
+        if (store.youngestFile.empty()) store.youngestFile = waitedOn;
         if (store.recentlyWrittenFiles == 0 || stop.stop_requested()) return store;
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) return store;
@@ -467,6 +476,7 @@ NeuralModelStore DigestSettledNeuralModelStore(std::span<const NeuralModelRoot> 
             const auto slice = std::min<std::chrono::steady_clock::duration>(wait, std::chrono::milliseconds(50));
             std::this_thread::sleep_for(slice);
             wait -= slice;
+            slept += std::chrono::duration_cast<std::chrono::milliseconds>(slice);
         }
         if (stop.stop_requested()) return store;
     }
