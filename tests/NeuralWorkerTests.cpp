@@ -1293,14 +1293,19 @@ void one_metadata_drain_pass_stops_on_its_budget_test()
     NeuralRenderProgress progress;
     progress.phase = NeuralRenderPhase::NeuralRendering;
     progress.totalFrames = 1000000;
+    // Three budgets, not two: the pass's read-ahead thread keeps pulling up to
+    // one more budget into its own buffer after the pass returns, so with two
+    // the pipe could be empty by the check below. Under AddressSanitizer on CI
+    // it was: the check raced the thread. With three, at least one budget minus
+    // a chunk is still in the pipe whatever the thread has done.
     size_t written = 0;
-    for (uint64_t frame = 0; written < neural_worker_detail::kMetadataDrainByteBudget * 2; ++frame) {
+    for (uint64_t frame = 0; written < neural_worker_detail::kMetadataDrainByteBudget * 3; ++frame) {
         progress.completedFrames = frame;
         const WireProgress wire = EncodeProgress(progress);
         if (!WriteMessage(writeEnd, WireKind::Progress, &wire, sizeof(wire))) break;
         written += sizeof(WireHeader) + sizeof(wire);
     }
-    CHECK(written >= neural_worker_detail::kMetadataDrainByteBudget * 2);
+    CHECK(written >= neural_worker_detail::kMetadataDrainByteBudget * 3);
 
     const auto pass = neural_worker_detail::DrainMetadataPipeOnce(readEnd);
     CHECK(!pass.malformed);
