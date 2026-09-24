@@ -1,6 +1,6 @@
 # Troubleshooting
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
+_Verified against main (9d3e6cc) on 2026-09-25._
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
 
@@ -159,7 +159,8 @@ render's unique name was already there, which is refused rather than reused.
 
 ## A recent video is missing or needs a download
 
-The **menu** lists five videos; the cache behind it is unbounded. A video that
+The **menu** lists five videos; the cache behind it is not limited by the list
+(it evicts only when the drive falls below 20 GiB free). A video that
 has dropped off the list still has its render and its download, and reopening it
 by any route attaches to them. Local files must still exist at their saved
 location. YouTube entries need a valid acquired source to
@@ -180,7 +181,7 @@ a slightly longer audio tail does not count as missing neural video.
 ## Export is unavailable or fails
 
 **DLSS > Convert & export > Save converted video** becomes available after validated neural playback
-opens. Select a new `.mkv` filename: existing destinations are never overwritten.
+opens. Select a new filename: existing destinations are never overwritten.
 Export needs the cached neural file, its original source and FFmpeg.
 
 Unsupported MKV subtitle codecs produce an error. The exporter does not silently
@@ -233,8 +234,7 @@ smallest rung, so there is nowhere to put the extra pixels.
 
 Pin a lower rung, or turn runtime upscaling off, to isolate its cost. For YouTube, choosing
 1080p reduces source load. The player drops late frames to preserve playback time.
-There are no legacy Auto/Balanced/Performance render-quality modes. Check the
-player log for SR startup/evaluation failures; ordinary playback remains available.
+Check the player log for SR startup/evaluation failures; ordinary playback remains available.
 
 ## RTX VSR is grey
 

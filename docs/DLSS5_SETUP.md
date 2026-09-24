@@ -1,6 +1,6 @@
 # Experimental DLSS 5 neural-rendering mode
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
+_Verified against main (9d3e6cc) on 2026-09-25._
 
 This is a community experiment built around a separately supplied RenoDX /
 ReShade add-on and modified neural runtime. It is not NVIDIA's official
@@ -110,9 +110,10 @@ remain off; playback SR follows the separately saved player preference.
 Neural rendering either completes into a cache entry before playback or runs
 behind live playback, publishing finalized segments that playback follows once
 a four-second lead exists. The player materializes a private
-local source when needed, evaluates every frame in timestamp order, reads the
-neural output back from D3D12, encodes with NVENC (or restarts from frame zero
-with software H.264), and probes the completed video. Only a complete schema-5
+local source when needed, evaluates every frame in timestamp order, encodes
+the neural output with NVENC, straight from D3D12 or after a readback (FFV1
+for Lossless; a failed NVENC restarts from frame zero with software H.264),
+and probes the completed video. Only a complete schema-5
 manifest with matching hashes, dimensions, frame count, monotonic source
 timing, video duration, final-frame decode, runtime digest, one captured native
 submission per source frame, the NGX-only inline interception contract armed
@@ -164,8 +165,8 @@ written, or is nested so deep that the cache's own paths would pass Windows'
 Cache** reports its current size and requires confirmation. Clearing is blocked
 while acquisition, a neural job or export is active. Confirmed clearing closes
 playback first. Windows package virtualization may redirect the physical cache
-under the launching app's LocalCache. Recent-five retention and settings-aware
-cache identity are described in the [usage guide](USAGE.md).
+under the launching app's LocalCache. Retention and settings-aware cache
+identity are described in the [usage guide](USAGE.md).
 
 The player intentionally retains the add-on interception backend instead of
 also loading feature 18 directly. Running both would duplicate neural passes
