@@ -31,11 +31,13 @@ import numpy as np
 import run
 from common import ANALYSIS, CORPUS, FrameReader, RUNS, framemd5, load_manifest, sequence_digest, write_json
 
-# What the player writes on every render, in its order (NeuralAddonOverridesFor).
+# What the player writes on every render, in its order (NeuralAddonOverridesFor). The
+# governor has been pinned to slew since docs/measurements/governor-20260924; the
+# table in knobs-653-20260924 was measured against REFERENCE_EXTRA's 0 either way.
 SHIPPED = {
     "NRIntensity": "1.000000", "NRLocalTone": "1.000000", "NRLocalStructure": "1.000000",
     "NRSkinStructure": "-1.000000", "NRColorStrength": "1.000000", "NRPreset": "0", "NRStyle": "0",
-    "NRAutoMask": "1", "NRPasses": "1", "NRChainedHistory": "1",
+    "NRAutoMask": "1", "NRPasses": "1", "NRChainedHistory": "1", "NRNormGovernor": "1",
 }
 
 # The reference is the shipped state with the add-on's normalization governor off.
@@ -52,7 +54,7 @@ REFERENCE_EXTRA = {"NRNormGovernor": "0"}
 # NRNormGovernor ("Normalization Governor": 0 off, 1 slew, 2 stable, default 2).
 KNOBS = [
     ("shipped-repeat", "(reference, rendered again)", "none", {}, "mv=1,depth=1"),
-    ("governor-2", "Normalization governor (hidden)", "0 -> 2 (the add-on default the player ships)",
+    ("governor-2", "Normalization governor (hidden)", "0 -> 2 (the add-on default; the player shipped it until it pinned 1)",
      {"NRNormGovernor": "2"}, "mv=1,depth=1"),
     ("governor-2-repeat", "Normalization governor (hidden)", "2, rendered again (its own noise)",
      {"NRNormGovernor": "2"}, "mv=1,depth=1"),

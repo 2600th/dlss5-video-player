@@ -303,9 +303,10 @@ columns now, so the rerun is one command and the comparison it then allows is th
 whole reason the staleness matters.
 
 - Rerenders are bit-identical across repeats (framemd5 sequence digests match).
-  On RenoDX 6.5.3 that holds only with `NRNormGovernor=0`: the add-on's default
-  governor makes repeats differ on saturated synthetic clips (see the settings
-  table below).
+  On RenoDX 6.5.3 that holds only with `NRNormGovernor` 0 or 1: the add-on's
+  default governor (2, stable) makes repeats differ wherever it moves (see the
+  settings table below and `docs/measurements/governor-20260924/REPORT.md`, after
+  which the player pins 1).
 - The mask guide is gone, and the `mask-off` rows are why. `mask-off` was
   byte-identical to `baseline` on both clips, and the mask was not missing: the
   generator produced a mask with 5–24 % of cells non-zero on `cuts-motion` (0 %
@@ -637,7 +638,11 @@ the three NR-processed captures the governor changes nothing at all (0 bytes bet
 0 and 2, repeats identical). So the shipped render is reproducible on the captures
 and not on saturated synthetic material, and every byte-for-byte comparison in the
 harness now writes `NRNormGovernor=0`. Whether the player should write 0 too is a
-flicker trade this table cannot decide, so it does not.
+flicker trade this table could not decide. `docs/measurements/governor-20260924`
+did: off brings frame-to-frame pumping back (2.7-6× the governed mean-luma jitter on
+three clips), stable's repeats differ on five of nine clips including real footage
+with lighting changes (50.7 % of bytes), and slew (1) is reproducible in every render
+and damps as stable does - so the player now writes `NRNormGovernor=1`.
 
 **Schema migration.** `run.py` wrote 4.70's `NREnableUpscaling=0` and no
 `ConfigVersion`, so 6.5.3 read every fresh profile as config schema v0 and migrated

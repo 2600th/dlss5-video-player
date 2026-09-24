@@ -673,7 +673,10 @@ void neural_settings_round_trip_and_format_renodx_overrides()
         {"NRIntensity", "1.000000"}, {"NRLocalTone", "1.000000"},
         {"NRLocalStructure", "1.000000"}, {"NRSkinStructure", "-1.000000"},
         {"NRColorStrength", "1.000000"}, {"NRPreset", "0"}, {"NRStyle", "0"},
-        {"NRAutoMask", "1"}, {"NRPasses", "1"}, {"NRChainedHistory", "1"}};
+        {"NRAutoMask", "1"}, {"NRPasses", "1"}, {"NRChainedHistory", "1"},
+        // Slew, not the add-on's stable default: stable does not repeat itself
+        // (docs/measurements/governor-20260924), and the cache assumes it does.
+        {"NRNormGovernor", "1"}};
     CHECK(expected == defaults);
     // The canonical form is the neural cache key, so every field belongs in it:
     // a render at two stack passes is a different render, and one that keyed the

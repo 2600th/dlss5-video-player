@@ -1213,6 +1213,16 @@ build named; the full entries are in `CHANGELOG.md` at tag
   its first load and adopts its own `NRChainedHistory` for that launch. The
   parenthesised `NR skipped (after-upscale): ... incomplete` line is a startup
   notice on a healthy run; the bare `NR skipped:` form is still a failure.
+- **The normalization governor is pinned to slew** (`NRNormGovernor=1`, W4).
+  The add-on's default, stable, settles its brightness divisor at rates per
+  second of render time, so a repeat of one render differed from itself on five
+  of nine clips - 50.7 % of the bytes of a real clip with lighting changes -
+  and the render cache assumes a render is a function of its key. Off is
+  reproducible but pumps (2.7-6× the governed frame-to-frame mean-luma change);
+  slew was identical in every render and damps within 0.02-0.04 of stable. On
+  the NR-processed captures all three render the same bytes. The key rides in
+  `NeuralAddonOverridesFor`, so the settings snapshot keys it.
+  `docs/measurements/governor-20260924/REPORT.md`.
 - **Streamline stays at 2.13.0.0** (0.25.0). 2.14.1.0 drops `sl.dlss_nr.dll`
   and buys nothing back: at `EnableHooks=2` Streamline is never patched and no
   `sl.*` module appears in a render log.

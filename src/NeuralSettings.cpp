@@ -91,6 +91,7 @@ std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& s
         {"NRAutoMask", settings.autoMask ? "1" : "0"},
         {"NRPasses", std::to_string(settings.passes)},
         {"NRChainedHistory", settings.chainedHistory ? "1" : "0"},
+        {"NRNormGovernor", std::string(kPinnedNormGovernor)},
     };
 }
 

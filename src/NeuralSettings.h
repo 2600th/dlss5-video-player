@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Player-owned RenoDX 6.5.3 neural tuning. Field defaults, key names and value
@@ -34,8 +35,23 @@ struct NeuralSettings {
     friend bool operator==(const NeuralSettings&, const NeuralSettings&) = default;
 };
 
-// Exact-case [RenoDX.DLSS5] overrides in field order. Floats use RenoDX's
-// six-decimal form ("1.000000"), integers are plain and booleans are 0/1.
+// The add-on's normalization governor (NRNormGovernor: 0 off, 1 slew, 2 stable),
+// pinned to slew rather than left at the add-on's default of stable. Measured in
+// docs/measurements/governor-20260924: at stable a repeat of one render differs
+// from itself wherever the governor moves - 50.7 % of the bytes of a real clip
+// with lighting changes, three distinct results from three renders on each of
+// five clips - because it settles at rates per second of render time, and the
+// render cache assumes a render is a function of its key. Off is reproducible
+// but brings the pumping back (added frame-to-frame mean-luma change 0.45
+// against 0.17 on flash-exposure); slew was identical in every render (four or
+// five per clip) and damps as stable does, within 0.02-0.04. On the
+// three real captures all three values render the same bytes. Not a setting:
+// a render property, keyed through the settings snapshot like any other key.
+inline constexpr std::string_view kPinnedNormGovernor = "1";
+
+// Exact-case [RenoDX.DLSS5] overrides in field order, then the pinned governor.
+// Floats use RenoDX's six-decimal form ("1.000000"), integers are plain and
+// booleans are 0/1.
 std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& settings);
 
 // [NeuralSettings] section of the player's DLSSVideoPlayer.ini. Load leaves
