@@ -141,20 +141,22 @@ new capture defaults, so the first conversion of each video renders it again.
 
 ### New media for the README and site
 
-- **A new demonstration video.** 19.7 seconds of *The Matrix* and *GTA VI*
-  Trailer 2, each source frame split against the player's own render of it,
-  with the comparison on screen from the first frame. Rendered on an RTX 4080
-  SUPER with Intensity, Local tone and Local structure at 2.0, and the video
-  says so.
-- **Face comparisons up front.** The README opens with the unscaled Trinity
-  side-by-side, and gains a second one from GTA VI.
-- **Fresh player screenshots from 0.25.0.** A GTA VI pair and a Matrix pair,
-  each one paused frame with only the view switched. They replace the Godfather
-  pair.
-- **A sharper site hero and a proper link preview.** The hero is a native
-  1920x1080 crop instead of 920x518 stretched to full width, and shared links
-  show a real 1200x630 card.
-- **The benchmark still reproduces.** Its `real-*` clips are cut from the old
+- **A new demonstration video at default settings.** 24.8 seconds of *007 First
+  Light* and *GTA VI* Trailer 2 from the built-in trailer list, rendered on an
+  RTX 4080 SUPER: a face split between source and render from the first frame,
+  then the player's own Difference, Side by side and loupe views, and a render
+  filling the timeline (shown at a labelled 2x). A new poster and a 2.4 MB
+  README loop go with it.
+- **Five comparison stills with provenance.** Unscaled crops of one source
+  frame beside the same frame of the render, each with a `.provenance.json`
+  naming the source, frame, settings and runtime. One, from *Assassin's Creed
+  Shadows*, shows a face the model makes worse, and says so.
+- **Screenshots of the new player** at 150% scaling: Wipe, Difference, 2 x 2
+  with a toast, a saved comparison image, subtitles and Neural settings; the
+  start screen and Image adjustments are retaken.
+- **A link-preview card and a square clip** (1200x630 and 1080x1080) for
+  sharing.
+- **The benchmark still reproduces.** Its `real-*` clips are cut from an older
   video, so that file moved unchanged to `tools/benchmark/fixtures/`.
 
 ### Documentation
