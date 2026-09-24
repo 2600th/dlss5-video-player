@@ -65,6 +65,7 @@
 #include "FrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
 #include "StatusNotePolicy.h"
+#include "SeekPolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
 #include "SourceDigestMemo.h"
@@ -6488,22 +6489,11 @@ private:
         double s=m_playStartSec+std::chrono::duration<double>(Clock::now()-m_playStart).count();double d=m_decoder.DurationSeconds();return d>0?std::clamp(s,0.0,d):std::max(0.0,s);
     }
 
-    // A cached range entry only holds [start,end); seeking outside it would
-    // desynchronize the pair, so the timeline is clamped to the last range frame.
+    // Where a seek may land (SeekPolicy.h): inside the source's last frame,
+    // and inside the range a finished cached entry was rendered for.
     double ClampSeek(double sec)const{
-        double low=0.0,high=m_decoder.DurationSeconds();
-        // Seeking to the container end has no frame to decode: the restarted
-        // decoder returns nothing and the seek pays for a second restart.
-        if(const int64_t last=LastFramePts(m_decoder.FrameRate(),SourceDuration100ns());last>0)high=std::min(high,double(last)*1e-7);
-        // A cached entry can only serve its own range. An active session is
-        // different now: its coverage is a set of regions with holes between
-        // them, and the original plays in the holes, so every seek target in the
-        // source is legal. Clamping to the newest rendered frame is what made a
-        // seek back to an earlier rendered region impossible to even express -
-        // the target was pulled forward to the clamp before anything could
-        // answer whether it was rendered.
-        if(m_cachedPlayback&&!m_liveSession&&!m_cachedRange.Whole()){low=double(m_cachedRange.start100ns)*1e-7;high=std::max(low,double(m_cachedRange.end100ns)*1e-7-1.0/std::max(1.0,m_decoder.FrameRate()));}
-        if(high>0)return std::clamp(sec,low,high);return std::max(low,sec);
+        return seek_policy::Clamp(sec,{m_decoder.DurationSeconds(),m_decoder.FrameRate(),LastFramePts(m_decoder.FrameRate(),SourceDuration100ns()),
+                                       m_cachedPlayback,m_liveSession,m_cachedRange});
     }
 
     void RequestSeek(double sec) {

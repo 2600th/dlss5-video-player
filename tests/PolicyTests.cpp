@@ -75,6 +75,7 @@
 #include "TemporalStabilityShader.h"
 #include "DitherPolicy.h"
 #include "DebandPolicy.h"
+#include "SeekPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -13082,6 +13083,53 @@ void utf8_text_lossy_keeps_the_message_and_strict_refuses_it_test()
     CHECK(utf8_text::ToWideStrict("") == std::optional<std::wstring>(L""));
 }
 
+// P3.4: ClampSeek, out of PlayerApp. A 10 s, 30 fps source whose last frame
+// sits at 299/30 s.
+void seek_clamp_stays_on_a_decodable_frame_and_inside_a_finished_range_test()
+{
+    seek_policy::Timeline source{10.0, 30.0, LastFramePts(30.0, 100000000)};
+    const double last = double(source.lastFramePts100ns) * 1e-7;
+    CHECK(last < 10.0);
+    // The container end has no frame to decode, so a seek there lands on the
+    // last one rather than paying for a second decoder restart.
+    CHECK_EQ(last, seek_policy::Clamp(10.0, source));
+    CHECK_EQ(last, seek_policy::Clamp(1e9, source));
+    CHECK_EQ(0.0, seek_policy::Clamp(-3.0, source));
+    CHECK_EQ(4.25, seek_policy::Clamp(4.25, source));
+
+    // A finished cached entry serves only its own range: [1.5,3.0) at 30 fps
+    // keeps the playhead between its first frame and its last.
+    seek_policy::Timeline range = source;
+    range.cachedPlayback = true;
+    range.cachedRange = NeuralRenderRange{15000000, 30000000};
+    CHECK(std::abs(seek_policy::Clamp(0.0, range) - 1.5) < 1e-9);
+    CHECK(std::abs(seek_policy::Clamp(9.0, range) - (3.0 - 1.0 / 30.0)) < 1e-9);
+    CHECK_EQ(2.0, seek_policy::Clamp(2.0, range));
+    // A whole-source entry is the source's own timeline.
+    range.cachedRange = {};
+    CHECK_EQ(last, seek_policy::Clamp(1e9, range));
+
+    // An active session's coverage has holes the original plays in, so every
+    // target is legal. Clamping it to the rendered range is what made a seek
+    // back to an earlier rendered region impossible to express.
+    seek_policy::Timeline live = source;
+    live.cachedPlayback = true;
+    live.liveSession = true;
+    live.cachedRange = NeuralRenderRange{50000000, 60000000};
+    CHECK_EQ(0.5, seek_policy::Clamp(0.5, live));
+    CHECK_EQ(8.0, seek_policy::Clamp(8.0, live));
+
+    // A stream whose duration is not known yet: nothing to clamp above.
+    const seek_policy::Timeline stream{0.0, 30.0, 0};
+    CHECK_EQ(123.0, seek_policy::Clamp(123.0, stream));
+    CHECK_EQ(0.0, seek_policy::Clamp(-1.0, stream));
+    // A range shorter than one frame never inverts the clamp.
+    seek_policy::Timeline sliver = source;
+    sliver.cachedPlayback = true;
+    sliver.cachedRange = NeuralRenderRange{20000000, 20100000};
+    CHECK(std::abs(seek_policy::Clamp(5.0, sliver) - 2.0) < 1e-9);
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -13435,6 +13483,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(atomic_file_replace_publishes_whole_files_and_cleans_up_only_its_own_test),
     TEST_CASE(media_tools_are_found_the_same_way_by_every_caller_test),
     TEST_CASE(utf8_text_lossy_keeps_the_message_and_strict_refuses_it_test),
+    TEST_CASE(seek_clamp_stays_on_a_decodable_frame_and_inside_a_finished_range_test),
 };
 
 
