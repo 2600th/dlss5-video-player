@@ -2,8 +2,9 @@
 
 This covers the native player (Win32 + GDI chrome over a D3D12 picture) and
 the project site (`site/`). It records what is good, where people get stuck,
-what is missing, and a plan of 18 improvements in three rounds. Round 1 is
-built and committed on `wip/w6-design`. Rounds 2 and 3 are the plan.
+what is missing, and a plan of 18 improvements in three rounds. All three
+rounds shipped in `main`; the round sections below record what was built, and
+what was cut.
 
 ## How this was done
 

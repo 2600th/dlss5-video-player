@@ -296,7 +296,9 @@ chrome over a D3D12 picture) is a separate surface with its own tokens, and
 this section records them. The player is an **Operate** surface: the video is
 the hero, the chrome recedes during playback, and nothing is ever drawn over
 the comparison point. The one thing it shares with the site is the flag
-orange, used the same way: as the mark under the selected compare mode.
+orange, used the same way: as the mark under the selected compare mode. The
+[player UX audit](docs/design/player-ux-audit-2026-09-24.md) records how it got
+here.
 
 ### Tokens
 
