@@ -327,6 +327,12 @@ never decorates. The numbers live in `src/ChromeMotionPolicy.h`, with tests.
 | Press | button down | no animation: glyph and label sink 1 px into the darker fill for as long as it is held | same |
 | Render complete | a live session that had holes has none left | 900 ms: the coverage lane lights over the first fifth, a highlight crosses it left to right, then it eases back to teal | the lane holds lit for 900 ms, no sweep |
 | Status chip flash | the fact a chip reports changes (not every repaint) | 900 ms linear fall-off (`status_chips::Flash`) | holds lit for 900 ms |
+| Slider knob | pointer on a slider, or dragging it | knob 6 to 8 dip on the hover fade | lands at once |
+| Volume value bubble | a volume drag | fades in with the knob; lingers 400 ms after release, then fades out | appears and goes, linger kept |
+| Compare mark | the compare mode changes | slides from the old segment to the new over 160 ms, ease-out | jumps |
+| Comparison tags | the compare mode changes | fade in over 120 ms, ease-out (the compositor's tag alpha) | there at once |
+| Start tile lift | pointer on a tile | rises 2 dip, picture +6% brighter, blue edge, on the hover fade | lands at once |
+| Toast | a file saved, a subtitle shift, a whole video rendered | rises 8 dip and fades in over 160 ms (ease-out), holds 2.4 s, fades out over 140 ms (ease-in); a second one replaces it without rising | there for the hold, then gone |
 | Rendering-now hatch | a live job is running | drifts with the 50 ms activity timer | still hatch, 1 s repaint |
 
 Rules:
@@ -338,6 +344,28 @@ Rules:
 - Every animation has a static equivalent that says the same thing.
 - Nothing flashes over the picture.
 
+### Components
+
+- **Slider** (`src/SliderPolicy.h`): one look everywhere - the strip's
+  volume, the compare bar's Mix and every settings-dialog trackbar. A 4 dip
+  rounded rail in `RGB(68,71,77)`, the stretch from the origin to the value
+  filled in PrimaryBlue, a round knob in `RGB(246,246,248)` with a Window
+  rim. A level fills from its start; a setting with a neutral point (the Mix,
+  brightness, contrast, the neural look) fills from that point, so a
+  control at its default shows no fill. A value bubble appears over the knob
+  only where it cannot cover the picture (the volume); the Mix's value is
+  already read out beside its track.
+- **Toast**: a 34 dip Inactive-grey panel with an 8 dip radius and a 3 dip
+  mark on its left edge (teal for a render, the accent otherwise), at the
+  picture's bottom-left above the strip, never over the compare seam or the
+  tags. It takes neither the mouse nor the focus. The status line keeps the
+  same notice.
+- **Dialog group heading**: Segoe UI 11 dip semibold, upper case, tracked
+  1 dip, in SecondaryText, with a `RGB(62,65,70)` hairline to the column's
+  edge. It labels a group; it is never a decorative kicker.
+- **Dialogs** fit a 1080p screen at 175%: at most 1920x1032 px including the
+  frame, which is why Neural settings is two columns.
+
 ### Tooltips
 
 Every toolbar control has a tip (`src/ToolbarTipPolicy.h`). A control with a
@@ -346,4 +374,11 @@ uses, and the key is checked against the control's menu row by PolicyTests.
 A second line, when there is one, says what the control does in the plain,
 measured voice the rest of the product uses; where there is a measurement,
 the tip quotes it (Upscaling, Mix, SR history). Tips appear after 500 ms and
-at once when moving from one control to the next.
+at once when moving from one control to the next. The status chips and the
+compare modes build theirs when shown (TTN_GETDISPINFO): a chip says what
+was measured and over what; a greyed mode says what would make it work.
+
+### Keys
+
+`Esc` leaves fullscreen before anything else, as in every other player; in a
+window it stops the longest-running job (`src/EscapeKeyPolicy.h`).
