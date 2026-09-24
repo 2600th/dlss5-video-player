@@ -1905,6 +1905,70 @@ struct PlayerAppTestAccess {
         CHECK(validated);
     }
 
+    // P3.4: the job StartNeuralJob launches is NeuralJobRun's named steps now.
+    // With no runtime beside the test a local job still runs its first two for
+    // real: it resolves and identifies the source and refuses a range outside
+    // it, and a range inside it stops at the runtime with its reason. Each
+    // run posts exactly one completion, carrying the source it resolved.
+    static void neural_job_steps_run_in_order_without_a_runtime_test()
+    {
+        PlayerApp& app = fixture->app;
+        const auto directory = app.SettingsPath().parent_path();
+        const auto avi = directory / L"neural-job-64x48.avi";
+        WriteTinyAvi(avi, 64, 48, 30);
+        const auto run = [&](NeuralRenderRange range) -> std::unique_ptr<NeuralJobCompletion> {
+            if (!app.StartNeuralJob(avi.wstring(), {}, L"Steps", {}, MediaSourceKind::LocalFile,
+                                    YouTubeSourceQuality::Auto, {}, 0.0, range, false)) return nullptr;
+            if (app.m_neuralWorker.joinable()) app.m_neuralWorker.join();
+            MSG message{};
+            std::unique_ptr<NeuralJobCompletion> completion;
+            if (PeekMessageW(&message, app.m_hwnd, WM_NEURAL_COMPLETE, WM_NEURAL_COMPLETE, PM_REMOVE))
+                completion = app.m_neuralCompletions.Take(static_cast<uint64_t>(message.wParam));
+            CHECK(!PeekMessageW(&message, app.m_hwnd, WM_NEURAL_COMPLETE, WM_NEURAL_COMPLETE, PM_NOREMOVE));
+            app.CancelNeuralJob(false);
+            app.DrainNeuralMessages();
+            return completion;
+        };
+
+        // 3 frames at 30 fps: 0.1 s. A range from 10 s is outside it.
+        const auto outside = run(NeuralRenderRange{100000000, 200000000});
+        REQUIRE(outside != nullptr);
+        CHECK(!outside->result.ok);
+        CHECK(!outside->result.cancelled);
+        CHECK(outside->result.failure == NeuralRenderFailure::Source);
+        CHECK(outside->result.detail == L"The requested render range lies outside the source.");
+        CHECK(status_note::SameSource(outside->sourcePath, avi));
+        CHECK(outside->renderKey.empty());
+
+        const bool runtimeStaged = std::filesystem::exists(PlayerApp::ExecutableDirectory() / L"neural-runtime");
+        const auto whole = run({});
+        REQUIRE(whole != nullptr);
+        CHECK(!whole->result.ok);
+        CHECK(status_note::SameSource(whole->sourcePath, avi));
+        if (!runtimeStaged) {
+            CHECK(!whole->result.cancelled);
+            CHECK(whole->result.detail == L"The configured neural runtime is incomplete.");
+        }
+
+        // A source that is not there never reaches the steps after the first.
+        const auto missingPath = directory / L"neural-job-missing.avi";
+        std::filesystem::remove(missingPath);
+        std::unique_ptr<NeuralJobCompletion> missing;
+        if (app.StartNeuralJob(missingPath.wstring(), {}, L"Missing", {}, MediaSourceKind::LocalFile,
+                               YouTubeSourceQuality::Auto)) {
+            if (app.m_neuralWorker.joinable()) app.m_neuralWorker.join();
+            MSG message{};
+            if (PeekMessageW(&message, app.m_hwnd, WM_NEURAL_COMPLETE, WM_NEURAL_COMPLETE, PM_REMOVE))
+                missing = app.m_neuralCompletions.Take(static_cast<uint64_t>(message.wParam));
+            app.CancelNeuralJob(false);
+            app.DrainNeuralMessages();
+        }
+        REQUIRE(missing != nullptr);
+        CHECK(!missing->result.ok);
+        CHECK(missing->result.detail == L"The source digest could not be computed.");
+        std::filesystem::remove(avi);
+    }
+
     static constexpr ::test_support::TestCase kGpuCases[] = {
         UI_CASE(network_prepared_pair_agrees_on_nv12_test),
         UI_CASE(network_prepared_falls_back_to_bgra_off_bt709_test),
@@ -1956,6 +2020,7 @@ struct PlayerAppTestAccess {
         UI_CASE(retarget_retires_the_worker_test),
         UI_CASE(playback_frames_are_shared_not_copied_test),
         UI_CASE(paused_frame_presents_on_invalidation_test),
+        UI_CASE(neural_job_steps_run_in_order_without_a_runtime_test),
         UI_CASE(window_and_menu_teardown_test),
         UI_CASE(fullscreen_lifecycle_test),
     };

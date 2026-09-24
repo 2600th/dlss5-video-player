@@ -69,6 +69,7 @@
 #include "RenderPacePolicy.h"
 #include "PlayerCommandLine.h"
 #include "PlaybackTickPolicy.h"
+#include "NeuralJobPolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
 #include "SourceDigestMemo.h"
@@ -2149,6 +2150,511 @@ static void GatherStartScreen(StartScreenRequest request,std::shared_ptr<StartSc
         if(!publish([&](StartScreenAnswers& a){a.renders[recent.renderKey]=std::move(render);}))return;
     }
 }
+
+// Everything a neural job reads, captured on the UI thread when it starts:
+// the job thread never touches PlayerApp. The two pointers are owned by the
+// player and outlive the job, which the UI thread joins before touching them.
+struct NeuralJobInputs {
+    HWND target{};
+    uint64_t generation{};
+    std::wstring mediaUrl,audioUrl,displayTitle,pageUrl;
+    MediaSourceKind sourceKind{MediaSourceKind::LocalFile};
+    YouTubeSourceQuality sourceQuality{YouTubeSourceQuality::Auto};
+    GpuGeneration gpu{GpuGeneration::Unsupported};
+    std::wstring driverVersion;
+    std::filesystem::path moduleDirectory;
+    CompletionRegistry<NeuralProgressMessage>* progressMessages{};
+    CompletionRegistry<NeuralJobCompletion>* completions{};
+    std::string reuseSourceKey;
+    std::filesystem::path cacheRoot;
+    double expectedDurationSeconds{};
+    NeuralRenderRange range;
+    GuideControls guides;
+    TemporalSettings temporal;
+    NeuralSettings settings;
+    HANDLE pauseEvent{};
+    bool prepareOnly{};
+    // The background acquisition of this very source, when one is in flight.
+    std::shared_ptr<SourcePrefetchState> prefetch;
+    // An active session's segment index, its directory for this job and the
+    // job's run id; empty for an offline render.
+    std::shared_ptr<NeuralSegmentIndex> liveIndex;
+    std::filesystem::path liveDirectory;
+    uint64_t liveRunId{};
+    uint32_t segmentFrames{},firstSegmentFrames{};
+    std::wstring driverNotice;
+    NeuralCacheFailureText cacheFailureText;
+    NeuralPreflightKey preflightKey;
+    NeuralPreflightLatch* preflightLatch{};
+    ResidentNeuralHelper* residentHelper{};
+    std::shared_ptr<NeuralColdStartRecord> coldStart;
+    bool gpuColorConversion{},gpuSourceConversion{};
+    uint32_t nvencPreset{},processingScale{};
+    bool captureDither{};
+    EncoderQuality cacheQuality{};
+    bool sourceDeband{},suppliedExposure{};
+    std::shared_ptr<SharedSourceDigest> sourceDigestMemo;
+};
+
+// One neural job on its own thread, as named steps: find the local source,
+// identify it and the runtime, answer from the cache when it can, prove the
+// runtime, render, and publish. Each step returns false when the job is over,
+// with `completion_` saying why; Run posts the completion either way. The
+// steps share what the earlier ones established through the members below,
+// in the order they are set.
+class NeuralJobRun {
+public:
+    NeuralJobRun(const NeuralJobInputs& in,std::stop_token stop):in_(in),stop_(std::move(stop)),cache_(in.cacheRoot){}
+    NeuralJobRun(const NeuralJobRun&)=delete;
+    NeuralJobRun& operator=(const NeuralJobRun&)=delete;
+
+    void Run(){
+        completion_=std::make_unique<NeuralJobCompletion>();completion_->generation=in_.generation;completion_->displayTitle=in_.displayTitle;completion_->pageUrl=in_.pageUrl;completion_->sourceKind=in_.sourceKind;completion_->sourceQuality=in_.sourceQuality;
+        if(!cache_.Valid())completion_->result.detail=in_.cacheFailureText.DescribeRoot(cache_.LastFailure());
+        else{
+            if(ResolveSource()&&IdentifySource()&&PrepareRuntime()&&AnswerFromCache()&&ClearPreflight()&&Render())Publish();
+            // What the steps held ends here, as it did at the end of the
+            // block they were written in: the runtime lease is released
+            // before the completion can start the next job.
+            lease_.reset();
+        }
+        // A cache hit, a refusal or a prepared open never reached a
+        // helper, so this is where the player's own work ends.
+        in_.coldStart->MarkIfAbsent(NeuralColdStartPhase::Request);
+        in_.completions->RegisterAndPost(std::move(completion_),[&](uint64_t token){return PostMessageW(in_.target,WM_NEURAL_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
+    }
+
+private:
+    void PostProgress(const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=in_.generation;message->progress=progress;message->width=progressWidth_;message->height=progressHeight_;message->sourcePath=progressSourcePath_;message->sourceKey=progressSourceKey_;message->pageUrl=in_.pageUrl;in_.progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(in_.target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});}
+    bool Cancelled(){completion_->result.cancelled=true;completion_->result.detail=L"Neural render was cancelled.";return false;}
+
+    // The local file to render: the path itself, or a stream's verified copy
+    // in the cache - the one a background acquisition is writing, a recorded
+    // one, or a fresh download.
+    bool ResolveSource(){
+        if(in_.sourceKind==MediaSourceKind::YouTube){
+            std::string reuseKey=in_.reuseSourceKey;
+            const auto& prefetch=in_.prefetch;
+            // Wait for an acquisition of this same source whenever one is
+            // in flight, not only when no key is known: the recents entry
+            // can already name the key that acquisition is still writing,
+            // and looking it up mid-download finds an incomplete entry. A
+            // live session that hit that ended with no message at all.
+            if(prefetch&&!prefetch->finished.load(std::memory_order_acquire)){
+                LOG("Waiting for the background source acquisition.");
+                NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;PostProgress(acquiring);
+                while(!prefetch->finished.load(std::memory_order_acquire)&&!stop_.stop_requested())
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if(stop_.stop_requested())return Cancelled();
+            if(reuseKey.empty()&&prefetch)reuseKey=prefetch->key;
+            if(!reuseKey.empty()){
+                const auto cached=cache_.LookupSource(reuseKey,stop_);
+                // A cancelled lookup reads as a missing copy; it must not be reported as one.
+                if(stop_.stop_requested())return Cancelled();
+                if(cached&&cached->manifest.encoder==kCompleteSourcePolicy){
+                    sourcePath_=cached->payloadPath;completion_->sourceKey=reuseKey;
+                    LOG("Owned source cache verified; network resolution skipped.");
+                }else if(in_.audioUrl.empty()){
+                    // No stream pair in hand, so there is nothing to acquire
+                    // from: the UI answers this by resolving the page again.
+                    completion_->cachedSourceUnavailable=true;
+                    completion_->result.detail=L"The downloaded copy of this video is no longer available.";return false;
+                }else{
+                    // A recorded key whose copy is gone or half-written, with
+                    // the stream this session is already playing still in hand.
+                    // Acquiring again beats ending the session.
+                    LOG("The recorded source copy is missing or incomplete; acquiring this stream again.");
+                    reuseKey.clear();
+                }
+            }
+            if(sourcePath_.empty()){
+                const SourceAcquisition acquired=AcquireYouTubeSource(cache_,in_.cacheFailureText,in_.moduleDirectory,in_.mediaUrl,in_.audioUrl,in_.pageUrl,in_.sourceQuality,in_.expectedDurationSeconds,
+                    [&](const MediaDownloadProgress& download){
+                        NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;
+                        acquiring.bytes=download.bytes;acquiring.acquiredSeconds=download.seconds;
+                        acquiring.expectedSeconds=in_.expectedDurationSeconds;PostProgress(acquiring);
+                    },stop_);
+                if(!acquired.key.empty())completion_->sourceKey=acquired.key;
+                if(acquired.path.empty()){completion_->result.cancelled=acquired.cancelled;completion_->result.detail=acquired.detail;return false;}
+                sourcePath_=acquired.path;
+            }
+        }else{
+            std::error_code pathError;
+            sourcePath_=std::filesystem::absolute(std::filesystem::path(in_.mediaUrl),pathError);
+            if(pathError){completion_->result.detail=L"The source path could not be resolved.";return false;}
+        }
+        completion_->sourcePath=sourcePath_;
+        // Published to the UI thread from here, which is what lets
+        // playback move off a stream and onto this copy.
+        progressSourcePath_=sourcePath_;progressSourceKey_=completion_->sourceKey;
+        return true;
+    }
+
+    // The source's digest and what the render key needs from its metadata,
+    // and the range checked against it.
+    bool IdentifySource(){
+        // Memoised per loaded file. Every job used to full-hash
+        // the source first, including the prepare-only cache check
+        // and every live retarget, which is 3-5 s of dead air on a
+        // 5 GB file each time it is asked for.
+        sourceDigest_=MemoisedSourceDigest(*in_.sourceDigestMemo,sourcePath_,stop_);if(!sourceDigest_){completion_->result.cancelled=stop_.stop_requested();completion_->result.detail=L"The source digest could not be computed.";return false;}
+        // Metadata only: this decoder was opened and closed two lines
+        // later, and a full open paid for an ffmpeg child for nothing.
+        VideoDecoder metadata;if(!metadata.OpenMetadata(sourcePath_.wstring(),MediaSourceKind::LocalFile,stop_)){completion_->result.detail=L"The source could not be decoded for neural rendering.";return false;}
+        width_=metadata.NativeWidth();height_=metadata.NativeHeight();fps_=metadata.FrameRate();duration_=metadata.DurationSeconds();
+        // An undeclared HD source now reaches the model as BT.709
+        // rather than ffmpeg's BT.601 (UntaggedColorPolicy.h), so its
+        // renders carry a term that retires the ones made before.
+        untaggedBt709_=metadata.DecodesUntaggedAsBt709();
+        // An HDR source reaches the model tone mapped to SDR now
+        // (HdrPolicy.h), for a peak read from its metadata; its
+        // renders carry both, and every SDR key stays as it was.
+        toneMapTerm_=metadata.ToneMapIdentityTerm();metadata.Close();
+        if(!width_||!height_||!std::isfinite(fps_)||fps_<=0.0||!std::isfinite(duration_)||duration_<=0.0){completion_->result.detail=L"The source metadata is incomplete.";return false;}progressWidth_=width_;progressHeight_=height_;
+        NeuralRenderProgress checking{};checking.phase=NeuralRenderPhase::CheckingCache;PostProgress(checking);
+        const int64_t sourceDuration100ns=static_cast<int64_t>(std::llround(duration_*10000000.0));
+        frameDurationTolerance_=neural_job::FrameDurationTolerance100ns(fps_);
+        if(neural_job::RangeOutsideSource(in_.range,sourceDuration100ns)){completion_->result.failure=NeuralRenderFailure::Source;completion_->result.detail=L"The requested render range lies outside the source.";return false;}
+        // A range render is exactly [start,end) long; a whole render matches the source.
+        expectedDuration100ns_=neural_job::ExpectedDuration100ns(in_.range,sourceDuration100ns);
+        return true;
+    }
+
+    // The runtime this job renders with: its digest, its lock, its lease, and
+    // the add-on settings written for this job and read back as its identity.
+    bool PrepareRuntime(){
+        runtimeDirectory_=in_.moduleDirectory/L"neural-runtime";
+        runtimeDigest_=BuildRuntimeDigest(runtimeDirectory_,LockedRuntimeFileNames(),stop_);if(!runtimeDigest_){completion_->result.cancelled=stop_.stop_requested();completion_->result.detail=L"The configured neural runtime is incomplete.";return false;}
+        // The lock names every drifted file; a mismatch is refused, never repaired by swapping runtimes.
+        lockChecks_=VerifyRuntimeLock(runtimeDirectory_,EmbeddedRuntimeLock(),stop_);
+        if(stop_.stop_requested())return Cancelled();
+        if(!RuntimeLockSatisfied(lockChecks_)){const std::wstring drift=DescribeRuntimeLockDrift(lockChecks_);LOG("Neural runtime lock drift; render refused: "<<WideToUtf8(drift));completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"The neural runtime does not match the locked stack: "+drift;return false;}
+        // One writer at a time: the settings written below and the
+        // helper's proxy log are shared per runtime directory, so a
+        // second player instance must not interleave with this job.
+        lease_.emplace(runtimeDirectory_);
+        if(!lease_->Held()){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("Neural runtime is in use by another render; refusing to share it.");return false;}
+        const auto overrides=RenderAddonOverrides(runtimeDirectory_/L"ReShade.ini",in_.settings,in_.processingScale);const auto configured=ConfigureNeuralAddon(runtimeDirectory_/L"ReShade.ini",true,overrides);
+        if(!configured.ok){completion_->result.detail=L"The neural settings could not be prepared.";return false;}
+        std::wstring settingsError;settingsSnapshot_=ReadNeuralAddonSettingsSnapshot(runtimeDirectory_/L"ReShade.ini",&settingsError);
+        if(!settingsSnapshot_){completion_->result.detail=settingsError.empty()?L"The neural settings could not be read.":settingsError;return false;}
+        settingsDigest_=Sha256Bytes(*settingsSnapshot_);if(!settingsDigest_){completion_->result.detail=L"The neural settings digest could not be computed.";return false;}
+        return true;
+    }
+
+    // The render key, and a validated cache entry under it when there is one.
+    // Returns false on a hit (the job is answered) and on a prepared open,
+    // which stops at the lookup.
+    bool AnswerFromCache(){
+        const auto& range=in_.range;const auto& guides=in_.guides;const auto& temporal=in_.temporal;const auto& settings=in_.settings;
+        // The pass evaluates models out of the driver store, which no
+        // staged file covers: without these two terms a render made on
+        // one driver is served and validated on a later one.
+        // The pipeline term carries `bt709-export-v1` because the
+        // capture-side encoder arguments are deliberately not part of
+        // this key and the export colorimetry changed: renders written
+        // before that fix carry BT.601 pixels with no colour tags, and
+        // without moving the term they would stay valid hits under an
+        // unchanged VERSION. `GpuSourceConversion` is the one conversion
+        // switch that does belong in the key, because it changes what the
+        // model is shown rather than how the result is encoded.
+        const auto modelStore=ResolveNeuralModelStore(in_.driverVersion,stop_);
+        LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest
+            <<(NeuralModelStoreSettled(modelStore)?"":" (unsettled: the key may not match a later read)")
+            <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{}));
+        identity_=NeuralCacheIdentity{*sourceDigest_,width_,height_,DLSS_VIDEO_PLAYER_VERSION,GpuGenerationPathName(in_.gpu),*runtimeDigest_,NeuralRenderPipelineIdentity(in_.gpuSourceConversion,KeyedNvencPreset(in_.nvencPreset,in_.cacheQuality),KeyedGpuColorConversion(in_.gpuColorConversion,in_.cacheQuality))+ProcessingScaleIdentityTerm(in_.processingScale)+UntaggedColorIdentityTerm(untaggedBt709_)+toneMapTerm_+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({in_.captureDither,in_.cacheQuality,in_.sourceDeband,in_.suppliedExposure}),false,*settingsDigest_,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(in_.driverVersion),modelStore.digest};renderKey_=BuildNeuralCacheKey(identity_);completion_->renderKey=renderKey_;completion_->range=range;completion_->settings=settings;completion_->guides=guides;completion_->temporal=temporal;
+        LOG("Checking neural cache key="<<renderKey_<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
+        if(const auto cached=cache_.LookupRender(renderKey_,stop_)){
+            // LookupRender already verifies the full payload hash and
+            // strict feature-18 manifest. Do not decode every frame again.
+            const ProbeResult cachedProbe=ProbeMedia(in_.moduleDirectory,cached->payloadPath,stop_,MediaProbeMode::CachedMetadata);
+            if(stop_.stop_requested())return Cancelled();
+            // Split by what each piece of evidence needs. The
+            // manifest is compared in process; everything else
+            // needs ffprobe to have run. Reading a probe that
+            // could not run as a probe that disagreed quarantined
+            // - and then deleted - entries whose payload had just
+            // been hash-verified as intact.
+            const cached_render::Evidence evidence=neural_job::CachedRenderEvidence(cached->manifest,cachedProbe,
+                {*sourceDigest_,*runtimeDigest_,*settingsDigest_,range,identity_.guides,width_,height_,expectedDuration100ns_,frameDurationTolerance_});
+            const auto verdict=cached_render::Judge(evidence);
+            const bool valid=verdict==cached_render::Verdict::Serve;
+            // A validated hit is answered without a helper, so the
+            // five phases a helper measures are absent by nature.
+            if(valid){in_.coldStart->NoteNoHelper("cache-hit");completion_->result.ok=true;completion_->result.frameCount=cached->manifest.frameCount;completion_->result.duration100ns=cached->manifest.duration100ns;completion_->result.jobId=cached->manifest.jobId;completion_->result.historyResets=cached->manifest.historyResets;completion_->result.firstTimestamp100ns=cached->manifest.rangeStart100ns;completion_->sourcePath=sourcePath_;completion_->neuralPath=cached->payloadPath;completion_->cacheHit=true;completion_->range={cached->manifest.rangeStart100ns,cached->manifest.rangeEnd100ns};if(!cached->manifest.receiptDigest.empty()&&std::filesystem::is_regular_file(cached->directory/L"receipt.json"))completion_->receiptPath=cached->directory/L"receipt.json";return false;}
+            if(verdict==cached_render::Verdict::Unverified){
+                LOG("Neural cache entry "<<renderKey_<<" could not be verified because the probe did not run ("
+                    <<WideToUtf8(cachedProbe.detail)<<"); it is kept and this render proceeds without it.");
+            }else if(!cache_.Quarantine(*cached)){completion_->result.detail=L"The invalid neural cache entry could not be quarantined.";return false;}
+        }
+        // A cancelled lookup reads as a miss; it must not start a render.
+        if(stop_.stop_requested())return Cancelled();
+        // The cache check every open runs: no helper, and the line
+        // it logs is not a render that failed to measure.
+        if(in_.prepareOnly){in_.coldStart->NoteNoHelper("range-selection");completion_->preparedOnly=true;LOG("Neural cache miss; opening the original for range selection.");return false;}
+        LOG("Neural cache miss or invalid entry; starting a new render.");
+        // Everything above is the player's own preparation; from
+        // here the cost belongs to the probe and the helper.
+        in_.coldStart->Mark(NeuralColdStartPhase::Request);
+        return true;
+    }
+
+    // Everything that refuses a render before a helper is asked for one: the
+    // driver floor, a stray module, a latched failure, and the feature-18
+    // probe itself, paid once per runtime and driver.
+    bool ClearPreflight(){
+        const auto& driverNotice=in_.driverNotice;const auto& preflightKey=in_.preflightKey;auto* preflightLatch=in_.preflightLatch;
+        // A driver below the floor cannot create feature 18 at all,
+        // so do not pay five seconds for a probe to learn that.
+        if(!driverNotice.empty()){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=driverNotice;LOG("Neural render refused before the probe: "<<WideToUtf8(driverNotice));return false;}
+        // A stray module beside the helper is refused by the helper at
+        // startup - after a process start and, on a first run, a
+        // five-second preflight. It is named here instead, in the
+        // helper's own words, and never latched: the directory is
+        // listed again on every attempt, so removing the file is all
+        // it takes. A directory that cannot be listed is left to the
+        // helper, which refuses it with its own reason.
+        if(const auto unlocked=FindUnlockedRuntimeModules(runtimeDirectory_,EmbeddedRuntimeLock());unlocked&&!unlocked->empty()){
+            completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=runtime_modules::UnlockedModulesRefusal(*unlocked);
+            LOG("Neural render refused before the helper: "<<WideToUtf8(completion_->result.detail));
+            return false;
+        }
+        // The same runtime on the same driver fails the same way:
+        // probe once per configuration, not once per play and seek.
+        // A failure is remembered against the module listing too: the
+        // digest hashes only the locked files, so a refusal caused by
+        // anything else the loader picks up from that directory stood
+        // until restart even after the user removed the cause.
+        const NeuralPreflightKey runtimeKey{preflightKey.gpu,preflightKey.driver,*runtimeDigest_};
+        const NeuralPreflightKey failureKey{preflightKey.gpu,preflightKey.driver,
+            *runtimeDigest_+"|"+WideToUtf8(runtime_modules::ModuleListingIdentity(runtimeDirectory_))};
+        if(const std::wstring latched=preflightLatch->LatchedFailureDetail(failureKey);!latched.empty()){
+            completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=latched;
+            LOG("Neural preflight skipped; this runtime and driver already failed: "<<WideToUtf8(latched));
+            return false;
+        }
+        workerExecutable_=runtimeDirectory_/L"NeuralWorker.exe";
+        // A pass is as reusable as a failure: the probe answers for a
+        // GPU, a driver and a runtime, not for a playback session, and
+        // paying five seconds per toggle for the same answer is what
+        // made the picture take sixteen seconds to appear.
+        preflightJson_=preflightLatch->LatchedSuccessJson(runtimeKey);
+        if(preflightJson_.empty())preflightJson_=LoadNeuralPreflightReceipt(in_.cacheRoot,runtimeKey);
+        if(!preflightJson_.empty()){
+            preflightLatch->RecordSuccess(runtimeKey,preflightJson_);
+            preflightJson_=MarkReusedNeuralPreflight(preflightJson_);
+            LOG("Neural preflight skipped; this runtime and driver already armed feature 18.");
+        }else{
+            // The feature-18 probe needs the GPU; only a cache miss pays for it.
+            // It also needs the runtime to itself: it loads its own proxy and
+            // creates its own feature 18, and an idle resident helper from an
+            // earlier job is still holding the device and the session log. That
+            // helper is on its way out regardless - a probe only runs when the
+            // runtime identity in its key changed.
+            in_.residentHelper->Release();
+            NeuralRenderProgress preflighting{};preflighting.phase=NeuralRenderPhase::Preflight;PostProgress(preflighting);
+            const NeuralPreflightResult preflight=RunNeuralPreflight(workerExecutable_,stop_);
+            // Marked before the verdict is read: a probe that failed
+            // or was cancelled still cost what it cost.
+            in_.coldStart->Mark(NeuralColdStartPhase::Preflight);
+            if(preflight.cancelled||stop_.stop_requested())return Cancelled();
+            if(!preflight.ok){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;preflightLatch->RecordFailure(failureKey,completion_->result.detail);LOG("Neural preflight failed: cause="<<NeuralPreflightCauseName(preflight.cause)<<" "<<WideToUtf8(completion_->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);return false;}
+            preflightLatch->RecordSuccess(runtimeKey,preflight.json);
+            StoreNeuralPreflightReceipt(in_.cacheRoot,runtimeKey,preflight.json);
+            preflightJson_=preflight.json;
+        }
+        return true;
+    }
+
+    // The render itself, in the staging directory under the key, by the
+    // resident helper (launched or reused). An active session's segments are
+    // published into its index as the helper finalizes them.
+    bool Render(){
+        const auto& liveIndex=in_.liveIndex;const auto& liveDirectory=in_.liveDirectory;const uint64_t liveRunId=in_.liveRunId;const auto& coldStart=in_.coldStart;
+        staging_=cache_.BeginRenderStaging(renderKey_);if(!staging_){completion_->result.detail=in_.cacheFailureText.Describe(cache_);return false;}
+        {std::ofstream settingsFile(*staging_/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot_->data(),static_cast<std::streamsize>(settingsSnapshot_->size()));if(!settingsFile){cache_.MarkInvalid(*staging_);completion_->result.detail=L"The neural settings snapshot could not be staged.";return false;}}
+        const auto& range=in_.range;
+        NeuralRenderRequest request{nullptr,sourcePath_,liveIndex?liveDirectory/L"neural.mkv":*staging_/L"neural.mkv",width_,height_,fps_,duration_};request.jobId=in_.generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps_);request.guides=in_.guides;request.temporal=in_.temporal;request.pauseEvent=in_.pauseEvent;request.segmentFrames=liveIndex?in_.segmentFrames:0u;request.firstSegmentFrames=liveIndex?in_.firstSegmentFrames:0u;request.gpuColorConversion=in_.gpuColorConversion;request.nvencPreset=in_.nvencPreset;request.gpuSourceConversion=in_.gpuSourceConversion;request.processingScale=in_.processingScale;request.captureDither=in_.captureDither;request.quality=in_.cacheQuality;request.sourceDeband=in_.sourceDeband;request.suppliedExposure=in_.suppliedExposure;
+        receipt_.emplace(NeuralRenderReceiptInputs{preflightJson_,lockChecks_,request,{},renderKey_,*settingsDigest_,*runtimeDigest_,std::chrono::system_clock::now(),{}});
+        NeuralSegmentSink sink{};
+        if(liveIndex){
+            // Every finalized segment is playable on arrival; the
+            // player reads them behind the render head.
+            sink.onSegment=[&](const NeuralRenderSegment& segment){
+                NeuralSegment entry{};entry.path=liveDirectory/segment.fileName;entry.runId=liveRunId;entry.index=segment.index;entry.firstFrameNumber=segment.firstFrameNumber;entry.firstTimestamp100ns=segment.firstTimestamp100ns;entry.end100ns=segment.end100ns;entry.frameCount=segment.frameCount;
+                LOG("Neural segment run="<<liveRunId<<" index="<<entry.index<<" frames="<<segment.frameCount<<" firstFrame="<<segment.firstFrameNumber<<" span=["<<double(segment.firstTimestamp100ns)*1e-7<<","<<double(segment.end100ns)*1e-7<<") file="<<WideToUtf8(segment.fileName));
+                liveIndex->Append(std::move(entry));
+                // The first file the player can show: everything
+                // after it is the player's own attach cost.
+                coldStart->Ready();
+            };
+            // A relaunched worker republishes from its own index 0,
+            // so only this run's segments are discarded; coverage any
+            // other run left behind stays valid wherever it sits.
+            sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding run "<<liveRunId<<"'s published segments.");liveIndex->DropRun(liveRunId);};
+        }
+        NeuralJobHooks hooks{};
+        hooks.progress=[this](const NeuralRenderProgress& progress){PostProgress(progress);};
+        hooks.segments=sink;
+        // The helper holds this job from here. For a launched one
+        // that is its created process; for a reused one it is the
+        // command frame, which is also the whole of what a warm
+        // toggle now pays before the helper's own clock starts. The
+        // plan is noted here rather than after the job, because an
+        // active session reports its cold start when the first frame
+        // reaches the screen - seconds before this call returns.
+        hooks.accepted=[&](resident_helper::HelperPlan plan){
+            coldStart->Mark(NeuralColdStartPhase::Launch);
+            coldStart->NoteHelper(std::string(resident_helper::HelperPlanName(plan)));
+        };
+        // Merged the moment the helper reports it, which is when
+        // its first output file exists. Merging only after the
+        // call returned put the helper's five phases seconds
+        // behind the attach: an active session presents its
+        // first frame while the render runs on, and the log line
+        // written there carried five dashes in ten of ten
+        // sessions while receipt.json for the same render
+        // carried all five numbers. A reused helper reports only
+        // firstOutput, and the two phases it did not pay stay
+        // absent rather than becoming zeroes.
+        hooks.helperTimeline=[&](const NeuralColdStartTimeline& helper){coldStart->Merge(helper);};
+        // The residency key: the runtime this job locked, the files
+        // it verified, and the settings INI written above. ReShade
+        // and RenoDX read that INI at process start, so a change to
+        // it is a different helper and not a different job.
+        const auto helperKey=resident_helper::MakeHelperKey(runtimeDirectory_.wstring(),*runtimeDigest_,*settingsDigest_);
+        resident_helper::HelperPlan helperPlan=resident_helper::HelperPlan::Launch;
+        completion_->result=in_.residentHelper->RunJob(workerExecutable_,helperKey,request,hooks,stop_,&helperPlan);
+        LOG("Neural helper plan="<<resident_helper::HelperPlanName(helperPlan)<<" resident="<<in_.residentHelper->Resident()<<".");
+        // Nothing is marked finished here any more: one job fills one
+        // hole, and whether the session has more to do is a question
+        // about coverage, answered on the UI thread.
+        // Again for a timeline that arrived too late to be reported
+        // over the pipe - a crash or a cancel the launcher
+        // synthesized a result for. Merging twice is idempotent.
+        coldStart->Merge(completion_->result.coldStart);
+        completion_->result.coldStart=coldStart->Snapshot();
+        receipt_->result=completion_->result;receipt_->finished=std::chrono::system_clock::now();
+        LOG("Neural render receipt: "<<SummarizeNeuralReceiptForLog(*receipt_));
+        if(!completion_->result.ok){cache_.MarkInvalid(*staging_);return false;}
+        return true;
+    }
+
+    // The finished render into the cache: an active session's segments
+    // joined, its receipt staged beside it, the payload probed, and the entry
+    // promoted only when the probe agrees with what the helper reported.
+    bool Publish(){
+        const auto& liveIndex=in_.liveIndex;const uint64_t liveRunId=in_.liveRunId;const auto& range=in_.range;
+        const auto& moduleDirectory=in_.moduleDirectory;
+        // The entry is keyed, labelled and proven by THIS run: its range, its
+        // frame count, its evidence counters. So it must contain exactly the
+        // segments this run published. A resumed session hands earlier coverage
+        // to the next job for playback to keep reading, and joining that in too
+        // produced a file longer than the label - one session joined 46 files of
+        // 2622 frames and 87.4 s against a result of 1647 frames and 54.9 s, and
+        // the gate correctly refused the render it had just finished.
+        //
+        // Selected by run id rather than by position: segments are held sorted
+        // by timestamp, so a run that filled a hole behind an earlier region is
+        // not the tail of the index, and a positional slice would take the wrong
+        // files. The scan stays in timeline order, which is what a join needs.
+        // The next hole cannot start until this returns, so the phases
+        // are timed: one driven session sat 18 s between a finished
+        // render and the next one with the GPU idle and a hole left.
+        const auto publishStart=std::chrono::steady_clock::now();
+        const auto msSince=[](std::chrono::steady_clock::time_point from){
+            return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-from).count();};
+        const std::vector<std::filesystem::path> parts=liveIndex?neural_job::SegmentsOfRun(*liveIndex,liveRunId):std::vector<std::filesystem::path>{};
+        const size_t joinedParts=liveIndex?parts.size():size_t{1};
+        if(liveIndex&&(parts.empty()||ConcatenateMedia(moduleDirectory,parts,*staging_/L"neural.mkv",stop_)!=EncodeError::None)){
+            cache_.MarkInvalid(*staging_);completion_->result.ok=false;
+            completion_->result.detail=L"The rendered segments could not be joined into a cache entry.";return false;
+        }
+        const double concatMs=msSince(publishStart);
+        const auto finalSettings=ReadNeuralAddonSettingsSnapshot(runtimeDirectory_/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot_){cache_.MarkInvalid(*staging_);completion_->result.ok=false;completion_->result.detail=L"Neural settings changed during rendering. Try the render again.";return false;}
+        const std::string receiptJson=BuildNeuralRenderReceiptJson(*receipt_);const auto receiptDigest=Sha256Bytes(receiptJson);
+        {std::ofstream receiptFile(*staging_/L"receipt.json",std::ios::binary|std::ios::trunc);receiptFile.write(receiptJson.data(),static_cast<std::streamsize>(receiptJson.size()));if(!receiptFile||!receiptDigest){cache_.MarkInvalid(*staging_);completion_->result.ok=false;completion_->result.detail=L"The neural render receipt could not be staged.";return false;}}
+        const auto probeStart=std::chrono::steady_clock::now();
+        const ProbeResult probe=ProbeMedia(moduleDirectory,*staging_/L"neural.mkv",stop_);
+        const double probeMs=msSince(probeStart);
+        if(stop_.stop_requested()){cache_.MarkInvalid(*staging_);completion_->result.cancelled=true;completion_->result.ok=false;completion_->result.detail=L"Neural render was cancelled.";return false;}
+        NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest_;manifest.runtimeDigest=*runtimeDigest_;manifest.encoder=neural_job::CacheEncoderName(completion_->result.encoder);manifest.width=width_;manifest.height=height_;manifest.frameCount=completion_->result.frameCount;manifest.duration100ns=completion_->result.duration100ns;manifest.nativeEvaluations=completion_->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion_->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion_->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion_->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion_->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
+        manifest.settingsDigest=*settingsDigest_;manifest.rangeStart100ns=range.start100ns;manifest.rangeEnd100ns=range.end100ns;manifest.guides=identity_.guides;manifest.jobId=in_.generation;manifest.historyResets=completion_->result.historyResets;manifest.receiptDigest=*receiptDigest;
+        // The key's environment terms, so eviction can tell this entry from one a driver
+        // update, a model refresh or an upgrade of this installation has orphaned.
+        manifest.environment=NeuralCacheEnvironmentFor(identity_);
+        const int64_t joinedDurationTolerance=JoinedMediaDurationTolerance100ns(fps_,joinedParts);
+        const bool probeMatches=neural_job::PublishedProbeMatches(probe,width_,height_,completion_->result.frameCount,completion_->result.duration100ns,expectedDuration100ns_,joinedDurationTolerance);
+        NeuralCacheManifest publishCandidate=manifest;publishCandidate.kind=NeuralCacheEntryKind::Render;publishCandidate.state=NeuralCacheState::Complete;publishCandidate.neuralDigest=std::string(64,'0');
+        const bool manifestReusable=IsReusableNeuralCacheManifest(publishCandidate);
+        const bool gate=CanPublishNeuralCompletion(completion_->result.ok,probeMatches,manifestReusable);
+        NeuralCachePromotion promotion{};
+        const auto promoteStart=std::chrono::steady_clock::now();
+        const bool published=gate&&cache_.PromoteRender(renderKey_,*staging_,manifest,&promotion);
+        LOG("Neural publish timing: parts="<<joinedParts<<" concatMs="<<concatMs<<" probeMs="<<probeMs
+            <<" promoteMs="<<msSince(promoteStart)<<" totalMs="<<msSince(publishStart)<<".");
+        if(!published){
+            // This gate discarded a finished render once and left nothing to diagnose it
+            // with; then it did it again for a rename an antivirus scan was holding, and
+            // the numbers below all agreed. Both halves of the verdict are named now.
+            LOG("Neural publish refused: gate="<<gate<<" promoteStage="<<NeuralCachePromotionStageName(promotion.stage)
+                <<" promoteError="<<promotion.win32Error<<" renameAttempts="<<promotion.attempts
+                <<" renderOk="<<completion_->result.ok<<" manifestReusable="<<manifestReusable<<" probeOk="<<probe.ok<<" probe="<<probe.width<<"x"<<probe.height<<" expected="<<width_<<"x"<<height_<<" probeFrames="<<probe.frameCount<<" resultFrames="<<completion_->result.frameCount<<" probeDuration="<<probe.duration100ns<<" resultDuration="<<completion_->result.duration100ns<<" expectedDuration="<<expectedDuration100ns_<<" tolerance="<<joinedDurationTolerance<<" parts="<<joinedParts<<".");
+            if(!cache_.MarkInvalid(*staging_))LOG("The refused staging directory could not be set aside either: "<<WideToUtf8(staging_->wstring()));
+            completion_->result.ok=false;completion_->result.detail=L"The neural video failed final cache validation.";return false;
+        }
+        if(promotion.attempts>1)LOG("Neural cache entry published after "<<promotion.attempts<<" rename attempts; the entry was held by another process.");
+        if(promotion.entry){completion_->neuralPath=promotion.entry->payloadPath;completion_->receiptPath=promotion.entry->directory/L"receipt.json";}else{completion_->result.ok=false;completion_->result.detail=L"The neural cache entry could not be reopened.";}
+        // The entry IS this run's segments, joined: same frames, same
+        // timestamps. Serving the run from it retires the segments, so
+        // a session stops holding every rendered byte twice until it is
+        // released - and a retained one across toggles. The UI thread
+        // deletes them once no decoder has them open.
+        if(liveIndex&&promotion.entry){
+            std::error_code sizeError;const auto entryBytes=std::filesystem::file_size(promotion.entry->payloadPath,sizeError);
+            const bool replaced=liveIndex->ReplaceRun(liveRunId,promotion.entry->payloadPath);
+            LOG("Live run "<<liveRunId<<(replaced?" now plays from its published entry; ":" keeps playing its segments; the entry could not replace ")
+                <<joinedParts<<" segment files"<<(replaced?" retired":"")<<". entryBytes="<<(sizeError?uintmax_t{0}:entryBytes)<<".");
+        }
+        return true;
+    }
+
+    const NeuralJobInputs& in_;
+    std::stop_token stop_;
+    NeuralCacheManager cache_;
+    std::unique_ptr<NeuralJobCompletion> completion_;
+    // What every progress post carries: the geometry once the source is
+    // read, and the local source the moment the job knows it, so playback
+    // can leave the stream.
+    uint32_t progressWidth_=0,progressHeight_=0;
+    std::filesystem::path progressSourcePath_;
+    std::string progressSourceKey_;
+    // ResolveSource
+    std::filesystem::path sourcePath_;
+    // IdentifySource
+    std::optional<std::string> sourceDigest_;
+    uint32_t width_{},height_{};
+    double fps_{},duration_{};
+    bool untaggedBt709_{};
+    std::string toneMapTerm_;
+    int64_t frameDurationTolerance_{},expectedDuration100ns_{};
+    // PrepareRuntime
+    std::filesystem::path runtimeDirectory_;
+    std::optional<std::string> runtimeDigest_;
+    std::vector<RuntimeLockCheck> lockChecks_;
+    std::optional<NeuralRuntimeLease> lease_;
+    std::optional<std::string> settingsSnapshot_,settingsDigest_;
+    // AnswerFromCache
+    NeuralCacheIdentity identity_{};
+    std::string renderKey_;
+    // ClearPreflight
+    std::filesystem::path workerExecutable_;
+    std::string preflightJson_;
+    // Render
+    std::optional<std::filesystem::path> staging_;
+    std::optional<NeuralRenderReceiptInputs> receipt_;
+};
 
 class PlayerApp {
 #ifdef PLAYER_APP_TESTING
@@ -9265,11 +9771,18 @@ private:
         const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
         SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         try{
-            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const std::wstring driverVersion=m_opt.detectedGpu.driverVersion;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const TemporalSettings temporal=m_temporalSettings;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;const bool gpuColorConversion=m_gpuColorConversion;const bool gpuSourceConversion=m_gpuSourceConversion;const uint32_t nvencPreset=m_nvencPreset;const uint32_t processingScale=m_processingScale;const bool captureDither=m_captureDither;const EncoderQuality cacheQuality=m_cacheQuality;const bool sourceDeband=m_sourceDeband;const bool suppliedExposure=m_suppliedExposure;
+            // What the job reads, captured here: the job thread never touches
+            // the player (NeuralJobRun).
+            NeuralJobInputs job;
+            job.target=m_hwnd;job.generation=generation;job.mediaUrl=mediaUrl;job.audioUrl=audioUrl;job.displayTitle=displayTitle;job.pageUrl=pageUrl;job.sourceKind=sourceKind;job.sourceQuality=sourceQuality;
+            job.gpu=m_opt.detectedGpu.generation;job.driverVersion=m_opt.detectedGpu.driverVersion;job.moduleDirectory=ExecutableDirectory();job.cacheRoot=m_cacheRoot;
+            job.guides=m_renderGuides;job.temporal=m_temporalSettings;job.settings=m_neuralSettings;job.pauseEvent=m_neuralPauseEvent;
+            job.gpuColorConversion=m_gpuColorConversion;job.gpuSourceConversion=m_gpuSourceConversion;job.nvencPreset=m_nvencPreset;job.processingScale=m_processingScale;job.captureDither=m_captureDither;job.cacheQuality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
+            job.reuseSourceKey=reuseSourceKey;job.expectedDurationSeconds=expectedDurationSeconds;job.range=range;job.prepareOnly=prepareOnly;
             // The background acquisition of this very source, when one is in
             // flight: the job waits for it rather than downloading again.
-            const std::shared_ptr<SourcePrefetchState> prefetch=(sourceKind==MediaSourceKind::YouTube&&!pageUrl.empty()&&pageUrl==m_prefetchPageUrl)?m_prefetchState:nullptr;
-            CompletionRegistry<NeuralProgressMessage>* progressMessages=&m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>* completions=&m_neuralCompletions;
+            job.prefetch=(sourceKind==MediaSourceKind::YouTube&&!pageUrl.empty()&&pageUrl==m_prefetchPageUrl)?m_prefetchState:nullptr;
+            job.progressMessages=&m_neuralProgressMessages;job.completions=&m_neuralCompletions;
             // An active session renders into its own directory of segment files;
             // the cache entry is the concatenation published when the job ends.
             // A resumed or retargeted session keeps every earlier job's files, so
@@ -9277,407 +9790,44 @@ private:
             // what makes a relaunch discard its own segments and nobody else's:
             // segments are sorted by timestamp now, so this job's are not
             // necessarily the tail of the index.
-            const std::shared_ptr<NeuralSegmentIndex> liveIndex=kind==NeuralJobKind::Live?m_liveSegments:nullptr;
-            std::filesystem::path liveDirectory;
-            const uint64_t liveRunId=liveIndex?uint64_t(++m_liveJobSerial):0u;
-            if(liveIndex){
-                liveDirectory=m_liveDirectory/(L"job"+std::to_wstring(liveRunId));
-                std::error_code ec;std::filesystem::create_directories(liveDirectory,ec);
+            job.liveIndex=kind==NeuralJobKind::Live?m_liveSegments:nullptr;
+            job.liveRunId=job.liveIndex?uint64_t(++m_liveJobSerial):0u;
+            if(job.liveIndex){
+                job.liveDirectory=m_liveDirectory/(L"job"+std::to_wstring(job.liveRunId));
+                std::error_code ec;std::filesystem::create_directories(job.liveDirectory,ec);
                 if(ec){
                     // Begin() above already marked a job as running; leaving it
                     // there kept the spinner on and every render action greyed
                     // out for the rest of the file, with nothing to say why.
-                    LOG("Active neural session could not create the segment directory "<<WideToUtf8(liveDirectory.wstring())<<": "<<ec.message());
+                    LOG("Active neural session could not create the segment directory "<<WideToUtf8(job.liveDirectory.wstring())<<": "<<ec.message());
                     m_neuralLifecycle.Invalidate();m_neuralProgress={};m_pendingNeuralTitle.clear();
                     m_neuralNotice=T(L"neural.live.directory_failed");
                     SyncSourceActionAvailability();UpdateCachedStatus();InvalidateRect(m_hwnd,nullptr,FALSE);
                     return false;
                 }
             }
-            const uint32_t segmentFrames=kind==NeuralJobKind::Live?static_cast<uint32_t>(std::max<long>(1,std::lround(m_decoder.FrameRate()*kLiveSegmentSeconds))):0u;
             // Nothing can be shown until the first file is muxed, so the first
             // one is short. Later files stay long: a boundary costs an encoder
             // start and a mux, and only the first one is on the user's clock.
-            const uint32_t firstSegmentFrames=kind==NeuralJobKind::Live?static_cast<uint32_t>(std::max<long>(1,std::lround(m_decoder.FrameRate()*kLiveFirstSegmentSeconds))):0u;
+            job.segmentFrames=kind==NeuralJobKind::Live?neural_job::SegmentFrames(m_decoder.FrameRate(),kLiveSegmentSeconds):0u;
+            job.firstSegmentFrames=kind==NeuralJobKind::Live?neural_job::SegmentFrames(m_decoder.FrameRate(),kLiveFirstSegmentSeconds):0u;
             // The driver verdict and the latched preflight failure are read on
             // this thread; the job only needs the answers.
-            const std::wstring driverNotice=NeuralDriverNoticeText();
-            const NeuralCacheFailureText cacheFailureText=CacheFailureText();
-            const NeuralPreflightKey preflightKey{m_opt.detectedGpu.description,m_opt.detectedGpu.driverVersion,std::string{}};
-            NeuralPreflightLatch* preflightLatch=&m_preflightLatch;
+            job.driverNotice=NeuralDriverNoticeText();
+            job.cacheFailureText=CacheFailureText();
+            job.preflightKey=NeuralPreflightKey{m_opt.detectedGpu.description,m_opt.detectedGpu.driverVersion,std::string{}};
+            job.preflightLatch=&m_preflightLatch;
             // The helper this player keeps between jobs. Reached by pointer, like
             // the latch above: one job runs at a time and the UI thread joins it
             // before touching either, so the job thread owns both while it runs.
-            ResidentNeuralHelper* residentHelper=&m_residentHelper;
-            // The request instant: every phase below is measured from here, and
-            // the total the acceptance criterion names ends when the first
-            // neural frame reaches the screen.
+            job.residentHelper=&m_residentHelper;
+            // The request instant: every phase is measured from here, and the
+            // total the acceptance criterion names ends when the first neural
+            // frame reaches the screen.
             m_coldStart=std::make_shared<NeuralColdStartRecord>();
-            const std::shared_ptr<NeuralColdStartRecord> coldStart=m_coldStart;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,temporal,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset,processingScale,captureDither,cacheQuality,sourceDeband,suppliedExposure,sourceDigestMemo=m_sourceDigestMemo](std::stop_token stop){
-                auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
-                uint32_t progressWidth=0,progressHeight=0;
-                // Set the moment the job knows its local source; every progress
-                // post after that carries it, so playback can leave the stream.
-                std::filesystem::path progressSourcePath;
-                std::string progressSourceKey;
-                auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;message->sourcePath=progressSourcePath;message->sourceKey=progressSourceKey;message->pageUrl=pageUrl;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
-                NeuralCacheManager cache(cacheRoot);if(!cache.Valid()){completion->result.detail=cacheFailureText.DescribeRoot(cache.LastFailure());goto finish;}
-                {
-                    std::filesystem::path sourcePath;
-                    if(sourceKind==MediaSourceKind::YouTube){
-                        std::string reuseKey=reuseSourceKey;
-                        // Wait for an acquisition of this same source whenever one is
-                        // in flight, not only when no key is known: the recents entry
-                        // can already name the key that acquisition is still writing,
-                        // and looking it up mid-download finds an incomplete entry. A
-                        // live session that hit that ended with no message at all.
-                        if(prefetch&&!prefetch->finished.load(std::memory_order_acquire)){
-                            LOG("Waiting for the background source acquisition.");
-                            NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;postProgress(acquiring);
-                            while(!prefetch->finished.load(std::memory_order_acquire)&&!stop.stop_requested())
-                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        }
-                        if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                        if(reuseKey.empty()&&prefetch)reuseKey=prefetch->key;
-                        if(!reuseKey.empty()){
-                            const auto cached=cache.LookupSource(reuseKey,stop);
-                            // A cancelled lookup reads as a missing copy; it must not be reported as one.
-                            if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                            if(cached&&cached->manifest.encoder==kCompleteSourcePolicy){
-                                sourcePath=cached->payloadPath;completion->sourceKey=reuseKey;
-                                LOG("Owned source cache verified; network resolution skipped.");
-                            }else if(audioUrl.empty()){
-                                // No stream pair in hand, so there is nothing to acquire
-                                // from: the UI answers this by resolving the page again.
-                                completion->cachedSourceUnavailable=true;
-                                completion->result.detail=L"The downloaded copy of this video is no longer available.";goto finish;
-                            }else{
-                                // A recorded key whose copy is gone or half-written, with
-                                // the stream this session is already playing still in hand.
-                                // Acquiring again beats ending the session.
-                                LOG("The recorded source copy is missing or incomplete; acquiring this stream again.");
-                                reuseKey.clear();
-                            }
-                        }
-                        if(sourcePath.empty()){
-                            const SourceAcquisition acquired=AcquireYouTubeSource(cache,cacheFailureText,moduleDirectory,mediaUrl,audioUrl,pageUrl,sourceQuality,expectedDurationSeconds,
-                                [&](const MediaDownloadProgress& download){
-                                    NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;
-                                    acquiring.bytes=download.bytes;acquiring.acquiredSeconds=download.seconds;
-                                    acquiring.expectedSeconds=expectedDurationSeconds;postProgress(acquiring);
-                                },stop);
-                            if(!acquired.key.empty())completion->sourceKey=acquired.key;
-                            if(acquired.path.empty()){completion->result.cancelled=acquired.cancelled;completion->result.detail=acquired.detail;goto finish;}
-                            sourcePath=acquired.path;
-                        }
-                    }else{
-                        std::error_code pathError;
-                        sourcePath=std::filesystem::absolute(std::filesystem::path(mediaUrl),pathError);
-                        if(pathError){completion->result.detail=L"The source path could not be resolved.";goto finish;}
-                    }
-                    completion->sourcePath=sourcePath;
-                    // Published to the UI thread from here, which is what lets
-                    // playback move off a stream and onto this copy.
-                    progressSourcePath=sourcePath;progressSourceKey=completion->sourceKey;
-                    // Memoised per loaded file. Every job used to full-hash
-                    // the source first, including the prepare-only cache check
-                    // and every live retarget, which is 3-5 s of dead air on a
-                    // 5 GB file each time it is asked for.
-                    const auto sourceDigest=MemoisedSourceDigest(*sourceDigestMemo,sourcePath,stop);if(!sourceDigest){completion->result.cancelled=stop.stop_requested();completion->result.detail=L"The source digest could not be computed.";goto finish;}
-                    // Metadata only: this decoder was opened and closed two lines
-                    // later, and a full open paid for an ffmpeg child for nothing.
-                    VideoDecoder metadata;if(!metadata.OpenMetadata(sourcePath.wstring(),MediaSourceKind::LocalFile,stop)){completion->result.detail=L"The source could not be decoded for neural rendering.";goto finish;}
-                    const uint32_t width=metadata.NativeWidth(),height=metadata.NativeHeight();const double fps=metadata.FrameRate(),duration=metadata.DurationSeconds();
-                    // An undeclared HD source now reaches the model as BT.709
-                    // rather than ffmpeg's BT.601 (UntaggedColorPolicy.h), so its
-                    // renders carry a term that retires the ones made before.
-                    const bool untaggedBt709=metadata.DecodesUntaggedAsBt709();
-                    // An HDR source reaches the model tone mapped to SDR now
-                    // (HdrPolicy.h), for a peak read from its metadata; its
-                    // renders carry both, and every SDR key stays as it was.
-                    const std::string toneMapTerm=metadata.ToneMapIdentityTerm();metadata.Close();
-                    if(!width||!height||!std::isfinite(fps)||fps<=0.0||!std::isfinite(duration)||duration<=0.0){completion->result.detail=L"The source metadata is incomplete.";goto finish;}progressWidth=width;progressHeight=height;
-                    NeuralRenderProgress checking{};checking.phase=NeuralRenderPhase::CheckingCache;postProgress(checking);
-                    const int64_t sourceDuration100ns=static_cast<int64_t>(std::llround(duration*10000000.0));
-                    const int64_t frameDurationTolerance=static_cast<int64_t>(std::ceil(10000000.0/fps));
-                    if(!range.Whole()&&(range.start100ns<0||range.end100ns<=range.start100ns||range.start100ns>=sourceDuration100ns)){completion->result.failure=NeuralRenderFailure::Source;completion->result.detail=L"The requested render range lies outside the source.";goto finish;}
-                    // A range render is exactly [start,end) long; a whole render matches the source.
-                    const int64_t expectedDuration100ns=range.Whole()?sourceDuration100ns:range.end100ns-range.start100ns;
-                    const auto runtimeDirectory=moduleDirectory/L"neural-runtime";
-                    const auto runtimeDigest=BuildRuntimeDigest(runtimeDirectory,LockedRuntimeFileNames(),stop);if(!runtimeDigest){completion->result.cancelled=stop.stop_requested();completion->result.detail=L"The configured neural runtime is incomplete.";goto finish;}
-                    // The lock names every drifted file; a mismatch is refused, never repaired by swapping runtimes.
-                    const std::vector<RuntimeLockCheck> lockChecks=VerifyRuntimeLock(runtimeDirectory,EmbeddedRuntimeLock(),stop);
-                    if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                    if(!RuntimeLockSatisfied(lockChecks)){const std::wstring drift=DescribeRuntimeLockDrift(lockChecks);LOG("Neural runtime lock drift; render refused: "<<WideToUtf8(drift));completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=L"The neural runtime does not match the locked stack: "+drift;goto finish;}
-                    // One writer at a time: the settings written below and the
-                    // helper's proxy log are shared per runtime directory, so a
-                    // second player instance must not interleave with this job.
-                    NeuralRuntimeLease runtimeLease(runtimeDirectory);
-                    if(!runtimeLease.Held()){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("Neural runtime is in use by another render; refusing to share it.");goto finish;}
-                    const auto overrides=RenderAddonOverrides(runtimeDirectory/L"ReShade.ini",settings,processingScale);const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",true,overrides);
-                    if(!configured.ok){completion->result.detail=L"The neural settings could not be prepared.";goto finish;}
-                    std::wstring settingsError;const auto settingsSnapshot=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini",&settingsError);
-                    if(!settingsSnapshot){completion->result.detail=settingsError.empty()?L"The neural settings could not be read.":settingsError;goto finish;}
-                    const auto settingsDigest=Sha256Bytes(*settingsSnapshot);if(!settingsDigest){completion->result.detail=L"The neural settings digest could not be computed.";goto finish;}
-                    // The pass evaluates models out of the driver store, which no
-                    // staged file covers: without these two terms a render made on
-                    // one driver is served and validated on a later one.
-                    // The pipeline term carries `bt709-export-v1` because the
-                    // capture-side encoder arguments are deliberately not part of
-                    // this key and the export colorimetry changed: renders written
-                    // before that fix carry BT.601 pixels with no colour tags, and
-                    // without moving the term they would stay valid hits under an
-                    // unchanged VERSION. `GpuSourceConversion` is the one conversion
-                    // switch that does belong in the key, because it changes what the
-                    // model is shown rather than how the result is encoded.
-                    const auto modelStore=ResolveNeuralModelStore(driverVersion,stop);
-                    LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest
-                        <<(NeuralModelStoreSettled(modelStore)?"":" (unsettled: the key may not match a later read)")
-                        <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{}));
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,KeyedNvencPreset(nvencPreset,cacheQuality),KeyedGpuColorConversion(gpuColorConversion,cacheQuality))+ProcessingScaleIdentityTerm(processingScale)+UntaggedColorIdentityTerm(untaggedBt709)+toneMapTerm+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({captureDither,cacheQuality,sourceDeband,suppliedExposure}),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;completion->temporal=temporal;
-                    LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
-                    if(const auto cached=cache.LookupRender(renderKey,stop)){
-                        // LookupRender already verifies the full payload hash and
-                        // strict feature-18 manifest. Do not decode every frame again.
-                        const ProbeResult cachedProbe=ProbeMedia(moduleDirectory,cached->payloadPath,stop,MediaProbeMode::CachedMetadata);
-                        if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                        const int64_t durationTolerance=std::max<int64_t>(1,cached->manifest.duration100ns/static_cast<int64_t>(cached->manifest.frameCount)+1);
-                        // Split by what each piece of evidence needs. The
-                        // manifest is compared in process; everything else
-                        // needs ffprobe to have run. Reading a probe that
-                        // could not run as a probe that disagreed quarantined
-                        // - and then deleted - entries whose payload had just
-                        // been hash-verified as intact.
-                        const cached_render::Evidence evidence{
-                            cachedProbe.ok,
-                            cached->manifest.sourceDigest==*sourceDigest&&cached->manifest.runtimeDigest==*runtimeDigest&&cached->manifest.settingsDigest==*settingsDigest&&cached->manifest.rangeStart100ns==range.start100ns&&cached->manifest.rangeEnd100ns==range.end100ns&&cached->manifest.guides==identity.guides,
-                            cachedProbe.width==width&&cachedProbe.height==height&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height,
-                            std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::llabs(cachedProbe.duration100ns-expectedDuration100ns)<=frameDurationTolerance};
-                        const auto verdict=cached_render::Judge(evidence);
-                        const bool valid=verdict==cached_render::Verdict::Serve;
-                        // A validated hit is answered without a helper, so the
-                        // five phases a helper measures are absent by nature.
-                        if(valid){coldStart->NoteNoHelper("cache-hit");completion->result.ok=true;completion->result.frameCount=cached->manifest.frameCount;completion->result.duration100ns=cached->manifest.duration100ns;completion->result.jobId=cached->manifest.jobId;completion->result.historyResets=cached->manifest.historyResets;completion->result.firstTimestamp100ns=cached->manifest.rangeStart100ns;completion->sourcePath=sourcePath;completion->neuralPath=cached->payloadPath;completion->cacheHit=true;completion->range={cached->manifest.rangeStart100ns,cached->manifest.rangeEnd100ns};if(!cached->manifest.receiptDigest.empty()&&std::filesystem::is_regular_file(cached->directory/L"receipt.json"))completion->receiptPath=cached->directory/L"receipt.json";goto finish;}
-                        if(verdict==cached_render::Verdict::Unverified){
-                            LOG("Neural cache entry "<<renderKey<<" could not be verified because the probe did not run ("
-                                <<WideToUtf8(cachedProbe.detail)<<"); it is kept and this render proceeds without it.");
-                        }else if(!cache.Quarantine(*cached)){completion->result.detail=L"The invalid neural cache entry could not be quarantined.";goto finish;}
-                    }
-                    // A cancelled lookup reads as a miss; it must not start a render.
-                    if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                    // The cache check every open runs: no helper, and the line
-                    // it logs is not a render that failed to measure.
-                    if(prepareOnly){coldStart->NoteNoHelper("range-selection");completion->preparedOnly=true;LOG("Neural cache miss; opening the original for range selection.");goto finish;}
-                    LOG("Neural cache miss or invalid entry; starting a new render.");
-                    // Everything above is the player's own preparation; from
-                    // here the cost belongs to the probe and the helper.
-                    coldStart->Mark(NeuralColdStartPhase::Request);
-                    // A driver below the floor cannot create feature 18 at all,
-                    // so do not pay five seconds for a probe to learn that.
-                    if(!driverNotice.empty()){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=driverNotice;LOG("Neural render refused before the probe: "<<WideToUtf8(driverNotice));goto finish;}
-                    // A stray module beside the helper is refused by the helper at
-                    // startup - after a process start and, on a first run, a
-                    // five-second preflight. It is named here instead, in the
-                    // helper's own words, and never latched: the directory is
-                    // listed again on every attempt, so removing the file is all
-                    // it takes. A directory that cannot be listed is left to the
-                    // helper, which refuses it with its own reason.
-                    if(const auto unlocked=FindUnlockedRuntimeModules(runtimeDirectory,EmbeddedRuntimeLock());unlocked&&!unlocked->empty()){
-                        completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=runtime_modules::UnlockedModulesRefusal(*unlocked);
-                        LOG("Neural render refused before the helper: "<<WideToUtf8(completion->result.detail));
-                        goto finish;
-                    }
-                    // The same runtime on the same driver fails the same way:
-                    // probe once per configuration, not once per play and seek.
-                    // A failure is remembered against the module listing too: the
-                    // digest hashes only the locked files, so a refusal caused by
-                    // anything else the loader picks up from that directory stood
-                    // until restart even after the user removed the cause.
-                    const NeuralPreflightKey runtimeKey{preflightKey.gpu,preflightKey.driver,*runtimeDigest};
-                    const NeuralPreflightKey failureKey{preflightKey.gpu,preflightKey.driver,
-                        *runtimeDigest+"|"+WideToUtf8(runtime_modules::ModuleListingIdentity(runtimeDirectory))};
-                    if(const std::wstring latched=preflightLatch->LatchedFailureDetail(failureKey);!latched.empty()){
-                        completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=latched;
-                        LOG("Neural preflight skipped; this runtime and driver already failed: "<<WideToUtf8(latched));
-                        goto finish;
-                    }
-                    const auto workerExecutable=runtimeDirectory/L"NeuralWorker.exe";
-                    // A pass is as reusable as a failure: the probe answers for a
-                    // GPU, a driver and a runtime, not for a playback session, and
-                    // paying five seconds per toggle for the same answer is what
-                    // made the picture take sixteen seconds to appear.
-                    std::string preflightJson=preflightLatch->LatchedSuccessJson(runtimeKey);
-                    if(preflightJson.empty())preflightJson=LoadNeuralPreflightReceipt(cacheRoot,runtimeKey);
-                    if(!preflightJson.empty()){
-                        preflightLatch->RecordSuccess(runtimeKey,preflightJson);
-                        preflightJson=MarkReusedNeuralPreflight(preflightJson);
-                        LOG("Neural preflight skipped; this runtime and driver already armed feature 18.");
-                    }else{
-                        // The feature-18 probe needs the GPU; only a cache miss pays for it.
-                        // It also needs the runtime to itself: it loads its own proxy and
-                        // creates its own feature 18, and an idle resident helper from an
-                        // earlier job is still holding the device and the session log. That
-                        // helper is on its way out regardless - a probe only runs when the
-                        // runtime identity in its key changed.
-                        residentHelper->Release();
-                        NeuralRenderProgress preflighting{};preflighting.phase=NeuralRenderPhase::Preflight;postProgress(preflighting);
-                        const NeuralPreflightResult preflight=RunNeuralPreflight(workerExecutable,stop);
-                        // Marked before the verdict is read: a probe that failed
-                        // or was cancelled still cost what it cost.
-                        coldStart->Mark(NeuralColdStartPhase::Preflight);
-                        if(preflight.cancelled||stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                        if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;preflightLatch->RecordFailure(failureKey,completion->result.detail);LOG("Neural preflight failed: cause="<<NeuralPreflightCauseName(preflight.cause)<<" "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
-                        preflightLatch->RecordSuccess(runtimeKey,preflight.json);
-                        StoreNeuralPreflightReceipt(cacheRoot,runtimeKey,preflight.json);
-                        preflightJson=preflight.json;
-                    }
-                    const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=cacheFailureText.Describe(cache);goto finish;}
-                    {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
-                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.temporal=temporal;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.firstSegmentFrames=liveIndex?firstSegmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;request.processingScale=processingScale;request.captureDither=captureDither;request.quality=cacheQuality;request.sourceDeband=sourceDeband;request.suppliedExposure=suppliedExposure;
-                    NeuralRenderReceiptInputs receipt{preflightJson,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
-                    NeuralSegmentSink sink{};
-                    if(liveIndex){
-                        // Every finalized segment is playable on arrival; the
-                        // player reads them behind the render head.
-                        sink.onSegment=[&](const NeuralRenderSegment& segment){
-                            NeuralSegment entry{};entry.path=liveDirectory/segment.fileName;entry.runId=liveRunId;entry.index=segment.index;entry.firstFrameNumber=segment.firstFrameNumber;entry.firstTimestamp100ns=segment.firstTimestamp100ns;entry.end100ns=segment.end100ns;entry.frameCount=segment.frameCount;
-                            LOG("Neural segment run="<<liveRunId<<" index="<<entry.index<<" frames="<<segment.frameCount<<" firstFrame="<<segment.firstFrameNumber<<" span=["<<double(segment.firstTimestamp100ns)*1e-7<<","<<double(segment.end100ns)*1e-7<<") file="<<WideToUtf8(segment.fileName));
-                            liveIndex->Append(std::move(entry));
-                            // The first file the player can show: everything
-                            // after it is the player's own attach cost.
-                            coldStart->Ready();
-                        };
-                        // A relaunched worker republishes from its own index 0,
-                        // so only this run's segments are discarded; coverage any
-                        // other run left behind stays valid wherever it sits.
-                        sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding run "<<liveRunId<<"'s published segments.");liveIndex->DropRun(liveRunId);};
-                    }
-                    NeuralJobHooks hooks{};
-                    hooks.progress=postProgress;
-                    hooks.segments=sink;
-                    // The helper holds this job from here. For a launched one
-                    // that is its created process; for a reused one it is the
-                    // command frame, which is also the whole of what a warm
-                    // toggle now pays before the helper's own clock starts. The
-                    // plan is noted here rather than after the job, because an
-                    // active session reports its cold start when the first frame
-                    // reaches the screen - seconds before this call returns.
-                    hooks.accepted=[&](resident_helper::HelperPlan plan){
-                        coldStart->Mark(NeuralColdStartPhase::Launch);
-                        coldStart->NoteHelper(std::string(resident_helper::HelperPlanName(plan)));
-                    };
-                    // Merged the moment the helper reports it, which is when
-                    // its first output file exists. Merging only after the
-                    // call returned put the helper's five phases seconds
-                    // behind the attach: an active session presents its
-                    // first frame while the render runs on, and the log line
-                    // written there carried five dashes in ten of ten
-                    // sessions while receipt.json for the same render
-                    // carried all five numbers. A reused helper reports only
-                    // firstOutput, and the two phases it did not pay stay
-                    // absent rather than becoming zeroes.
-                    hooks.helperTimeline=[&](const NeuralColdStartTimeline& helper){coldStart->Merge(helper);};
-                    // The residency key: the runtime this job locked, the files
-                    // it verified, and the settings INI written above. ReShade
-                    // and RenoDX read that INI at process start, so a change to
-                    // it is a different helper and not a different job.
-                    const auto helperKey=resident_helper::MakeHelperKey(runtimeDirectory.wstring(),*runtimeDigest,*settingsDigest);
-                    resident_helper::HelperPlan helperPlan=resident_helper::HelperPlan::Launch;
-                    completion->result=residentHelper->RunJob(workerExecutable,helperKey,request,hooks,stop,&helperPlan);
-                    LOG("Neural helper plan="<<resident_helper::HelperPlanName(helperPlan)<<" resident="<<residentHelper->Resident()<<".");
-                    // Nothing is marked finished here any more: one job fills one
-                    // hole, and whether the session has more to do is a question
-                    // about coverage, answered on the UI thread.
-                    // Again for a timeline that arrived too late to be reported
-                    // over the pipe - a crash or a cancel the launcher
-                    // synthesized a result for. Merging twice is idempotent.
-                    coldStart->Merge(completion->result.coldStart);
-                    completion->result.coldStart=coldStart->Snapshot();
-                    receipt.result=completion->result;receipt.finished=std::chrono::system_clock::now();
-                    LOG("Neural render receipt: "<<SummarizeNeuralReceiptForLog(receipt));
-                    if(!completion->result.ok){cache.MarkInvalid(*staging);goto finish;}
-                    // The entry is keyed, labelled and proven by THIS run: its range, its
-                    // frame count, its evidence counters. So it must contain exactly the
-                    // segments this run published. A resumed session hands earlier coverage
-                    // to the next job for playback to keep reading, and joining that in too
-                    // produced a file longer than the label - one session joined 46 files of
-                    // 2622 frames and 87.4 s against a result of 1647 frames and 54.9 s, and
-                    // the gate correctly refused the render it had just finished.
-                    //
-                    // Selected by run id rather than by position: segments are held sorted
-                    // by timestamp, so a run that filled a hole behind an earlier region is
-                    // not the tail of the index, and a positional slice would take the wrong
-                    // files. The scan stays in timeline order, which is what a join needs.
-                    // The next hole cannot start until this returns, so the phases
-                    // are timed: one driven session sat 18 s between a finished
-                    // render and the next one with the GPU idle and a hole left.
-                    const auto publishStart=std::chrono::steady_clock::now();
-                    const auto msSince=[](std::chrono::steady_clock::time_point from){
-                        return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-from).count();};
-                    std::vector<std::filesystem::path> parts;
-                    if(liveIndex)
-                        for(size_t position=0;position<liveIndex->Count();++position)
-                            if(const auto segment=liveIndex->At(position);segment&&segment->runId==liveRunId)
-                                parts.push_back(segment->path);
-                    const size_t joinedParts=liveIndex?parts.size():size_t{1};
-                    if(liveIndex&&(parts.empty()||ConcatenateMedia(moduleDirectory,parts,*staging/L"neural.mkv",stop)!=EncodeError::None)){
-                        cache.MarkInvalid(*staging);completion->result.ok=false;
-                        completion->result.detail=L"The rendered segments could not be joined into a cache entry.";goto finish;
-                    }
-                    const double concatMs=msSince(publishStart);
-                    const auto finalSettings=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"Neural settings changed during rendering. Try the render again.";goto finish;}
-                    const std::string receiptJson=BuildNeuralRenderReceiptJson(receipt);const auto receiptDigest=Sha256Bytes(receiptJson);
-                    {std::ofstream receiptFile(*staging/L"receipt.json",std::ios::binary|std::ios::trunc);receiptFile.write(receiptJson.data(),static_cast<std::streamsize>(receiptJson.size()));if(!receiptFile||!receiptDigest){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The neural render receipt could not be staged.";goto finish;}}
-                    const auto probeStart=std::chrono::steady_clock::now();
-                    const ProbeResult probe=ProbeMedia(moduleDirectory,*staging/L"neural.mkv",stop);
-                    const double probeMs=msSince(probeStart);
-                    if(stop.stop_requested()){cache.MarkInvalid(*staging);completion->result.cancelled=true;completion->result.ok=false;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                    NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest;manifest.runtimeDigest=*runtimeDigest;manifest.encoder=completion->result.encoder==EncoderKind::HevcNvenc?"hevc_nvenc":completion->result.encoder==EncoderKind::Ffv1?"ffv1":"h264_software";manifest.width=width;manifest.height=height;manifest.frameCount=completion->result.frameCount;manifest.duration100ns=completion->result.duration100ns;manifest.nativeEvaluations=completion->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
-                    manifest.settingsDigest=*settingsDigest;manifest.rangeStart100ns=range.start100ns;manifest.rangeEnd100ns=range.end100ns;manifest.guides=identity.guides;manifest.jobId=generation;manifest.historyResets=completion->result.historyResets;manifest.receiptDigest=*receiptDigest;
-                    // The key's environment terms, so eviction can tell this entry from one a driver
-                    // update, a model refresh or an upgrade of this installation has orphaned.
-                    manifest.environment=NeuralCacheEnvironmentFor(identity);
-                    const int64_t joinedDurationTolerance=JoinedMediaDurationTolerance100ns(fps,joinedParts);
-                    const bool probeMatches=probe.ok&&probe.width==width&&probe.height==height&&probe.frameCount==completion->result.frameCount&&NeuralPublishDurationsMatch(probe.duration100ns,completion->result.duration100ns,expectedDuration100ns,joinedDurationTolerance);
-                    NeuralCacheManifest publishCandidate=manifest;publishCandidate.kind=NeuralCacheEntryKind::Render;publishCandidate.state=NeuralCacheState::Complete;publishCandidate.neuralDigest=std::string(64,'0');
-                    const bool manifestReusable=IsReusableNeuralCacheManifest(publishCandidate);
-                    const bool gate=CanPublishNeuralCompletion(completion->result.ok,probeMatches,manifestReusable);
-                    NeuralCachePromotion promotion{};
-                    const auto promoteStart=std::chrono::steady_clock::now();
-                    const bool published=gate&&cache.PromoteRender(renderKey,*staging,manifest,&promotion);
-                    LOG("Neural publish timing: parts="<<joinedParts<<" concatMs="<<concatMs<<" probeMs="<<probeMs
-                        <<" promoteMs="<<msSince(promoteStart)<<" totalMs="<<msSince(publishStart)<<".");
-                    if(!published){
-                        // This gate discarded a finished render once and left nothing to diagnose it
-                        // with; then it did it again for a rename an antivirus scan was holding, and
-                        // the numbers below all agreed. Both halves of the verdict are named now.
-                        LOG("Neural publish refused: gate="<<gate<<" promoteStage="<<NeuralCachePromotionStageName(promotion.stage)
-                            <<" promoteError="<<promotion.win32Error<<" renameAttempts="<<promotion.attempts
-                            <<" renderOk="<<completion->result.ok<<" manifestReusable="<<manifestReusable<<" probeOk="<<probe.ok<<" probe="<<probe.width<<"x"<<probe.height<<" expected="<<width<<"x"<<height<<" probeFrames="<<probe.frameCount<<" resultFrames="<<completion->result.frameCount<<" probeDuration="<<probe.duration100ns<<" resultDuration="<<completion->result.duration100ns<<" expectedDuration="<<expectedDuration100ns<<" tolerance="<<joinedDurationTolerance<<" parts="<<joinedParts<<".");
-                        if(!cache.MarkInvalid(*staging))LOG("The refused staging directory could not be set aside either: "<<WideToUtf8(staging->wstring()));
-                        completion->result.ok=false;completion->result.detail=L"The neural video failed final cache validation.";goto finish;
-                    }
-                    if(promotion.attempts>1)LOG("Neural cache entry published after "<<promotion.attempts<<" rename attempts; the entry was held by another process.");
-                    if(promotion.entry){completion->neuralPath=promotion.entry->payloadPath;completion->receiptPath=promotion.entry->directory/L"receipt.json";}else{completion->result.ok=false;completion->result.detail=L"The neural cache entry could not be reopened.";}
-                    // The entry IS this run's segments, joined: same frames, same
-                    // timestamps. Serving the run from it retires the segments, so
-                    // a session stops holding every rendered byte twice until it is
-                    // released - and a retained one across toggles. The UI thread
-                    // deletes them once no decoder has them open.
-                    if(liveIndex&&promotion.entry){
-                        std::error_code sizeError;const auto entryBytes=std::filesystem::file_size(promotion.entry->payloadPath,sizeError);
-                        const bool replaced=liveIndex->ReplaceRun(liveRunId,promotion.entry->payloadPath);
-                        LOG("Live run "<<liveRunId<<(replaced?" now plays from its published entry; ":" keeps playing its segments; the entry could not replace ")
-                            <<joinedParts<<" segment files"<<(replaced?" retired":"")<<". entryBytes="<<(sizeError?uintmax_t{0}:entryBytes)<<".");
-                    }
-                }
-            finish:
-                // A cache hit, a refusal or a prepared open never reached a
-                // helper, so this is where the player's own work ends.
-                coldStart->MarkIfAbsent(NeuralColdStartPhase::Request);
-                completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
-            });
+            job.coldStart=m_coldStart;
+            job.sourceDigestMemo=m_sourceDigestMemo;
+            m_neuralWorker=std::jthread([job=std::move(job)](std::stop_token stop){NeuralJobRun(job,std::move(stop)).Run();});
         }catch(const std::system_error&){m_neuralLifecycle.Invalidate();SyncSourceActionAvailability();const std::wstring message=L"The neural pre-render worker could not start.";MessageBoxW(m_hwnd,message.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);return false;}
         return true;
     }

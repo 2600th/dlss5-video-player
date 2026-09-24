@@ -79,6 +79,7 @@
 #include "RenderPacePolicy.h"
 #include "PlayerCommandLine.h"
 #include "PlaybackTickPolicy.h"
+#include "NeuralJobPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -13410,6 +13411,118 @@ void seek_requests_coalesce_and_a_seek_at_the_end_retries_before_it_test()
     CHECK(seek_policy::RestartsAudioAfterSeek(false));
 }
 
+// P3.4: the decisions inside the player's neural job, out of the 420-line
+// thread lambda StartNeuralJob used to be.
+void neural_job_checks_the_range_and_what_a_cached_entry_must_agree_with_test()
+{
+    CHECK_EQ(30u, neural_job::SegmentFrames(30.0, 1.0));
+    CHECK_EQ(60u, neural_job::SegmentFrames(29.97, 2.0));
+    CHECK_EQ(1u, neural_job::SegmentFrames(0.1, 1.0));
+
+    const int64_t source = 100000000;  // 10 s
+    CHECK(!neural_job::RangeOutsideSource({}, source));
+    CHECK(!neural_job::RangeOutsideSource({0, 5000000}, source));
+    CHECK(!neural_job::RangeOutsideSource({90000000, 200000000}, source));
+    CHECK(neural_job::RangeOutsideSource({-1, 5000000}, source));
+    CHECK(neural_job::RangeOutsideSource({5000000, 5000000}, source));
+    CHECK(neural_job::RangeOutsideSource({source, source + 1}, source));
+    CHECK_EQ(source, neural_job::ExpectedDuration100ns({}, source));
+    CHECK_EQ(int64_t{15000000}, neural_job::ExpectedDuration100ns({15000000, 30000000}, source));
+    CHECK_EQ(int64_t{333334}, neural_job::FrameDurationTolerance100ns(30.0));
+
+    // A 1080p 10 s entry of 300 frames, and the probe of a healthy payload.
+    NeuralCacheManifest manifest{};
+    manifest.sourceDigest = "s"; manifest.runtimeDigest = "r"; manifest.settingsDigest = "k";
+    manifest.guides = "mv=1"; manifest.width = 1920; manifest.height = 1080;
+    manifest.frameCount = 300; manifest.duration100ns = source;
+    ProbeResult probe{};
+    probe.ok = true; probe.width = 1920; probe.height = 1080; probe.duration100ns = source;
+    const neural_job::Expected expected{"s", "r", "k", {}, "mv=1", 1920, 1080, source,
+                                        neural_job::FrameDurationTolerance100ns(30.0)};
+    CHECK(cached_render::Judge(neural_job::CachedRenderEvidence(manifest, probe, expected)) ==
+          cached_render::Verdict::Serve);
+
+    // A probe that could not run is not a probe that disagreed: the entry,
+    // whose payload hash was just verified, is kept rather than quarantined.
+    ProbeResult unrun{};
+    unrun.detail = L"ffprobe could not be started";
+    const auto unverified = neural_job::CachedRenderEvidence(manifest, unrun, expected);
+    CHECK(!unverified.probeRan);
+    CHECK(unverified.manifestMatches);
+    CHECK(cached_render::Judge(unverified) == cached_render::Verdict::Unverified);
+
+    // Each identity term the manifest carries has to agree.
+    for (int term = 0; term < 5; ++term) {
+        neural_job::Expected other = expected;
+        if (term == 0) other.sourceDigest = "x";
+        if (term == 1) other.runtimeDigest = "x";
+        if (term == 2) other.settingsDigest = "x";
+        if (term == 3) other.range = {0, 50000000};
+        if (term == 4) other.guides = "mv=0";
+        const auto evidence = neural_job::CachedRenderEvidence(manifest, probe, other);
+        CHECK(!evidence.manifestMatches);
+        CHECK(cached_render::Judge(evidence) == cached_render::Verdict::Discard);
+    }
+    // Geometry: the probe against both the job and the manifest.
+    ProbeResult small = probe;
+    small.width = 1280; small.height = 720;
+    CHECK(!neural_job::CachedRenderEvidence(manifest, small, expected).geometryMatches);
+    // Duration: within one frame of the manifest's own frame duration, and
+    // within one frame of what this job expects.
+    ProbeResult longer = probe;
+    longer.duration100ns = source + source / 300 + 1;
+    CHECK(neural_job::CachedRenderEvidence(manifest, longer, expected).durationMatches);
+    longer.duration100ns = source + source / 300 + 2;
+    CHECK(!neural_job::CachedRenderEvidence(manifest, longer, expected).durationMatches);
+    neural_job::Expected ranged = expected;
+    ranged.duration100ns = source / 2;
+    CHECK(!neural_job::CachedRenderEvidence(manifest, probe, ranged).durationMatches);
+
+    CHECK(std::string(neural_job::CacheEncoderName(EncoderKind::HevcNvenc)) == "hevc_nvenc");
+    CHECK(std::string(neural_job::CacheEncoderName(EncoderKind::Ffv1)) == "ffv1");
+    CHECK(std::string(neural_job::CacheEncoderName(EncoderKind::H264Software)) == "h264_software");
+}
+
+// A resumed session's index holds earlier runs' coverage beside this run's,
+// sorted by time, and the published entry must be exactly this run's files:
+// joining the others in once produced 2622 frames against a result of 1647.
+void neural_job_publishes_only_its_own_run_and_only_what_it_reported_test()
+{
+    NeuralSegmentIndex index;
+    const auto add = [&](uint64_t run, int64_t start, const wchar_t* name) {
+        NeuralSegment segment{};
+        segment.path = name; segment.runId = run; segment.firstTimestamp100ns = start;
+        segment.end100ns = start + 10000000; segment.frameCount = 30;
+        index.Append(std::move(segment));
+    };
+    add(1, 0, L"r1-a.mkv");
+    add(2, 50000000, L"r2-a.mkv");
+    add(1, 10000000, L"r1-b.mkv");
+    // Run 2 filled a hole behind run 3: it is not the tail of the index.
+    add(3, 80000000, L"r3-a.mkv");
+    add(2, 60000000, L"r2-b.mkv");
+    const auto run2 = neural_job::SegmentsOfRun(index, 2);
+    CHECK_EQ(size_t{2}, run2.size());
+    if (run2.size() == 2) {
+        CHECK(run2[0] == L"r2-a.mkv");
+        CHECK(run2[1] == L"r2-b.mkv");
+    }
+    CHECK_EQ(size_t{2}, neural_job::SegmentsOfRun(index, 1).size());
+    CHECK(neural_job::SegmentsOfRun(index, 9).empty());
+
+    ProbeResult probe{};
+    probe.ok = true; probe.width = 1920; probe.height = 1080; probe.frameCount = 60;
+    probe.duration100ns = 20000000;
+    const int64_t tolerance = JoinedMediaDurationTolerance100ns(30.0, 2);
+    CHECK(neural_job::PublishedProbeMatches(probe, 1920, 1080, 60, 20000000, 20000000, tolerance));
+    CHECK(!neural_job::PublishedProbeMatches(probe, 1920, 1080, 61, 20000000, 20000000, tolerance));
+    CHECK(!neural_job::PublishedProbeMatches(probe, 1280, 1080, 60, 20000000, 20000000, tolerance));
+    CHECK(!neural_job::PublishedProbeMatches(probe, 1920, 1080, 60, 20000000, 30000000, tolerance));
+    ProbeResult failed = probe;
+    failed.ok = false;
+    CHECK(!neural_job::PublishedProbeMatches(failed, 1920, 1080, 60, 20000000, 20000000, tolerance));
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -13769,6 +13882,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(playback_clock_reads_audio_only_while_playing_and_clamps_to_the_file_test),
     TEST_CASE(playback_tick_seeks_first_presents_paused_frames_once_and_times_frames_test),
     TEST_CASE(seek_requests_coalesce_and_a_seek_at_the_end_retries_before_it_test),
+    TEST_CASE(neural_job_checks_the_range_and_what_a_cached_entry_must_agree_with_test),
+    TEST_CASE(neural_job_publishes_only_its_own_run_and_only_what_it_reported_test),
 };
 
 
