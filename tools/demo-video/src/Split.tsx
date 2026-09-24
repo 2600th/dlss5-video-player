@@ -50,7 +50,7 @@ export const Split: React.FC<{plate: Plate; divider: number; scale?: number; ori
         name="LabelNeural"
         style={{position: 'absolute', left: x + 22, top: 44, opacity: labels * (divider < 0.92 ? 1 : 0), ...chip, color: '#120602', backgroundColor: ink.flag}}
       >
-        DLSS 5 NEURAL
+        DLSS 5
       </Interactive.Div>
     </AbsoluteFill>
   );

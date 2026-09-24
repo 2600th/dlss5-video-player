@@ -5,7 +5,7 @@
   "scripts": {
     "preview": "remotion studio --no-open",
     "render": "remotion render src/index.tsx Demo ../../docs/media/neural-comparison-demo.mp4",
-    "poster": "remotion still src/index.tsx Demo ../../docs/media/neural-comparison-poster.jpg --frame=110"
+    "poster": "remotion still src/index.tsx Demo ../../docs/media/neural-comparison-poster.jpg --frame=45"
   },
   "dependencies": {
     "@remotion/cli": "4.0.520",

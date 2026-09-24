@@ -3,72 +3,78 @@
 [Watch the MP4](neural-comparison-demo.mp4) ·
 [Looping preview](neural-comparison-preview.webp) ·
 [Poster](neural-comparison-poster.jpg) ·
+[Comparison stills](#comparison-stills) ·
 [How to rebuild it](../../tools/demo-video/README.md)
 
 [![Player demonstration poster](neural-comparison-poster.jpg)](neural-comparison-demo.mp4)
 
-A 19.7-second, silent video: 1920x1080, 30 fps, 591 frames, H.264. GitHub
+A 24.8-second, silent video: 1920x1080, 30 fps, 744 frames, H.264. GitHub
 strips `<video>` tags from Markdown, so the README shows
-`neural-comparison-preview.webp` instead. It's the same cut at 880 px and 10 fps.
+`neural-comparison-preview.webp` instead: the same cut at 800 px and 8 fps.
+Everything in it was rendered at the player's **default** neural settings.
 
 ## What's in it
 
 | Time | Scene |
 | --- | --- |
-| 0:00–0:04.5 | *The Matrix*, one paused frame of Trinity. The divider sweeps across her face, revealing the render, while the shot slowly pushes in |
-| 0:04.5–0:06.9 | The one-line pitch, over that frame's render |
-| 0:06.9–0:09.7 | *GTA VI* Trailer 2: Lucia walking toward the camera, playing at full speed with the divider down her face |
-| 0:09.7–0:13.3 | The same shot paused and magnified about 2x |
-| 0:13.3–0:16.3 | GTA VI in hard daylight, a man mid-sentence |
-| 0:16.3–0:19.7 | Download card, including the settings used |
+| 0:00–0:04 | *007 First Light*, one paused frame (1122). The divider is across the face from the first frame and sweeps on while the shot slowly pushes in |
+| 0:04–0:06.8 | *GTA VI* Trailer 2: Lucia walking toward the camera, playing at full speed (frames 1896–1979) with the divider down the middle, 1:1 source pixels |
+| 0:06.8–0:09.8 | The player's **Difference** view (x4, brightness only) of the 007 frame |
+| 0:09.8–0:12.6 | The player's **Side by side** view of the same frame |
+| 0:12.6–0:16.0 | The player's **loupe** on the same frame, then a punch-in on its two circles |
+| 0:16.0–0:21.0 | **Renders while you watch**: a live render of a 16-second GTA VI clip, the picture and the timeline, at 2x speed |
+| 0:21.0–0:24.8 | End card |
 
 ## How it was made
 
-Nothing in the video is a screen recording or a mock-up. Every picture is one
-of two things:
+There are two kinds of picture, and nothing else:
 
-- **Left of the divider:** the source file, decoded.
-- **Right of the divider:** the same frame from the render the v0.25.0 player
-  saved for that file. Each trailer was opened in the player, neural rendering
-  was switched on, and the render was left to finish.
+- **The split scenes** (0:00 and 0:04). Left of the divider is the source,
+  decoded; right is the same frame of the render the player saved to its cache
+  for that source. Both halves have the same frame and the same crop, and
+  zooms apply to both equally. The render starts at the source's first frame
+  (a whole-video render), so source frame *n* is render frame *n*;
+  `prepare-inputs.py` checks that by picture and stops if a pair is closest at
+  any other offset.
+- **The player scenes** (0:06.8 onwards). Window captures of the player itself,
+  at 150% scaling, taken by handle with the method of
+  `tools/verification/capture-window.ps1`. They are cropped to the title bar,
+  the picture and the compare bar, scaled and pushed in; the status row is
+  cropped off. The Difference, Side by side and loupe captures are the ones
+  described in [screenshot provenance](../screenshots/README.md) (frame 1122,
+  after the `f2ae230` playback fix).
 
-Both halves use the same frame and the same crop, so the divider is the only
-difference. Zooms apply to both halves equally. Nothing was retouched,
-sharpened or colour-corrected, and no clip was slowed, looped or frozen.
+The render band scene is a 16-second clip of the GTA VI source (0:14 to 0:30),
+cut by stream copy so it is the same encode, opened in the player as a local
+file with no render yet. Neural rendering was switched on at the first frame and
+playback started; the window was captured every 200 ms. In the player's log the
+live render attached 8.3 s after the key press and covered the whole clip 15 s
+after it, while the video played. The scene uses the 50 captures from the
+moment playback attached (10 s) shown over 5 s, and says 2x on screen. The
+GPU was not shared with anything else at the time: an earlier attempt, taken
+while another program held most of the GPU's memory, was thrown away.
 
-Getting the frames to line up is simple: a render starts at its range's first
-frame, so source frame *n* is render frame *n* − round(start × fps). That's 60
-frames for The Matrix and 54 for GTA VI. `prepare-inputs.py` also checks this
-by picture and stops if the pair isn't closest at that offset.
+Nothing was retouched, sharpened or colour-corrected. The GTA VI clip is not
+slowed, looped or frozen; the paused frames are paused frames.
 
 | Source | Video | Render |
 | --- | --- | --- |
-| [The Matrix \| 4K Trailer](https://www.youtube.com/watch?v=nUEQNVV3Gfs), Warner Bros. | 2560x1440 VP9, 23.976 fps, 147 s | 3,472 of 3,472 frames verified |
-| [Grand Theft Auto VI Trailer 2](https://www.youtube.com/watch?v=VQRLujxTm3c), Rockstar Games | 2560x1440 VP9, 30 fps, 167 s | 4,948 of 4,948 frames verified |
+| [007 First Light - Story Trailer](https://www.youtube.com/watch?v=trvIyyFt_MM), PlayStation | 2560x1440 VP9, 59.94 fps, 96.5 s | 5,784 of 5,784 frames verified |
+| [Grand Theft Auto VI Trailer 2](https://www.youtube.com/watch?v=VQRLujxTm3c), Rockstar Games | 2560x1440 VP9, 30 fps, 166.8 s | 5,002 of 5,002 frames verified |
 
-Both renders ran on an RTX 4080 SUPER (driver 610.47, RenoDX 6.5.3,
-DLSS-NR 310.8.0), with the model taking about 11 ms of GPU time per frame. Intensity, Local tone and Local
-structure were set to 2.0 instead of the default 1.0, because that's how this
-machine is set up. At the defaults the change is subtler. Full digests are in
-[screenshot provenance](../screenshots/README.md).
+Both were fetched through the player's own YouTube feature at its **Auto**
+quality and rendered whole with **Convert whole video to neural video** at
+default settings (settings digest `96bf471a…` in the cache manifest) on an RTX
+4080 SUPER, driver 610.47, runtime lock `310.8.SF-v2`, by the player at
+`dced888`. The source files' SHA-256 and the renders' cache keys are in the
+[stills' provenance records](stills/). The player scenes and the band clip were
+captured the same day with `f2ae230` applied.
 
-## Choosing the frames
-
-Both trailers were scanned second by second, then frame by frame around each
-candidate, for open eyes, a gaze into the lens, focus and motion blur.
-
-| Scene | Source frames | Why this one |
-| --- | --- | --- |
-| Trinity | Matrix 2116 | Eyes on the lens, even light, a wall of gun racks behind her |
-| Lucia, walking | GTA VI 1896–1979 | Golden hour, walking toward camera, chain-link mesh behind |
-| Lucia, 2x | GTA VI 1940 | The moment in that walk she looks straight at the camera |
-| Daylight | GTA VI 420–509 | Harsh midday light on a face mid-sentence |
-
-Some candidates were left out. Morpheus's close-up at 1:12 is the hardest shot
-in either trailer, but the render darkens the shadow side of his face, so it
-doesn't make a good opener. Shirtless, club and bedroom shots in GTA VI
-(1:11–1:18, 1:34–1:41, 2:03–2:04) fall outside this repository's content
-standard. Everyone on screen is fully clothed.
+The previous cut (22 September, *The Matrix* and GTA VI at Intensity, Local
+tone and Local structure 2.0 on v0.25.0) is in this file's git history. The one
+before it (12 September) is kept unchanged at
+[`tools/benchmark/fixtures/demo-capture-20260912.mp4`](../../tools/benchmark/fixtures/README.md),
+because the benchmark corpus is cut from it.
 
 ## Comparison stills
 
@@ -130,11 +136,7 @@ Renders: RTX 4080 SUPER, driver 610.47 (`32.0.16.1047`), runtime lock
 This is an unofficial RenoDX/ReShade experiment, not an NVIDIA product. *The
 Matrix* footage is © Warner Bros., *Grand Theft Auto VI* © Rockstar Games,
 *007 First Light* © IO Interactive, *Resident Evil Requiem* © Capcom and
-*Assassin's Creed Shadows* © Ubisoft. They're used to document the software, and the source-code
-licence doesn't relicense them. Only the finished video, preview, poster and
-edit source are in Git. The sources and renders are not.
-
-The previous cut (12 September, *The Godfather* and GTA VI on the v0.21 player)
-is kept unchanged at
-[`tools/benchmark/fixtures/demo-capture-20260912.mp4`](../../tools/benchmark/fixtures/README.md),
-because the benchmark corpus is cut from it.
+*Assassin's Creed Shadows* © Ubisoft. They're used to document the software,
+and the source-code licence doesn't relicense them. Only the finished video,
+preview, poster, stills and edit source are in Git. The sources and renders are
+not.

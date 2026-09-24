@@ -9,6 +9,7 @@ export const ink = {
   dim: '#a4a099',
   meta: '#837e77',
   flag: '#ff6a1a',
+  line: '#ffffff26',
 };
 
 export const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;

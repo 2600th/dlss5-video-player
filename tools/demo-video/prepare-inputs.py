@@ -1,7 +1,7 @@
-"""Build public/ for the composition from two sources and the player's renders.
+"""Build public/ for the composition from two trailers, their renders and player captures.
 
-Every input is a matched pair cut from a source file and the render the shipping
-player wrote for that file (a cache entry: renders/<key>/neural.mkv beside its
+Every source/render input is a matched pair cut from a source file and the render
+the player wrote for that file (a cache entry: renders/<key>/neural.mkv beside its
 manifest.json). A render starts at its range's first frame, so source frame n is
 render frame n - offset, offset = round(rangeStart * fps) from the manifest. The
 offset is then checked by picture: the pair must differ least at that offset
@@ -11,10 +11,16 @@ Both sides get the same frame indices and the same crop. Stills are lossless
 PNGs of the whole 2560x1440 frame; clips are one H.264 CRF 10 encode each. No
 scaling, retouching or tonal adjustment happens here.
 
-    python prepare-inputs.py --matrix SOURCE.mp4 RENDER_DIR --gta6 SOURCE.mp4 RENDER_DIR
+The player captures (the Difference, Side by side and loupe views, and the
+render band filling during a live session) are window captures made with
+tools/verification/capture-window.ps1. They are copied as they are: PNG in,
+PNG out.
+
+    python prepare-inputs.py --bond SOURCE RENDER_DIR --re SOURCE RENDER_DIR \
+                             --gta6 SOURCE RENDER_DIR --captures CAPTURE_DIR
 
 Needs Python with numpy and Pillow, and FFmpeg (the repository's
-external/ffmpeg/bin is used when present).
+external/ffmpeg/bin is used when present, or --ffmpeg-bin).
 """
 import argparse, json, shutil, subprocess
 from pathlib import Path
@@ -23,14 +29,23 @@ from PIL import Image
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-BIN = REPO / 'external' / 'ffmpeg' / 'bin'
-FF = str(BIN / 'ffmpeg.exe') if (BIN / 'ffmpeg.exe').exists() else 'ffmpeg'
-FPS = {'matrix': 24000 / 1001, 'gta6': 30.0}
+FPS = {'bond': 60.0, 'gta6': 30.0}
 
-# name, source frame, kind, (first frame, count, crop x,y,w,h) for clips
-STILLS = [('matrix', 2116), ('gta6', 1940)]
-CLIPS = [('gta6', 'lucia', 1896, 84, (130, 150, 1920, 1080)),
-         ('gta6', 'florida', 420, 90, (560, 180, 1920, 1080))]
+# name, source frame: whole-frame stills
+STILLS = [('bond', 1122)]
+# name, clip, first frame, count, crop x,y,w,h
+CLIPS = [('gta6', 'lucia', 1896, 84, (130, 150, 1920, 1080))]
+# The captures the composition uses, by the names capture-window gave them.
+CAPTURES = ['difference.png', 'side-by-side.png', 'loupe.png']
+BAND_FRAMES = 'band-*.png'
+
+parser = argparse.ArgumentParser()
+for name in FPS:
+    parser.add_argument(f'--{name}', nargs=2, type=Path, required=True, metavar=('SOURCE', 'RENDER_DIR'))
+parser.add_argument('--captures', type=Path, required=True)
+parser.add_argument('--ffmpeg-bin', type=Path, default=REPO / 'external' / 'ffmpeg' / 'bin')
+args = parser.parse_args()
+FF = str(args.ffmpeg_bin / 'ffmpeg.exe') if (args.ffmpeg_bin / 'ffmpeg.exe').exists() else 'ffmpeg'
 
 
 def frame(path, index):
@@ -39,12 +54,11 @@ def frame(path, index):
     return np.frombuffer(raw, np.uint8).reshape(1440, 2560, 3)
 
 
-def offset_of(name, source, render):
+def offset_of(name, source, render, probe):
     manifest = json.loads((render / 'manifest.json').read_text())
     if manifest.get('state') != 'complete' or manifest['verifiedNeuralFrames'] != manifest['frameCount']:
         raise SystemExit(f'{name}: the render is not a complete, fully verified entry')
     offset = round(manifest['rangeStart100ns'] / 1e7 * FPS[name])
-    probe = STILLS[[s[0] for s in STILLS].index(name)][1]
     a = frame(source, probe).astype(np.int16)
     mad = {d: np.abs(a - frame(render / 'neural.mkv', probe - offset + d).astype(np.int16)).mean() for d in (-1, 0, 1)}
     if min(mad, key=mad.get) != 0:
@@ -53,17 +67,16 @@ def offset_of(name, source, render):
     return offset
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--matrix', nargs=2, type=Path, required=True, metavar=('SOURCE', 'RENDER_DIR'))
-parser.add_argument('--gta6', nargs=2, type=Path, required=True, metavar=('SOURCE', 'RENDER_DIR'))
-args = parser.parse_args()
-inputs = {'matrix': args.matrix, 'gta6': args.gta6}
+inputs = {name: getattr(args, name) for name in FPS}
 out = HERE / 'public'
-out.mkdir(exist_ok=True)
+if out.exists():
+    shutil.rmtree(out)
+out.mkdir()
 for font in (REPO / 'site' / 'src' / 'assets' / 'fonts').glob('*.woff2'):
     shutil.copy2(font, out / font.name)
 
-offsets = {name: offset_of(name, *inputs[name]) for name in inputs}
+probes = {name: n for name, n in STILLS} | {name: first for name, _, first, _, _ in CLIPS}
+offsets = {name: offset_of(name, *inputs[name], probes[name]) for name in inputs}
 for name, n in STILLS:
     source, render = inputs[name]
     Image.fromarray(frame(source, n)).save(out / f'{name}-{n}-original.png')
@@ -75,4 +88,6 @@ for name, clip, first, count, (x, y, w, h) in CLIPS:
                         f"select='between(n,{start},{start + count - 1})',setpts=N/FRAME_RATE/TB,crop={w}:{h}:{x}:{y}",
                         '-an', '-c:v', 'libx264', '-preset', 'slow', '-crf', '10', '-pix_fmt', 'yuv420p',
                         '-r', str(FPS[name]), str(out / f'{clip}-{side}.mp4')], check=True)
-print('public/ ready:', ', '.join(sorted(p.name for p in out.iterdir())))
+for capture in CAPTURES + sorted(p.name for p in args.captures.glob(BAND_FRAMES)):
+    shutil.copy2(args.captures / capture, out / capture)
+print('public/ ready:', len(list(out.iterdir())), 'files')

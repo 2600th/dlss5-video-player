@@ -1,65 +1,64 @@
 import {AbsoluteFill, Composition, Interactive, Sequence, interpolate, registerRoot, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {loadFont} from '@remotion/fonts';
-import {Claim, EndCard, Motion, Sweep} from './scenes';
+import {Band, EndCard, Motion, PlayerView, Sweep} from './scenes';
 import {clamp, ink} from './brand';
 
 // What the video has to do, in order: show the difference before saying
-// anything, say what it is, show it survives motion, show it up close, then say
-// where to get it. A silent autoplay in a README gets about two seconds, so the
-// first frame is already the comparison.
+// anything, show it survives motion, show the tools the player gives you to
+// check it (Difference, Side by side, the loupe), show that it renders while you
+// watch, then say where to get it. A silent autoplay in a README gets about two
+// seconds, so the first frame is already the comparison.
 //
-// Every picture is the player's own output: the original is the source file,
-// the neural side is the render the shipping player wrote to its cache for
-// that file (tools/demo-video/README.md). prepare-inputs cuts both at the same
-// frame indices with the same crop; nothing here retouches either side.
+// Every picture is the player's own output. The split scenes use the source
+// file and the render the player wrote to its cache for that file, cut at the
+// same frame with the same crop (prepare-inputs.py). The player scenes are
+// window captures of the player itself, made with capture-window.ps1's method;
+// here they are only cropped, scaled and pushed in, never retouched.
 
 void Promise.all([
   loadFont({family: 'Archivo', url: staticFile('archivo-latin.woff2'), weight: '400 900'}),
   loadFont({family: 'JetBrains Mono', url: staticFile('jbmono-latin.woff2'), weight: '400 700'}),
 ]);
 
-const trinity = {kind: 'still', original: 'matrix-2116-original.png', neural: 'matrix-2116-neural.png', x: 350, y: 130} as const;
-const lucia = {kind: 'still', original: 'gta6-1940-original.png', neural: 'gta6-1940-neural.png', x: 130, y: 0} as const;
+// 007 First Light, frame 1122: the 1920x1080 window sits over the face.
+const bond = {kind: 'still', original: 'bond-1122-original.png', neural: 'bond-1122-neural.png', x: 560, y: 180} as const;
 
 // Seconds. Each clip scene is exactly as long as its clip, so nothing loops,
-// holds or changes speed.
+// holds or changes speed - except the render band, which says it runs at 2x:
+// 50 window captures taken 200 ms apart (10 s) shown over 5 s.
 const timeline = [
-  {id: 'trinity', at: 0, length: 4.5},
-  {id: 'claim', at: 4.5, length: 2.4},
-  {id: 'lucia-motion', at: 6.9, length: 2.8},
-  {id: 'lucia-2x', at: 9.7, length: 3.6},
-  {id: 'florida', at: 13.3, length: 3.0},
-  {id: 'end', at: 16.3, length: 3.4},
+  {id: 'bond', at: 0, length: 4.0},
+  {id: 'lucia-motion', at: 4.0, length: 2.8},
+  {id: 'difference', at: 6.8, length: 3.0},
+  {id: 'side-by-side', at: 9.8, length: 2.8},
+  {id: 'loupe', at: 12.6, length: 3.4},
+  {id: 'band', at: 16.0, length: 5.0},
+  {id: 'end', at: 21.0, length: 3.8},
 ] as const;
 const total = timeline[timeline.length - 1].at + timeline[timeline.length - 1].length;
 
 const scene = (id: (typeof timeline)[number]['id']) => {
   switch (id) {
-    case 'trinity':
-      return <Sweep plate={trinity} zoom={[1.25, 1.45]} origin="1310px 460px" title="The Matrix (1999)" detail="paused frame · 2560×1440 source · same pixels both sides" />;
-    case 'claim':
-      return <Claim still={trinity.neural} x={trinity.x} y={trinity.y} />;
+    case 'bond':
+      return (
+        <Sweep plate={bond} zoom={[1.0, 1.12]} origin="1520px 560px" from={0.56} to={0.49}
+          title="007 First Light" detail="one paused frame · 2560×1440 source · same pixels both sides" />
+      );
     case 'lucia-motion':
       return (
-        <Motion
-          plate={{kind: 'clip', original: 'lucia-original.mp4', neural: 'lucia-neural.mp4'}}
-          title="Grand Theft Auto VI"
-          detail="playing at 30 fps · Trailer 2 · 1:1 source pixels"
-        />
+        <Motion plate={{kind: 'clip', original: 'lucia-original.mp4', neural: 'lucia-neural.mp4'}}
+          title="Grand Theft Auto VI" detail="playing at 30 fps · Trailer 2 · 1:1 source pixels" />
       );
-    case 'lucia-2x':
-      return <Sweep plate={lucia} zoom={[1.9, 2.1]} origin="1090px 380px" from={0} to={0.5} title="Up close, 2×" detail="skin, hair, catchlights · one paused frame" />;
-    case 'florida':
-      return (
-        <Motion
-          plate={{kind: 'clip', original: 'florida-original.mp4', neural: 'florida-neural.mp4'}}
-          divider={0.47}
-          title="Daylight, mid-sentence"
-          detail="Grand Theft Auto VI · Trailer 2 · playback"
-        />
-      );
+    case 'difference':
+      return <PlayerView src="difference.png" zoom={[1.25, 1.5]} origin="1060px 430px" title="Difference" detail="where the model changed the picture · ×4 · in the player" />;
+    case 'side-by-side':
+      return <PlayerView src="side-by-side.png" zoom={[1.3, 1.38]} origin="951px 425px" title="Side by side" detail="one frame, one timestamp · Video > Compare" />;
+    case 'loupe':
+      return <PlayerView src="loupe.png" zoom={[1.0, 1.8]} origin="1032px 240px" punch title="Loupe" detail="4× rendered pixels · original left, DLSS 5 right" />;
+    case 'band':
+      return <Band frames={50} title="Renders while you watch" detail="teal is rendered, blue is played · 16 s clip, shown at 2× speed" />;
     case 'end':
-      return <EndCard version="0.25.0" size="312 MB" />;
+      return <EndCard />;
   }
 };
 
@@ -77,7 +76,7 @@ const Demo = () => {
         name="Attribution"
         style={{position: 'absolute', right: 28, bottom: 14, padding: '4px 12px', backgroundColor: '#050506b3', fontFamily: 'Archivo', fontSize: 15, color: ink.dim}}
       >
-        Unofficial community build, not affiliated with NVIDIA. The Matrix © Warner Bros. · Grand Theft Auto VI © Rockstar Games.
+        Unofficial community build, not affiliated with NVIDIA. 007 First Light © IO Interactive · Grand Theft Auto VI © Rockstar Games.
       </Interactive.Div>
       <Interactive.Div
         name="Progress"
