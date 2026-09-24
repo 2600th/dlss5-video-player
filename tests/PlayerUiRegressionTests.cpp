@@ -1071,6 +1071,70 @@ struct PlayerAppTestAccess {
         app.SyncTimelineMedia();
     }
 
+    // A live session keeps the timeline's bottom lane for the render map even
+    // before it has coverage: the played progress used to fill the whole track
+    // then, and after a seek past the render's head it painted over the hatched
+    // stretch that says where the render is working.
+    static void timeline_keeps_the_render_lane_clear_during_a_live_session_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, live = app.m_liveSession, hadRenderer = app.m_renderer != nullptr;
+        const double current = app.m_currentSec;
+        const NeuralPlaybackLifecycle lifecycle = app.m_neuralLifecycle;
+        app.m_neuralLifecycle.state = NeuralPlaybackState::Idle;
+        if (!hadRenderer) app.m_renderer = MakeD3D12Renderer();
+        app.m_loaded = true;
+        app.m_cachedPlayback = false;
+        VideoDecoder saved;
+        saved.Swap(app.m_decoder);
+        const auto avi = app.SettingsPath().parent_path() / L"lane-64x48.avi";
+        WriteTinyAvi(avi, 64, 48, 30);
+        REQUIRE(app.m_decoder.OpenMetadata(avi.wstring()));
+        REQUIRE(app.m_decoder.DurationSeconds() > 0.0);
+        app.m_currentSec = app.m_decoder.DurationSeconds() * 0.8;
+
+        RECT client{};
+        GetClientRect(app.m_hwnd, &client);
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(info.bmiHeader);
+        info.bmiHeader.biWidth = client.right;
+        info.bmiHeader.biHeight = -client.bottom;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        void* bits = nullptr;
+        HDC dc = CreateCompatibleDC(nullptr);
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        REQUIRE(dc && bitmap);
+        const HGDIOBJ old = SelectObject(dc, bitmap);
+        const RECT track = app.TimelineRect();
+        const int x = track.left + (track.right - track.left) * 2 / 5;
+        const auto paintAndRead = [&](int y) {
+            app.RenderUi(dc, client);
+            GdiFlush();
+            return GetPixel(dc, x, y);
+        };
+
+        app.m_liveSession = true;
+        CHECK_EQ(ui_palette::PrimaryBlue, paintAndRead(track.top + 1));
+        CHECK(paintAndRead(track.bottom - 1) != ui_palette::PrimaryBlue);
+        // No session, no render map: progress fills the track as it always did.
+        app.m_liveSession = false;
+        CHECK_EQ(ui_palette::PrimaryBlue, paintAndRead(track.bottom - 1));
+
+        SelectObject(dc, old);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+        app.m_decoder.Close();
+        app.m_decoder.Swap(saved);
+        std::filesystem::remove(avi);
+        app.m_currentSec = current;
+        app.m_neuralLifecycle = lifecycle;
+        app.m_liveSession = live;
+        app.m_cachedPlayback = cached;
+        app.m_loaded = loaded;
+        if (!hadRenderer) app.m_renderer.reset();
+    }
+
     // ? and F1 open the cheat sheet from anywhere, Esc and the same keys put
     // it away, and Help > Keyboard shortcuts is the menu route to it.
     // Tips are registered by rectangle, so they have to follow the surface: the
@@ -2127,6 +2191,7 @@ struct PlayerAppTestAccess {
         UI_CASE(timeline_render_map_test),
         UI_CASE(toolbar_tips_follow_the_surface_test),
         UI_CASE(toolbar_hover_fades_run_only_while_moving_test),
+        UI_CASE(timeline_keeps_the_render_lane_clear_during_a_live_session_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),

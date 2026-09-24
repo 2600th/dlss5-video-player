@@ -8356,7 +8356,13 @@ private:
         // A live session plays the original inside its holes, so progress is not
         // confined to the rendered regions; a cache entry's playback is.
         const bool clampProgress=m_cachedPlayback&&!m_liveSession;
-        RECT done{clampProgress?rendered.left:tr.left,tr.top,0,renderedSpan?tr.bottom-coverageLane:tr.bottom};
+        // The lane is kept clear for the whole of a live session, not only once
+        // it has coverage: before the first segment lands the lane holds the
+        // hatched rendering-now stretch, and a seek past it used to paint the
+        // played progress straight over it - the one sign of where the render
+        // was working vanished during the wait it explains.
+        const bool laneKept=renderedSpan||m_liveSession;
+        RECT done{clampProgress?rendered.left:tr.left,tr.top,0,laneKept?tr.bottom-coverageLane:tr.bottom};
         done.right=std::clamp<LONG>(static_cast<LONG>(tr.left+std::lround((tr.right-tr.left)*f)),done.left,clampProgress?rendered.right:tr.right);
         if(lengthKnown){HBRUSH db=CreateSolidBrush(ui_palette::PrimaryBlue);FillRect(dc,&done,db);DeleteObject(db);}
         // One pair of edge ticks per rendered region, so a hole reads as a gap
@@ -8374,7 +8380,7 @@ private:
         // The selection is drawn last and fills the track, so it reads at a
         // glance; the coverage lane stays visible beneath it.
         if(m_markers.in100ns&&m_markers.out100ns&&*m_markers.out100ns>*m_markers.in100ns){
-            RECT span{markerX(*m_markers.in100ns),tr.top,markerX(*m_markers.out100ns),renderedSpan?tr.bottom-coverageLane:tr.bottom};
+            RECT span{markerX(*m_markers.in100ns),tr.top,markerX(*m_markers.out100ns),laneKept?tr.bottom-coverageLane:tr.bottom};
             if(span.right<=span.left)span.right=span.left+std::max(1,Dip(1));
             HBRUSH sb=CreateSolidBrush(ui_palette::MarkedRange);FillRect(dc,&span,sb);DeleteObject(sb);
             RECT rail{span.left,tr.top,span.right,tr.top+std::max<LONG>(1,Dip(2))};HBRUSH rb=CreateSolidBrush(ui_palette::MarkedRangeEdge);FillRect(dc,&rail,rb);DeleteObject(rb);
