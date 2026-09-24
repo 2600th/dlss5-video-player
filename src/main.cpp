@@ -4932,6 +4932,7 @@ private:
         effective.loupe=false;
         if(!ComparisonModesAvailable()){effective.mode=ComparisonMode::Neural;effective.strength=1.0f;return effective;}
         if(m_peekOriginal)effective.mode=ComparisonMode::Original;
+        effective.labelFade=float(m_tagFade.Level(Clock::now()));
         effective.mask=!m_maskFeathered.pixels.empty();effective.maskInvert=m_maskInvert;
         // The loupe exists while the pointer is over the picture. Backbuffer pixels are
         // the render window's client pixels, because the backbuffers follow it.
@@ -5058,6 +5059,9 @@ private:
             return;
         }
         StartCompareMarkSlide(m_comparison.mode,mode);
+        // The tags name the new arrangement; they fade in with it rather than
+        // printing at once over a picture that has just changed shape.
+        if(mode!=m_comparison.mode){m_tagFade.Reset(false);m_tagFade.Set(true,Clock::now(),m_activityMotionEnabled);if(m_activityMotionEnabled)EnsureHoverTimer();}
         m_comparison.mode=mode;ApplyComparison();
         LOG("Comparison mode="<<static_cast<int>(mode)<<" splitX="<<m_comparison.splitX<<" zoomStep="<<m_zoomStep
             <<" reference="<<m_havePresentedPair);
@@ -7988,7 +7992,8 @@ private:
         const bool sliders=AnimateSliders(now);
         const bool compare=AnimateCompareBar(now);
         const bool tiles=AnimateStartTiles(now);
-        if(!animating&&!sliders&&!compare&&!tiles&&m_hoverTimer){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
+        const bool tags=AnimateTagFade(now);
+        if(!animating&&!sliders&&!compare&&!tiles&&!tags&&m_hoverTimer){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
     }
     // The volume slider's geometry at this moment: the knob grows with the
     // hover fade, and the bubble keeps inside the strip, above the button row.
@@ -8286,6 +8291,17 @@ private:
         if(!a||!b)return;
         m_compareMark.Start(a->left,a->right-1,b->left,b->right-1,Clock::now(),m_activityMotionEnabled);
         if(m_activityMotionEnabled)EnsureHoverTimer();
+    }
+    // One frame of the tags' fade-in: the compositor reads the level, and a
+    // paused frame is presented again (the reference is already resident, so
+    // this is one present, not an upload). Playing, the next frame carries it.
+    bool AnimateTagFade(Clock::time_point now){
+        const bool moving=m_tagFade.Animating(now);
+        if((moving||m_tagsWereMoving)&&m_renderer&&ComparisonModesAvailable()){
+            m_renderer->SetComparison(EffectiveComparison());
+            if(!m_playing&&!m_seeking&&!m_renderer->PresentCurrent())RecoverUnusableRenderer();
+        }
+        m_tagsWereMoving=moving;return moving;
     }
     // One frame of the compare bar's motion; true while any of it moves.
     bool AnimateCompareBar(Clock::time_point now){
@@ -11381,6 +11397,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // lingers slider::kBubbleLingerMs after a drag ends before it fades.
     // The compare bar's segment tints by part and index, and its sliding mark.
     std::map<int,chrome_motion::Fade> m_compareFades;chrome_motion::Slide m_compareMark;bool m_compareWasMoving=false;
+    // The comparison tags' fade-in after a mode change; at rest it is on.
+    chrome_motion::Fade m_tagFade=[]{chrome_motion::Fade fade;fade.Reset(true);return fade;}();bool m_tagsWereMoving=false;
     chrome_motion::Fade m_volumeHot,m_mixHot,m_volumeBubble;std::optional<Clock::time_point> m_volumeBubbleOffAt;bool m_slidersWereMoving=false;
     // Windows' own rule for focus cues: hidden until the keyboard is used to move
     // between controls, hidden again by the mouse. The focused action is always the

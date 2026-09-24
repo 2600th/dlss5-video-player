@@ -194,6 +194,9 @@ struct ComparisonSettings {
     // "Original" / "DLSS 5" tags drawn on the picture wherever both members share it.
     // Drawn from the atlas SetLabelAtlas uploads; without one nothing is drawn.
     bool labels = true;
+    // How far the tags have faded in, 0..1: a mode change brings them in
+    // rather than printing them at once. Presentation only, like the tags.
+    float labelFade = 1.0f;
     // The synced loupe: two circles, the original and DLSS 5 at the same image point,
     // point-sampled so the texels show. Centres and radius in backbuffer pixels, the
     // point in image UV, magnification in screen pixels per output texel.

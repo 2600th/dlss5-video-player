@@ -572,7 +572,8 @@ float LabelWidth(int row){return row==0?LabelW.x:row==1?LabelW.y:row==2?LabelW.z
 float3 LabelOver(float3 c,float2 px,float2 anchor,int row){
     float2 rel=floor(px-anchor);
     if(Label.x>=1.0&&rel.x>=0.0&&rel.y>=0.0&&rel.x<LabelWidth(row)&&rel.y<Label.x){
-        float4 t=Labels.Load(int3(int(rel.x),int(float(row)*Label.x+rel.y),0));
+        // Premultiplied, so scaling the whole texel by Pane.w fades the tag.
+        float4 t=Labels.Load(int3(int(rel.x),int(float(row)*Label.x+rel.y),0))*Pane.w;
         c=OVERLAY_LINEAR(t.rgb)+c*(1.0-t.a);
     }
     return c;
@@ -643,7 +644,7 @@ float4 ComposePanes(float2 wuv,int mode,bool swap){
     // A dark two-pixel gutter where panes meet, so four pictures read as four.
     float2 fromMiddle=abs(px-0.5*Target.xy);
     if(fromMiddle.x<1.0||(mode==7&&fromMiddle.y<1.0))o=0.0;
-    if(inside&&Pane.w>0.5)o=LabelOver(o,px,origin*Target.xy+Label.y,kind);
+    if(inside&&Pane.w>0.0)o=LabelOver(o,px,origin*Target.xy+Label.y,kind);
     return float4(o,1);
 }
 float4 PSPresentScaled(V i):SV_Target{
@@ -684,7 +685,7 @@ float4 PSPresentScaled(V i):SV_Target{
     // The tags name what each side of the picture is, pinned to the picture's top
     // corners and clipped to their own side of the divider, so a divider dragged to
     // an edge takes its tag with it rather than printing it over the other member.
-    if(Pane.w>0.5){
+    if(Pane.w>0.0){
         float2 px=i.uv*Target.xy;
         float inset=Label.y;
         if(mode==1)o=LabelOver(o,px,float2(inset,inset),0);
@@ -1945,7 +1946,7 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     const bool mask=useReference&&cmp.mask&&m_mask;
     const float inset=float(m_labelRowHeight/2u);
     const float compose[ComposeConstantCount]={
-        0,useReference&&cmp.swap?1.0f:0.0f,std::clamp(cmp.secondMix,0.0f,2.0f),labels?1.0f:0.0f,
+        0,useReference&&cmp.swap?1.0f:0.0f,std::clamp(cmp.secondMix,0.0f,2.0f),labels?std::clamp(cmp.labelFade,0.0f,1.0f):0.0f,
         labels?float(m_labelRowHeight):0.0f,inset,float(m_labelAtlasW),float(m_labelAtlasH),
         float(m_labelWidths[0]),float(m_labelWidths[1]),float(m_labelWidths[2]),float(m_labelWidths[3]),
         float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),0,0,

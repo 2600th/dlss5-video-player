@@ -1609,6 +1609,22 @@ struct PlayerAppTestAccess {
         CHECK(std::wstring_view(app.CurrentThumbBar()[2].tipKey) == L"thumb.compare_off");
         app.HandleCommand(IDM_COMPARE_TOGGLE);
         CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        // A mode change brings the tags in with a fade (presentation only; the
+        // compositor reads the level), and without animations they are at once.
+        {
+            const bool motion = app.m_activityMotionEnabled;
+            app.m_activityMotionEnabled = true;
+            app.SetComparisonMode(ComparisonMode::SplitVertical);
+            CHECK(app.EffectiveComparison().labelFade < 1.0f);
+            std::this_thread::sleep_for(chrome_motion::kHoverIn + std::chrono::milliseconds(30));
+            CHECK_EQ(1.0f, app.EffectiveComparison().labelFade);
+            app.m_activityMotionEnabled = false;
+            app.SetComparisonMode(ComparisonMode::Wipe);
+            CHECK_EQ(1.0f, app.EffectiveComparison().labelFade);
+            app.m_activityMotionEnabled = motion;
+            app.ResetHoverFades();
+            app.SetComparisonMode(ComparisonMode::Neural);
+        }
         app.m_neuralRequested = false;
         app.HandleCommand(IDM_COMPARE_TOGGLE);
         CHECK(app.m_comparison.mode == ComparisonMode::Neural);
