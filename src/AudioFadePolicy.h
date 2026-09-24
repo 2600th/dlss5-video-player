@@ -97,4 +97,26 @@ inline void BuildFadeOutTail(const float* lastFrame, uint16_t channels, uint32_t
     }
 }
 
+// How long a ramped stop may wait, once for room in the endpoint buffer to queue
+// the tail and once for what is queued to play out: one buffer's duration, which
+// is all either can take on a running stream, plus slack for the engine period.
+// It used to be forty polls of Sleep(1) and of Sleep(2) - forty and eighty
+// milliseconds as written, but each Sleep rounds up to the 15.6 ms system tick
+// unless something raised the timer resolution, so each loop was 600 ms, and
+// the drain one ran all forty whenever the clock fell a frame short (see
+// FramesFromClock). A stop or a seek right after a start took that long.
+inline uint32_t StopWaitBudgetMs(uint32_t bufferFrames, uint32_t sampleRate)
+{
+    if (!sampleRate) return 0;
+    return uint32_t(uint64_t(bufferFrames) * 1000u / sampleRate) + 20u;
+}
+
+// Whether a stream has played everything written to it. IAudioClock counts in
+// units of its own frequency, and the frame count is the floor of a quotient,
+// so it can sit at `written - 1` for good; that last frame is 20 microseconds.
+inline bool Drained(uint64_t playedFrames, uint64_t writtenFrames)
+{
+    return playedFrames + 1 >= writtenFrames;
+}
+
 } // namespace audio_fade

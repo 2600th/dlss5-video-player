@@ -365,6 +365,35 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // ---- stop and seek right after a start --------------------------------
+    // Both used to take about 600 ms when they landed in the first moments of
+    // playback. The stop ramps the endpoint down, and the ramp waited for room
+    // in a buffer the engine had not begun to drain, then for a drain that had
+    // not begun, in polls of Sleep(1) and Sleep(2) that each round up to the
+    // 15.6 ms system tick: forty of each. A stop or a seek is the viewer's
+    // hand on the transport, so it is bounded here, early and settled alike.
+    {
+        double worstStop = 0.0, worstSeek = 0.0;
+        for (int round = 0; round < 4; ++round) {
+            Check(audio.Start(clip.wstring(), 5.0), "Start for the early stop");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10 * round));
+            auto begin = std::chrono::steady_clock::now();
+            audio.Stop();
+            worstStop = std::max(worstStop, Seconds(begin));
+            Check(audio.Start(clip.wstring(), 5.0), "Start for the early seek");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10 * round));
+            begin = std::chrono::steady_clock::now();
+            Check(audio.Seek(9.0), "Seek right after a start");
+            worstSeek = std::max(worstSeek, Seconds(begin));
+        }
+        std::cout << "stop right after start: worst " << worstStop * 1000.0 << " ms\n";
+        std::cout << "seek right after start: worst " << worstSeek * 1000.0 << " ms\n";
+        Check(worstStop < 0.15, "a stop right after a start returns within 150 ms");
+        Check(worstSeek < 0.25, "a seek right after a start returns within 250 ms");
+        Check(WaitForClock(audio, 5s) >= 0.0, "the clock answers after the early seek");
+        audio.Stop();
+    }
+
     // ---- end of stream -----------------------------------------------------
     // The clock must never run backwards as the queue drains. Resetting the
     // device at EOF would snap the played-sample count to zero and make the

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 // Whether the audio clock is still advancing, and therefore still a clock.
 //
@@ -140,5 +141,19 @@ inline void PauseChanged(StallState& stall, Continuity& continuity, double wallS
 }
 
 inline void Reset(Continuity& state) { state = {}; }
+
+// IAudioClock::GetPosition in frames: `position` in units of `frequency` per
+// second (the byte rate, for a PCM stream), at `sampleRate` frames per second.
+// Exact integer arithmetic: going through a long double quotient - which MSVC
+// makes a double - came out a hair under a whole number, and the truncation
+// then reported 1727 frames played of 1728 written for as long as the stream
+// stood still at its end.
+inline uint64_t FramesFromClock(uint64_t position, uint64_t frequency, uint32_t sampleRate)
+{
+    if (!frequency) return 0;
+    const uint64_t whole = position / frequency, part = position % frequency;
+    // part < frequency, a byte rate - far below 2^32 - so part * rate fits.
+    return whole * sampleRate + part * sampleRate / frequency;
+}
 
 } // namespace audio_clock

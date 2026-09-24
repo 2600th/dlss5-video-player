@@ -1,5 +1,6 @@
 #include "WasapiRenderer.h"
 
+#include "AudioClockPolicy.h"
 #include "AudioFadePolicy.h"
 #include "HexText.h"
 #include "Log.h"
@@ -766,10 +767,16 @@ bool WasapiRenderer::FadeOutAndStop()
     // tail was almost never written in the player even though it was always
     // written in a test that had just started. The buffer drains on its own
     // in one engine period, so waiting for the room costs that and nothing.
-    constexpr int kRoomPolls = 40;
+    // Both waits are bounded by time rather than by a count of sleeps; see
+    // audio_fade::StopWaitBudgetMs for what a count of sleeps cost.
+    uint32_t budgetMs = 0;
+    { std::lock_guard<std::mutex> lock(mutex_); budgetMs = audio_fade::StopWaitBudgetMs(bufferFrames_, format_.sampleRate); }
+    const auto within = [budgetMs](std::chrono::steady_clock::time_point since) {
+        return std::chrono::steady_clock::now() - since < std::chrono::milliseconds(budgetMs);
+    };
     bool wroteTail = false;
     if (!fadeTail_.empty()) {
-        for (int poll = 0; poll < kRoomPolls; ++poll) {
+        for (const auto since = std::chrono::steady_clock::now(); within(since);) {
             bool settled = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -794,12 +801,11 @@ bool WasapiRenderer::FadeOutAndStop()
 
     // Let what is queued reach the speaker before the clock is stopped;
     // stopping first would cut the tail off along with everything else.
-    // Bounded by the endpoint's own buffer plus generous slack.
-    constexpr int kDrainPolls = 40;
-    for (int poll = 0; poll < kDrainPolls; ++poll) {
+    // Bounded by the endpoint's own buffer plus slack.
+    for (const auto since = std::chrono::steady_clock::now(); within(since);) {
         uint64_t played = 0;
-        if (!PlayedFrames(played) || played >= queuedThrough) break;
-        Sleep(2);
+        if (!PlayedFrames(played) || audio_fade::Drained(played, queuedThrough)) break;
+        Sleep(1);
     }
     // IAudioClock leads the speaker. GetPosition reports what the engine has
     // consumed, not what has been converted, so stopping the instant it
@@ -831,11 +837,8 @@ bool WasapiRenderer::PlayedFrames(uint64_t& frames) const
     const HRESULT result = clock_->GetPosition(&position, nullptr);
     if (FAILED(result)) return false;
     // GetPosition counts in units of GetFrequency per second, which is the
-    // byte rate for a PCM stream rather than the frame rate. Converting
-    // through seconds is exact enough here and does not assume which.
-    frames = static_cast<uint64_t>(
-        (static_cast<long double>(position) / static_cast<long double>(clockFrequency_)) *
-        static_cast<long double>(format_.sampleRate));
+    // byte rate for a PCM stream rather than the frame rate.
+    frames = audio_clock::FramesFromClock(position, clockFrequency_, format_.sampleRate);
     // The null data an exclusive stream sent in the film's absence: counted
     // by the device clock, not part of the film. Only the part already played
     // comes off, so the clock never steps back when a range is queued.

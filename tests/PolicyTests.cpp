@@ -11797,6 +11797,41 @@ void constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test()
 // A raised cosine rather than a straight line: its slope is zero at both ends,
 // so the ramp does not replace one discontinuity in the signal with a smaller
 // one in its derivative.
+// A stop or a seek right after audio started took about 600 ms: the ramped stop
+// waited for its tail to play out until the clock reached the last frame written,
+// the clock's frame count came out one short through a floating-point quotient,
+// and the wait was forty Sleep(2)s that each lasted a 15.6 ms tick.
+void audio_stop_waits_are_bounded_and_the_clock_counts_whole_frames_test()
+{
+    // IAudioClock in bytes at a float stereo byte rate: every frame written is
+    // counted, however far into the stream - the double quotient said 1727 of 1728.
+    for (const uint32_t rate : {44100u, 48000u, 96000u, 192000u}) {
+        const uint64_t bytesPerFrame = 8, frequency = uint64_t(rate) * bytesPerFrame;
+        for (const uint64_t frames : {uint64_t{1}, uint64_t{1728}, uint64_t{96202}, uint64_t{301056},
+                                      uint64_t{rate} * 3600u * 3u + 17u}) {
+            CHECK_EQ(frames, audio_clock::FramesFromClock(frames * bytesPerFrame, frequency, rate));
+            // Part of a frame is not a frame.
+            CHECK_EQ(frames - 1, audio_clock::FramesFromClock(frames * bytesPerFrame - 1, frequency, rate));
+        }
+    }
+    // A clock whose frequency is not a multiple of the rate (a 10 MHz QPC-style
+    // counter) still floors the exact quotient.
+    CHECK_EQ(uint64_t{48000}, audio_clock::FramesFromClock(10'000'000, 10'000'000, 48000));
+    CHECK_EQ(uint64_t{47999}, audio_clock::FramesFromClock(9'999'999, 10'000'000, 48000));
+    CHECK_EQ(uint64_t{0}, audio_clock::FramesFromClock(123, 0, 48000));
+
+    CHECK(audio_fade::Drained(1728, 1728));
+    CHECK(audio_fade::Drained(1727, 1728));   // the last frame is 20 microseconds
+    CHECK(!audio_fade::Drained(1726, 1728));
+    CHECK(audio_fade::Drained(0, 0));
+    // One buffer and a little: a 22 ms shared-mode buffer waits at most 42 ms, a
+    // long exclusive one its own length plus the same slack - never a count of
+    // sleeps whose length the system tick decides.
+    CHECK_EQ(42u, audio_fade::StopWaitBudgetMs(1056, 48000));
+    CHECK_EQ(120u, audio_fade::StopWaitBudgetMs(4800, 48000));
+    CHECK_EQ(0u, audio_fade::StopWaitBudgetMs(1056, 0));
+}
+
 void audio_fade_is_a_raised_cosine_that_starts_and_ends_flat_test()
 {
     using namespace audio_fade;
@@ -13371,6 +13406,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_fade_is_a_raised_cosine_that_starts_and_ends_flat_test),
     TEST_CASE(audio_fade_in_scales_whole_frames_and_stops_once_it_is_open_test),
     TEST_CASE(audio_fade_out_tail_decays_from_the_last_frame_to_silence_test),
+    TEST_CASE(audio_stop_waits_are_bounded_and_the_clock_counts_whole_frames_test),
     TEST_CASE(audio_track_selection_skips_the_tracks_nobody_asked_for_test),
     TEST_CASE(audio_track_labels_say_what_distinguishes_the_tracks_test),
     TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
