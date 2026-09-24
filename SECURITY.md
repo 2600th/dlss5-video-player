@@ -1,10 +1,14 @@
 # Security
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
+_Verified against main (9d3e6cc) on 2026-09-25._
 
-The player launches only its package-local `ffmpeg.exe`, `ffprobe.exe`,
-`yt-dlp.exe`, and `deno.exe` helpers without a command shell. YouTube support is
-limited to validated public HTTPS video URLs.
+The player launches its package-local `ffmpeg.exe`, `ffprobe.exe`,
+`yt-dlp.exe`, and `deno.exe` helpers without a command shell. Playback falls
+back to an FFmpeg on `PATH` when the package has none; rendering and export
+never do. YouTube support is limited to validated public HTTPS video URLs.
+Besides YouTube, the player contacts only `api.github.com` for the update check
+and `i.ytimg.com` for trailer thumbnails, both over HTTPS; `[Updates] Enabled=0`
+and `[Start] ThumbnailFetch=0` in `DLSSVideoPlayer.ini` turn them off.
 
 Offline neural jobs run in the package-local
 `neural-runtime/NeuralWorker.exe`. The experimental proxy/add-on belongs in

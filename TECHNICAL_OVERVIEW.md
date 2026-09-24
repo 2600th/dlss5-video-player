@@ -1,6 +1,6 @@
 # DLSS 5 Video Player — technical overview
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
+_Verified against main (9d3e6cc) on 2026-09-25._
 
 The player renders a whole video while you watch it, keeps every rendered
 region seekable, reuses the validated result, and compares it with the original
@@ -74,9 +74,10 @@ from different packages. See [runtime setup](docs/DLSS5_SETUP.md).
    cache.
 
 Neural cache output preserves source resolution. Playback upscaling and image
-adjustments do not change the cache or export. The cache is 8-bit; changing its
-container or encoding label cannot recover source HDR precision. In-player
-subtitles, queues, bounded previews and durable render resume are not implemented.
+adjustments do not change the cache or export. The Standard cache is 8-bit
+(High and Lossless are 10-bit), and HDR sources are tone mapped to SDR before
+the model. A render queue and resuming a render after a restart are not
+implemented.
 See [architecture and remaining work](docs/ARCHITECTURE.md).
 
 ## Build, diagnose and verify
@@ -87,13 +88,13 @@ uses `build-upscaling` for configure, build, CTest and packaging. Source builds
 do not supply the separately obtained experimental neural runtime.
 
 Player diagnostics are in `DLSSVideoPlayer.log` beside the executable. Neural
-diagnostics are in `neural-runtime/DLSSVideoPlayer.log` and
+diagnostics are in `neural-runtime/NeuralWorker.log` and
 `neural-runtime/ReShade.log`. **Advanced > Restart in DLSS SR safe mode** skips
 the neural helper for that launch. See [troubleshooting](docs/TROUBLESHOOTING.md).
 
 Thirteen portable CTest suites cover cache/history/settings, export, worker
 protocols, runtime policy, cached comparison playback through the real decoders,
-and native UI regressions; twelve GPU smokes and an audio-clock smoke run on an
+and native UI regressions; sixteen GPU smokes and an audio-clock smoke run on an
 RTX card with an audio endpoint. Real-media
 GPU checks and their limits are recorded per machine and date in the
 repository's [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).
