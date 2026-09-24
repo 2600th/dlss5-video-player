@@ -3856,9 +3856,17 @@ public:
         if(!frames.empty())duration=double(frames.back().timestamp100ns+333333)/10000000.0;
     }
     bool Open(const std::filesystem::path&,std::stop_token stop) override
-    { ++opens;index=0;return !failOpen&&!stop.stop_requested(); }
+    {
+        ++opens;index=0;
+        // What VideoDecoder does with the request: NV12 only when asked AND the
+        // file qualifies, BGRA otherwise.
+        layout=preferNv12&&nv12Capable?PixelLayout::Nv12:PixelLayout::Bgra;
+        return !failOpen&&!stop.stop_requested();
+    }
     bool OpenKnown(const std::filesystem::path& path,const VideoDecoder::KnownMedia&,std::stop_token stop) override
     { ++knownOpens;return Open(path,stop); }
+    PixelLayout Layout() const override { return layout; }
+    void PreferNv12(bool prefer) override { preferNv12=prefer; }
     void Close() override { ++closes; }
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop) override
     {
@@ -3879,6 +3887,7 @@ public:
     double DurationSeconds() const override { return duration; }
     std::vector<VideoFrame> frames;size_t index{};uint32_t width{1},height{1};
     double fps{30.0},duration{};bool failOpen{},failNextSeek{};int opens{},knownOpens{},closes{},seeks{},notReadyReads{};
+    bool nv12Capable{},preferNv12{};PixelLayout layout{PixelLayout::Bgra};
     // Read from another thread by a test waiting for a reader to be inside its
     // not-ready loop, so it is the one atomic here.
     std::atomic<int> notReadyServed{};
@@ -4035,6 +4044,36 @@ void synchronized_playback_opens_a_described_original_without_a_probe_test()
     // Without one it probes, as it always has.
     CHECK(playback.Open(L"o",L"n",{}));
     CHECK_EQ(1,original.knownOpens);CHECK_EQ(0,neural.knownOpens);
+}
+
+// Both members feed one renderer whose layout is fixed. A cached open asked
+// only the original for NV12, so the neural file decoded to BGRA and the
+// DLSS 5 view read BGRA bytes as NV12: fine vertical stripes over a yellow cast.
+void synchronized_playback_decodes_both_members_of_a_cached_pair_alike_test()
+{
+    FakeSynchronizedSource original({0,333333,666666});FakeSynchronizedSource neural({0,333333,666666});
+    original.nv12Capable=neural.nv12Capable=true;
+    SynchronizedPlayback playback(original,neural);
+    CHECK(playback.Open(L"o",L"n",{},{},true));
+    CHECK_EQ(PixelLayout::Nv12,original.Layout());CHECK_EQ(PixelLayout::Nv12,neural.Layout());
+    CHECK_EQ(PixelLayout::Nv12,playback.Layout());
+    CHECK(playback.Open(L"o",L"n",{},{},false));
+    CHECK_EQ(PixelLayout::Bgra,original.Layout());CHECK_EQ(PixelLayout::Bgra,neural.Layout());
+    CHECK_EQ(PixelLayout::Bgra,playback.Layout());
+}
+
+// A neural file the GPU conversion cannot take stays BGRA however it is asked,
+// so the pair settles on BGRA for both rather than failing the open, and says
+// so through Layout() for the caller to configure its renderer from.
+void synchronized_playback_settles_a_pair_that_cannot_share_nv12_on_bgra_test()
+{
+    FakeSynchronizedSource original({0,333333,666666});FakeSynchronizedSource neural({0,333333,666666});
+    original.nv12Capable=true;neural.nv12Capable=false;
+    SynchronizedPlayback playback(original,neural);
+    CHECK(playback.Open(L"o",L"n",{},{},true));
+    CHECK_EQ(PixelLayout::Bgra,original.Layout());CHECK_EQ(PixelLayout::Bgra,neural.Layout());
+    CHECK_EQ(PixelLayout::Bgra,playback.Layout());
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
 }
 
 // Behaves the way VideoDecoder does with the buffer a frame arrives holding:
@@ -5796,6 +5835,8 @@ int wmain(int argc, wchar_t* argv[])
     synchronized_playback_original_only_mode_remains_available_after_cancel_test();
     synchronized_playback_returns_released_pair_buffers_to_its_sources_test();
     synchronized_playback_opens_a_described_original_without_a_probe_test();
+    synchronized_playback_decodes_both_members_of_a_cached_pair_alike_test();
+    synchronized_playback_settles_a_pair_that_cannot_share_nv12_on_bgra_test();
     neural_segment_index_orders_appends_and_locates_by_timestamp_test();
     neural_segment_index_resumes_after_retained_coverage_test();
     live_playback_prefetches_across_a_seam_published_after_the_open_test();

@@ -6751,7 +6751,7 @@ private:
         // a seek, would otherwise fire on the next file's first seek.
         CancelPausedSettingsPreview();m_previewShown=false;m_neuralToggleDeferred=false;m_livePaceConfirmedKey.clear();
         m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_decodeNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_cachedTemporal={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;m_gesture={};m_peekOriginal=false;m_dragMix=false;m_middlePan=false;m_renderTracking=false;
-        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_nextPairFrame.reset();m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
+        m_seekPending=false;m_seeking=false;m_layoutMismatchLogged=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_nextPairFrame.reset();m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
         m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();m_sourceCache.reset();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
@@ -6975,6 +6975,13 @@ private:
         // A member, not a local: its grid was a fresh 230 KB allocation on every
         // guided frame. Generate rewrites every field it reports.
         if(!m_renderer)return false; GuideFrame& g=m_guideFrame;
+        // The renderer reads whatever bytes it is handed in the layout it was
+        // configured for, and a BGRA frame is larger than the NV12 one it checks
+        // for, so a mismatch reaches the screen as stripes rather than an error.
+        if(f.layout!=m_renderer->ActiveSourceLayout()){
+            if(!m_layoutMismatchLogged)LOG("A "<<(f.layout==VideoPixelLayout::Nv12?"NV12":"BGRA")<<" frame reached a renderer configured for the other layout; refusing it rather than presenting garbage.");
+            m_layoutMismatchLogged=true;return false;
+        }
         // Translate the legacy reset flags into a named reason: a fresh load is
         // the first frame; a seek/reload reset outranks a decoder discontinuity,
         // which outranks a dropped frame.
@@ -10514,6 +10521,13 @@ private:
         if(!m_decoder.OpenMetadata(completion.sourcePath.wstring(),MediaSourceKind::LocalFile,{},/*preferNv12=*/true)){Unload();return false;}
         const VideoDecoder::KnownMedia originalMedia=(m_decoder.IsStillImage()||m_decoder.IsAnimation()||m_decoder.Media().hardwareProfile.empty())?VideoDecoder::KnownMedia{}:m_decoder.Media();
         if(!m_synchronizedPlayback.Open(completion.sourcePath,completion.neuralPath,{},SynchronizedRange{completion.range.start100ns,completion.range.end100ns},PairPrefersNv12(),originalMedia)){Unload();return false;}
+        // The pair settles on BGRA when the neural file cannot take NV12, and the
+        // renderer is configured from m_decoder: describe the original again with
+        // the layout the pair actually decodes to.
+        if(m_synchronizedPlayback.Layout()!=m_decoder.PixelLayout()){
+            LOG("Cached pair decodes to "<<(m_synchronizedPlayback.Layout()==VideoPixelLayout::Nv12?"NV12":"BGRA")<<"; the neural file could not share the original's layout.");
+            if(!m_decoder.OpenMetadata(completion.sourcePath.wstring(),MediaSourceKind::LocalFile,{},m_synchronizedPlayback.Layout()==VideoPixelLayout::Nv12)||m_decoder.PixelLayout()!=m_synchronizedPlayback.Layout()){Unload();return false;}
+        }
         m_dar=m_decoder.DisplayAspectRatio();if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
         const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
         ShowWindow(m_viewport,SW_SHOW);Layout();m_renderer=MakeD3D12Renderer();
@@ -11818,7 +11832,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // Set while guides are being skipped because nothing reads them, so the
     // first frame after they resume declares its discontinuity instead of
     // claiming history against a frame that is not its predecessor.
-    bool m_guidesSkipped=false;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
+    bool m_guidesSkipped=false,m_layoutMismatchLogged=false;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
     bool m_upscalingRequested=false;
     UINT_PTR m_activityTimer=0;
     // The status chips as last painted, what each last flashed on, and the

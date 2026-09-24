@@ -741,6 +741,11 @@ bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
         }
     }
     if(useNeural){
+        // Asked of the neural member exactly as of the original: both feed one
+        // renderer. Asking only the original decoded the neural file to BGRA
+        // under an NV12 renderer, which drew the DLSS 5 view as fine vertical
+        // stripes over a yellow cast.
+        if(impl_->neural)impl_->neural->PreferNv12(preferNv12);
         if(!impl_->neural||!impl_->neural->Open(neuralPath,stop)){impl_->original->Close();return false;}
         const double fps=originalFps;
         const double neuralFps=impl_->neural->FrameRate();
@@ -753,6 +758,14 @@ bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
            std::abs(fps-neuralFps)>0.01||
            std::abs(expectedDuration-impl_->neural->DurationSeconds())>durationTolerance+1e-6){
             impl_->neural->Close();impl_->original->Close();return false;
+        }
+        // A request is not a promise: a neural file the GPU conversion cannot
+        // take (a description it does not implement) stays BGRA however it is
+        // asked. Then both decode to BGRA - Layout() reports it for the caller's
+        // renderer - rather than refusing a render that plays fine that way.
+        if(impl_->neural->Layout()!=impl_->original->Layout()){
+            impl_->neural->Close();impl_->original->Close();
+            return preferNv12&&Open(originalPath,neuralPath,stop,range,false,originalMedia);
         }
         impl_->tolerance100ns=static_cast<int64_t>(std::ceil(10000000.0/fps));
     }else{
@@ -955,6 +968,8 @@ bool SynchronizedPlayback::Paused()const{return impl_->paused;}
 bool SynchronizedPlayback::Step(){if(!impl_->opened||!impl_->paused)return false;impl_->stepRequested=true;return true;}
 bool SynchronizedPlayback::NeuralAvailable()const
 {return impl_->opened&&(impl_->neural!=nullptr||(impl_->live&&impl_->segments!=nullptr));}
+PixelLayout SynchronizedPlayback::Layout()const
+{return impl_->opened&&impl_->original?impl_->original->Layout():PixelLayout::Bgra;}
 bool SynchronizedPlayback::Live()const{return impl_->opened&&impl_->live;}
 int64_t SynchronizedPlayback::LiveHead100ns()const
 {return impl_->live&&impl_->segments?impl_->segments->Head100ns():0;}

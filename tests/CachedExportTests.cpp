@@ -1411,6 +1411,40 @@ void SynchronizedPlaybackPairsRealMediaTest(const std::filesystem::path& helpers
     SynchronizedPlayback mismatched;
     CHECK(!mismatched.Open(original, rangeRender));
     CHECK(!mismatched.NeuralAvailable());
+
+    // Cached playback asks for NV12, and a BT.709 limited-range render
+    // qualifies as its original does. Asking only the original put an NV12
+    // original beside a BGRA render under one NV12 renderer: the DLSS 5 view
+    // drew the render's BGRA bytes as NV12 stripes.
+    const auto tagged = [&](const wchar_t* color, const std::filesystem::path& out) {
+        return RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+            L"-i", std::wstring(L"color=") + color + L":s=64x48:r=10:d=1", L"-c:v", L"libx264",
+            L"-pix_fmt", L"yuv420p", L"-colorspace", L"bt709", L"-color_primaries", L"bt709",
+            L"-color_trc", L"bt709", L"-color_range", L"tv", out.wstring()}, log);
+    };
+    const auto originalBt709 = fixture.path / L"original-bt709.mkv";
+    const auto neuralBt709 = fixture.path / L"neural-bt709.mkv";
+    CHECK(tagged(L"red", originalBt709));
+    CHECK(tagged(L"blue", neuralBt709));
+    SynchronizedPlayback nv12;
+    CHECK(nv12.Open(originalBt709, neuralBt709, {}, {}, true));
+    CHECK_EQ(PixelLayout::Nv12, nv12.Layout());
+    CHECK_EQ(SynchronizedReadResult::PairReady, next(nv12));
+    if (const SynchronizedFramePair* pair = nv12.CurrentPair()) {
+        CHECK_EQ(PixelLayout::Nv12, pair->original.layout);
+        CHECK_EQ(PixelLayout::Nv12, pair->neural.layout);
+        CHECK_EQ(FrameBytes(PixelLayout::Nv12, 64, 48), pair->neural.bgra.size());
+    }
+    // The FFV1 renders above declare no colour, so one cannot take NV12: the
+    // pair settles on BGRA for both instead of mixing the two.
+    SynchronizedPlayback settled;
+    CHECK(settled.Open(originalBt709, rangeRender, {}, {}, true));
+    CHECK_EQ(PixelLayout::Bgra, settled.Layout());
+    CHECK_EQ(SynchronizedReadResult::PairReady, next(settled));
+    if (const SynchronizedFramePair* pair = settled.CurrentPair()) {
+        CHECK_EQ(PixelLayout::Bgra, pair->original.layout);
+        CHECK_EQ(PixelLayout::Bgra, pair->neural.layout);
+    }
 }
 
 

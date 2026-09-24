@@ -134,6 +134,10 @@ public:
     bool Paused() const;
     bool Step();
     bool NeuralAvailable() const;
+    // The layout both members decode to, which is the one the renderer has to
+    // be configured for. An open may settle on BGRA though NV12 was asked for:
+    // see Open.
+    PixelLayout Layout() const;
     bool Live() const;
     int64_t LiveHead100ns() const;
     // Whether a live segment decoder has `path` open, or is opening it on
