@@ -4721,11 +4721,13 @@ void neural_segment_index_serves_a_published_run_from_its_joined_entry_test()
     CHECK(gapped.RetiredFiles().empty());
 }
 
-// The switch from a run's segments to its joined entry happens under a playing
-// session, and has to be invisible: every frame once, at its own timestamp, and
-// no process started on the presenting thread at the boundary where playback
-// crosses into the entry. The file warmed before the join is out of service
-// and is swapped for the entry while there is still lead to open it in.
+// A live run is joined into its cache entry (ReplaceRun) while it plays. That
+// has to be invisible: every frame once, at its own timestamp, and no process
+// started on the presenting thread at any boundary. A file warmed for the next
+// boundary before the join holds the same frames and is still on disk, so it
+// is kept and played; the entry is opened off this thread while that file
+// plays, and taken at the file's end. Dropping the warmed file for the entry
+// instead dropped 8 frames when a join landed 65 ms before a boundary.
 void live_playback_crosses_into_a_joined_run_without_a_gap_or_stall_test()
 {
     constexpr uint8_t kJoinedTag=7;
@@ -4758,13 +4760,17 @@ void live_playback_crosses_into_a_joined_run_without_a_gap_or_stall_test()
     std::this_thread::sleep_for(20ms);
     CHECK(segments->ReplaceRun(0,L"joined.mkv"));
     CHECK(playback.HoldsFile(L"neural-00000.mkv"));
+    // The warmed next file is kept through the join, and played.
+    for(int index=0;index<4;++index)readPair(0);
+    CHECK(playback.HoldsFile(L"neural-00001.mkv"));
+    CHECK_EQ(1,library.Opens(L"neural-00001.mkv"));
     readPair(0);
-    // The stale prefetch is dropped and the entry opened, off this thread,
-    // already positioned where the playing file ends.
+    // While it plays, the entry is opened off this thread, positioned where
+    // the kept file ends.
     CHECK(library.WaitForOpen(L"joined.mkv",1));
-    CHECK(!playback.HoldsFile(L"neural-00001.mkv"));
-    for(int index=0;index<3;++index)readPair(0);
-    for(int index=0;index<10;++index)readPair(kJoinedTag);
+    std::this_thread::sleep_for(20ms);
+    for(int index=0;index<4;++index)readPair(0);
+    for(int index=0;index<5;++index)readPair(kJoinedTag);
     std::vector<uint64_t> expected;
     for(uint64_t number=10;number<25;++number)expected.push_back(number);
     CHECK_EQ(expected,played);
@@ -4772,10 +4778,11 @@ void live_playback_crosses_into_a_joined_run_without_a_gap_or_stall_test()
     CHECK(library.OpenedKnown(L"joined.mkv"));
     CHECK_EQ(1,library.Opens(L"joined.mkv"));
     CHECK_EQ(1,library.Seeks(L"joined.mkv"));
-    CHECK_EQ(size_t{5},library.LandedIndex(L"joined.mkv"));
+    CHECK_EQ(size_t{10},library.LandedIndex(L"joined.mkv"));
     CHECK_EQ(0,library.Opens(L"neural-00002.mkv"));
     // The retired files are free for the caller to delete; the entry is not.
     CHECK(!playback.HoldsFile(L"neural-00000.mkv"));
+    CHECK(!playback.HoldsFile(L"neural-00001.mkv"));
     CHECK(playback.HoldsFile(L"joined.mkv"));
     CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
     CHECK(playback.LastFault().empty());

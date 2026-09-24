@@ -483,8 +483,12 @@ struct SynchronizedPlayback::Impl {
            pendingOpen->future.wait_for(std::chrono::milliseconds(4))!=std::future_status::ready)
             return SynchronizedReadResult::NotReady;
         HarvestAsyncOpen();
-        // The boundary is free when prefetch already opened and warmed the file.
-        if(prefetchSource&&SameSegment(prefetchSegment,wanted)){
+        // The boundary is free when prefetch already opened and warmed the file:
+        // the one asked for, or - when the run was joined into its entry just
+        // before this boundary - the retired file warmed for it, which holds
+        // the same frames (see PrefetchNextSegment). Switching to the entry
+        // here would open it on the presenting thread, mid-file.
+        if(prefetchSource&&(SameSegment(prefetchSegment,wanted)||ContinuesAt(prefetchSegment,timestamp100ns))){
             if(segmentSource)segmentSource->Close();
             segmentSource=std::move(prefetchSource);segment=std::move(prefetchSegment);
             pendingNeural=std::move(prefetchPending);prefetchPending.reset();
@@ -521,6 +525,14 @@ struct SynchronizedPlayback::Impl {
         segmentSource=std::move(source);segment=std::move(wanted);
         pendingNeural.reset();segmentExhausted=false;
         return SynchronizedReadResult::PairReady;
+    }
+
+    // A warmed file that serves the frame at `timestamp100ns` from its first
+    // frame: the continuation of the file that just ended.
+    bool ContinuesAt(const NeuralSegment& candidate,int64_t timestamp100ns)const
+    {
+        return !candidate.path.empty()&&timestamp100ns+tolerance100ns/2>=candidate.firstTimestamp100ns&&
+               timestamp100ns<candidate.firstTimestamp100ns+tolerance100ns/2&&timestamp100ns<candidate.end100ns;
     }
 
     // Makes segmentSource the decoder that serves the pending original frame.
@@ -591,10 +603,17 @@ struct SynchronizedPlayback::Impl {
         if(pendingOpen)return;
         if(timestamp100ns<segment.end100ns-prefetchLead100ns)return;
         const auto next=Continuation();
-        // A file warmed before its run was joined holds the right frames, but
-        // it is out of service and the boundary would pass it over for a
-        // synchronous open of the joined one. Open that here instead, while
-        // there is still lead to do it in.
+        // A file warmed before its run was joined holds the right frames and is
+        // kept: it is out of the index's service, but still on disk (HoldsFile
+        // keeps the caller from deleting it) and ready now, while opening the
+        // entry in its place needs 175-250 ms that the lead may not have left.
+        // A join that landed 65 ms before a boundary dropped 8 frames that way:
+        // the boundary found the entry's open still in flight. The entry is
+        // opened instead while the kept file plays, with its whole length as
+        // lead (Continuation hands the entry back from inside it).
+        if(prefetchSource&&next&&!SameSegment(prefetchSegment,*next)&&
+           std::llabs(prefetchSegment.firstTimestamp100ns-segment.end100ns)<tolerance100ns/2)
+            return;
         if(prefetchSource&&(!next||!SameSegment(prefetchSegment,*next))){
             prefetchSource->Close();prefetchSource.reset();
             prefetchSegment=NeuralSegment{};prefetchPending.reset();
