@@ -20,6 +20,8 @@
 #include "TemporalStabilityPolicy.h"
 #include "UpscalingPolicy.h"
 #include "ExposurePolicy.h"
+#include "VsrEngine.h"
+#include "VsrPolicy.h"
 
 #include "SubtitlePolicy.h"
 
@@ -173,8 +175,9 @@ struct CapturedVideoFrame {
 
 // Which member of an original/neural pair the presentation shader shows. The values
 // are persisted ([Comparison] Mode) and are the shader's mode numbers, so new ones
-// only ever go on the end.
-enum class ComparisonMode { Neural, Original, Blend, SplitVertical, Wipe, Difference, SideBySide, Quad };
+// only ever go on the end. Vsr is not a member of the pair: it is RTX Video Super
+// Resolution of the original, made live by the renderer (VsrPolicy.h).
+enum class ComparisonMode { Neural, Original, Blend, SplitVertical, Wipe, Difference, SideBySide, Quad, Vsr };
 
 struct ComparisonSettings {
     ComparisonMode mode = ComparisonMode::Neural;
@@ -214,9 +217,32 @@ struct ComparisonSettings {
     // original, in every view of the neural member. Drawn only once a mask is uploaded.
     bool mask = false;
     bool maskInvert = false;
-    // Quad's fourth pane: DLSS 5 at a second Mix, beside the first.
+    // Quad's fourth pane: DLSS 5 at a second Mix, beside the first. Where RTX VSR can
+    // run, the pane is RTX VSR instead.
     float secondMix = 0.5f;
+    // What Split, Wipe, Difference, Side by side and the loupe compare the original
+    // against: DLSS 5, or RTX VSR of the original. The Mix and the mask are DLSS 5's
+    // and do not apply to RTX VSR.
+    bool againstVsr = false;
+    // The RTX VSR ladder (VsrPolicy.h). Presentation only, like everything here.
+    vsr_policy::Quality vsrQuality = vsr_policy::kDefaultQuality;
 };
+
+// Whether the present shows RTX VSR anywhere: its own view, the 2x2 (whose fourth
+// pane it takes where it can run), or as the member the original is compared with.
+// Only then does the renderer run the feature. The Mix, the mask and the second Mix
+// never ask for it.
+inline bool ComparisonComparesAgainstVsr(const ComparisonSettings& comparison)
+{
+    return comparison.againstVsr &&
+           (comparison.mode == ComparisonMode::SplitVertical || comparison.mode == ComparisonMode::Wipe ||
+            comparison.mode == ComparisonMode::Difference || comparison.mode == ComparisonMode::SideBySide);
+}
+inline bool ComparisonReadsVsr(const ComparisonSettings& comparison)
+{
+    return comparison.mode == ComparisonMode::Vsr || comparison.mode == ComparisonMode::Quad ||
+           ComparisonComparesAgainstVsr(comparison);
+}
 
 // Whether a comparison needs the window compositor (PSPresentScaled) even when the
 // window is exactly the output's size, where the present would otherwise be PSPresent
@@ -234,11 +260,14 @@ inline bool ComparisonReadsReference(const ComparisonSettings& comparison)
 // placing it beside or instead of the neural frame: the Mix off 100%, the mask,
 // Difference, and 2x2 (whose panes include both). Those need the original as the
 // model saw it - tone mapped, for an HDR source - so an HDR display compares them
-// at SDR (HdrPolicy.h) instead of mixing PQ light with SDR light.
+// at SDR (HdrPolicy.h) instead of mixing PQ light with SDR light. RTX VSR takes 8-bit
+// SDR input only (RTX Video SDK Programming Guide 1.1.0, 3.3.5), so a view that runs
+// it takes the original as the model saw it too.
 inline bool ComparisonCombinesPixels(const ComparisonSettings& comparison)
 {
     return comparison.strength != 1.0f || comparison.mask || comparison.mode == ComparisonMode::Blend ||
-           comparison.mode == ComparisonMode::Difference || comparison.mode == ComparisonMode::Quad;
+           comparison.mode == ComparisonMode::Difference || comparison.mode == ComparisonMode::Quad ||
+           ComparisonReadsVsr(comparison);
 }
 
 inline bool ComparisonNeedsCompositor(const ComparisonSettings& comparison)
@@ -581,7 +610,9 @@ public:
         DWORD budgetMilliseconds = d3d12_renderer_detail::TeardownFenceWaitMilliseconds);
     bool PresentCurrent();
     void SetColorSettings(const ColorSettings& settings) { m_colorSettings = settings; m_presentStale = true; }
-    void SetComparison(const ComparisonSettings& settings) { m_comparison = settings; m_presentStale = true; }
+    // Creates the RTX VSR feature the first time a comparison reads it (a synchronous
+    // submission, like SetLabelAtlas), so a frame never has to.
+    void SetComparison(const ComparisonSettings& settings);
     const ComparisonSettings& GetComparison() const { return m_comparison; }
     // Compiles one entry point of the presentation program the way CreatePipelines
     // does, without a device, so a test can check the text on any machine.
@@ -597,12 +628,13 @@ public:
     bool HasReference() const { return m_hasReference || m_referencePending; }
     // The tags the compositor draws on the picture: premultiplied BGRA, one row of
     // `rowHeight` pixels per tag, in the order Original, DLSS 5, Difference, DLSS 5 at
-    // the second Mix,
+    // the second Mix, RTX VSR,
     // each `rowWidths[i]` pixels wide from the left edge. Drawn by the caller at the
     // window's DPI; uploaded synchronously, so it drains the queue - call it when the
     // text or the DPI changes, not per frame. False leaves the previous atlas in use.
+    static constexpr size_t LabelRows = 5;
     bool SetLabelAtlas(const uint8_t* premultipliedBgra, uint32_t width, uint32_t height,
-                       uint32_t rowHeight, const std::array<uint32_t, 4>& rowWidths);
+                       uint32_t rowHeight, const std::array<uint32_t, LabelRows>& rowWidths);
     bool HasLabelAtlas() const { return m_labelAtlas != nullptr; }
     // The spatial mask, 8-bit grey at any size (the compositor stretches it over the
     // frame). Synchronous like SetLabelAtlas; ClearMask drains too, because the view
@@ -661,6 +693,21 @@ public:
     // is what the DLSS guide S5.5 forbids, so the feature is kept instead.
     bool ReleaseDLSSFeatureForIdle();
 
+    // RTX Video Super Resolution (P2.8, VsrPolicy.h). Probed when a renderer that
+    // follows its window - the player's - is initialized; Ready until a create is
+    // refused. The view is presentation only: nothing here reaches the capture.
+    vsr_policy::Reason VsrReason() const { return m_vsr.Reason(); }
+    const vsr_policy::Capabilities& VsrCapabilities() const { return m_vsr.Capabilities(); }
+    NVSDK_NGX_Result VsrLastResult() const { return m_vsr.LastResult(); }
+    uint64_t VsrEvaluations() const { return m_vsr.EvaluationCount(); }
+    // Whether the last present drew an RTX VSR frame, and the size it was made at.
+    bool VsrShown() const { return m_vsrShown; }
+    uint32_t VsrOutputW() const { return m_vsrOutputW; }
+    uint32_t VsrOutputH() const { return m_vsrOutputH; }
+    // GPU time between the timestamps bracketing the last resolved RTX VSR evaluate;
+    // 0 until one has completed.
+    double LastVsrGpuMs() const { return m_lastVsrGpuMs; }
+
 private:
     friend struct D3D12RendererDeleter;
     ~D3D12Renderer();
@@ -687,6 +734,9 @@ private:
     // three keep the indices every other pass binds.
     static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
     static constexpr uint32_t RootOverlay = 3, RootCompose = 4;
+    // [5] SRV table t6, the RTX VSR frame, read by PSPresentScaled alone and appended
+    // for the same reason as the two before it.
+    static constexpr uint32_t RootVsr = 5;
     // 16 present parameters plus the capture pass's source texel size.
     static constexpr uint32_t PresentConstantCount = 20;
     // Pane, Label, LabelW, Target, Loupe, LoupeAt, Diff, Subs, Hdr; see the Compose
@@ -718,7 +768,9 @@ private:
     // [0,1,0,1]: the pass binds a three-wide table at CurrentInput(), so t3 is always
     // the frame the field belongs to and t4 the one before it.
     static constexpr uint32_t NvofInputSRV = PqSourceSRV + 1;
-    static constexpr uint32_t SRVCount = NvofInputSRV + 4;
+    // The RTX VSR frame (t6): a null view until the first one is allocated.
+    static constexpr uint32_t VsrSRV = NvofInputSRV + 4;
+    static constexpr uint32_t SRVCount = VsrSRV + 1;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
     // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two
@@ -831,6 +883,13 @@ private:
     void FollowWindowSize();
     bool ResizeSwapchain(uint32_t width, uint32_t height);
     void HarvestNeuralTimings();
+    // RTX VSR of the reference into m_vsrOutput, when the comparison reads it and the
+    // reference, the size or the quality changed since the last one. Records onto
+    // `cmd` ahead of the draw that reads it and re-binds the SRV heap NGX replaced.
+    void RecordVsr(ID3D12GraphicsCommandList* cmd, uint32_t slot, const present_scale::Target& target);
+    bool EnsureVsrFeature();
+    bool EnsureVsrOutput(uint32_t width, uint32_t height);
+    void HarvestVsrTimings();
     void SampleLocalVideoMemory();
     d3d12_renderer_detail::FenceWaitResult DrainForRetirement();
     void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
@@ -938,7 +997,7 @@ private:
     // of which it is all zeroes, and the rectangle the pending copy rewrites.
     subtitle::PixelBox m_subtitleHeld, m_subtitleDirty;
     uint32_t m_labelAtlasW = 0, m_labelAtlasH = 0, m_labelRowHeight = 0;
-    std::array<uint32_t, 4> m_labelWidths{};
+    std::array<uint32_t, LabelRows> m_labelWidths{};
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap; // 2 timestamps per frame slot
     Microsoft::WRL::ComPtr<ID3D12Resource> m_timestampReadback;
 
@@ -1050,6 +1109,27 @@ private:
     d3d12_renderer_detail::FenceWaitResult m_lastFenceWaitResult =
         d3d12_renderer_detail::FenceWaitResult::Completed;
     DLSSBackend m_dlss;
+    // After m_dlss, so it is destroyed first; the destructor shuts it down ahead of
+    // m_dlss in any case, so the session DLSSBackend opened outlives the lease on it.
+    VsrEngine m_vsr;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_vsrOutput;  // R8G8B8A8 UAV, VsrPolicy.h OutputSize
+    uint32_t m_vsrOutputW = 0, m_vsrOutputH = 0;
+    bool m_vsrOutputInUAV = true;
+    // Bumped by every reference copy; the VSR frame is made again only when this,
+    // its size or its quality moved, so a paused split drag re-presents without it.
+    uint64_t m_referenceSerial = 0;
+    uint64_t m_vsrSerial = 0;
+    vsr_policy::Quality m_vsrQuality = vsr_policy::kDefaultQuality;
+    bool m_vsrShown = false;
+    bool m_vsrValid = false;  // the last evaluate (m_vsrSerial, m_vsrQuality) succeeded
+    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_vsrTimestampHeap;  // 2 per frame slot
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_vsrTimestampReadback;
+    const uint64_t* m_vsrTimestampMapped = nullptr;
+    bool m_vsrTimingPending[FrameCount]{};
+    double m_lastVsrGpuMs = 0.0;
+    // Running totals the log reports every 300 timed evaluations and on teardown.
+    uint64_t m_vsrTimed = 0;
+    double m_vsrTimedSum = 0.0, m_vsrTimedMin = 0.0, m_vsrTimedMax = 0.0;
     // Renderers this process has kept alive after a drain that did not complete;
     // see D3D12RendererDeleter. Process-wide because the limit is on the process.
     static std::atomic<uint32_t> s_retainedRenderers;

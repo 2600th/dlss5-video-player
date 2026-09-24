@@ -540,6 +540,14 @@ if(BUILD_TESTING)
     # named the wrong resource states; this holds the renderer to no debug-layer
     # error before and after the first guided frame. Needs no clip.
     add_test(NAME DebugViewGpuSmoke COMMAND UpscalingGpuSmoke debug-views)
+    # RTX VSR (P2.8): the feature created on the player's renderer, evaluated beside
+    # DLSS Super Resolution in the same frames, every mode presented from it, and the
+    # quality ladder timed. Only a build with the SDK has an engine to test.
+    if(RTX_VSR_FOUND)
+        add_test(NAME VsrGpuSmoke COMMAND UpscalingGpuSmoke vsr
+            "${CMAKE_SOURCE_DIR}/docs/media/neural-comparison-demo.mp4")
+        set_tests_properties(VsrGpuSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 300)
+    endif()
     add_test(NAME MediaGpuSmoke COMMAND MediaGpuSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
     add_test(NAME NeuralRangeRenderSmoke COMMAND NeuralRangeRenderSmoke

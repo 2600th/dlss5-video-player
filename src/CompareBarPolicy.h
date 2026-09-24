@@ -92,7 +92,7 @@ inline int Scale(int dip, UINT dpi)
 // is Segoe UI 14's average over these labels, rounded up.
 inline Metrics EstimatedMetrics(size_t modeCount, UINT dpi)
 {
-    static constexpr std::array full{6, 8, 5, 4, 10, 12, 5}, brief{6, 4, 5, 4, 4, 4, 5};
+    static constexpr std::array full{6, 8, 7, 5, 4, 10, 12, 5}, brief{6, 4, 3, 5, 4, 4, 4, 5};
     Metrics metrics;
     for (size_t index = 0; index < modeCount; ++index) {
         metrics.modeLabels.push_back(Scale(7 * full[index % full.size()], dpi));

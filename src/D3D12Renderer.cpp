@@ -152,7 +152,14 @@ D3D12Renderer::~D3D12Renderer() {
     m_timestampMapped=nullptr;
     if (m_exposureUpload && m_exposureUploadMapped) m_exposureUpload->Unmap(0,nullptr);
     m_exposureUploadMapped=nullptr;
+    if (m_vsrTimestampReadback && m_vsrTimestampMapped) m_vsrTimestampReadback->Unmap(0,nullptr);
+    m_vsrTimestampMapped=nullptr;
     LOG("Renderer teardown: buffers unmapped");
+    if (m_vsrTimed) LOG("RTX VSR GPU: " << m_vsrTimed << " evaluations, mean " << m_vsrTimedSum/double(m_vsrTimed)
+        << " ms, min " << m_vsrTimedMin << " ms, max " << m_vsrTimedMax << " ms (quality " << static_cast<int>(m_vsrQuality)
+        << ", " << m_sourceW << "x" << m_sourceH << " -> " << m_vsrOutputW << "x" << m_vsrOutputH << ")");
+    // Ahead of DLSSBackend: the lease it holds is on the session DLSSBackend opened.
+    m_vsr.Shutdown();
     m_dlss.Shutdown();
     LOG("Renderer teardown: NGX released");
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
@@ -184,6 +191,9 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
         LOG("DLSS unavailable; using D3D12 scaler fallback.");
         m_renderW=sourceW; m_renderH=sourceH;
     }
+    // Only the player's renderer presents a comparison, and only it asks NGX about RTX
+    // VSR; the offline carrier never has a view to show it in.
+    if(m_followWindow)m_vsr.Probe(m_device.Get());
     if(!CreateVideoResources()) return false;
     LOG("V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.");
     return true;
@@ -468,10 +478,15 @@ cbuffer Compose:register(b1){
     float4 Loupe;   // xy = image UV under the pointer, z = circle radius px, w = px per output texel (0 = off)
     float4 LoupeAt; // xy = centre of the left circle, zw = of the right one, px
     float4 Diff;    // x = difference gain, y = 1 for grey luma, 0 per channel, z = mask on, w = mask inverted
-    float4 Subs;    // x = the subtitle overlay is on
+    float4 Subs;    // x = the subtitle overlay is on, y = an RTX VSR frame is bound at t6,
+                    // z = split, wipe, difference and side by side compare against it
     float4 Hdr;     // x = SDR white in nits, y = 1 when Ref holds PQ BT.2020 (R10G10B10A2)
 }
 Texture2D Mask:register(t3); Texture2D Labels:register(t4); Texture2D Subtitles:register(t5);
+// RTX Video Super Resolution of the original (P2.8, VsrPolicy.h): 8-bit sRGB, made by
+// the renderer at the size the picture is shown at, or at the source's size where the
+// window is smaller. Never bound by a capture program, like everything at b1 and t3+.
+Texture2D Vsr:register(t6);
 // HDR (P3.1). The compositor works in linear light with SDR white at 1.0 and BT.709
 // primaries, which is what T has always held; an HDR original arrives as PQ BT.2020
 // and is brought into the same space, so it can exceed 1.0 and leave the BT.709
@@ -568,7 +583,7 @@ float3 MaskedNeural(float3 c,float3 ref,float2 uv){
 // One tag from the premultiplied atlas over an sRGB-encoded colour, with its top-left
 // corner at `anchor` in backbuffer pixels. Load, not Sample: the tags were drawn by GDI
 // at the window's DPI and are shown texel for pixel.
-float LabelWidth(int row){return row==0?LabelW.x:row==1?LabelW.y:row==2?LabelW.z:LabelW.w;}
+float LabelWidth(int row){return row==0?LabelW.x:row==1?LabelW.y:row==2?LabelW.z:row==3?LabelW.w:Target.z;}
 float3 LabelOver(float3 c,float2 px,float2 anchor,int row){
     float2 rel=floor(px-anchor);
     if(Label.x>=1.0&&rel.x>=0.0&&rel.y>=0.0&&rel.x<LabelWidth(row)&&rel.y<Label.x){
@@ -582,12 +597,14 @@ float3 LabelOver(float3 c,float2 px,float2 anchor,int row){
 // square and not a bilinear smear, which is the whole point of looking this close. The
 // original is point-sampled at ITS grid, the source's, which is what it really has; the
 // DLSS 5 side is dialled against the original at the same spot, like the main view.
-float3 LoupeColour(float2 uv,bool original){
+// RTX VSR, when it is the compared member, is point-sampled at its own grid too.
+float3 LoupeColour(float2 uv,bool original,bool vsr){
     uv=saturate(uv);
     float w,h;T.GetDimensions(w,h);
     float rw,rh;Ref.GetDimensions(rw,rh);
     float3 c;
     if(original)c=RefToLinear(Ref.Load(int3(min(int2(uv*float2(rw,rh)),int2(rw,rh)-1),0)).rgb);
+    else if(vsr){float vw,vh;Vsr.GetDimensions(vw,vh);c=SRGBToLinear(Vsr.Load(int3(min(int2(uv*float2(vw,vh)),int2(vw,vh)-1),0)).rgb);}
     else{
         c=T.Load(int3(min(int2(uv*float2(w,h)),int2(w,h)-1),0)).rgb;
         float3 ref=RefToLinear(Ref.SampleLevel(S,uv,0).rgb);
@@ -596,14 +613,14 @@ float3 LoupeColour(float2 uv,bool original){
     }
     return COMPOSE_ENCODE(ApplyVideoAdjustments(c));
 }
-float3 LoupeOver(float3 o,float2 px,bool swap){
+float3 LoupeOver(float3 o,float2 px,bool swap,bool vsr){
     float radius=Loupe.z;
     float w,h;T.GetDimensions(w,h);
     [unroll]for(int side=0;side<2;++side){
         float2 centre=side==0?LoupeAt.xy:LoupeAt.zw;
         float d=length(px-centre);
         // A white ring inside a dark one, for the reason the wipe divider has both.
-        if(d<radius)o=LoupeColour(Loupe.xy+(px-centre)/(Loupe.w*float2(w,h)),(side==0)!=swap);
+        if(d<radius)o=LoupeColour(Loupe.xy+(px-centre)/(Loupe.w*float2(w,h)),(side==0)!=swap,vsr);
         else if(d<radius+2.0)o=1.0;
         else if(d<radius+3.5)o=0.0;
     }
@@ -621,6 +638,10 @@ float3 DifferenceOf(float3 c,float3 ref){
 // side fits the whole picture into each half, letterboxed; 2x2 quarters the window,
 // which has the picture's aspect already. Panes: Original | DLSS 5 over Difference |
 // DLSS 5 at the second Mix, the first two swapped by Swap. Mirrors compare_view::Locate.
+// With an RTX VSR frame bound, side by side's DLSS 5 pane is RTX VSR when that is the
+// compared member (Subs.z), and the 2x2's fourth pane is RTX VSR (Subs.y), so the two
+// engines share the right-hand column and the eye moves straight down between them.
+// Kind 4 is RTX VSR, which is also its tag's row.
 float4 ComposePanes(float2 wuv,int mode,bool swap){
     int pane=0;float2 origin=0.0,size=1.0;
     if(mode==6){pane=wuv.x<0.5?0:1;origin=float2(0.5*float(pane),0.25);size=float2(0.5,0.5);}
@@ -634,9 +655,12 @@ float4 ComposePanes(float2 wuv,int mode,bool swap){
     float3 n=SampleFootprint(T,uv,footprint,false);
     float3 ref=SampleRefFootprint(uv,footprint);
     int kind=pane==0?(swap?1:0):pane==1?(swap?0:1):pane==2?2:3;
+    if(mode==6&&kind==1&&Subs.z>0.5)kind=4;
+    if(mode==7&&kind==3&&Subs.y>0.5)kind=4;
     float mixS=kind==3?Pane.z:ColorB.z;
     if(mixS!=1.0)n=ApplyNeuralStrength(n,ref,mixS,max(ColorB.w,1.0));
     n=MaskedNeural(n,ref,uv);
+    if(kind==4)n=SampleFootprint(Vsr,uv,footprint,true);
     float3 c=kind==0?ApplyVideoAdjustments(ref):kind==2?DifferenceOf(n,ref):ApplyVideoAdjustments(n);
     float2 px=wuv*Target.xy;
     bool inside=all(s>=0.0)&&all(s<=1.0);
@@ -651,7 +675,7 @@ float4 PSPresentScaled(V i):SV_Target{
     int paneMode=int(Compare.x+0.5);
     if(paneMode==6||paneMode==7){
         float4 panes=ComposePanes(i.uv,paneMode,Pane.y>0.5);
-        if(Loupe.w>0.0)panes.rgb=LoupeOver(panes.rgb,i.uv*Target.xy,Pane.y>0.5);
+        if(Loupe.w>0.0)panes.rgb=LoupeOver(panes.rgb,i.uv*Target.xy,Pane.y>0.5,paneMode==6&&Subs.z>0.5);
         return float4(FinishCompose(panes.rgb,i.uv,i.p.xy),1);
     }
     float zoom=max(Misc.y,0.01);
@@ -663,14 +687,20 @@ float4 PSPresentScaled(V i):SV_Target{
     int mode=int(Compare.x+0.5);
     float strength=ColorB.z;
     bool swap=Pane.y>0.5;
+    // RTX VSR is the picture in its own view (mode 8) and the compared member of the
+    // modes Subs.z names; the renderer sends neither without a frame bound at t6.
+    bool vsr=mode==8||Subs.z>0.5;
     if(mode!=0||strength!=1.0||Diff.z>0.5){
         float3 ref=SampleRefFootprint(uv,footprint);
-        if(strength!=1.0)c=ApplyNeuralStrength(c,ref,strength,max(ColorB.w,1.0));
-        c=MaskedNeural(c,ref,uv);
+        if(vsr)c=SampleFootprint(Vsr,uv,footprint,true);
+        else{
+            if(strength!=1.0)c=ApplyNeuralStrength(c,ref,strength,max(ColorB.w,1.0));
+            c=MaskedNeural(c,ref,uv);
+        }
         if(mode==1)c=ref;
         else if(mode==2)c=lerp(ref,c,saturate(Compare.y));
         else if(mode==5)c=DifferenceOf(c,ref);
-        else if(mode!=0)c=(uv.x<Compare.y)!=swap?ref:c;
+        else if(mode!=0&&mode!=8)c=(uv.x<Compare.y)!=swap?ref:c;
     }
     if(mode!=5)c=ApplyVideoAdjustments(c);
     float screenSplit=(Compare.y-zc.x)*zoom+zc.x;
@@ -688,15 +718,17 @@ float4 PSPresentScaled(V i):SV_Target{
     if(Pane.w>0.0){
         float2 px=i.uv*Target.xy;
         float inset=Label.y;
+        int compared=vsr?4:1;
         if(mode==1)o=LabelOver(o,px,float2(inset,inset),0);
+        else if(mode==8)o=LabelOver(o,px,float2(inset,inset),4);
         else if(mode==5)o=LabelOver(o,px,float2(inset,inset),2);
         else if(mode==3||mode==4){
-            int left=swap?1:0,right=1-left;
+            int left=swap?compared:0,right=swap?0:compared;
             if(px.x<screenSplit*Target.x)o=LabelOver(o,px,float2(inset,inset),left);
             else o=LabelOver(o,px,float2(Target.x-inset-LabelWidth(right),inset),right);
         }
     }
-    if(Loupe.w>0.0)o=LoupeOver(o,i.uv*Target.xy,swap);
+    if(Loupe.w>0.0)o=LoupeOver(o,i.uv*Target.xy,swap,vsr);
     return float4(FinishCompose(o,i.uv,i.p.xy),1);
 }
 )"
@@ -897,16 +929,19 @@ bool D3D12Renderer::CreatePipelines(){
     // The compositor's table, t3 to t5. Its own parameter, appended, so nothing that
     // binds the first three moves.
     D3D12_DESCRIPTOR_RANGE overlayRange{};overlayRange.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;overlayRange.NumDescriptors=3;overlayRange.BaseShaderRegister=3;
+    // The RTX VSR frame, t6, in a table of its own, appended like the overlay's.
+    D3D12_DESCRIPTOR_RANGE vsrRange{};vsrRange.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;vsrRange.NumDescriptors=1;vsrRange.BaseShaderRegister=6;
     // [0] t0 current view, [1] t1 comparison reference and t2 backward flow, [2]
     // PresentConstantCount root constants (Params), [3] t3..t5, [4] ComposeConstantCount
-    // root constants (Compose).
-    D3D12_ROOT_PARAMETER rp[5]{};
+    // root constants (Compose), [5] t6.
+    D3D12_ROOT_PARAMETER rp[6]{};
     for(uint32_t r=0;r<2;++r){rp[r].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[r].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[r].DescriptorTable.NumDescriptorRanges=1;rp[r].DescriptorTable.pDescriptorRanges=&ranges[r];}
     rp[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;rp[2].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[2].Constants.Num32BitValues=PresentConstantCount;rp[2].Constants.ShaderRegister=0;
     rp[RootOverlay].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[RootOverlay].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[RootOverlay].DescriptorTable.NumDescriptorRanges=1;rp[RootOverlay].DescriptorTable.pDescriptorRanges=&overlayRange;
     rp[RootCompose].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;rp[RootCompose].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[RootCompose].Constants.Num32BitValues=ComposeConstantCount;rp[RootCompose].Constants.ShaderRegister=1;
+    rp[RootVsr].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[RootVsr].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[RootVsr].DescriptorTable.NumDescriptorRanges=1;rp[RootVsr].DescriptorTable.pDescriptorRanges=&vsrRange;
     D3D12_STATIC_SAMPLER_DESC smp{};smp.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;smp.AddressU=smp.AddressV=smp.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;smp.ShaderRegister=0;smp.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;smp.MaxLOD=D3D12_FLOAT32_MAX;
-    D3D12_ROOT_SIGNATURE_DESC rs{};rs.NumParameters=5;rs.pParameters=rp;rs.NumStaticSamplers=1;rs.pStaticSamplers=&smp;rs.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    D3D12_ROOT_SIGNATURE_DESC rs{};rs.NumParameters=6;rs.pParameters=rp;rs.NumStaticSamplers=1;rs.pStaticSamplers=&smp;rs.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob>sig;if(!HR(D3D12SerializeRootSignature(&rs,D3D_ROOT_SIGNATURE_VERSION_1,&sig,&err),"SerializeRootSignature"))return false;
     if(!HR(m_device->CreateRootSignature(0,sig->GetBufferPointer(),sig->GetBufferSize(),IID_PPV_ARGS(&m_rootSig)),"CreateRootSignature"))return false;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};p.pRootSignature=m_rootSig.Get();p.VS={vs->GetBufferPointer(),vs->GetBufferSize()};p.PS={convert->GetBufferPointer(),convert->GetBufferSize()};
@@ -1279,6 +1314,9 @@ bool D3D12Renderer::CreateVideoResources(){
     // The HDR source texture is allocated by the first PQ frame; until then its slot
     // is a null view like the reference's.
     srv.Format=DXGI_FORMAT_R10G10B10A2_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(PqSourceSRV));
+    // The RTX VSR frame is allocated when a comparison first shows one; never read
+    // before that, because the flags the compositor tests are off.
+    srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(VsrSRV));
 
     // Two timestamps per frame slot bracket DLSS Evaluate; resolved into a readback
     // buffer and harvested once that slot's fence is known complete.
@@ -1377,6 +1415,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot, &m_renderSlotWaitNanos)) return false;
     HarvestNeuralTimings();
+    HarvestVsrTimings();
     SampleLocalVideoMemory();
     if(nv12Source){
         // Y plane, then the interleaved UV plane straight behind it; both rows are
@@ -1622,8 +1661,9 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     // skipped presents past the feature recreate rendered 900/900 "verified" frames with
     // DLAA only (0.46 ms neural GPU time against 5.7 ms), bit-for-bit non-neural.
     {
-        uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);
         const present_scale::Target target=CurrentPresentTarget();
+        RecordVsr(cmd,slot,target);
+        uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);
         D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         const bool finalView=(m_debugView==DebugView::Final);
         SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
@@ -1908,7 +1948,7 @@ void D3D12Renderer::RecordReferenceUpload(ID3D12GraphicsCommandList*cmd,uint32_t
     if(m_referencePq)s.PlacedFootprint.Footprint.Format=DXGI_FORMAT_R10G10B10A2_UNORM;
     cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
     Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    m_referenceInCopyDest=false;m_referencePending=false;m_hasReference=true;
+    m_referenceInCopyDest=false;m_referencePending=false;m_hasReference=true;++m_referenceSerial;
 }
 
 // Root constants (PresentConstantCount floats): [0..1] JitterUV, [2] Misc.x = 1/outputW,
@@ -1921,7 +1961,13 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     // One target pixel in UV, which is what the wipe divider is drawn in. The capture
     // passes draw at the output's size and pass nothing.
     const uint32_t dividerWidth=targetWidth?targetWidth:m_outputW;
-    const ComparisonMode mode=useReference?cmp.mode:ComparisonMode::Neural;
+    ComparisonMode mode=useReference?cmp.mode:ComparisonMode::Neural;
+    // RTX VSR is drawn only from a frame this present made or kept (RecordVsr). Without
+    // one its view is the original it would have been made from, tagged as such, and
+    // the compared member stays DLSS 5; nothing is ever shown under a name it is not.
+    const bool vsrFrame=useReference&&m_vsrShown;
+    if(mode==ComparisonMode::Vsr&&!vsrFrame)mode=ComparisonMode::Original;
+    const bool againstVsr=vsrFrame&&ComparisonComparesAgainstVsr(cmp);
     const float select=(mode==ComparisonMode::Blend)?cmp.amount:cmp.splitX;
     // The dial composites against the reference, so without one it falls back to exactly
     // 1: the capture pass and the offline renderer never upload a reference, which is
@@ -1949,14 +1995,15 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
         0,useReference&&cmp.swap?1.0f:0.0f,std::clamp(cmp.secondMix,0.0f,2.0f),labels?std::clamp(cmp.labelFade,0.0f,1.0f):0.0f,
         labels?float(m_labelRowHeight):0.0f,inset,float(m_labelAtlasW),float(m_labelAtlasH),
         float(m_labelWidths[0]),float(m_labelWidths[1]),float(m_labelWidths[2]),float(m_labelWidths[3]),
-        float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),0,0,
+        float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),float(m_labelWidths[4]),0,
         cmp.loupeU,cmp.loupeV,cmp.loupeRadius,loupe?std::max(cmp.loupeMagnification,1.0f):0.0f,
         cmp.loupeLeftX,cmp.loupeLeftY,cmp.loupeRightX,cmp.loupeRightY,
         std::max(cmp.differenceGain,0.0f),cmp.differenceLuma?1.0f:0.0f,mask?1.0f:0.0f,cmp.maskInvert?1.0f:0.0f,
-        m_subtitleShown&&m_debugView==DebugView::Final?1.0f:0.0f,0,0,0,
+        m_subtitleShown&&m_debugView==DebugView::Final?1.0f:0.0f,vsrFrame?1.0f:0.0f,againstVsr?1.0f:0.0f,0,
         m_sdrWhiteNits,useReference&&m_referencePq?1.0f:0.0f,0,0};
     cmd->SetGraphicsRoot32BitConstants(RootCompose,ComposeConstantCount,compose,0);
     cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(OverlaySRV));
+    cmd->SetGraphicsRootDescriptorTable(RootVsr,SRVGPU(VsrSRV));
 }
 
 bool D3D12Renderer::UploadStaticTexture(ComPtr<ID3D12Resource>&texture,DXGI_FORMAT format,const uint8_t*pixels,
@@ -2007,7 +2054,7 @@ void D3D12Renderer::ClearMask(){
 }
 
 bool D3D12Renderer::SetLabelAtlas(const uint8_t*premultipliedBgra,uint32_t width,uint32_t height,
-                                  uint32_t rowHeight,const std::array<uint32_t,4>&rowWidths){
+                                  uint32_t rowHeight,const std::array<uint32_t,LabelRows>&rowWidths){
     if(!rowHeight||height<rowHeight*uint32_t(rowWidths.size()))return false;
     for(const uint32_t rowWidth:rowWidths)if(rowWidth>width)return false;
     if(!UploadStaticTexture(m_labelAtlas,DXGI_FORMAT_B8G8R8A8_UNORM,premultipliedBgra,width,height,4u,LabelSRV,L"Compositor_Label_Atlas"))return false;
@@ -2552,6 +2599,7 @@ bool D3D12Renderer::PresentCurrent(){
     if(!DeviceHR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset static-present command list"))return false;
     ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
     HarvestNeuralTimings();
+    HarvestVsrTimings();
     RecordReferenceUpload(cmd,slot);
     RecordSubtitleUpload(cmd,slot);
 
@@ -2588,6 +2636,8 @@ void D3D12Renderer::PrepareGuideView(ID3D12GraphicsCommandList*cmd){
 }
 
 void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCRIPTOR_HANDLE rtv,const present_scale::Target&target,bool hdrTarget){
+    // Both callers record on the slot the next signal publishes.
+    RecordVsr(cmd,m_frameSlot%FrameCount,target);
     D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};
     D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};
     cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);
@@ -2680,6 +2730,122 @@ void D3D12Renderer::HarvestNeuralTimings(){
     if(end>begin)m_lastNeuralGpuMs=double(end-begin)*1000.0/double(m_timestampFrequency);
     for(uint32_t slot=0;slot<FrameCount;++slot)
         if(m_neuralTimingPending[slot]&&m_frameFence[slot]<=completed)m_neuralTimingPending[slot]=false;
+}
+
+void D3D12Renderer::HarvestVsrTimings(){
+    if(!m_vsrTimestampMapped||!m_fence||!m_timestampFrequency)return;
+    const uint64_t completed=m_fence->GetCompletedValue();
+    if(completed==UINT64_MAX)return;
+    uint64_t newestFence=0;
+    for(uint32_t slot=0;slot<FrameCount;++slot){
+        if(!m_vsrTimingPending[slot]||m_frameFence[slot]>completed)continue;
+        m_vsrTimingPending[slot]=false;
+        const uint64_t begin=m_vsrTimestampMapped[slot*2u],end=m_vsrTimestampMapped[slot*2u+1u];
+        if(end<=begin)continue;
+        const double ms=double(end-begin)*1000.0/double(m_timestampFrequency);
+        if(m_frameFence[slot]>=newestFence){newestFence=m_frameFence[slot];m_lastVsrGpuMs=ms;}
+        m_vsrTimedMin=m_vsrTimed?std::min(m_vsrTimedMin,ms):ms;m_vsrTimedMax=m_vsrTimed?std::max(m_vsrTimedMax,ms):ms;
+        m_vsrTimedSum+=ms;++m_vsrTimed;
+    }
+    // The cost the view adds, where anyone reading a playback log will find it.
+    if(m_vsrTimed>=300){
+        LOG("RTX VSR GPU: " << m_vsrTimed << " evaluations, mean " << m_vsrTimedSum/double(m_vsrTimed) << " ms, min "
+            << m_vsrTimedMin << " ms, max " << m_vsrTimedMax << " ms (quality " << static_cast<int>(m_vsrQuality) << ", "
+            << m_sourceW << "x" << m_sourceH << " -> " << m_vsrOutputW << "x" << m_vsrOutputH << ")");
+        m_vsrTimed=0;m_vsrTimedSum=0.0;
+    }
+}
+
+void D3D12Renderer::SetComparison(const ComparisonSettings&settings){
+    m_comparison=settings;m_presentStale=true;
+    if(ComparisonReadsVsr(settings)&&!m_vsr.FeatureCreated()&&m_vsr.Reason()==vsr_policy::Reason::Ready)EnsureVsrFeature();
+}
+
+// The feature is created on its own submission and waited for, as the upload of a
+// label atlas is, so the first frame that reads it evaluates on a feature whose
+// creation has reached the GPU - the order DLSS's own create keeps (RecordAndPresentFrame).
+bool D3D12Renderer::EnsureVsrFeature(){
+    if(m_vsr.FeatureCreated())return true;
+    if(m_gpuUnusable||!m_device||!m_queue||m_vsr.Reason()!=vsr_policy::Reason::Ready)return false;
+    if(!WaitGPUForContinuedUse())return false;
+    const uint32_t slot=m_frameSlot%FrameCount;
+    if(!DeviceHR(m_uploadAllocators[slot]->Reset(),"Reset RTX VSR create allocator"))return false;
+    auto*cmd=m_uploadCmds[slot].Get();
+    if(!DeviceHR(cmd->Reset(m_uploadAllocators[slot].Get(),nullptr),"Reset RTX VSR create list"))return false;
+    const bool created=m_vsr.CreateFeature(cmd);
+    if(!DeviceHR(cmd->Close(),"Close RTX VSR create list"))return false;
+    ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
+    if(!WaitGPUForContinuedUse()||!created)return false;
+    // Two timestamps per frame slot bracket the evaluate, like DLSS's.
+    if(!m_vsrTimestampHeap&&m_timestampFrequency){
+        D3D12_QUERY_HEAP_DESC qh{};qh.Type=D3D12_QUERY_HEAP_TYPE_TIMESTAMP;qh.Count=FrameCount*2;
+        D3D12_RESOURCE_DESC readback{};readback.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;readback.Width=uint64_t{FrameCount}*2u*sizeof(uint64_t);
+        readback.Height=1;readback.DepthOrArraySize=1;readback.MipLevels=1;readback.SampleDesc={1,0};readback.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        auto readbackHeap=HeapProps(D3D12_HEAP_TYPE_READBACK);void*stamps=nullptr;
+        const D3D12_RANGE stampRange{0,static_cast<SIZE_T>(readback.Width)};
+        if(HR(m_device->CreateQueryHeap(&qh,IID_PPV_ARGS(&m_vsrTimestampHeap)),"Create RTX VSR timestamp heap")&&
+           HR(m_device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&readback,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,
+                                                IID_PPV_ARGS(&m_vsrTimestampReadback)),"Create RTX VSR timestamp readback")&&
+           HR(m_vsrTimestampReadback->Map(0,&stampRange,&stamps),"Map RTX VSR timestamp readback")){
+            m_vsrTimestampReadback->SetName(L"Vsr_Timestamp_Readback");
+            m_vsrTimestampMapped=static_cast<const uint64_t*>(stamps);
+        }else{m_vsrTimestampHeap.Reset();m_vsrTimestampReadback.Reset();}
+    }
+    return true;
+}
+
+bool D3D12Renderer::EnsureVsrOutput(uint32_t width,uint32_t height){
+    if(m_vsrOutput&&m_vsrOutputW==width&&m_vsrOutputH==height)return true;
+    if(m_gpuUnusable||!m_device||!m_srvHeap)return false;
+    // The view below replaces one a frame in flight may read. Nothing on the list being
+    // recorded has been submitted, so a drain here waits only for earlier frames.
+    if(!WaitGPUForContinuedUse())return false;
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    // R8G8B8A8, as the guide's DX12 flow makes it, with the UAV NGX writes through;
+    // the spike measured it and B8G8R8A8 alike, and RGBA16F refused (0xbad0000e).
+    auto desc=Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM,width,height,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    ComPtr<ID3D12Resource> output;
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&output)),"Create RTX VSR output"))return false;
+    output->SetName(L"Vsr_Output_RGBA8_sRGB");
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
+    srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;m_device->CreateShaderResourceView(output.Get(),&srv,SRVCPU(VsrSRV));
+    m_vsrOutput=std::move(output);m_vsrOutputW=width;m_vsrOutputH=height;m_vsrOutputInUAV=true;
+    // A new texture holds nothing yet, whatever the reference is.
+    m_vsrSerial=UINT64_MAX;
+    LOG("RTX VSR output allocated: "<<m_sourceW<<"x"<<m_sourceH<<" -> "<<width<<"x"<<height<<" R8G8B8A8.");
+    return true;
+}
+
+void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const present_scale::Target&target){
+    m_vsrShown=false;
+    if(m_debugView!=DebugView::Final||!m_vsr.FeatureCreated()||!ComparisonReadsVsr(m_comparison))return;
+    // An HDR original compared in HDR is PQ: never RTX VSR's input, which is 8-bit SDR.
+    // A view that reads RTX VSR asks for the SDR original (ComparisonCombinesPixels).
+    if(!m_hasReference||!m_reference||m_referenceInCopyDest||m_referencePq||slot>=FrameCount)return;
+    const auto size=vsr_policy::OutputSize(m_sourceW,m_sourceH,target.width,target.height);
+    if(!size.width||!size.height||!EnsureVsrOutput(size.width,size.height))return;
+    const vsr_policy::Quality quality=m_comparison.vsrQuality;
+    // The frame already made from this reference at this quality is kept: a paused
+    // split drag or a loupe move re-presents without running the network again.
+    if(m_vsrSerial==m_referenceSerial&&m_vsrQuality==quality){m_vsrShown=m_vsrValid;return;}
+    Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if(!m_vsrOutputInUAV)Barrier(cmd,m_vsrOutput.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_vsrOutputInUAV=true;
+    const bool timed=m_vsrTimestampHeap&&m_vsrTimestampMapped;
+    if(timed)cmd->EndQuery(m_vsrTimestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u);
+    const bool evaluated=m_vsr.Evaluate(cmd,m_reference.Get(),m_sourceW,m_sourceH,m_vsrOutput.Get(),size.width,size.height,quality);
+    // NGX leaves its own descriptor heaps bound, as DLSS's evaluate does.
+    ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
+    if(timed&&evaluated){
+        cmd->EndQuery(m_vsrTimestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u+1u);
+        cmd->ResolveQueryData(m_vsrTimestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u,2,m_vsrTimestampReadback.Get(),uint64_t{slot}*2u*sizeof(uint64_t));
+        m_vsrTimingPending[slot]=true;
+    }
+    Barrier(cmd,m_vsrOutput.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_vsrOutputInUAV=false;
+    Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    // A refused evaluate is not retried until the reference, the size or the quality
+    // moves: VsrEngine has logged why, and a retry per present would only repeat it.
+    m_vsrSerial=m_referenceSerial;m_vsrQuality=quality;m_vsrValid=evaluated;m_vsrShown=evaluated;
 }
 
 void D3D12Renderer::SampleLocalVideoMemory(){

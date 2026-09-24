@@ -134,6 +134,16 @@ inline constexpr UINT IDM_COMPARE_DIFFERENCE_LUMA = 437;
 inline constexpr UINT IDM_COMPARE_SIDE_BY_SIDE = 447;
 inline constexpr UINT IDM_COMPARE_QUAD = 448;
 inline constexpr UINT kLastComparisonModeCommand = IDM_COMPARE_QUAD;
+// RTX VSR (P2.8), a mode in the group above by position - it sits under Original -
+// with the one free id below the Advanced block.
+inline constexpr UINT IDM_COMPARE_VSR = 449;
+// What Split, Wipe, Difference and Side by side compare the original against: a
+// checkbox, DLSS 5 when clear and RTX VSR when checked.
+inline constexpr UINT IDM_COMPARE_AGAINST_VSR = 494;
+// The RTX VSR ladder, one command per vsr_policy::kQualities entry, in order: a radio
+// block of its own past the second-Mix block, routed before HandleCommand's switch.
+inline constexpr UINT IDM_COMPARE_VSR_QUALITY_FIRST = 620;
+inline constexpr UINT IDM_COMPARE_VSR_QUALITY_COUNT = 4;
 // Quad's second Mix, one command per compare_settings::kSecondMixes entry, in order.
 // A block of its own past every other command (500-599 stay unused, see the menu
 // tests): 449 would have run into the Advanced items at 450-452, and HandleCommand
@@ -236,9 +246,13 @@ bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool r
 // selectedMode is one of the mode commands (IDM_COMPARE_NEURAL, _ORIGINAL, _SPLIT,
 // _WIPE); anything else checks IDM_COMPARE_NEURAL.
 // zoomed enables Zoom out and Fit; the zoom steps themselves carry no check.
+// vsrAvailable: RTX VSR can run (VsrPolicy.h); its mode row and the compare-against
+// toggle need it as well as modesAvailable.
 bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable,
                           UINT selectedMode, bool zoomed, bool swapped = false, bool loupe = false,
-                          bool differenceLuma = true);
+                          bool differenceLuma = true, bool vsrAvailable = false, bool againstVsr = false);
+// The RTX VSR quality block: enabled while RTX VSR can run, `index` checked.
+bool UpdateVsrQualityMenu(HMENU menuBar, bool available, UINT index);
 // Video > Compare's mask rows: Load needs a source; Invert, Clear and the feather need
 // a mask. featherIndex is the checked position in the feather block.
 bool UpdateMaskMenu(HMENU menuBar, bool loadAvailable, bool maskLoaded, bool inverted, UINT featherIndex);
@@ -251,7 +265,7 @@ bool CheckRadioCommand(HMENU menuBar, UINT first, UINT last, UINT chosen);
 // Menu command for a plain-key accelerator of the range, preview, neural
 // settings, comparison and subtitle items (I, O, Shift+I/O, Ctrl+G, F, Shift+F,
 // Ctrl+R, Ctrl+N, Ctrl+Shift+S, Z, Shift+Z, [ and ], Shift+[ and Shift+], X, C,
-// Shift+C, L, V, H and J); nullopt when the key is not one of them.
+// Shift+C, L, R, Shift+R, V, H and J); nullopt when the key is not one of them.
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown);
 
 // One row of the keyboard cheat sheet: the menu it lives in (or "Keyboard"

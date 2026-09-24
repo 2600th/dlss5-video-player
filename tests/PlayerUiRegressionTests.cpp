@@ -2801,6 +2801,36 @@ struct PlayerAppTestAccess {
         app.HandleCommand(IDM_COMPARE_SWAP);
         CHECK(!app.m_comparison.swap);
 
+        // RTX VSR (P2.8) needs an initialised renderer on an RTX GPU, which this fixture's
+        // is not: R and Shift+R change nothing and say why, its segment's tip is the
+        // reason, and C stepped over it above (Original went straight to Split).
+        CHECK(app.CurrentVsrReason() != vsr_policy::Reason::Ready);
+        const ComparisonMode beforeVsr = app.m_comparison.mode;
+        app.HandleCommand(IDM_COMPARE_VSR);
+        CHECK(app.m_comparison.mode == beforeVsr);
+        app.HandleCommand(IDM_COMPARE_AGAINST_VSR);
+        CHECK(!app.m_comparison.againstVsr);
+        CHECK(!app.VsrReasonText().empty());
+        CHECK(app.CallbackTipText(PlayerApp::kCompareModeTipIdBase + 2) == app.VsrReasonText());
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_COMPARE_VSR, MF_BYCOMMAND) & (MF_GRAYED | MF_DISABLED)) != 0);
+        // One remembered from a machine that had it reads as DLSS 5, without being
+        // forgotten, and never asks the renderer to compare against it.
+        app.m_comparison.mode = ComparisonMode::Vsr; app.m_comparison.againstVsr = true;
+        CHECK(app.EffectiveComparison().mode == ComparisonMode::Neural);
+        CHECK(!app.EffectiveComparison().againstVsr);
+        CHECK(app.SelectedComparisonMode() == ComparisonMode::Neural);
+        app.m_comparison.mode = beforeVsr; app.m_comparison.againstVsr = false;
+        // The ladder is a preference kept for when it can run, and its rung is in the tag.
+        const uint64_t tagsBefore = app.m_labelTextRevision;
+        CHECK(app.LabelAtlasTexts()[4].find(L"RTX VSR") != std::wstring::npos);
+        CHECK(app.LabelAtlasTexts()[4].find(L"HIGH") != std::wstring::npos);
+        app.HandleCommand(IDM_COMPARE_VSR_QUALITY_FIRST + 3);
+        CHECK(app.m_comparison.vsrQuality == vsr_policy::Quality::Ultra);
+        CHECK(app.m_renderer->GetComparison().vsrQuality == vsr_policy::Quality::Ultra);
+        CHECK(app.m_labelTextRevision != tagsBefore);
+        CHECK(app.LabelAtlasTexts()[4].find(L"ULTRA") != std::wstring::npos);
+        app.HandleCommand(IDM_COMPARE_VSR_QUALITY_FIRST + 2);
+
         // Holding still on the picture shows the original until release, whatever the
         // mode, and leaves the mode alone.
         app.m_comparison.mode = ComparisonMode::Neural; app.ApplyComparison(false);
@@ -2919,11 +2949,21 @@ struct PlayerAppTestAccess {
         const auto layout = app.CompareBarLayout();
         RECT main{}; GetClientRect(app.m_hwnd, &main);
         CHECK_EQ(layout.bar.top, main.bottom - app.ControlHeight());
-        // Clicking a mode segment selects it; clicking the track sets the Mix.
+        // Clicking a mode segment selects it; clicking the track sets the Mix. RTX VSR's
+        // segment (the third) cannot run here, so a click on it is the row's and nothing
+        // else.
+        for (const auto& item : layout.items) {
+            if (item.part == compare_bar::Part::Mode && item.index == 3) {
+                CHECK(app.CompareBarMouseDown((item.bounds.left + item.bounds.right) / 2, (item.bounds.top + item.bounds.bottom) / 2));
+                CHECK(app.m_comparison.mode == app.CompareBarModes()[3]);
+            }
+        }
         for (const auto& item : layout.items) {
             if (item.part == compare_bar::Part::Mode && item.index == 2) {
+                CHECK(app.CompareBarModes()[2] == ComparisonMode::Vsr);
+                CHECK(!app.CompareBarItemEnabled(item));
                 CHECK(app.CompareBarMouseDown((item.bounds.left + item.bounds.right) / 2, (item.bounds.top + item.bounds.bottom) / 2));
-                CHECK(app.m_comparison.mode == app.CompareBarModes()[2]);
+                CHECK(app.m_comparison.mode == app.CompareBarModes()[3]);
             }
         }
         const int quarter = layout.mixTrack.left + (layout.mixTrack.right - layout.mixTrack.left) / 4;
@@ -2938,7 +2978,7 @@ struct PlayerAppTestAccess {
         // edge, plate translucent beside it, nothing past each tag's width.
         const auto atlas = app.BuildLabelAtlas(96);
         CHECK(!atlas.pixels.empty());
-        CHECK(atlas.widths[0] > 0 && atlas.widths[1] > 0 && atlas.widths[2] > 0 && atlas.widths[3] > 0);
+        CHECK(atlas.widths[0] > 0 && atlas.widths[1] > 0 && atlas.widths[2] > 0 && atlas.widths[3] > 0 && atlas.widths[4] > 0);
         CHECK_EQ(size_t(atlas.width) * atlas.height * 4, atlas.pixels.size());
         if (!atlas.pixels.empty() && atlas.widths[1] + 1 < atlas.width) {
             const auto alpha = [&](uint32_t x, uint32_t y) { return atlas.pixels[(size_t(y) * atlas.width + x) * 4 + 3]; };

@@ -418,6 +418,23 @@ private:
             {L"status.hdr_original", L"HDR display: original in HDR, DLSS 5 in SDR"},
             {L"status.hdr_at_sdr", L"HDR display: comparing at SDR, as DLSS 5 sees the source"},
             {L"menu.compare_hdr_at_sdr", L"Compare HDR at SDR"},
+            // RTX Video Super Resolution (P2.8): a view of its own, what the other modes
+            // compare against, its quality ladder, and why it cannot run when it cannot.
+            {L"menu.compare_vsr", L"RTX VSR\tR"}, {L"menu.compare_against_vsr", L"Compare against RTX VSR\tShift+R"},
+            {L"menu.compare_vsr_quality", L"RTX VSR quality"}, {L"menu.compare_vsr_quality_0", L"Low"}, {L"menu.compare_vsr_quality_1", L"Medium"},
+            {L"menu.compare_vsr_quality_2", L"High (default)"}, {L"menu.compare_vsr_quality_3", L"Ultra"},
+            {L"compare.mode.vsr", L"RTX VSR"}, {L"compare.mode.vsr.short", L"VSR"},
+            {L"compare.tag.vsr", L"RTX VSR"}, {L"compare.tag.vsr_quality_0", L"LOW"}, {L"compare.tag.vsr_quality_1", L"MEDIUM"},
+            {L"compare.tag.vsr_quality_2", L"HIGH"}, {L"compare.tag.vsr_quality_3", L"ULTRA"},
+            {L"compare.tip.vsr", L"RTX VSR (R): NVIDIA's video super resolution of the original, made live at the quality set in Video > Compare. Shift+R compares the other modes against it."},
+            {L"vsr.reason.not_built", L"RTX VSR is not in this build: it was built without the NVIDIA RTX Video SDK"},
+            {L"vsr.reason.no_session", L"RTX VSR needs an NVIDIA RTX GPU: NGX did not start on this one"},
+            {L"vsr.reason.query_failed", L"RTX VSR is unavailable: the NVIDIA driver did not report its features"},
+            {L"vsr.reason.needs_driver", L"RTX VSR needs NVIDIA driver %u.%02u or newer"},
+            {L"vsr.reason.missing_runtime", L"RTX VSR is unavailable: nvngx_vsr.dll is missing beside the player"},
+            {L"vsr.reason.unsupported", L"RTX VSR is not supported on this GPU or driver"},
+            {L"vsr.reason.create_failed", L"RTX VSR could not start on this GPU (NGX %s)"},
+            {L"vsr.reason.ready", L"RTX VSR"},
             {L"recent.missing", L"This local video has moved or is no longer available."},
             {L"open.missing", L"This video could not be found:\n\n%s"},
             // Keyboard discoverability (P2.23). The cheat sheet lists every

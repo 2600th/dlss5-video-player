@@ -73,6 +73,7 @@
 #include "StartScreenPolicy.h"
 #include "CompareBarPolicy.h"
 #include "CompareViewPolicy.h"
+#include "VsrPolicy.h"
 #include "CompareMaskPolicy.h"
 #include "CompareImageIO.h"
 #include <d3dcompiler.h>
@@ -2502,6 +2503,9 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(has_menu_entry(compareEntries, L"Difference", app_menu::IDM_COMPARE_DIFFERENCE));
     CHECK(has_menu_entry(compareEntries, L"Side by side", app_menu::IDM_COMPARE_SIDE_BY_SIDE));
     CHECK(has_menu_entry(compareEntries, L"2 \u00d7 2", app_menu::IDM_COMPARE_QUAD));
+    CHECK(has_menu_entry(compareEntries, L"RTX VSR\tR", app_menu::IDM_COMPARE_VSR));
+    CHECK(has_menu_entry(compareEntries, L"Compare against RTX VSR\tShift+R", app_menu::IDM_COMPARE_AGAINST_VSR));
+    CHECK(has_menu_entry(compareEntries, L"High (default)", app_menu::IDM_COMPARE_VSR_QUALITY_FIRST + 2));
     CHECK(has_menu_entry(compareEntries, L"More difference gain\tShift+]", app_menu::IDM_COMPARE_DIFFERENCE_MORE));
     CHECK(has_menu_entry(compareEntries, L"Less difference gain\tShift+[", app_menu::IDM_COMPARE_DIFFERENCE_LESS));
     // Blend was the Mix under another name; its row is gone and [ and ] step the Mix.
@@ -2562,6 +2566,21 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     // 2x2 ends the group.
     CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_QUAD, false, false, false, false));
     CHECK(checked(app_menu::IDM_COMPARE_QUAD));CHECK(!checked(app_menu::IDM_COMPARE_DIFFERENCE));
+    // RTX VSR sits in the group under Original with an id outside its range, and needs
+    // RTX VSR as well as a comparison: without it the row and the toggle are grey,
+    // and a selected RTX VSR reads as DLSS 5.
+    CHECK(grayed(app_menu::IDM_COMPARE_VSR));CHECK(grayed(app_menu::IDM_COMPARE_AGAINST_VSR));
+    CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_VSR, false, false, false, false, false, true));
+    CHECK(checked(app_menu::IDM_COMPARE_NEURAL));CHECK(!checked(app_menu::IDM_COMPARE_VSR));CHECK(!checked(app_menu::IDM_COMPARE_AGAINST_VSR));
+    CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_VSR, false, false, false, false, true, true));
+    CHECK(!grayed(app_menu::IDM_COMPARE_VSR));CHECK(checked(app_menu::IDM_COMPARE_VSR));CHECK(!checked(app_menu::IDM_COMPARE_QUAD));
+    CHECK(!grayed(app_menu::IDM_COMPARE_AGAINST_VSR));CHECK(checked(app_menu::IDM_COMPARE_AGAINST_VSR));
+    CHECK(app_menu::UpdateComparisonMenu(menu, false, true, app_menu::IDM_COMPARE_VSR, false, false, false, false, true, false));
+    CHECK(grayed(app_menu::IDM_COMPARE_VSR));CHECK(grayed(app_menu::IDM_COMPARE_AGAINST_VSR));
+    CHECK(app_menu::UpdateVsrQualityMenu(menu, true, 3));
+    CHECK(checked(app_menu::IDM_COMPARE_VSR_QUALITY_FIRST + 3));CHECK(!checked(app_menu::IDM_COMPARE_VSR_QUALITY_FIRST + 2));
+    CHECK(app_menu::UpdateVsrQualityMenu(menu, false, 2));
+    CHECK(grayed(app_menu::IDM_COMPARE_VSR_QUALITY_FIRST));CHECK(checked(app_menu::IDM_COMPARE_VSR_QUALITY_FIRST + 2));
     CHECK(app_menu::UpdateSecondMixMenu(menu, true, 3));
     CHECK(checked(app_menu::IDM_COMPARE_SECOND_MIX_FIRST + 3));CHECK(!checked(app_menu::IDM_COMPARE_SECOND_MIX_FIRST + 1));
     CHECK(app_menu::UpdateSecondMixMenu(menu, false, 1));
@@ -2599,6 +2618,11 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(CommandForPlayerKey(VK_OEM_6, false, true) == app_menu::IDM_COMPARE_DIFFERENCE_MORE);
     CHECK(CommandForPlayerKey('C', false, false) == app_menu::IDM_COMPARE_NEXT_MODE);
     CHECK(CommandForPlayerKey('C', false, true) == app_menu::IDM_COMPARE_PREVIOUS_MODE);
+    // R shows RTX VSR and Shift+R compares against it; Ctrl+R still converts the range.
+    CHECK(CommandForPlayerKey('R', false, false) == app_menu::IDM_COMPARE_VSR);
+    CHECK(CommandForPlayerKey('R', false, true) == app_menu::IDM_COMPARE_AGAINST_VSR);
+    CHECK(CommandForPlayerKey('R', true, false) == app_menu::IDM_RENDER_RANGE);
+    CHECK(!CommandForPlayerKey('R', true, true).has_value());
     // Subtitles: V steps through them, H and J move them earlier and later.
     CHECK(CommandForPlayerKey('V', false, false) == app_menu::IDM_SUBTITLE_NEXT);
     CHECK(CommandForPlayerKey('H', false, false) == app_menu::IDM_SUBTITLE_EARLIER);
@@ -2607,8 +2631,9 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(!CommandForPlayerKey('V', true, false).has_value());
     // Ctrl+Alt+C is the overlay hotkey for the adjustments; Ctrl+C stays unclaimed.
     CHECK(!CommandForPlayerKey('C', true, false).has_value());
-    // Existing single-letter and Ctrl accelerators keep their owners.
-    for (const UINT key : {UINT('D'), UINT('S'), UINT('A'), UINT('M'), UINT('G'), UINT('R'), UINT('N'), UINT(VK_SPACE), UINT(VK_F6)})
+    // Existing single-letter and Ctrl accelerators keep their owners. (Bare R was
+    // listed here while only Ctrl+R had one; it is RTX VSR's now, checked above.)
+    for (const UINT key : {UINT('D'), UINT('S'), UINT('A'), UINT('M'), UINT('G'), UINT('N'), UINT(VK_SPACE), UINT(VK_F6)})
         CHECK(!CommandForPlayerKey(key, false, false).has_value());
     for (const UINT key : {'O', 'E', 'L', 'I', 'F', 'Z'})
         CHECK(!CommandForPlayerKey(key, true, false).has_value());
@@ -8635,6 +8660,13 @@ void compare_compositor_stays_out_of_the_capture_program_test()
         const auto bound=present_program_bindings(entry);
         CHECK(std::find(bound.begin(),bound.end(),"Subtitles@5")==bound.end());
     }
+    // RTX VSR (P2.8) is the compositor's too: presentation only, never in the capture,
+    // the conversion or the NV12 capture, so no cached render can hold it.
+    CHECK(std::find(scaled.begin(),scaled.end(),"Vsr@6")!=scaled.end());
+    for(const char* entry:{"PSPresent","PSConvert","PSConvertDebanded","PSCaptureLuma","PSCaptureChroma","PSCaptureDithered"}){
+        const auto bound=present_program_bindings(entry);
+        CHECK(std::find(bound.begin(),bound.end(),"Vsr@6")==bound.end());
+    }
     // The window compositor takes over at 1:1 only for what PSPresent cannot draw.
     using present_scale::Choose;
     CHECK(!Choose(true,true,1920,1080,1920,1080,false).scaled);
@@ -8646,9 +8678,85 @@ void compare_compositor_stays_out_of_the_capture_program_test()
     ComparisonSettings comparison;
     CHECK(!ComparisonNeedsCompositor(comparison));
     comparison.mode=ComparisonMode::Blend;CHECK(!ComparisonNeedsCompositor(comparison));
-    for(const ComparisonMode mode:{ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe,ComparisonMode::Difference}){
+    for(const ComparisonMode mode:{ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe,ComparisonMode::Difference,ComparisonMode::Vsr}){
         comparison.mode=mode;CHECK(ComparisonNeedsCompositor(comparison));
     }
+}
+
+// RTX VSR (P2.8): when the view can be shown and what it says when it cannot, the
+// ladder, the size of the frame it makes, and which views ask the renderer for it.
+void vsr_policy_decides_the_view_its_ladder_and_its_size_test()
+{
+    using namespace vsr_policy;
+    // The conditions, most fundamental first.
+    Capabilities caps;
+    CHECK(Decide(caps)==Reason::NotBuilt);
+    caps.built=true;CHECK(Decide(caps)==Reason::NoSession);
+    caps.session=true;CHECK(Decide(caps)==Reason::QueryFailed);
+    caps.queried=true;CHECK(Decide(caps)==Reason::MissingRuntime);
+    caps.availableRead=true;CHECK(Decide(caps)==Reason::Unsupported);
+    caps.available=true;CHECK(Decide(caps)==Reason::Ready);
+    // An old driver is named before anything it would also explain.
+    Capabilities old=caps;old.needsUpdatedDriver=true;old.available=false;CHECK(Decide(old)==Reason::NeedsDriver);
+    caps.createAttempted=true;CHECK(Decide(caps)==Reason::CreateFailed);
+    caps.createSucceeded=true;CHECK(Decide(caps)==Reason::Ready);
+    // Every reason has its own English sentence, and the two with numbers take them.
+    Localizer localizer;
+    std::vector<std::wstring> texts;
+    for(const Reason reason:{Reason::Ready,Reason::NotBuilt,Reason::NoSession,Reason::QueryFailed,Reason::NeedsDriver,
+                             Reason::MissingRuntime,Reason::Unsupported,Reason::CreateFailed}){
+        const std::wstring text=localizer.Get(ReasonKey(reason));
+        CHECK(text!=ReasonKey(reason));
+        CHECK(std::find(texts.begin(),texts.end(),text)==texts.end());
+        texts.push_back(text);
+    }
+    CHECK(localizer.Get(ReasonKey(Reason::NeedsDriver)).find(L"%u.%02u")!=std::wstring::npos);
+    CHECK(localizer.Get(ReasonKey(Reason::CreateFailed)).find(L"%s")!=std::wstring::npos);
+    // The ladder: NGX's own numbers, High by default, anything else read as High.
+    CHECK(static_cast<int>(kDefaultQuality)==3);
+    CHECK(LoadQuality(1)==Quality::Low);CHECK(LoadQuality(4)==Quality::Ultra);
+    CHECK(LoadQuality(0)==kDefaultQuality);CHECK(LoadQuality(5)==kDefaultQuality);CHECK(LoadQuality(-1)==kDefaultQuality);
+    for(size_t index=0;index<kQualities.size();++index)CHECK_EQ(index,QualityIndex(kQualities[index]));
+    CHECK_EQ(size_t(app_menu::IDM_COMPARE_VSR_QUALITY_COUNT),kQualities.size());
+    CHECK(localizer.Get(L"menu.compare_vsr_quality_2").find(L"default")!=std::wstring::npos);
+    // 1x where the window shows the picture no larger than the source...
+    CHECK((OutputSize(1920,1080,1920,1080)==Size{1920,1080}));
+    CHECK((OutputSize(2560,1440,1920,1080)==Size{2560,1440}));
+    CHECK((OutputSize(1920,1080,1280,1080)==Size{1920,1080}));
+    CHECK((OutputSize(1920,1080,0,0)==Size{1920,1080}));
+    // ...and the picture's fitted size where it is larger, the aspect held.
+    CHECK((OutputSize(1920,1080,2560,1440)==Size{2560,1440}));
+    CHECK((OutputSize(1920,1080,3840,2400)==Size{3840,2160}));
+    CHECK((OutputSize(1280,720,2560,1600)==Size{2560,1440}));
+    CHECK((OutputSize(640,360,3840,2160)==Size{3840,2160}));
+    // Never past D3D12's texture limit.
+    const Size huge=OutputSize(1920,1080,40000,22500);
+    CHECK(huge.width<=kMaxDimension&&huge.height<=kMaxDimension&&huge.width==kMaxDimension);
+    CHECK((OutputSize(0,1080,1920,1080)==Size{}));
+    // Which views ask for it: its own, the 2x2, and the modes that compare, when
+    // told to compare against it. The Mix and the mask alone never do.
+    ComparisonSettings comparison;
+    CHECK(!ComparisonReadsVsr(comparison));
+    comparison.againstVsr=true;CHECK(!ComparisonReadsVsr(comparison));
+    comparison.strength=0.5f;comparison.mask=true;CHECK(!ComparisonReadsVsr(comparison));
+    comparison={};
+    for(const ComparisonMode mode:{ComparisonMode::Vsr,ComparisonMode::Quad}){comparison.mode=mode;CHECK(ComparisonReadsVsr(comparison));}
+    for(const ComparisonMode mode:{ComparisonMode::SplitVertical,ComparisonMode::Wipe,ComparisonMode::Difference,ComparisonMode::SideBySide}){
+        comparison.mode=mode;comparison.againstVsr=false;
+        CHECK(!ComparisonReadsVsr(comparison));CHECK(!ComparisonComparesAgainstVsr(comparison));
+        comparison.againstVsr=true;
+        CHECK(ComparisonReadsVsr(comparison));CHECK(ComparisonComparesAgainstVsr(comparison));
+    }
+    comparison.mode=ComparisonMode::Original;CHECK(!ComparisonComparesAgainstVsr(comparison));
+    comparison.mode=ComparisonMode::Quad;CHECK(!ComparisonComparesAgainstVsr(comparison));
+    // RTX VSR reads 8-bit SDR, so a view that runs it takes the SDR original, as
+    // Difference does; and it reads the original, so the reference is uploaded.
+    comparison={};comparison.mode=ComparisonMode::Vsr;
+    CHECK(ComparisonCombinesPixels(comparison));CHECK(ComparisonReadsReference(comparison));
+    comparison.mode=ComparisonMode::SideBySide;CHECK(!ComparisonCombinesPixels(comparison));
+    comparison.againstVsr=true;CHECK(ComparisonCombinesPixels(comparison));
+    // Appended: the persisted numbers of the modes before it are unchanged.
+    CHECK_EQ(7,static_cast<int>(ComparisonMode::Quad));CHECK_EQ(8,static_cast<int>(ComparisonMode::Vsr));
 }
 
 static std::string program_bytes(const char* entry,bool hdrOutput)
@@ -8893,8 +9001,8 @@ void compare_bar_lays_out_and_hit_tests_test()
 void compare_bar_fits_every_width_and_dpi_test()
 {
     using namespace compare_bar;
-    const std::array<const wchar_t*,7> full{L"DLSS 5",L"Original",L"Split",L"Wipe",L"Difference",L"Side by side",L"2 \u00d7 2"};
-    const std::array<const wchar_t*,7> brief{L"DLSS 5",L"Orig.",L"Split",L"Wipe",L"Diff.",L"Side",L"2 \u00d7 2"};
+    const std::array<const wchar_t*,8> full{L"DLSS 5",L"Original",L"RTX VSR",L"Split",L"Wipe",L"Difference",L"Side by side",L"2 \u00d7 2"};
+    const std::array<const wchar_t*,8> brief{L"DLSS 5",L"Orig.",L"VSR",L"Split",L"Wipe",L"Diff.",L"Side",L"2 \u00d7 2"};
     HDC dc=CreateCompatibleDC(nullptr);
     CHECK(dc!=nullptr);if(!dc)return;
     for(const UINT dpi:{96u,120u,144u,168u,192u}){
@@ -8937,7 +9045,7 @@ void compare_bar_fits_every_width_and_dpi_test()
                 default:break;
                 }
             }
-            // Every control is there at every width: seven segments or the menu.
+            // Every control is there at every width: eight segments or the menu.
             CHECK(swap&&loupe&&zoom);CHECK(menu?modes==0:modes==full.size());
             CHECK(bar.mixValue.right>bar.mixValue.left&&bar.zoomValue.right>bar.zoomValue.left);
             CHECK((bar.tier==Tier::Tight)==(bar.mixLabel.right<=bar.mixLabel.left));
@@ -8947,22 +9055,22 @@ void compare_bar_fits_every_width_and_dpi_test()
     }
     DeleteDC(dc);
     // The default window on the machine the bug was seen on: short labels, all of them.
-    const Metrics estimate=EstimatedMetrics(7,168);
+    const Metrics estimate=EstimatedMetrics(8,168);
     const Layout seen=LayoutBar(1440,0,168,estimate,true);
     CHECK(seen.fits);CHECK(seen.tier!=Tier::Full);
     // Below the short labels the modes fold into one button, which answers a click like
     // any other part. The player's own minimum is wider than this today; the menu is for
     // translations with longer names, and for the tight tier's sake nothing is dropped.
-    const Layout folded=LayoutBar(700,0,96,EstimatedMetrics(7,96),true);
+    const Layout folded=LayoutBar(700,0,96,EstimatedMetrics(8,96),true);
     CHECK(folded.tier==Tier::Menu);CHECK(folded.fits);
-    const Layout tight=LayoutBar(520,0,96,EstimatedMetrics(7,96),true);
+    const Layout tight=LayoutBar(520,0,96,EstimatedMetrics(8,96),true);
     CHECK(tight.tier==Tier::Tight);CHECK(tight.fits);
     const Item& button=folded.items.front();
     CHECK(button.part==Part::ModeMenu);
     const Item* hit=HitTest(folded,POINT{(button.bounds.left+button.bounds.right)/2,(button.bounds.top+button.bounds.bottom)/2});
     CHECK(hit!=nullptr&&hit->part==Part::ModeMenu);
     // Without the icon font the toggles keep their words, even when tight.
-    Metrics wordy=EstimatedMetrics(7,96);wordy.icon=0;
+    Metrics wordy=EstimatedMetrics(8,96);wordy.icon=0;
     const Layout plain=LayoutBar(MinimumToolbarClientWidth(96),0,96,wordy,true);
     for(const Item& item:plain.items)if(item.part==Part::Swap||item.part==Part::Loupe)CHECK(item.face==Face::Label);
 }
@@ -9235,6 +9343,11 @@ void compare_panes_locate_the_point_under_the_pointer_test()
         for(UINT index=0;index<app_menu::IDM_COMPARE_SECOND_MIX_COUNT;++index)
             for(const UINT other:{app_menu::IDM_ADVANCED_SAFE_MODE,app_menu::IDM_CLEAR_NEURAL_CACHE,app_menu::IDM_OPEN_RENDER_RECEIPT,app_menu::IDM_CHECK_FOR_UPDATES})
                 CHECK(app_menu::IDM_COMPARE_SECOND_MIX_FIRST+index!=other);
+        // The RTX VSR rows are built with the menu, in the Compare popup.
+        for(UINT index=0;index<app_menu::IDM_COMPARE_VSR_QUALITY_COUNT;++index)
+            CHECK(std::binary_search(ids.begin(),ids.end(),app_menu::IDM_COMPARE_VSR_QUALITY_FIRST+index));
+        CHECK(app_menu::FindMenuContainingCommand(bar,app_menu::IDM_COMPARE_VSR)==app_menu::FindMenuContainingCommand(bar,app_menu::IDM_COMPARE_QUAD));
+        CHECK(app_menu::FindMenuContainingCommand(bar,app_menu::IDM_COMPARE_AGAINST_VSR)==app_menu::FindMenuContainingCommand(bar,app_menu::IDM_COMPARE_QUAD));
         if(bar)DestroyMenu(bar);
     }
     ComparisonSettings comparison;
@@ -14397,6 +14510,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(source_nv12_conversion_compiles_a_distinct_program_per_arm_test),
     TEST_CASE(present_scale_follows_the_window_only_where_it_should_test),
     TEST_CASE(compare_compositor_stays_out_of_the_capture_program_test),
+    TEST_CASE(vsr_policy_decides_the_view_its_ladder_and_its_size_test),
     TEST_CASE(hdr_output_leaves_the_capture_programs_alone_test),
     TEST_CASE(hdr_output_follows_the_display_under_the_window_test),
     TEST_CASE(compare_gesture_tells_press_drag_and_hold_apart_test),

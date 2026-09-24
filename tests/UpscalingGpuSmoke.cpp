@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <string>
 #include <vector>
@@ -87,6 +88,16 @@ int RunHdrToneMapProbe(const wchar_t* source,const wchar_t* rawOut);
 // Needs no source clip.
 int RunDebugViewProbe();
 
+// `vsr <clip>` holds RTX Video Super Resolution (P2.8) to what the player needs of it:
+// the feature is created on the player's renderer and evaluates frames of the clip in
+// the same command lists as DLSS Super Resolution - both features in one NGX session,
+// one core - then every comparison mode presents from it under the debug layer, a
+// paused present reuses the frame it made rather than running the network again, and
+// the RTX VSR view differs from the original while staying close to it. Last it times
+// the ladder: every quality at 1080p and 1440p sources, at 1x and into a 2160p window,
+// and prints the table. Registered as VsrGpuSmoke only in a build with -DRTX_VIDEO_SDK.
+int RunVsrProbe(const wchar_t* source);
+
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if(argc==4&&std::wstring_view(argv[2])==L"sr-quality")return RunSrQualityProbe(argv[1],argv[3]);
@@ -102,6 +113,7 @@ int wmain(int argc,wchar_t** argv) {
     if(argc==3&&std::wstring_view(argv[2])==L"hdr-output")return RunHdrOutputProbe(argv[1]);
     if(argc==2&&std::wstring_view(argv[1])==L"subtitle-upload")return RunSubtitleUploadProbe();
     if(argc==2&&std::wstring_view(argv[1])==L"debug-views")return RunDebugViewProbe();
+    if(argc==3&&std::wstring_view(argv[1])==L"vsr")return RunVsrProbe(argv[2]);
     if((argc==3||argc==4)&&std::wstring_view(argv[1])==L"hdr-tonemap")return RunHdrToneMapProbe(argv[2],argc==4?argv[3]:nullptr);
     if(argc!=3)return 2; // source path, target height (1440 or 2160)
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
@@ -834,6 +846,147 @@ int RunHdrToneMapProbe(const wchar_t* source,const wchar_t* rawOut)
         std::cout<<"hdr-tonemap: decoded "<<frames<<" frames in "<<seconds<<" s = "<<(seconds>0?frames/seconds:0.0)
                  <<" fps, p010="<<decoder.DecodingP010()<<" allGpu="<<allGpu<<"\n";
         code=identical&&tables==4&&frames>0&&allGpu&&decoder.ToneMapsItself()?0:6;
+    }
+    MFShutdown();CoUninitialize();return code;
+}
+
+// Nearest-neighbour resample of a BGRA frame, so the timing sizes carry the clip's
+// own detail rather than a synthetic pattern the network would find easy.
+std::vector<uint8_t> ResampleBgra(const std::vector<uint8_t>& bgra,uint32_t w,uint32_t h,uint32_t tw,uint32_t th){
+    std::vector<uint8_t> out(size_t(tw)*th*4u);
+    for(uint32_t y=0;y<th;++y){
+        const uint32_t sy=std::min(h-1,uint32_t(uint64_t(y)*h/th));
+        for(uint32_t x=0;x<tw;++x){
+            const uint32_t sx=std::min(w-1,uint32_t(uint64_t(x)*w/tw));
+            std::memcpy(&out[(size_t(y)*tw+x)*4u],&bgra[(size_t(sy)*w+sx)*4u],4u);
+        }
+    }
+    return out;
+}
+
+int RunVsrProbe(const wchar_t* source)
+{
+    Microsoft::WRL::ComPtr<ID3D12Debug> debug;
+    const bool debugLayer=SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)));
+    if(debugLayer)debug->EnableDebugLayer();
+    using Access=D3D12RendererTestAccess;
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    int code=1;
+    {
+        VideoDecoder decoder;
+        if(!decoder.Open(source,MediaSourceKind::LocalFile))return 3;
+        const uint32_t w=decoder.Width(),h=decoder.Height();
+        const auto target=UpscalingTarget(w,h,1440);
+        if(!target.grows)return 4;
+        const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(w,h,decoder.FrameRate());
+        const float frameMs=float(1000.0/decoder.FrameRate());
+        // Part 1: the player's renderer with DLSS Super Resolution on, in a window the
+        // output's size, and the RTX VSR view: both features evaluate in every frame.
+        HWND window=CreateWindowExW(0,L"STATIC",L"vsr probe",WS_POPUP,0,0,int(target.width),int(target.height),nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        auto renderer=MakeD3D12Renderer();
+        renderer->SetPresentFollowsWindow(true);
+        bool ok=renderer->Initialize(window,w,h,target.width,target.height,gw,gh,NVSDK_NGX_PerfQuality_Value_MaxQuality,true)&&renderer->DLSSAvailable();
+        const vsr_policy::Reason reason=renderer->VsrReason();
+        const auto& caps=renderer->VsrCapabilities();
+        std::cout<<"vsr capability: reason="<<int(reason)<<" built="<<caps.built<<" session="<<caps.session<<" available="<<caps.available
+                 <<" needsDriver="<<caps.needsUpdatedDriver<<" minDriver="<<caps.minDriverMajor<<"."<<caps.minDriverMinor<<"\n";
+        ok=ok&&reason==vsr_policy::Reason::Ready;
+        ComparisonSettings view;view.mode=ComparisonMode::Vsr;
+        if(ok)renderer->SetComparison(view);
+        ok=ok&&renderer->VsrReason()==vsr_policy::Reason::Ready;
+        TemporalGuideGenerator guides;VideoFrame frame;uint32_t frames=0,both=0;
+        while(ok&&frames<30&&decoder.ReadNext(frame)){
+            GuideFrame guide;
+            const FrameIdentity id=IdentityOf(frame,guides.HistoryGeneration(),0,frames==0?HistoryReset::FirstFrame:HistoryReset::None);
+            ok=guides.Generate(frame.bgra.data(),frame.bgra.size(),w,h,w,h,decoder.FrameRate(),id,guide)&&
+               renderer->UploadReferenceFrame(frame.bgra.data(),frame.bgra.size())&&
+               renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs);
+            if(ok){++frames;if(renderer->LastFrameUsedDLSS()&&renderer->VsrShown())++both;}
+        }
+        const uint64_t srEvaluations=renderer->DLSSEvaluations(),vsrEvaluations=renderer->VsrEvaluations();
+        const DebugLayerReport afterFrames=ok?ReadDebugLayer(Access::Device(*renderer),"vsr-frames"):DebugLayerReport{};
+        // Paused: every mode against the last pair, RTX VSR as the compared member where
+        // a mode takes one. None of them may run the network again: the frame is kept.
+        static constexpr ComparisonMode modes[]={ComparisonMode::Neural,ComparisonMode::Original,ComparisonMode::Vsr,ComparisonMode::SplitVertical,
+            ComparisonMode::Wipe,ComparisonMode::Difference,ComparisonMode::SideBySide,ComparisonMode::Quad};
+        uint32_t presented=0;
+        for(const ComparisonMode mode:modes){
+            if(!ok)break;
+            ComparisonSettings cmp;cmp.mode=mode;cmp.againstVsr=true;cmp.splitX=0.5f;
+            cmp.loupe=mode==ComparisonMode::Wipe;cmp.loupeRadius=60.0f;cmp.loupeLeftX=200.0f;cmp.loupeLeftY=200.0f;cmp.loupeRightX=400.0f;cmp.loupeRightY=200.0f;
+            renderer->SetComparison(cmp);
+            ok=renderer->PresentCurrent()&&!renderer->GpuUnusable();
+            if(ok)++presented;
+        }
+        const bool kept=renderer->VsrEvaluations()==vsrEvaluations;
+        // The view against the original it was made from, as the window shows them.
+        std::vector<uint8_t> original,vsr;uint32_t ow=0,oh=0,vw=0,vh=0;
+        ComparisonSettings shown;shown.mode=ComparisonMode::Original;renderer->SetComparison(shown);
+        ok=ok&&renderer->PresentCurrent()&&renderer->CaptureComposedView(original,ow,oh);
+        shown.mode=ComparisonMode::Vsr;renderer->SetComparison(shown);
+        ok=ok&&renderer->PresentCurrent()&&renderer->CaptureComposedView(vsr,vw,vh);
+        double meanAbs=0.0,gradientOriginal=0.0,gradientVsr=0.0;
+        if(ok&&ow==vw&&oh==vh&&!original.empty()&&original.size()==vsr.size()){
+            for(size_t i=0;i<original.size();i+=4)for(size_t c=0;c<3;++c)meanAbs+=std::abs(int(original[i+c])-int(vsr[i+c]));
+            meanAbs/=double(original.size()/4*3);
+            // Horizontal green-channel gradient energy: RTX VSR sharpens what the
+            // compositor's bilinear upscale of the original softens.
+            for(uint32_t y=0;y<oh;++y)for(uint32_t x=1;x<ow;++x){
+                const size_t at=(size_t(y)*ow+x)*4u+1u;
+                gradientOriginal+=std::abs(int(original[at])-int(original[at-4]));gradientVsr+=std::abs(int(vsr[at])-int(vsr[at-4]));
+            }
+            gradientOriginal/=double(ow)*oh;gradientVsr/=double(ow)*oh;
+        }
+        // A quality step makes a new frame from the same original.
+        shown.vsrQuality=vsr_policy::Quality::Ultra;renderer->SetComparison(shown);
+        const bool requality=ok&&renderer->PresentCurrent()&&renderer->VsrEvaluations()==vsrEvaluations+1;
+        const DebugLayerReport afterModes=ok?ReadDebugLayer(Access::Device(*renderer),"vsr-modes"):DebugLayerReport{};
+        std::cout<<"vsr: source="<<w<<"x"<<h<<" window="<<target.width<<"x"<<target.height<<" vsrOutput="<<renderer->VsrOutputW()<<"x"<<renderer->VsrOutputH()
+                 <<" frames="<<frames<<" srAndVsrInOneFrame="<<both<<" srEvaluations="<<srEvaluations<<" vsrEvaluations="<<vsrEvaluations
+                 <<" modes="<<presented<<" pausedKeptFrame="<<kept<<" requality="<<requality
+                 <<" meanAbsVsOriginal="<<meanAbs<<" gradient original="<<gradientOriginal<<" vsr="<<gradientVsr
+                 <<" lastVsrGpuMs="<<renderer->LastVsrGpuMs()<<" neuralGpuMs="<<renderer->LastNeuralGpuMs()
+                 <<" debugLayer="<<(debugLayer?"on":"off")<<" errors="<<afterFrames.errors+afterModes.errors<<"\n";
+        const bool partOne=ok&&frames==30&&both==30&&srEvaluations==30&&vsrEvaluations==30&&presented==std::size(modes)&&kept&&requality&&
+                           renderer->VsrOutputW()==target.width&&renderer->VsrOutputH()==target.height&&
+                           meanAbs>0.05&&meanAbs<24.0&&afterFrames.errors==0&&afterModes.errors==0;
+        renderer.reset();DestroyWindow(window);
+
+        // Part 2: the ladder's cost, the network run on every present because the
+        // original is uploaded again before each one. Queue drained between presents,
+        // so each timing is one evaluate alone on the GPU.
+        bool timed=partOne;
+        std::vector<uint8_t> clipFrame=frame.bgra;
+        struct Case{uint32_t sw,sh,ww,wh;};
+        const Case cases[]={{1920,1080,1920,1080},{1920,1080,3840,2160},{2560,1440,2560,1440},{2560,1440,3840,2160}};
+        std::cout<<"vsr timing (GPU ms per evaluate, mean over 32 after 8 warm-up; RTX VSR cost follows the input):\n";
+        for(const Case& c:cases){
+            if(!timed)break;
+            const std::vector<uint8_t> pixels=ResampleBgra(clipFrame,w,h,c.sw,c.sh);
+            const auto [tgw,tgh]=TemporalGuideGenerator::AnalysisGrid(c.sw,c.sh,30.0);
+            HWND timing=CreateWindowExW(0,L"STATIC",L"vsr timing",WS_POPUP,0,0,int(c.ww),int(c.wh),nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+            auto r=MakeD3D12Renderer();
+            r->SetPresentFollowsWindow(true);
+            timed=r->Initialize(timing,c.sw,c.sh,c.sw,c.sh,tgw,tgh,DefaultNeuralCarrierQuality());
+            if(timed)r->SetDLSS(false);
+            timed=timed&&r->RenderFrame(pixels.data(),pixels.size(),nullptr,0,tgw,tgh,true,false,33.3f);
+            std::cout<<"  "<<c.sw<<"x"<<c.sh<<" -> window "<<c.ww<<"x"<<c.wh;
+            for(const vsr_policy::Quality quality:vsr_policy::kQualities){
+                if(!timed)break;
+                ComparisonSettings cmp;cmp.mode=ComparisonMode::Vsr;cmp.vsrQuality=quality;r->SetComparison(cmp);
+                double sum=0.0,low=1e9,high=0.0;int n=0;
+                for(int i=0;timed&&i<41;++i){
+                    timed=r->UploadReferenceFrame(pixels.data(),pixels.size())&&r->PresentCurrent()&&r->VsrShown()&&
+                          r->WaitGPU()==d3d12_renderer_detail::FenceWaitResult::Completed;
+                    // Each present harvests the one before it.
+                    if(timed&&i>=9){const double ms=r->LastVsrGpuMs();sum+=ms;low=std::min(low,ms);high=std::max(high,ms);++n;}
+                }
+                if(n)std::cout<<"  q"<<int(quality)<<" "<<std::fixed<<std::setprecision(2)<<sum/n<<" ["<<low<<"-"<<high<<"]";
+            }
+            std::cout<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n"<<std::defaultfloat;
+            r.reset();DestroyWindow(timing);
+        }
+        code=partOne?(timed?0:7):6;
     }
     MFShutdown();CoUninitialize();return code;
 }

@@ -4858,6 +4858,8 @@ private:
         m_comparison.differenceGain=compare_settings::LoadDifferenceGain(ReadIniFloat(L"Comparison",L"DifferenceGain",compare_settings::kDefaultDifferenceGain));
         m_comparison.differenceLuma=GetPrivateProfileIntW(L"Comparison",L"DifferenceLuma",1,SettingsPath().c_str())!=0;
         m_comparison.secondMix=compare_settings::LoadSecondMix(ReadIniFloat(L"Comparison",L"SecondMix",compare_settings::kDefaultSecondMix));
+        m_comparison.againstVsr=GetPrivateProfileIntW(L"Comparison",L"AgainstVsr",0,SettingsPath().c_str())!=0;
+        m_comparison.vsrQuality=vsr_policy::LoadQuality(int(GetPrivateProfileIntW(L"Comparison",L"VsrQuality",static_cast<int>(vsr_policy::kDefaultQuality),SettingsPath().c_str())));
         m_compareHdrAtSdr=GetPrivateProfileIntW(L"Comparison",L"HdrAtSdr",0,SettingsPath().c_str())!=0;
         ++m_labelTextRevision;
         LoadRenderPace();
@@ -4978,6 +4980,8 @@ private:
         WriteIniFloat(L"Comparison",L"DifferenceGain",m_comparison.differenceGain);
         WritePrivateProfileStringW(L"Comparison",L"DifferenceLuma",m_comparison.differenceLuma?L"1":L"0",SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"SecondMix",m_comparison.secondMix);
+        WritePrivateProfileStringW(L"Comparison",L"AgainstVsr",m_comparison.againstVsr?L"1":L"0",SettingsPath().c_str());
+        WritePrivateProfileStringW(L"Comparison",L"VsrQuality",std::to_wstring(static_cast<int>(m_comparison.vsrQuality)).c_str(),SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"SplitX",m_comparison.splitX);
         WritePrivateProfileStringW(L"Comparison",L"ZoomStep",std::to_wstring(m_zoomStep).c_str(),SettingsPath().c_str());
         WritePrivateProfileStringW(L"Comparison",L"HdrAtSdr",m_compareHdrAtSdr?L"1":L"0",SettingsPath().c_str());
@@ -5004,7 +5008,11 @@ private:
         effective.zoomScale=compare_zoom::ScaleForStep(m_zoomStep,outputW,viewW);
         if(effective.zoomScale<=1.0f){effective.zoomCenterX=0.5f;effective.zoomCenterY=0.5f;}
         effective.loupe=false;
-        if(!ComparisonModesAvailable()){effective.mode=ComparisonMode::Neural;effective.strength=1.0f;return effective;}
+        if(!ComparisonModesAvailable()){effective.mode=ComparisonMode::Neural;effective.strength=1.0f;effective.againstVsr=false;return effective;}
+        // RTX VSR remembered from a machine or build that had it reads as DLSS 5 here,
+        // without forgetting the choice.
+        effective.mode=SelectedComparisonMode();
+        if(!VsrUsable())effective.againstVsr=false;
         if(m_peekOriginal)effective.mode=ComparisonMode::Original;
         effective.labelFade=float(m_tagFade.Level(Clock::now()));
         effective.mask=!m_maskFeathered.pixels.empty();effective.maskInvert=m_maskInvert;
@@ -5047,22 +5055,47 @@ private:
         switch(step){case 1:return L"1:1";case 2:return L"2\u00d7";case 3:return L"4\u00d7";case 4:return L"8\u00d7";default:return L"";}
     }
     // The modes the compare bar offers, in its order, which is also the order C steps
-    // through. Blend is not one of them: it was the Mix under another name.
+    // through. Blend is not one of them: it was the Mix under another name. RTX VSR
+    // sits with the two single pictures, before the modes that combine them.
     static std::span<const ComparisonMode> CompareBarModes(){
-        static constexpr std::array modes{ComparisonMode::Neural,ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe,
-                                          ComparisonMode::Difference,ComparisonMode::SideBySide,ComparisonMode::Quad};
+        static constexpr std::array modes{ComparisonMode::Neural,ComparisonMode::Original,ComparisonMode::Vsr,ComparisonMode::SplitVertical,
+                                          ComparisonMode::Wipe,ComparisonMode::Difference,ComparisonMode::SideBySide,ComparisonMode::Quad};
         return modes;
     }
+    // RTX VSR (P2.8): the renderer says whether it can run (VsrPolicy.h). Without a
+    // renderer there is nothing to ask, and nothing to compare either.
+    bool VsrUsable()const{return m_renderer&&m_renderer->VsrReason()==vsr_policy::Reason::Ready;}
+    vsr_policy::Reason CurrentVsrReason()const{return m_renderer?m_renderer->VsrReason():vsr_policy::Reason::NoSession;}
+    // What a greyed RTX VSR says: the reason, with the numbers it names.
+    std::wstring VsrReasonText()const{
+        const vsr_policy::Reason reason=CurrentVsrReason();
+        const std::wstring format=T(vsr_policy::ReasonKey(reason));
+        wchar_t text[256]{};
+        if(reason==vsr_policy::Reason::NeedsDriver&&m_renderer){
+            const auto& caps=m_renderer->VsrCapabilities();
+            swprintf_s(text,format.c_str(),caps.minDriverMajor,caps.minDriverMinor);return text;
+        }
+        if(reason==vsr_policy::Reason::CreateFailed&&m_renderer){
+            const std::string hex=HexText(m_renderer->VsrLastResult());
+            swprintf_s(text,format.c_str(),std::wstring(hex.begin(),hex.end()).c_str());return text;
+        }
+        return format;
+    }
+    // The mode the bar and the menu mark: RTX VSR reads as DLSS 5 where it cannot run.
+    ComparisonMode SelectedComparisonMode()const{
+        return m_comparison.mode==ComparisonMode::Vsr&&!VsrUsable()?ComparisonMode::Neural:m_comparison.mode;
+    }
+    bool CompareModeEnabled(ComparisonMode mode)const{return ComparisonModesAvailable()&&(mode!=ComparisonMode::Vsr||VsrUsable());}
     static const wchar_t* CompareModeLabelKey(ComparisonMode mode){
-        switch(mode){case ComparisonMode::Original:return L"compare.mode.original";case ComparisonMode::SplitVertical:return L"compare.mode.split";case ComparisonMode::Wipe:return L"compare.mode.wipe";case ComparisonMode::Difference:return L"compare.mode.difference";case ComparisonMode::SideBySide:return L"compare.mode.side_by_side";case ComparisonMode::Quad:return L"compare.mode.quad";default:return L"compare.mode.neural";}
+        switch(mode){case ComparisonMode::Vsr:return L"compare.mode.vsr";case ComparisonMode::Original:return L"compare.mode.original";case ComparisonMode::SplitVertical:return L"compare.mode.split";case ComparisonMode::Wipe:return L"compare.mode.wipe";case ComparisonMode::Difference:return L"compare.mode.difference";case ComparisonMode::SideBySide:return L"compare.mode.side_by_side";case ComparisonMode::Quad:return L"compare.mode.quad";default:return L"compare.mode.neural";}
     }
     std::wstring CompareModeLabel(ComparisonMode mode,bool brief)const{return T((std::wstring(CompareModeLabelKey(mode))+(brief?L".short":L"")).c_str());}
-    static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Original:return IDM_COMPARE_ORIGINAL;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;case ComparisonMode::Difference:return IDM_COMPARE_DIFFERENCE;case ComparisonMode::SideBySide:return IDM_COMPARE_SIDE_BY_SIDE;case ComparisonMode::Quad:return IDM_COMPARE_QUAD;default:return IDM_COMPARE_NEURAL;}}
+    static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Vsr:return IDM_COMPARE_VSR;case ComparisonMode::Original:return IDM_COMPARE_ORIGINAL;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;case ComparisonMode::Difference:return IDM_COMPARE_DIFFERENCE;case ComparisonMode::SideBySide:return IDM_COMPARE_SIDE_BY_SIDE;case ComparisonMode::Quad:return IDM_COMPARE_QUAD;default:return IDM_COMPARE_NEURAL;}}
     // The pane layout a mode draws; zoom, pan and the loupe work in pane coordinates.
     static compare_view::Layout PaneLayout(ComparisonMode mode){
         return mode==ComparisonMode::SideBySide?compare_view::Layout::SideBySide:mode==ComparisonMode::Quad?compare_view::Layout::Quad:compare_view::Layout::Single;
     }
-    compare_view::Layout CurrentPaneLayout()const{return ComparisonModesAvailable()&&!m_peekOriginal?PaneLayout(m_comparison.mode):compare_view::Layout::Single;}
+    compare_view::Layout CurrentPaneLayout()const{return ComparisonModesAvailable()&&!m_peekOriginal?PaneLayout(SelectedComparisonMode()):compare_view::Layout::Single;}
     // A point in the render window as the pane under it and where in that pane's picture.
     compare_view::PanePoint PanePointAt(POINT point)const{
         RECT client{};
@@ -5113,6 +5146,13 @@ private:
             m_renderer->SetComparison(EffectiveComparison());
             if(ComparisonModesAvailable()){EnsureLabelAtlas();EnsureMask();}
             if(refreshPaused&&!m_playing&&!m_seeking){UploadPausedComparisonReference();if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
+            // The RTX VSR feature is created the first time a view reads it; a refusal
+            // there greys the view, and the tags that name it are drawn again.
+            const vsr_policy::Reason vsr=m_renderer->VsrReason();
+            if(vsr!=m_lastVsrReason){
+                if(m_lastVsrReason==vsr_policy::Reason::Ready)LOG("RTX VSR became unavailable: "<<utf8_text::FromWide(VsrReasonText()));
+                m_lastVsrReason=vsr;++m_labelTextRevision;
+            }
         }
         SyncFeatureMenuState();InvalidateCompareBar();
     }
@@ -5132,7 +5172,13 @@ private:
             LOG("Comparison mode refused: loaded="<<m_loaded<<" cachedPair="<<m_cachedPlayback<<" neuralView="<<m_neuralRequested);
             return;
         }
-        StartCompareMarkSlide(m_comparison.mode,mode);
+        // RTX VSR that cannot run says why, where the key was pressed.
+        if(mode==ComparisonMode::Vsr&&!VsrUsable()){
+            const std::wstring reason=VsrReasonText();
+            LOG("RTX VSR view refused: "<<utf8_text::FromWide(reason));
+            ShowToast(reason);return;
+        }
+        StartCompareMarkSlide(SelectedComparisonMode(),mode);
         // The tags name the new arrangement; they fade in with it rather than
         // printing at once over a picture that has just changed shape.
         if(mode!=m_comparison.mode){m_tagFade.Reset(false);m_tagFade.Set(true,Clock::now(),m_activityMotionEnabled);if(m_activityMotionEnabled)EnsureHoverTimer();}
@@ -5168,12 +5214,31 @@ private:
         return 1;
     }
     void ToggleDifferenceLuma(){if(!ComparisonModesAvailable())return;m_comparison.differenceLuma=!m_comparison.differenceLuma;++m_labelTextRevision;ApplyComparison();}
+    // Shift+R: Split, Wipe, Difference and Side by side compare the original against
+    // RTX VSR instead of DLSS 5, and back. Named in the Difference tag, so it redraws.
+    void ToggleAgainstVsr(){
+        if(!ComparisonModesAvailable())return;
+        if(!VsrUsable()){const std::wstring reason=VsrReasonText();LOG("Compare against RTX VSR refused: "<<utf8_text::FromWide(reason));ShowToast(reason);return;}
+        m_comparison.againstVsr=!m_comparison.againstVsr;++m_labelTextRevision;ApplyComparison();
+        LOG("Comparison against="<<(m_comparison.againstVsr?"RTX VSR":"DLSS 5"));
+    }
+    // The ladder is named in the RTX VSR tag, so a change redraws the atlas.
+    void SetVsrQuality(vsr_policy::Quality quality){
+        if(quality==m_comparison.vsrQuality)return;
+        m_comparison.vsrQuality=quality;++m_labelTextRevision;ApplyComparison();
+        LOG("RTX VSR quality="<<static_cast<int>(quality));
+    }
+    // C steps over a mode that cannot run rather than stopping on it.
     void CycleComparisonMode(bool reverse){
         if(!ComparisonModesAvailable())return;
         const auto modes=CompareBarModes();
-        const auto current=std::find(modes.begin(),modes.end(),m_comparison.mode);
-        const size_t index=current==modes.end()?0:size_t(current-modes.begin());
-        SetComparisonMode(modes[(index+(reverse?modes.size()-1:1))%modes.size()]);
+        const auto current=std::find(modes.begin(),modes.end(),SelectedComparisonMode());
+        size_t index=current==modes.end()?0:size_t(current-modes.begin());
+        for(size_t step=0;step<modes.size();++step){
+            index=(index+(reverse?modes.size()-1:1))%modes.size();
+            if(CompareModeEnabled(modes[index]))break;
+        }
+        SetComparisonMode(modes[index]);
     }
     // The divider is an image-UV position; while zoomed the shader shows
     // uv=(screen-center)/zoom+center, so invert that to keep it under the pointer.
@@ -5232,7 +5297,11 @@ private:
         const ComparisonSettings shown=EffectiveComparison();
         std::wstring view=T(CompareModeLabelKey(shown.mode));
         if(shown.mode==ComparisonMode::SplitVertical||shown.mode==ComparisonMode::Wipe)view+=L" "+PercentText(shown.splitX)+(shown.swap?L" swapped":L"");
-        if(shown.mode==ComparisonMode::Quad)view+=L" (fourth pane Mix "+PercentText(shown.secondMix)+L")";
+        const std::wstring vsrName=T(L"compare.mode.vsr")+L" "+T((L"menu.compare_vsr_quality_"+std::to_wstring(vsr_policy::QualityIndex(shown.vsrQuality))).c_str());
+        const bool vsrShown=m_renderer&&m_renderer->VsrShown();
+        if(shown.mode==ComparisonMode::Quad)view+=vsrShown?L" (fourth pane "+vsrName+L")":L" (fourth pane Mix "+PercentText(shown.secondMix)+L")";
+        if(shown.mode==ComparisonMode::Vsr&&vsrShown)view+=L" \u00b7 "+T((L"menu.compare_vsr_quality_"+std::to_wstring(vsr_policy::QualityIndex(shown.vsrQuality))).c_str());
+        if(vsrShown&&ComparisonComparesAgainstVsr(shown))view+=L" against "+vsrName;
         if(shown.mode==ComparisonMode::Difference){wchar_t gain[16]{};swprintf_s(gain,L"%g",double(shown.differenceGain));view+=std::wstring(L" \u00d7")+gain+(shown.differenceLuma?L" luma":L" color");}
         view+=L" \u00b7 Mix "+PercentText(shown.strength)+L" \u00b7 Zoom "+(m_zoomStep>0?ZoomStepText(m_zoomStep):T(L"compare.zoom.fit"));
         if(shown.mask)view+=L" \u00b7 Mask "+m_maskPath.filename().wstring()+(shown.maskInvert?L" inverted":L"");
@@ -5555,7 +5624,9 @@ private:
             }
             app_menu::CheckRadioCommand(menu,IDM_ASPECT_FIT,IDM_ASPECT_ONE_TO_ONE,m_onePixel?IDM_ASPECT_ONE_TO_ONE:(m_fill?IDM_ASPECT_FILL:IDM_ASPECT_FIT));
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
-            app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_zoomStep>0,m_comparison.swap,m_loupe,m_comparison.differenceLuma);
+            app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(SelectedComparisonMode()),m_zoomStep>0,m_comparison.swap,m_loupe,m_comparison.differenceLuma,
+                                           VsrUsable(),m_comparison.againstVsr);
+            app_menu::UpdateVsrQualityMenu(menu,ComparisonModesAvailable()&&VsrUsable(),UINT(vsr_policy::QualityIndex(m_comparison.vsrQuality)));
             app_menu::UpdateMaskMenu(menu,m_loaded,!m_maskSource.pixels.empty(),m_maskInvert,MaskFeatherIndex());
             app_menu::UpdateSecondMixMenu(menu,ComparisonModesAvailable(),SecondMixIndex());
             EnableMenuItem(menu,IDM_SAVE_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
@@ -5666,6 +5737,8 @@ private:
             const auto modes=CompareBarModes();const size_t index=size_t(id-kCompareModeTipIdBase);
             if(index>=modes.size())return {};
             if(!ComparisonModesAvailable())return T(L"compare.hint.unavailable");
+            // A greyed RTX VSR says what stops it (DESIGN.md, Tooltips).
+            if(modes[index]==ComparisonMode::Vsr)return VsrUsable()?T(L"compare.tip.vsr"):VsrReasonText();
             return CompareModeLabel(modes[index],false)+T(L"compare.tip.mode_cycle");
         }
         if(id>=kChipTipIdBase&&id<kChipTipIdBase+status_chips::kChipCount){
@@ -7367,7 +7440,7 @@ private:
         media_transport::ThumbState state{};
         state.loaded=m_loaded;state.playing=m_playing||LiveResumePending();
         state.neuralAvailable=neural.enabled;state.neuralOn=neural.active;
-        state.compareAvailable=ComparisonModesAvailable();state.comparing=m_comparison.mode!=ComparisonMode::Neural;
+        state.compareAvailable=ComparisonModesAvailable();state.comparing=SelectedComparisonMode()!=ComparisonMode::Neural;
         return media_transport::ThumbButtonsFor(state,IDM_PLAY,IDM_NEURAL_RENDERING,IDM_COMPARE_TOGGLE);
     }
     // One side-by-side switch for the thumbnail, over the Compare menu's own
@@ -7376,7 +7449,7 @@ private:
     // comparison.
     void ToggleSideBySide(){
         if(!ComparisonModesAvailable())return;
-        SetComparisonMode(m_comparison.mode==ComparisonMode::Neural?ComparisonMode::SideBySide:ComparisonMode::Neural);
+        SetComparisonMode(SelectedComparisonMode()==ComparisonMode::Neural?ComparisonMode::SideBySide:ComparisonMode::Neural);
         SyncFeatureMenuState();UpdateCachedStatus();
     }
     HICON ThumbIcon(UiIcon icon){
@@ -8523,11 +8596,19 @@ private:
         default:return ComparisonModesAvailable();
         }
     }
+    // A mode segment is live when its mode can be shown; RTX VSR may not be.
+    bool CompareBarItemEnabled(const compare_bar::Item& item)const{
+        if(item.part==compare_bar::Part::Mode){
+            const auto modes=CompareBarModes();
+            return size_t(item.index)<modes.size()&&CompareModeEnabled(modes[size_t(item.index)]);
+        }
+        return CompareBarPartEnabled(item.part);
+    }
     void CompareBarMouseMove(int x,int y){
         if(m_dragMix&&GetCapture()==m_hwnd){SetMix(compare_bar::MixFromX(CompareBarLayout().mixTrack,x));return;}
         if(!CompareBarVisible()){SetCompareHover({});return;}
         const auto layout=CompareBarLayout();const auto* item=compare_bar::HitTest(layout,POINT{x,y});
-        SetCompareHover(item&&CompareBarPartEnabled(item->part)?CompareHover{item->part,item->index}:CompareHover{});
+        SetCompareHover(item&&CompareBarItemEnabled(*item)?CompareHover{item->part,item->index}:CompareHover{});
     }
     bool CompareBarMouseDown(int x,int y){
         if(!CompareBarVisible())return false;
@@ -8536,7 +8617,7 @@ private:
         const auto* item=compare_bar::HitTest(layout,POINT{x,y});
         // A press anywhere on the row is the row's, enabled or not, so it never falls
         // through to a toolbar button that happens to sit under it.
-        if(!item||!CompareBarPartEnabled(item->part))return true;
+        if(!item||!CompareBarItemEnabled(*item))return true;
         switch(item->part){
         case compare_bar::Part::Mode:SetComparisonMode(CompareBarModes()[size_t(item->index)]);break;
         case compare_bar::Part::ModeMenu:ShowCompareModeMenu(item->bounds);break;
@@ -8555,7 +8636,7 @@ private:
         HMENU menu=CreatePopupMenu();if(!menu)return;
         const auto modes=CompareBarModes();
         for(size_t index=0;index<modes.size();++index)
-            AppendMenuW(menu,MF_STRING|(modes[index]==m_comparison.mode?MF_CHECKED:0u),UINT_PTR(index+1),CompareModeLabel(modes[index],false).c_str());
+            AppendMenuW(menu,MF_STRING|(modes[index]==SelectedComparisonMode()?MF_CHECKED:0u)|(CompareModeEnabled(modes[index])?0u:MF_GRAYED),UINT_PTR(index+1),CompareModeLabel(modes[index],false).c_str());
         POINT anchor{button.left,button.top};ClientToScreen(m_hwnd,&anchor);
         const UINT chosen=UINT(TrackPopupMenuEx(menu,TPM_RETURNCMD|TPM_NONOTIFY|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,anchor.x,anchor.y,m_hwnd,nullptr));
         DestroyMenu(menu);
@@ -8598,13 +8679,13 @@ private:
         const auto now=Clock::now();const bool sliding=m_compareMark.Animating(now);
         const auto level=[&](const compare_bar::Item& item){return CompareHoverLevel(item,now);};
         for(const auto& item:layout.items){
-            const bool enabled=CompareBarPartEnabled(item.part);
+            const bool enabled=CompareBarItemEnabled(item);
             switch(item.part){
             case compare_bar::Part::Mode:{
                 const ComparisonMode mode=CompareBarModes()[size_t(item.index)];
-                DrawCompareSegment(dc,item.bounds,CompareModeLabel(mode,item.face==compare_bar::Face::ShortLabel),enabled,mode==m_comparison.mode,level(item),0,false,!sliding);break;}
+                DrawCompareSegment(dc,item.bounds,CompareModeLabel(mode,item.face==compare_bar::Face::ShortLabel),enabled,mode==SelectedComparisonMode(),level(item),0,false,!sliding);break;}
             // Folded into one button, the mode is always the selected one: the mark says so.
-            case compare_bar::Part::ModeMenu:DrawCompareSegment(dc,item.bounds,CompareModeLabel(m_comparison.mode,item.face==compare_bar::Face::ShortLabel),enabled,true,level(item),0,true);break;
+            case compare_bar::Part::ModeMenu:DrawCompareSegment(dc,item.bounds,CompareModeLabel(SelectedComparisonMode(),item.face==compare_bar::Face::ShortLabel),enabled,true,level(item),0,true);break;
             case compare_bar::Part::MixTrack:{
                 // The player's slider (slider::Layout), filled from 100% - the
                 // render untouched - to the Mix, so more and less read as two
@@ -8655,14 +8736,18 @@ private:
     // the player's text already comes from: uppercase, on a near-black plate with the
     // flag rule down its left edge, DESIGN.md's provenance tag. Premultiplied, one row
     // per tag, at the window's DPI; see compare_labels::Premultiply for the alpha.
-    struct LabelAtlasPixels{std::vector<uint8_t> pixels;uint32_t width{},height{},rowHeight{};std::array<uint32_t,4> widths{};};
-    std::array<std::wstring,4> LabelAtlasTexts()const{
+    struct LabelAtlasPixels{std::vector<uint8_t> pixels;uint32_t width{},height{},rowHeight{};std::array<uint32_t,D3D12Renderer::LabelRows> widths{};};
+    std::array<std::wstring,D3D12Renderer::LabelRows> LabelAtlasTexts()const{
         // "DIFFERENCE x4 - LUMA": what the view is, how far it is amplified and which
-        // channels, because a difference image without its gain cannot be read.
+        // channels, because a difference image without its gain cannot be read. Against
+        // RTX VSR it names that too, since the same view then shows another engine.
         wchar_t gain[16]{};swprintf_s(gain,L"%g",double(m_comparison.differenceGain));
-        const std::wstring difference=T(L"compare.tag.difference")+L" \u00d7"+gain+L" \u00b7 "+T(m_comparison.differenceLuma?L"compare.tag.luma":L"compare.tag.color");
+        const std::wstring against=m_comparison.againstVsr&&VsrUsable()?L" \u00b7 "+T(L"compare.tag.vsr"):std::wstring{};
+        const std::wstring difference=T(L"compare.tag.difference")+against+L" \u00d7"+gain+L" \u00b7 "+T(m_comparison.differenceLuma?L"compare.tag.luma":L"compare.tag.color");
+        // "RTX VSR - HIGH": the engine and the rung it ran at.
+        const std::wstring vsr=T(L"compare.tag.vsr")+L" \u00b7 "+T((L"compare.tag.vsr_quality_"+std::to_wstring(vsr_policy::QualityIndex(m_comparison.vsrQuality))).c_str());
         return{T(L"compare.tag.original"),T(L"compare.tag.dlss"),difference,
-               T(L"compare.tag.dlss")+L" \u00b7 "+T(L"compare.tag.mix")+L" "+PercentText(m_comparison.secondMix)};
+               T(L"compare.tag.dlss")+L" \u00b7 "+T(L"compare.tag.mix")+L" "+PercentText(m_comparison.secondMix),vsr};
     }
     LabelAtlasPixels BuildLabelAtlas(UINT dpi)const{
         LabelAtlasPixels atlas;
@@ -8674,7 +8759,7 @@ private:
         HFONT font=CreateFontW(-scale(12),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
         const HGDIOBJ oldFont=SelectObject(dc,font?font:GetStockObject(DEFAULT_GUI_FONT));
         SetTextCharacterExtra(dc,std::max(1,scale(1)));
-        std::array<SIZE,4> extents{};int width=1;
+        std::array<SIZE,D3D12Renderer::LabelRows> extents{};int width=1;
         for(size_t row=0;row<texts.size();++row){
             if(texts[row].empty())continue;
             GetTextExtentPoint32W(dc,texts[row].c_str(),int(texts[row].size()),&extents[row]);
@@ -11164,7 +11249,7 @@ private:
         // The settled view, not a hold on the picture: a peek at the original from
         // Difference must not cost a decoder restart on the way in and out.
         ComparisonSettings settled=EffectiveComparison();
-        if(m_peekOriginal&&ComparisonModesAvailable())settled.mode=m_comparison.mode;
+        if(m_peekOriginal&&ComparisonModesAvailable())settled.mode=SelectedComparisonMode();
         state.viewCombinesPixels=m_cachedPlayback&&ComparisonCombinesPixels(settled);
         const bool pq=hdr_policy::DecodeOriginalAsPq(state);
         bool changed=false;
@@ -11583,6 +11668,7 @@ private:
         if(const ExampleVideo* example=app_menu::ExampleVideoForCommand(id)){ActivateExampleVideo(*example);return;}
         if(id>=IDM_COMPARE_MASK_FEATHER_FIRST&&id<IDM_COMPARE_MASK_FEATHER_FIRST+IDM_COMPARE_MASK_FEATHER_COUNT){SetMaskFeather(size_t(id-IDM_COMPARE_MASK_FEATHER_FIRST));return;}
         if(id>=IDM_COMPARE_SECOND_MIX_FIRST&&id<IDM_COMPARE_SECOND_MIX_FIRST+IDM_COMPARE_SECOND_MIX_COUNT){SetSecondMix(compare_settings::kSecondMixes[size_t(id-IDM_COMPARE_SECOND_MIX_FIRST)]);return;}
+        if(id>=IDM_COMPARE_VSR_QUALITY_FIRST&&id<IDM_COMPARE_VSR_QUALITY_FIRST+IDM_COMPARE_VSR_QUALITY_COUNT){SetVsrQuality(vsr_policy::kQualities[size_t(id-IDM_COMPARE_VSR_QUALITY_FIRST)]);return;}
         if(const auto quality=app_menu::YouTubeQualityForCommand(id)){SetYouTubeSourceQuality(*quality);return;}
         if(id>=IDM_AUDIO_TRACK_FIRST&&id<IDM_AUDIO_TRACK_FIRST+IDM_AUDIO_TRACK_COUNT){
             ChooseAudioTrack(int(id-IDM_AUDIO_TRACK_FIRST));return;}
@@ -11637,6 +11723,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         case IDM_COMPARE_MASK_LOAD:LoadMaskFromDialog();break;case IDM_COMPARE_MASK_INVERT:ToggleMaskInvert();break;case IDM_COMPARE_MASK_CLEAR:ClearMaskForSource();break;
         case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_DIFFERENCE:SetComparisonMode(ComparisonMode::Difference);break;
         case IDM_COMPARE_SIDE_BY_SIDE:SetComparisonMode(ComparisonMode::SideBySide);break;case IDM_COMPARE_QUAD:SetComparisonMode(ComparisonMode::Quad);break;
+        case IDM_COMPARE_VSR:SetComparisonMode(ComparisonMode::Vsr);break;case IDM_COMPARE_AGAINST_VSR:ToggleAgainstVsr();break;
         case IDM_COMPARE_DIFFERENCE_LESS:StepDifferenceGain(-1);break;case IDM_COMPARE_DIFFERENCE_MORE:StepDifferenceGain(+1);break;case IDM_COMPARE_DIFFERENCE_LUMA:ToggleDifferenceLuma();break;case IDM_COMPARE_ZOOM_OUT:ZoomBy(-1,false,PointerOverPicture());break;case IDM_COMPARE_ZOOM_FIT:ZoomToFit();break;case IDM_COMPARE_LOUPE:ToggleLoupe();break;
         case IDM_ASPECT_ONE_TO_ONE:SetAspect(false,true);break;case IDM_COMPARE_NEXT_MODE:CycleComparisonMode(false);break;case IDM_COMPARE_PREVIOUS_MODE:CycleComparisonMode(true);break;
         }
@@ -12024,6 +12111,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // changes a tag's text bumps m_labelTextRevision.
     UINT m_labelAtlasDpi=0;
     uint64_t m_labelAtlasRevision=0,m_labelTextRevision=1;
+    // The RTX VSR reason the tags were last drawn for; see ApplyComparison. Starts at
+    // NotBuilt so that only a view that was Ready and then was refused is logged.
+    vsr_policy::Reason m_lastVsrReason=vsr_policy::Reason::NotBuilt;
     const D3D12Renderer* m_labelAtlasRefusedBy=nullptr;
     // Settings the playing cache entry was rendered with (its receipt has the full record).
     NeuralSettings m_cachedSettings;
