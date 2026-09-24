@@ -60,6 +60,7 @@
 #include "Utf8Text.h"
 #include "StatusChipPolicy.h"
 #include "ToolbarTipPolicy.h"
+#include "ChromeMotionPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -1821,12 +1822,19 @@ void native_button_palette_has_distinct_interaction_states_test()
     state.pressed = true;
     CHECK_EQ(RGB(27, 28, 31), ResolveButtonVisual(state).fill);
     state.pressed = false;
+    state.hover = false;
     state.active = true;
     const ButtonVisual active = ResolveButtonVisual(state);
     CHECK_EQ(RGB(55, 139, 226), active.fill);
     CHECK(active.text != RGB(240, 240, 242));
+    // A lit pill answers the cursor by lifting toward white in its own hue,
+    // and its dark label keeps (and gains) contrast doing so.
     state.hover = true;
-    CHECK_EQ(active.fill, ResolveButtonVisual(state).fill);
+    const ButtonVisual activeHover = ResolveButtonVisual(state);
+    CHECK(activeHover.fill != active.fill);
+    CHECK(GetRValue(activeHover.fill) >= GetRValue(active.fill) && GetGValue(activeHover.fill) >= GetGValue(active.fill) &&
+          GetBValue(activeHover.fill) >= GetBValue(active.fill));
+    CHECK_EQ(active.text, activeHover.text);
     state.pressed = true;
     CHECK_EQ(RGB(27, 28, 31), ResolveButtonVisual(state).fill);
     state.focus = true;
@@ -1862,6 +1870,82 @@ void active_button_small_text_meets_wcag_contrast_test()
     state.active = true;
     const ButtonVisual active = ResolveButtonVisual(state);
     CHECK(contrast_ratio(active.text, active.fill) >= 4.5);
+    // Hovered, and the working (teal) state both ways, keep the same floor.
+    state.hover = true;
+    const ButtonVisual activeHover = ResolveButtonVisual(state);
+    CHECK(contrast_ratio(activeHover.text, activeHover.fill) >= contrast_ratio(active.text, active.fill));
+    state = ButtonState{};
+    state.working = true;
+    const ButtonVisual working = ResolveButtonVisual(state);
+    CHECK(contrast_ratio(working.text, working.fill) >= 4.5);
+    state.hover = true;
+    const ButtonVisual workingHover = ResolveButtonVisual(state);
+    CHECK(workingHover.fill != working.fill);
+    CHECK(contrast_ratio(workingHover.text, workingHover.fill) >= contrast_ratio(working.text, working.fill));
+}
+
+void chrome_motion_fades_ease_without_overshoot_and_honour_reduced_motion_test()
+{
+    using namespace chrome_motion;
+    // The curves start at 0, end at 1, never leave [0, 1] and never go back.
+    double lastOut = 0.0, lastIn = 0.0;
+    for (int step = 0; step <= 100; ++step) {
+        const double t = step / 100.0;
+        const double out = EaseOut(t), in = EaseIn(t);
+        CHECK(out >= lastOut && out <= 1.0);
+        CHECK(in >= lastIn && in <= 1.0);
+        lastOut = out;
+        lastIn = in;
+    }
+    CHECK_EQ(0.0, EaseOut(0.0));
+    CHECK_EQ(1.0, EaseOut(1.0));
+    CHECK_EQ(1.0, EaseIn(2.0));
+    // Ease-out answers early; ease-in leaves late.
+    CHECK(EaseOut(0.25) > 0.5);
+    CHECK(EaseIn(0.25) < 0.05);
+    CHECK_EQ(RGB(10, 20, 30), Mix(RGB(10, 20, 30), RGB(250, 250, 250), 0.0));
+    CHECK_EQ(RGB(250, 250, 250), Mix(RGB(10, 20, 30), RGB(250, 250, 250), 1.0));
+    CHECK_EQ(RGB(130, 135, 140), Mix(RGB(10, 20, 30), RGB(250, 250, 250), 0.5));
+
+    const Clock::time_point start{};
+    Fade fade;
+    CHECK_EQ(0.0, fade.Level(start));
+    CHECK(!fade.Animating(start));
+    fade.Set(true, start, true);
+    CHECK_EQ(0.0, fade.Level(start));
+    CHECK(fade.Animating(start + kHoverIn / 2));
+    const double half = fade.Level(start + kHoverIn / 2);
+    CHECK(half > 0.5 && half < 1.0);
+    CHECK_EQ(1.0, fade.Level(start + kHoverIn));
+    CHECK(!fade.Animating(start + kHoverIn));
+    // Setting the state it is already heading to changes nothing.
+    fade.Set(true, start + kHoverIn / 2, true);
+    CHECK_EQ(1.0, fade.Level(start + kHoverIn));
+    // Leaving halfway through arriving eases out from where it had got to,
+    // not from 1: the tint never jumps.
+    Fade reversal;
+    reversal.Set(true, start, true);
+    const auto turn = start + kHoverIn / 3;
+    const double reached = reversal.Level(turn);
+    reversal.Set(false, turn, true);
+    CHECK(std::abs(reversal.Level(turn) - reached) < 1e-9);
+    CHECK(reversal.Level(turn + kHoverOut / 2) < reached);
+    CHECK_EQ(0.0, reversal.Level(turn + kHoverOut));
+    // Durations sit inside DESIGN.md's 120-220 ms, and leaving is not quicker
+    // than arriving.
+    CHECK(kHoverIn.count() >= 120 && kHoverOut.count() <= 220 && kHoverOut >= kHoverIn);
+    // Without motion the level lands at once and nothing asks for a timer.
+    Fade still;
+    still.Set(true, start, false);
+    CHECK_EQ(1.0, still.Level(start));
+    CHECK(!still.Animating(start));
+    still.Set(false, start, false);
+    CHECK_EQ(0.0, still.Level(start));
+    // Reset drops a fade without animating it.
+    fade.Set(false, start + kHoverIn, true);
+    fade.Reset();
+    CHECK_EQ(0.0, fade.Level(start + kHoverIn));
+    CHECK(!fade.Animating(start + kHoverIn));
 }
 
 void failed_icon_font_uses_label_only_presentation_test()
@@ -13889,6 +13973,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(tabler_glyph_mapping_uses_the_pinned_css_codepoints_test),
     TEST_CASE(native_button_palette_has_distinct_interaction_states_test),
     TEST_CASE(active_button_small_text_meets_wcag_contrast_test),
+    TEST_CASE(chrome_motion_fades_ease_without_overshoot_and_honour_reduced_motion_test),
     TEST_CASE(failed_icon_font_uses_label_only_presentation_test),
     TEST_CASE(button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test),
     TEST_CASE(button_content_layout_centers_combined_icon_and_label_without_outline_contact_test),

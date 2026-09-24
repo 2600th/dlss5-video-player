@@ -1146,6 +1146,51 @@ struct PlayerAppTestAccess {
         app.RefreshToolbarTips();
     }
 
+    // A hover eases in on a timer that stops itself once the tint lands, and
+    // with Windows' animations off it lands at once and starts no timer.
+    static void toolbar_hover_fades_run_only_while_moving_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded, motion = app.m_activityMotionEnabled;
+        app.m_loaded = true;
+        app.SetHoverAction(ToolbarAction::None);
+        app.ResetHoverFades();
+        const auto items = app.ToolbarItems();
+        REQUIRE(items.size() >= 2);
+        const ToolbarAction first = items[0].action, second = items[1].action;
+
+        app.m_activityMotionEnabled = true;
+        app.SetHoverAction(first);
+        CHECK(app.m_hoverTimer != 0);
+        CHECK(app.HoverLevel(first, true) < 1.0);
+        std::this_thread::sleep_for(chrome_motion::kHoverOut + std::chrono::milliseconds(40));
+        CHECK_EQ(1.0, app.HoverLevel(first, true));
+        app.AnimateHover();   // paints the frame the fade landed on
+        app.AnimateHover();   // nothing moving: the timer goes
+        CHECK_EQ(static_cast<UINT_PTR>(0), app.m_hoverTimer);
+        // Moving along the bar fades one out while the next fades in.
+        app.SetHoverAction(second);
+        CHECK(app.m_hoverTimer != 0);
+        CHECK(app.HoverLevel(first, false) > 0.0);
+        CHECK(app.HoverLevel(second, true) < 1.0);
+        app.ResetHoverFades();
+        CHECK_EQ(static_cast<UINT_PTR>(0), app.m_hoverTimer);
+        CHECK_EQ(0.0, app.HoverLevel(first, false));
+
+        app.SetHoverAction(ToolbarAction::None);
+        app.ResetHoverFades();
+        app.m_activityMotionEnabled = false;
+        app.SetHoverAction(first);
+        CHECK_EQ(static_cast<UINT_PTR>(0), app.m_hoverTimer);
+        CHECK_EQ(1.0, app.HoverLevel(first, true));
+        app.SetHoverAction(ToolbarAction::None);
+        CHECK_EQ(0.0, app.HoverLevel(first, false));
+
+        app.ResetHoverFades();
+        app.m_activityMotionEnabled = motion;
+        app.m_loaded = loaded;
+    }
+
     static void keyboard_cheat_sheet_test()
     {
         PlayerApp& app = fixture->app;
@@ -2081,6 +2126,7 @@ struct PlayerAppTestAccess {
         UI_CASE(status_chips_and_narrow_pills_fit_test),
         UI_CASE(timeline_render_map_test),
         UI_CASE(toolbar_tips_follow_the_surface_test),
+        UI_CASE(toolbar_hover_fades_run_only_while_moving_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),

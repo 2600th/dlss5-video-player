@@ -120,6 +120,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "SynchronizedPlayback.h"
 #include "StatusChipPolicy.h"
 #include "ToolbarTipPolicy.h"
+#include "ChromeMotionPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -2979,6 +2980,8 @@ private:
     // The press-and-hold A/B: fires once, compare_gesture::kHoldMs after a press on the
     // picture that has not become a drag.
     static constexpr UINT_PTR kPeekTimerId=0xD15A;
+    // The toolbar's hover fades; runs only while a fade is moving.
+    static constexpr UINT_PTR kHoverTimerId=0xD15B;
     static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
     // How long a live or cached pair may stay NotReady before the player stops
     // waiting for it. A segment source is reopened at every boundary and after
@@ -7773,8 +7776,44 @@ private:
     }
     void SetHoverAction(ToolbarAction action){
         if(action==m_hoverAction)return;const auto items=FocusableItems();
-        const auto dirty=HoverDirtyRectangles(items,m_hoverAction,action);m_hoverAction=action;
+        const auto dirty=HoverDirtyRectangles(items,m_hoverAction,action);
+        // The tint eases in on the control the cursor reached and out of the one
+        // it left (chrome_motion::kHoverIn / kHoverOut). Without motion the
+        // fades land at once, which is exactly the hover this had before.
+        const auto now=Clock::now();
+        if(m_hoverAction!=ToolbarAction::None)m_hoverFades[static_cast<size_t>(m_hoverAction)].Set(false,now,m_activityMotionEnabled);
+        if(action!=ToolbarAction::None)m_hoverFades[static_cast<size_t>(action)].Set(true,now,m_activityMotionEnabled);
+        m_hoverAction=action;
         for(const RECT& rect:dirty)InvalidateRect(m_hwnd,&rect,FALSE);
+        if(m_activityMotionEnabled&&!m_hoverTimer&&m_hwnd)m_hoverTimer=SetTimer(m_hwnd,kHoverTimerId,chrome_motion::kFrameMs,nullptr);
+    }
+    // A layout change or a hidden bar drops the hover without a fade: the
+    // control it was on is gone or has moved, so there is nothing to ease out of.
+    void ResetHoverFades(){
+        for(auto& fade:m_hoverFades)fade.Reset();
+        m_hoverAnimating=0;
+        if(m_hoverTimer&&m_hwnd){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
+    }
+    // One timer frame of the hover fades: repaints only the buttons whose tint
+    // is moving, plus one last paint for each that just landed, and stops
+    // itself once nothing is moving. Playback never pays for a hover.
+    void AnimateHover(){
+        const auto now=Clock::now();const auto items=FocusableItems();
+        uint32_t animating=0;
+        for(const auto& item:items){
+            const size_t index=static_cast<size_t>(item.action);
+            if(index>=m_hoverFades.size())continue;
+            const bool moving=m_hoverFades[index].Animating(now);
+            if(moving||(m_hoverAnimating>>index)&1u)InvalidateRect(m_hwnd,&item.bounds,FALSE);
+            if(moving)animating|=1u<<index;
+        }
+        m_hoverAnimating=animating;
+        if(!animating&&m_hoverTimer){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
+    }
+    double HoverLevel(ToolbarAction action,bool hover)const{
+        const size_t index=static_cast<size_t>(action);
+        if(action==ToolbarAction::None||index>=m_hoverFades.size())return hover?1.0:0.0;
+        return m_hoverFades[index].Level(Clock::now());
     }
     void RefreshHoverForCurrentLayout(){
         POINT cursor{};std::optional<POINT> clientPoint;
@@ -7872,7 +7911,15 @@ private:
     bool ToolbarActionEnabled(ToolbarAction action)const{return IsToolbarActionEnabled(action,ToolbarState());}
 
     void DrawButton(HDC dc,ToolbarAction action,UiIcon icon,const std::wstring&label,const RECT&r,bool enabled,bool active,bool hover,bool pressed,bool focus,bool compact,bool working=false){
-        const ButtonVisual visual=ResolveButtonVisual(ButtonState{enabled,active,working,hover,pressed,focus});
+        // The resting and hovered looks mixed by how far the hover fade has got,
+        // so the tint eases rather than snapping; at 0 or 1 it is either look.
+        const ButtonVisual rest=ResolveButtonVisual(ButtonState{enabled,active,working,false,pressed,focus});
+        const ButtonVisual hot=ResolveButtonVisual(ButtonState{enabled,active,working,true,pressed,focus});
+        const double hoverLevel=HoverLevel(action,hover);
+        ButtonVisual visual=hot;
+        visual.fill=chrome_motion::Mix(rest.fill,hot.fill,hoverLevel);
+        visual.border=chrome_motion::Mix(rest.border,hot.border,hoverLevel);
+        visual.text=chrome_motion::Mix(rest.text,hot.text,hoverLevel);
         HBRUSH brush=CreateSolidBrush(visual.fill);HPEN pen=CreatePen(PS_SOLID,1,visual.border);
         const HGDIOBJ oldBrush=SelectObject(dc,brush),oldPen=SelectObject(dc,pen);
         const int radius=std::max(1,Dip(kToolbarCornerRadiusDip));
@@ -7897,7 +7944,11 @@ private:
         }
         SelectObject(dc,measuredText);
         const bool showText=!showIcon||featureLabel||neededWidth<=r.right-r.left;
-        const ButtonContentLayout content=LayoutButtonContent(r,iconSize,showText?textSize:SIZE{},stacked&&showText,ActiveWindowDpi(m_hwnd));
+        ButtonContentLayout content=LayoutButtonContent(r,iconSize,showText?textSize:SIZE{},stacked&&showText,ActiveWindowDpi(m_hwnd));
+        // Pressed sinks the glyph and label by one pixel into the darker fill,
+        // the inset a physical key gives under a finger. No timer: a press is
+        // as long as the button is held.
+        if(pressed&&enabled){const int sink=std::max(1,Dip(1));OffsetRect(&content.icon,0,sink);OffsetRect(&content.text,0,sink);}
         if(showIcon){const HGDIOBJ oldFont=SelectObject(dc,m_iconFont);RECT iconRect=content.icon;DrawTextW(dc,&glyph,1,&iconRect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);SelectObject(dc,oldFont);}
         if(showText){const HGDIOBJ oldFont=SelectObject(dc,textFont);RECT textRect=content.text;
             DrawTextW(dc,shown.c_str(),-1,&textRect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
@@ -10681,7 +10732,7 @@ private:
         if(interacting){m_fullscreenLastInput=Clock::now();return;}
         if(Clock::now()-m_fullscreenLastInput<kFullscreenIdleDelay)return;
         m_fullscreenControlsHidden=true;m_focusedToolbarAction=ToolbarAction::None;
-        m_hoverAction=ToolbarAction::None;m_pressedToolbarAction=ToolbarAction::None;
+        m_hoverAction=ToolbarAction::None;ResetHoverFades();m_pressedToolbarAction=ToolbarAction::None;
         StopFullscreenTimer();SetMenu(m_hwnd,nullptr);DrawMenuBar(m_hwnd);ClearTimelineHover();
         Layout();InvalidateRect(m_hwnd,nullptr,FALSE);
     }
@@ -10691,7 +10742,7 @@ private:
             m_savedStyle=GetWindowLongW(m_hwnd,GWL_STYLE);GetWindowRect(m_hwnd,&m_savedRect);
             m_fullscreenMenu=GetMenu(m_hwnd);m_fullscreen=true;m_fullscreenControlsHidden=true;
             m_fullscreenKeyboardFocus=false;m_focusedToolbarAction=ToolbarAction::None;
-            m_hoverAction=ToolbarAction::None;m_pressedToolbarAction=ToolbarAction::None;
+            m_hoverAction=ToolbarAction::None;ResetHoverFades();m_pressedToolbarAction=ToolbarAction::None;
             m_dragSeek=false;m_dragVolume=false;if(GetCapture()==m_hwnd)ReleaseCapture();
             m_fullscreenPointerKnown=GetCursorPos(&m_fullscreenPointer)!=FALSE;
             SetMenu(m_hwnd,nullptr);
@@ -10738,7 +10789,7 @@ private:
         case dark_mode::WM_UAHDRAWMENU:if(DrawDarkMenuBar(h,reinterpret_cast<const dark_mode::UAHMENU*>(l)))return TRUE;break;
         case dark_mode::WM_UAHDRAWMENUITEM:if(DrawDarkMenuBarItem(h,reinterpret_cast<const dark_mode::UAHDRAWMENUITEM*>(l)))return TRUE;break;
         case WM_NCPAINT:case WM_NCACTIVATE:{const LRESULT result=DefWindowProcW(h,m,w,l);PaintMenuBarSeparator(h);return result;}
-        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}break;
+        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}if(w==kHoverTimerId){AnimateHover();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
         case WM_ENTERSIZEMOVE:m_inSizeMove=true;StartModalTick();break;
@@ -11010,6 +11061,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     bool m_audioStaleAfterStep=false;
     Clock::time_point m_lastScrubSeek{};
     ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None,m_hoverAction=ToolbarAction::None;
+    // Indexed by ToolbarAction; m_hoverAnimating has a bit per fade that was
+    // moving on the last frame, so the frame it lands gets painted too.
+    std::array<chrome_motion::Fade,static_cast<size_t>(ToolbarAction::None)+1> m_hoverFades{};uint32_t m_hoverAnimating=0;UINT_PTR m_hoverTimer=0;
     // Windows' own rule for focus cues: hidden until the keyboard is used to move
     // between controls, hidden again by the mouse. The focused action is always the
     // first enabled one, so without this the Open button wore a ring from launch on.

@@ -66,13 +66,17 @@ ButtonVisual ResolveButtonVisual(ButtonState state)
     // Teal rather than blue, and the same teal the timeline already uses for
     // rendered coverage: the two places the player says "this is being made
     // right now" should not say it in two different colours.
+    // A lit pill answers the cursor too, by lifting a step toward white in its
+    // own hue. It used to ignore hover entirely, so on the icon-only bar the
+    // one control that was on was the one that looked dead under the pointer.
+    // Lighter only: the dark label's contrast rises, never falls.
     if (state.working) {
-        return {ui_palette::NeuralCoverage, RGB(120, 226, 208),
-                ui_palette::Window, state.focus};
+        return state.hover ? ButtonVisual{RGB(104, 214, 198), RGB(156, 236, 222), ui_palette::Window, state.focus}
+                           : ButtonVisual{ui_palette::NeuralCoverage, RGB(120, 226, 208), ui_palette::Window, state.focus};
     }
     if (state.active) {
-        return {ui_palette::PrimaryBlue, RGB(103, 179, 245),
-                ui_palette::Window, state.focus};
+        return state.hover ? ButtonVisual{RGB(84, 158, 236), RGB(136, 197, 250), ui_palette::Window, state.focus}
+                           : ButtonVisual{ui_palette::PrimaryBlue, RGB(103, 179, 245), ui_palette::Window, state.focus};
     }
     if (state.hover) {
         return {ui_palette::Hover, RGB(93, 97, 104),
