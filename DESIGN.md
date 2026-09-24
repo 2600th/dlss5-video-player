@@ -334,6 +334,8 @@ never decorates. The numbers live in `src/ChromeMotionPolicy.h`, with tests.
 | Start tile lift | pointer on a tile | rises 2 dip, picture +6% brighter, blue edge, on the hover fade | lands at once |
 | Toast | a file saved, a subtitle shift, a whole video rendered | takes the status row's slot: rises 8 dip and fades in over 160 ms (ease-out) as the line fades out, holds 2.4 s, then fades out over 140 ms (ease-in) as the line returns; repainted at 30 Hz; a second one replaces it without rising | the line and the toast swap for the hold |
 | Rendering-now hatch | a live job is running | drifts with the 50 ms activity timer | still hatch, 1 s repaint |
+| Render band growth | a live segment lands | the coverage it adds is revealed left to right over 180 ms, ease-out, at 30 Hz; only new coverage eases | steps |
+| Fullscreen controls | idle 2.5 s / pointer moves | none: they hide and show at once (see Fullscreen below) | same |
 
 Rules:
 - 120-220 ms for anything that answers the pointer; ease-out when something
@@ -380,6 +382,22 @@ the tip quotes it (Upscaling, Mix, SR history). Tips appear after 500 ms and
 at once when moving from one control to the next. The status chips and the
 compare modes build theirs when shown (TTN_GETDISPINFO): a chip says what
 was measured and over what; a greyed mode says what would make it work.
+
+### Fullscreen
+
+The controls in fullscreen hide and show at once; there is no fade or slide,
+and that is a decision, not an omission. The strip is painted in the main
+window below the picture, so easing it would mean one of two things:
+resizing the D3D12 swap chain every frame of the animation (a resize is a
+flush and a buffer reallocation, far over a frame's budget), or drawing the
+strip as a layered popup over the swap chain. The popup was measured: the
+round-two toast, built exactly that way, dropped 6, 6 and 2 frames at a
+render's completion against 0, 0 and 1 without it, and 0 once it was painted
+by the strip instead. What would make it possible: presenting the chrome
+through DirectComposition as a visual composed with the swap chain (the video
+in one visual, the strip in another, opacity and offset animated by the
+compositor, not by GDI on the presenting thread), measured to the same
+bar - the playback-health line unchanged while it animates.
 
 ### Keys
 

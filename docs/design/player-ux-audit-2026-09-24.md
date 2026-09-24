@@ -262,3 +262,90 @@ end. Nothing went wrong in the neural-job code:
 - The cold start on a fresh profile took 21.9 s, of which 8.1 s was the
   model-store hash of 59 files. With the store already hashed it took
   16.9 s. The warm-up UI does not say this (F5).
+
+## Round 2: what was built
+
+All of the round-2 plan (items 6-13) shipped, together with six review
+additions:
+
+- Esc leaves fullscreen first.
+- The first window is 80% of the work area.
+- The live render's cold start is explained, and measured.
+- The comparison tags fade in.
+- The dialogs are redesigned.
+- The volume slider sits on the button row.
+
+The chrome also gained a frame budget. A toast drawn as a popup over the video
+cost frames, so the toast now lives in the status row, paints draw only what
+changed, and the moments that arrive during playback repaint at 30 Hz. The
+round-2 section of the w6-design report has the details.
+
+## Round 3: final
+
+### What changed
+
+| Change | Commit |
+|---|---|
+| Rebased onto `improve/audit-2026-09-23` (site rewrite, direct NVENC encode, P3.4, 682322a); the 24 px tap-target rules survived next to the new masthead GitHub link | the rebase |
+| **Cold start (Option A).** A just-rewritten model-store file is trusted when its size and hash equal the last agreed pair's (`ModelStoreMemo`, persisted beside the cache). Measured on the fixture: model-store resolve 9.7-10.5 s → 0.07-0.43 s; cold start 17.9-21.9 s → 7.9-9.0 s. | `87b3efd` |
+| The first warm-up step now reads "waiting for NVIDIA's model files to settle" | `0d2288a` |
+| The dialog heading rule clears its text at 100/150/175% (pinned by a pixel test) | `467ae4b` |
+| The status-line slot crossfades with a toast (no text behind or after it) | `f580a91` |
+| Window placement is saved and restored, validated against the current monitors | `c913980` |
+| The render band grows as segments land (180 ms, ease-out) | `51fedda` |
+| **The 8-frame drop at publish** was a player-side starvation. The joined entry's open was still in flight at the next boundary. The warmed next file is now kept through the join; measured over 8 completions: 0 dropped. | `77156c9` |
+
+### Cut: the fullscreen fade-and-slide strip
+
+The strip is cut, on measurement. The controls sit below the picture in
+the main window. Easing them would mean either resizing the swap chain every
+animation frame, or drawing the strip as a layered popup over the video.
+
+The popup was built and measured in round 2, as the first version of the
+toast, on the fixture's render completion:
+
+| Version | Dropped frames, 3 runs |
+|---|---|
+| Popup over the video | 6, 6, 2 |
+| No toast | 0, 0, 1 |
+| Toast painted by the strip | 0, 0, 0 |
+
+No zero-cost path was found. What would make the strip possible is composing
+the chrome through DirectComposition, as a visual beside the swap chain that
+the compositor animates. It would have to pass the same bar: an unchanged
+playback-health line while it animates. DESIGN.md "Player > Fullscreen"
+records this.
+
+### Also out of scope and not built
+
+The loupe could not be captured this round: posted mouse input cannot hold the
+pointer over the picture. It is unchanged since round 1 and covered by the
+existing tests.
+
+### Before / after gallery
+
+All screenshots are in `C:\t\w6-design\shots\`, captured on the RTX 4080 SUPER
+at 3840x2160 and 175%. Before shots are round 1's `before-*`; after shots are
+round 3's `f3-*`.
+
+| Surface | Before | After |
+|---|---|---|
+| Start screen | `before-01-start.png` | `f3-01-start.png`; `r2f-02-start-tilehover.png` (new subtitle) |
+| Playing, first window | `before-02-playing.png` (1440x880 px client, icon-only pills) | `f3-02-playing.png` (2293x1563 client, pills with their words) |
+| Warm-up | `before-n1-3s.png` ("0% · ETA 0:10" frozen) | `f3-03-warmup.png` ("Starting the neural render · preparing the model on the GPU", "Render · starting") |
+| Timeline during a render | `before-n4-after-seek.png` (lane overpainted) | `f3-04-rendering.png`; `lane-before-after.png` |
+| Completion | `before-n8-late.png` (a chip reading 100%) | `f3-05-complete-*.png` (glow and toast), `f3-strip-sheet.png` |
+| Compare modes | `before-05-compare.png` (refused before a pair) | `f3-06-mode-{neural,original,split,wipe,difference,side,quad}.png`; `f3-modes-sheet.png` |
+| Tags | — | `r2-tags-split.png`, `r2-tags-split-early-top.png` (fade) |
+| Toast | — | `f3-08-toast.png`, `f3-08-toast-gone.png` |
+| Volume slider | `before-03-paused.png` | `r2a-volume-drag.png` (bubble), `f3-02-playing.png` (on the row) |
+| Image adjustments | `before-07-dlg-adjust.png` | `f3-09-dlg-adjust.png` |
+| Neural settings | `before-07-dlg-neural.png` (1,387 px) | `f3-09-dlg-neural.png` (796 px, two columns) |
+| Encoder settings | `before-07-dlg-encoder.png` (combo and note cut off) | `f3-09-dlg-encoder.png` |
+| Shortcut sheet | `before-04-sheet-popup.png` | `f3-10-sheet.png` (Esc row updated) |
+| Placement restored | — | `f3-11-reopened.png` (moved to 300,150 2100x1400, reopened there) |
+| Site | `site-before-desktop-full-0.png`, `site-before-mobile-full-0.png` | `f3-site-desktop-hero.png`, `f3-site-mobile.png` |
+
+A capture caveat: PrintWindow sometimes catches a directly painted popup (the
+sheet, a dialog) part-way through a repaint. The gallery keeps complete
+captures. The paint code itself validates and double-checks were complete.
