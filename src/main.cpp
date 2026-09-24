@@ -119,6 +119,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "UpdateCheck.h"
 #include "SynchronizedPlayback.h"
 #include "StatusChipPolicy.h"
+#include "ToolbarTipPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -5507,7 +5508,9 @@ private:
         if(host){
             ApplyDarkControlTheme(host);
             SendMessageW(host,TTM_SETMAXTIPWIDTH,0,Sd(dialog,420));
-            SendMessageW(host,TTM_SETDELAYTIME,TTDT_AUTOPOP,MAKELPARAM(30000,0));
+            SendMessageW(host,TTM_SETDELAYTIME,TTDT_AUTOPOP,MAKELPARAM(toolbar_tips::kAutoPopMs,0));
+            SendMessageW(host,TTM_SETDELAYTIME,TTDT_INITIAL,MAKELPARAM(toolbar_tips::kInitialDelayMs,0));
+            SendMessageW(host,TTM_SETDELAYTIME,TTDT_RESHOW,MAKELPARAM(toolbar_tips::kReshowDelayMs,0));
             m_tipHosts[dialog]=host;
         }
         return host;
@@ -5516,55 +5519,42 @@ private:
     // owner; only this dialog's strings are dropped, never another dialog's.
     void ReleaseDialogTips(HWND dialog){m_tipHosts.erase(dialog);m_tipText.erase(dialog);}
 
-    // Which sentence a toolbar control gets on hover. Null means the control
-    // says everything it needs to in its own label - "10s" does not need a
-    // paragraph - so only the ones with a state worth explaining carry one.
-    static const wchar_t* ToolbarTipKey(ToolbarAction action){
-        switch(action){
-        case ToolbarAction::ToggleNeuralRendering:return L"toolbar.tip.neural";
-        case ToolbarAction::ToggleUpscaling:return L"toolbar.tip.upscaling";
-        case ToolbarAction::ToggleFrameGeneration:return L"toolbar.tip.framegen";
-        case ToolbarAction::Open:return L"toolbar.tip.open";
-        case ToolbarAction::PlayPause:return L"toolbar.tip.playpause";
-        case ToolbarAction::Mute:return L"toolbar.tip.mute";
-        case ToolbarAction::Aspect:return L"toolbar.tip.aspect";
-        case ToolbarAction::Adjustments:return L"toolbar.tip.color";
-        case ToolbarAction::DebugView:return L"toolbar.tip.debug";
-        case ToolbarAction::Fullscreen:return L"toolbar.tip.fullscreen";
-        default:return nullptr;
-        }
-    }
-
     // Toolbar buttons are painted, not child windows, so their tips are
     // registered by RECTANGLE. The rectangles move on every resize and whenever
     // the bar drops items, so they are re-registered from the same layout the
     // painter uses - a tip pinned to a stale rect is worse than no tip, because
-    // it describes whatever control has moved into that space.
+    // it describes whatever control has moved into that space. That includes a
+    // control that is no longer laid out at all: the start screen's two buttons
+    // sit where the picture is once a file loads, and a narrowed bar drops
+    // items, so every action this surface does not show gets an empty rect.
     // Tool ids past every ToolbarAction value, so the compare bar's tips never replace a toolbar one.
     static constexpr UINT_PTR kCompareTipIdBase=0x1000;
     void RefreshToolbarTips(){
         if(!m_hwnd||!IsWindow(m_hwnd))return;
-        const auto items=ToolbarItems();
+        const auto items=FocusableItems();
         HWND host=EnsureTipHost(m_hwnd);
         if(!host)return;
         auto& text=m_tipText[m_hwnd];
         // Tool ids are the action value, so a re-registration replaces the tool
         // for that action rather than stacking a second one on top of it.
-        for(const auto& item:items){
-            const wchar_t* key=ToolbarTipKey(item.action);
+        for(size_t index=0;index<static_cast<size_t>(ToolbarAction::None);++index){
+            const auto action=static_cast<ToolbarAction>(index);
+            const wchar_t* key=toolbar_tips::TipKey(action);
             if(!key)continue;
-            const UINT_PTR id=static_cast<UINT_PTR>(item.action);
+            RECT bounds{};
+            for(const auto& item:items)if(item.action==action)bounds=item.bounds;
+            const UINT_PTR id=static_cast<UINT_PTR>(action);
             TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_SUBCLASS;
-            info.hwnd=m_hwnd;info.uId=id;info.rect=item.bounds;
+            info.hwnd=m_hwnd;info.uId=id;
             // Present already: move it. The control moved, the sentence did not.
             if(SendMessageW(host,TTM_GETTOOLINFOW,0,reinterpret_cast<LPARAM>(&info))){
-                info.rect=item.bounds;
+                info.rect=bounds;
                 SendMessageW(host,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&info));
                 continue;
             }
             text.push_back(std::make_unique<std::wstring>(T(key)));
             info.lpszText=text.back()->data();
-            info.rect=item.bounds;
+            info.rect=bounds;
             SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
         }
         // The compare bar's parts that can lose their words, named on hover. A part the

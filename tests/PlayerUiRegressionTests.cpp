@@ -1073,6 +1073,79 @@ struct PlayerAppTestAccess {
 
     // ? and F1 open the cheat sheet from anywhere, Esc and the same keys put
     // it away, and Help > Keyboard shortcuts is the menu route to it.
+    // Tips are registered by rectangle, so they have to follow the surface: the
+    // start screen's buttons have tips where they are drawn, and once a file
+    // loads those rectangles are emptied rather than left over the picture.
+    static void toolbar_tips_follow_the_surface_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded;
+        app.RefreshToolbarTips();
+        const auto host = app.m_tipHosts.find(app.m_hwnd);
+        REQUIRE(host != app.m_tipHosts.end());
+        const HWND tips = host->second;
+        const auto tool = [&](ToolbarAction action, std::wstring* text) -> std::optional<RECT> {
+            TTTOOLINFOW info{};
+            info.cbSize = TTTOOLINFOW_V2_SIZE;
+            info.hwnd = app.m_hwnd;
+            info.uId = static_cast<UINT_PTR>(action);
+            if (!SendMessageW(tips, TTM_GETTOOLINFOW, 0, reinterpret_cast<LPARAM>(&info))) return std::nullopt;
+            if (text) {
+                std::wstring buffer(1024, L'\0');
+                info.lpszText = buffer.data();
+                SendMessageW(tips, TTM_GETTEXTW, buffer.size(), reinterpret_cast<LPARAM>(&info));
+                *text = buffer.c_str();
+            }
+            return info.rect;
+        };
+        const auto empty = [](const RECT& r) { return r.right <= r.left || r.bottom <= r.top; };
+        const auto same = [](const RECT& a, const RECT& b) {
+            return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+        };
+
+        app.m_loaded = false;
+        app.RefreshToolbarTips();
+        const IdleSurfaceLayout idle = app.IdleLayout();
+        for (const ToolbarItem& item : idle.actions) {
+            std::wstring text;
+            const auto rect = tool(item.action, &text);
+            CHECK(rect.has_value());
+            if (rect) CHECK(same(*rect, item.bounds));
+            CHECK(!text.empty());
+        }
+        const auto playOnIdle = tool(ToolbarAction::PlayPause, nullptr);
+        CHECK(playOnIdle.has_value());
+        if (playOnIdle) CHECK(empty(*playOnIdle));
+
+        app.m_loaded = true;
+        app.RefreshToolbarTips();
+        const auto items = app.ToolbarItems();
+        CHECK(!items.empty());
+        bool youtubeOnBar = false;
+        for (const ToolbarItem& item : items) {
+            youtubeOnBar = youtubeOnBar || item.action == ToolbarAction::OpenYouTube;
+            const auto rect = tool(item.action, nullptr);
+            CHECK(rect.has_value());
+            if (rect) CHECK(same(*rect, item.bounds));
+        }
+        if (!youtubeOnBar) {
+            const auto youtube = tool(ToolbarAction::OpenYouTube, nullptr);
+            CHECK(youtube.has_value());
+            if (youtube) CHECK(empty(*youtube));
+        }
+        std::wstring playText;
+        CHECK(tool(ToolbarAction::PlayPause, &playText).has_value());
+        CHECK(playText.find(L"(Space)") != std::wstring::npos);
+        std::wstring fullscreenText;
+        CHECK(tool(ToolbarAction::Fullscreen, &fullscreenText).has_value());
+        CHECK(fullscreenText.find(L"(F11)") != std::wstring::npos);
+        CHECK_EQ(static_cast<LRESULT>(toolbar_tips::kInitialDelayMs), SendMessageW(tips, TTM_GETDELAYTIME, TTDT_INITIAL, 0));
+        CHECK_EQ(static_cast<LRESULT>(toolbar_tips::kReshowDelayMs), SendMessageW(tips, TTM_GETDELAYTIME, TTDT_RESHOW, 0));
+
+        app.m_loaded = loaded;
+        app.RefreshToolbarTips();
+    }
+
     static void keyboard_cheat_sheet_test()
     {
         PlayerApp& app = fixture->app;
@@ -2007,6 +2080,7 @@ struct PlayerAppTestAccess {
         UI_CASE(toolbar_pills_and_progress_panel_test),
         UI_CASE(status_chips_and_narrow_pills_fit_test),
         UI_CASE(timeline_render_map_test),
+        UI_CASE(toolbar_tips_follow_the_surface_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),

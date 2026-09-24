@@ -59,6 +59,7 @@
 #include "MediaTools.h"
 #include "Utf8Text.h"
 #include "StatusChipPolicy.h"
+#include "ToolbarTipPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
 #include "DarkModePolicy.h"
@@ -1369,6 +1370,42 @@ void status_chips_carry_the_rate_the_drops_and_the_render_test()
     // No dropped frames is a fine state, so the chip says it quietly.
     CHECK(At(playing, Chip::Dropped).quiet);
     CHECK(!At(Build(true, {}, 60.0, 60.0, 4), Chip::Dropped).quiet);
+}
+
+void toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test()
+{
+    const Localizer localizer;
+    // Every control on the bar and the start screen has a tip, and the tip
+    // text exists (Get hands back the key itself for a missing string).
+    for (size_t index = 0; index < static_cast<size_t>(ToolbarAction::None); ++index) {
+        const auto action = static_cast<ToolbarAction>(index);
+        const wchar_t* key = toolbar_tips::TipKey(action);
+        CHECK(key != nullptr);
+        if (!key) continue;
+        const std::wstring tip = localizer.Get(key);
+        CHECK(tip != key);
+        // A tip that names a key names the one its menu row carries; the
+        // Fullscreen tip said F, which previews a frame, while F11 is the key.
+        const wchar_t* menuKey = toolbar_tips::MenuKey(action);
+        const std::wstring_view shortcut = toolbar_tips::TipShortcut(tip);
+        if (!menuKey) {
+            CHECK(shortcut.empty());
+            continue;
+        }
+        const std::wstring menu = localizer.Get(menuKey);
+        const std::wstring_view accelerator = toolbar_tips::MenuAccelerator(menu);
+        CHECK(!accelerator.empty());
+        CHECK(!shortcut.empty());
+        CHECK(shortcut.starts_with(accelerator));
+    }
+    CHECK(toolbar_tips::TipKey(ToolbarAction::None) == nullptr);
+    CHECK(toolbar_tips::TipShortcut(localizer.Get(L"toolbar.tip.fullscreen")) == L"F11");
+    CHECK(toolbar_tips::MenuAccelerator(L"Play / Pause\tSpace   (Overlay: Ctrl+Alt+Space)") == L"Space");
+    CHECK(toolbar_tips::MenuAccelerator(L"Exit").empty());
+    CHECK(toolbar_tips::TipShortcut(L"Frame Generation\nWrites (a) file").empty());
+    // Resting reveals, sweeping does not; moving along the bar is immediate.
+    CHECK(toolbar_tips::kInitialDelayMs >= 400 && toolbar_tips::kInitialDelayMs <= 600);
+    CHECK(toolbar_tips::kReshowDelayMs < 100);
 }
 
 void status_chips_flash_on_the_fact_not_on_every_repaint_test()
@@ -13826,6 +13863,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test),
     TEST_CASE(player_status_formats_exact_runtime_and_playback_states_test),
     TEST_CASE(status_chips_carry_the_rate_the_drops_and_the_render_test),
+    TEST_CASE(toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test),
     TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),
     TEST_CASE(status_chips_keep_fixed_places_and_give_the_line_the_rest_test),
     TEST_CASE(feature_pills_shrink_before_the_bar_goes_compact_test),
