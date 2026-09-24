@@ -648,10 +648,12 @@ plus `ConfigVersion=6`, the stamp the add-on writes on first load and so the sta
 every player runtime after its first launch. At the defaults this changes no pixel
 (identical digests with and without the migration on three clips).
 
-The same migration can reach the player once: `packaging/ReShade.ini` carries no
-`[RenoDX.DLSS5]` section, so the first launch's section has no `ConfigVersion` and a
-chained-off setting in `DLSSVideoPlayer.ini` would be rendered chained on that first
-launch only. It is recorded in the report rather than changed here.
+The same migration could reach the player once: `packaging/ReShade.ini` carries no
+`[RenoDX.DLSS5]` section, so the first launch's section had no `ConfigVersion` and a
+chained-off setting in `DLSSVideoPlayer.ini` was rendered chained on that first
+launch only. The player now writes `ConfigVersion=6` into a section it creates
+(`src/ReShadeConfig.cpp`); a preflight on a fresh runtime logs no migration and leaves
+no `.bak`.
 
 Cost of a change is unchanged in kind: settings and guides are part of the render
 identity, so every distinct combination renders from scratch (16 cold 1080p

@@ -1207,7 +1207,10 @@ build named; the full entries are in `CHANGELOG.md` at tag
   `NRFollowInputRes=0` and `NRResolutionScale=1`; the scale is a multiplier,
   not a percentage (a written `100` came back from the add-on as `1`). A
   leftover `NREnableUpscaling` is left alone, because writing it makes 6.x
-  re-run a pre-v4 migration that backs up `ReShade.ini` each time. The
+  re-run a pre-v4 migration that backs up `ReShade.ini` each time. A section
+  the player creates, or one holding only keys it writes, gets the add-on's
+  own `ConfigVersion=6`; without it 6.5.3 migrates the section as schema v0 on
+  its first load and adopts its own `NRChainedHistory` for that launch. The
   parenthesised `NR skipped (after-upscale): ... incomplete` line is a startup
   notice on a healthy run; the bare `NR skipped:` form is still a failure.
 - **Streamline stays at 2.13.0.0** (0.25.0). 2.14.1.0 drops `sl.dlss_nr.dll`

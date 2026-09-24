@@ -61,6 +61,16 @@ existing `ReShade.ini` is left alone at whatever value it holds; 6.x ignores
 it, and rewriting a key it classifies as pre-v4 would re-run its config
 migration, which backs the file up beside the add-on every time it fires.
 
+A section the player creates also opens with `ConfigVersion=6`, the schema
+stamp 6.5.3 writes on every config it loads. Without it the add-on reads the
+section as schema v0 on its first load and migrates it: `ReShade.log` reports
+"config schema v0 migrated key-wise to v6", the file is backed up beside the
+add-on, and the add-on's own `NRChainedHistory` and `NRCodecMode` replace the
+saved ones for that launch (and the pre-v6 `NRPQCalibration=2.5375` is pinned
+into the file). The stamp is added only to a section holding nothing but keys
+the player writes; a section with anybody else's key, or a version of its own,
+is left for the add-on to migrate.
+
 One further key is written only when **DLSS > Processing scale** asks for it:
 `NRPreUpscale=1` for the 75% and 50% rungs, which put the model on the reduced
 picture ahead of DLSS Super Resolution, and `NRPreUpscale=0` when a render at

@@ -32,7 +32,9 @@ using NeuralAddonOverride = std::pair<std::string, std::string>;
 // Applies the complete RenoDX neural-rendering contract used by this player.
 // Enabling turns hooks and neural uplift on while explicitly keeping RenoDX's
 // own upscaling path off, then writes each override into [RenoDX.DLSS5],
-// replacing an existing exact-case key or appending at the section end.
+// replacing an existing exact-case key or appending at the section end. A
+// section it creates, or one holding only keys it writes, also gets the add-on's
+// ConfigVersion, so RenoDX does not migrate (and override) it on its next load.
 // Disabling only disables the add-on, preserving the user's neural tuning for a
 // later normal launch; overrides are not applied while disabling.
 std::string UpdateNeuralAddonIni(

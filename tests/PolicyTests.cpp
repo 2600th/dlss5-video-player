@@ -6197,12 +6197,75 @@ void neural_addon_runtime_settings_are_created_at_native_resolution_test()
         "[ADDON]\r\n"
         "DisabledAddons=\r\n"
         "[RenoDX.DLSS5]\r\n"
+        "ConfigVersion=6\r\n"
         "EnableHooks=2\r\n"
         "NeuralUplift=1\r\n"
         "NRFollowInputRes=0\r\n"
         "NRResolutionScale=1\r\n";
 
     CHECK_EQ(std::string(expected), UpdateNeuralAddonIni(input, true));
+}
+
+// RenoDX 6.5.3 reads a [RenoDX.DLSS5] without ConfigVersion as schema v0 and
+// migrates it on load, adopting its own NRChainedHistory/NRCodecMode for that
+// launch. A section this player wrote - its managed keys and its overrides, and
+// nothing else - is stamped with the version the add-on stamps itself; one with
+// anybody else's key or a version of its own is left to the add-on.
+void neural_addon_section_this_player_writes_carries_the_addon_schema_version_test()
+{
+    const std::vector<NeuralAddonOverride> overrides{{"NRChainedHistory", "0"}, {"NRPasses", "2"}};
+    // Created: the version opens the section, before the managed contract.
+    const std::string created = UpdateNeuralAddonIni("", true, overrides);
+    CHECK_EQ(std::string("[ADDON]\r\nDisabledAddons=\r\n[RenoDX.DLSS5]\r\nConfigVersion=6\r\n"
+                         "EnableHooks=2\r\nNeuralUplift=1\r\nNRFollowInputRes=0\r\n"
+                         "NRResolutionScale=1\r\nNRChainedHistory=0\r\nNRPasses=2\r\n"),
+             created);
+    CHECK_EQ(created, UpdateNeuralAddonIni(created, true, overrides));
+
+    // Repaired: a section an earlier build wrote and the add-on never loaded.
+    // Every user value stays where and what it was; the version is appended.
+    constexpr std::string_view unversioned =
+        "[ADDON]\nDisabledAddons=\n[RenoDX.DLSS5]\nEnableHooks=2\nNeuralUplift=1\n"
+        "; the user's note\nNRChainedHistory=0\nNRFollowInputRes=0\nNRResolutionScale=1\n"
+        "NRPasses=2\n[OVERLAY]\nWindow=x\n";
+    const std::string repaired = UpdateNeuralAddonIni(unversioned, true, overrides);
+    CHECK_EQ(std::string("[ADDON]\nDisabledAddons=\n[RenoDX.DLSS5]\nEnableHooks=2\nNeuralUplift=1\n"
+                         "; the user's note\nNRChainedHistory=0\nNRFollowInputRes=0\nNRResolutionScale=1\n"
+                         "NRPasses=2\nConfigVersion=6\n[OVERLAY]\nWindow=x\n"),
+             repaired);
+    CHECK_EQ(repaired, UpdateNeuralAddonIni(repaired, true, overrides));
+    // The worker's own call writes no overrides: a section it did not write
+    // entirely is not its to stamp, and one already stamped stays as it is -
+    // so a resident helper never sees a "repair" the player's write implied.
+    CHECK_EQ(repaired, UpdateNeuralAddonIni(repaired, true));
+    CHECK(UpdateNeuralAddonIni(unversioned, true).find("ConfigVersion") == std::string::npos);
+    // An empty section is one this player may have created.
+    CHECK(UpdateNeuralAddonIni("[RenoDX.DLSS5]\n", true).find("ConfigVersion=6") != std::string::npos);
+
+    // Somebody else's keys may be pre-v6 ones: the add-on's migration is for them.
+    for (const std::string_view foreign : {
+            std::string_view("[RenoDX.DLSS5]\nNREnableUpscaling=0\nNRChainedHistory=0\n"),
+            std::string_view("[RenoDX.DLSS5]\nNRChainedHistory=0\nFutureTuning=1\n"),
+            std::string_view("[RenoDX.DLSS5]\nConfigVersion=4\nNRChainedHistory=0\n"),
+            std::string_view("[RenoDX.DLSS5]\nConfigVersion=7\n"),
+            std::string_view("[RenoDX.DLSS5]\nConfigVersion = 6\nNRCodecMode=2\n")}) {
+        const std::string updated = UpdateNeuralAddonIni(foreign, true, overrides);
+        const size_t first = updated.find("ConfigVersion");
+        const bool hadVersion = foreign.find("ConfigVersion") != std::string_view::npos;
+        CHECK_EQ(hadVersion, first != std::string::npos);
+        if (hadVersion) CHECK_EQ(std::string::npos, updated.find("ConfigVersion", first + 1));
+        // The user's lines are untouched, in order.
+        CHECK(updated.find(foreign.substr(std::string_view("[RenoDX.DLSS5]\n").size())) !=
+              std::string::npos);
+    }
+
+    // Disabling never creates the section, and the version is not an override.
+    CHECK(UpdateNeuralAddonIni("", false, overrides).find("RenoDX.DLSS5") == std::string::npos);
+    const NeuralAddonOverride version{"ConfigVersion", "5"};
+    bool rejected = false;
+    try { (void)UpdateNeuralAddonIni("", true, std::span{&version, 1}); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    CHECK(rejected);
 }
 
 void neural_addon_runtime_settings_fail_closed_on_duplicate_managed_keys_test()
@@ -6261,6 +6324,7 @@ void configure_neural_addon_is_idempotent_test()
         "[ADDON]\n"
         "DisabledAddons=legacy.addon64\n"
         "[RenoDX.DLSS5]\n"
+        "ConfigVersion=6\n"
         "EnableHooks=2\n"
         "NeuralUplift=1\n"
         "NRFollowInputRes=0\n"
@@ -6329,6 +6393,7 @@ void configure_neural_addon_safe_then_normal_observes_reshade_state_test()
         "[ADDON]\r\n"
         "DisabledAddons=legacy.addon64\r\n"
         "[RenoDX.DLSS5]\r\n"
+        "ConfigVersion=6\r\n"
         "EnableHooks=2\r\n"
         "NeuralUplift=1\r\n"
         "NRFollowInputRes=0\r\n"
@@ -13086,6 +13151,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(disabled_addons_insertion_uses_target_section_line_ending_test),
     TEST_CASE(neural_addon_runtime_settings_enable_neural_and_hold_native_resolution_test),
     TEST_CASE(neural_addon_runtime_settings_are_created_at_native_resolution_test),
+    TEST_CASE(neural_addon_section_this_player_writes_carries_the_addon_schema_version_test),
     TEST_CASE(neural_addon_runtime_settings_fail_closed_on_duplicate_managed_keys_test),
     TEST_CASE(reshade_trailing_section_text_uses_reshade_section_boundaries_test),
     TEST_CASE(configure_neural_addon_is_idempotent_test),

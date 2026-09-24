@@ -468,6 +468,48 @@ constexpr std::pair<std::string_view, std::string_view> kManagedNeuralSettings[]
     {"NRResolutionScale", "1"},
 };
 
+// The schema version the pinned add-on (RenoDX 6.5.3) stamps on every config it
+// has loaded. A [RenoDX.DLSS5] section without it is read as schema v0 and
+// migrated on that load: ReShade.log reports "config schema v0 migrated key-wise
+// to v6 (inherited NRCodecMode/NRChainedHistory defaults adopted ...)", the file
+// is backed up beside the add-on as ReShade.ini.renodx-dlss5-pre-v4-migration-*.bak,
+// the add-on's own NRChainedHistory/NRCodecMode replace the values written here
+// for that launch - a saved "chained history off" rendered as on - and the pre-v6
+// PQ calibration (2.5375) is pinned into the file for good. Measured in
+// docs/measurements/knobs-653-20260924; a section holding only this player's four
+// managed keys was migrated that way on 2026-09-22. Only a section this player
+// wrote gets the stamp (NeuralSectionNeedsVersion): anyone else's keys may be
+// pre-v6 ones, and migrating those is what the add-on's migration is for.
+constexpr std::pair<std::string_view, std::string_view> kNeuralConfigVersion{"ConfigVersion", "6"};
+
+// True when [RenoDX.DLSS5] is missing, or holds no ConfigVersion and nothing but
+// keys this call writes (the managed contract and the caller's overrides): a
+// section this player created that the add-on has never loaded, so every value
+// in it already means what 6.5.3 means by it. A section with any other key, or
+// with a version of its own - older, newer or the add-on's stamp - is left alone.
+bool NeuralSectionNeedsVersion(std::string_view ini, std::span<const NeuralAddonOverride> overrides)
+{
+    bool inSection = false;
+    const auto lines = SplitLines(ini);
+    for (size_t index = 0; index < lines.size(); ++index) {
+        const auto& line = lines[index];
+        const auto content = Trim(StripUtf8Bom(
+            ini.substr(line.begin, line.contentEnd - line.begin), index == 0));
+        if (IsAnySection(content, false)) {
+            inSection = IsSection(content, kNeuralSettingsSection, false);
+            continue;
+        }
+        // Same comment rules as SnapshotNeuralAddonSettings (ReShade's ini_file::load).
+        if (!inSection || content.empty() || content.front() == ';' || content.front() == '/' ||
+            content.front() == '#') continue;
+        const auto key = Trim(content.substr(0, content.find('=')));
+        const auto ours = [&](const auto& entry) { return key == entry.first; };
+        if (!std::ranges::any_of(kManagedNeuralSettings, ours) && !std::ranges::any_of(overrides, ours))
+            return false;
+    }
+    return true;
+}
+
 bool ValidOverride(const NeuralAddonOverride& entry)
 {
     const auto& [key, value] = entry;
@@ -475,6 +517,7 @@ bool ValidOverride(const NeuralAddonOverride& entry)
         key.front() == '#') return false;
     if (key.find_first_of(std::string_view("=\r\n\0", 4)) != std::string::npos) return false;
     if (value.find_first_of(std::string_view("\r\n\0", 3)) != std::string::npos) return false;
+    if (key == kNeuralConfigVersion.first) return false;
     return std::ranges::none_of(kManagedNeuralSettings,
         [&](const auto& managed) { return key == managed.first; });
 }
@@ -493,6 +536,12 @@ ParsedUpdate ParseAndUpdateNeural(std::string_view ini, bool enable,
     // working resolution at native 1:1, and preserve every user-owned
     // style/intensity/guide setting. This player does not use Streamline, so
     // mode 2 avoids an unnecessary Streamline hook.
+    // First, so a section created here opens with it, as the add-on's own does.
+    if (NeuralSectionNeedsVersion(updated.content, overrides)) {
+        updated = UpdateExactIniKey(updated.content, kNeuralSettingsSection,
+                                    kNeuralConfigVersion.first, kNeuralConfigVersion.second);
+        if (updated.malformed) return updated;
+    }
     for (const auto& [key, value] : kManagedNeuralSettings) {
         updated = UpdateExactIniKey(updated.content, kNeuralSettingsSection, key, value);
         if (updated.malformed) return updated;
