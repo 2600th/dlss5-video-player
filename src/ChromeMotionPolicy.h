@@ -35,6 +35,11 @@ inline constexpr std::chrono::milliseconds kCompleteGlow{900};
 inline constexpr std::chrono::milliseconds kMarkSlide{160};
 // One repaint per display frame at 60 Hz is all a GDI tint can use.
 inline constexpr unsigned kFrameMs = 16;
+// The two moments that arrive while video is playing - the render-complete
+// glow and a toast - repaint at half that: they land on the thread that
+// presents the frames, and both move slowly enough (900 ms, 160/140 ms fades)
+// that 30 Hz reads as smooth, for half the paints.
+inline constexpr unsigned kPlaybackFrameMs = 33;
 
 inline double Clamp01(double value) { return std::clamp(value, 0.0, 1.0); }
 
@@ -188,7 +193,7 @@ public:
             return std::nullopt;
         }
         if (t >= kToastIn && t < kToastIn + kToastHold) return kToastIn + kToastHold - t;
-        return std::chrono::milliseconds(kFrameMs);
+        return std::chrono::milliseconds(kPlaybackFrameMs);
     }
 
 private:

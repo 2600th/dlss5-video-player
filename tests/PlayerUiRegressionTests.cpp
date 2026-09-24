@@ -1375,28 +1375,32 @@ struct PlayerAppTestAccess {
         app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested;
     }
 
-    // A toast is a popup that never takes focus or the mouse, sits above the
-    // strip at the picture's left, and goes away by itself with its timer.
+    // A toast is painted in the status row, over the line, and goes away by
+    // itself with its timer; it never makes a window of its own.
     static void toast_confirms_then_goes_with_its_timer_test()
     {
         PlayerApp& app = fixture->app;
-        const bool motion = app.m_activityMotionEnabled;
+        const bool motion = app.m_activityMotionEnabled, loaded = app.m_loaded;
+        app.m_loaded = true;
         app.m_activityMotionEnabled = false;
         app.ShowToast(L"Comparison saved: frame.png");
-        REQUIRE(app.m_toastWnd != nullptr);
-        CHECK(IsWindowVisible(app.m_toastWnd));
-        CHECK((GetWindowLongPtrW(app.m_toastWnd, GWL_EXSTYLE) & (WS_EX_NOACTIVATE | WS_EX_TRANSPARENT)) == (WS_EX_NOACTIVATE | WS_EX_TRANSPARENT));
-        CHECK(GetFocus() != app.m_toastWnd);
-        RECT toast{}, area{};
-        GetWindowRect(app.m_toastWnd, &toast);
-        GetWindowRect(app.m_viewport, &area);
-        CHECK(toast.left >= area.left && toast.bottom <= area.bottom);
+        CHECK(app.m_toast.At(std::chrono::steady_clock::now(), false).visible);
         CHECK(app.m_toastTimer != 0);
+        HDC dc = CreateCompatibleDC(nullptr);
+        HBITMAP bitmap = CreateCompatibleBitmap(GetDC(nullptr), 600, 40);
+        const HGDIOBJ old = SelectObject(dc, bitmap);
+        drawnText.clear();
+        app.PaintToast(dc, RECT{0, 0, 600, 30});
+        CHECK(Contains(L"Comparison saved: frame.png"));
         std::this_thread::sleep_for(chrome_motion::kToastIn + chrome_motion::kToastHold + std::chrono::milliseconds(40));
         app.AnimateToast();
-        CHECK(!IsWindowVisible(app.m_toastWnd));
         CHECK_EQ(static_cast<UINT_PTR>(0), app.m_toastTimer);
+        drawnText.clear();
+        app.PaintToast(dc, RECT{0, 0, 600, 30});
+        CHECK(!Contains(L"Comparison saved: frame.png"));
+        SelectObject(dc, old); DeleteObject(bitmap); DeleteDC(dc);
         app.m_activityMotionEnabled = motion;
+        app.m_loaded = loaded;
     }
 
     static void keyboard_cheat_sheet_test()

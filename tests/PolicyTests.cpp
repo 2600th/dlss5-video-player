@@ -2153,7 +2153,7 @@ void chrome_motion_toast_rises_holds_and_goes_and_a_second_one_does_not_bounce_t
     CHECK(held.alpha == 1.0 && held.rise == 0.0);
     // Sitting still, the next change is the hold's end, not the next frame.
     CHECK(toast.NextChange(start + kToastIn + kToastHold / 2).value() > std::chrono::milliseconds(1000));
-    CHECK(toast.NextChange(start + kToastIn / 2).value() == std::chrono::milliseconds(kFrameMs));
+    CHECK(toast.NextChange(start + kToastIn / 2).value() == std::chrono::milliseconds(kPlaybackFrameMs));
     const auto leaving = toast.At(start + kToastIn + kToastHold + kToastOut / 2);
     CHECK(leaving.visible && leaving.alpha < 1.0 && leaving.rise == 0.0);
     CHECK(!toast.At(start + kToastIn + kToastHold + kToastOut).visible);

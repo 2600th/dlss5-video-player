@@ -2563,7 +2563,11 @@ private:
         const auto& liveIndex=in_.liveIndex;const auto& liveDirectory=in_.liveDirectory;const uint64_t liveRunId=in_.liveRunId;const auto& coldStart=in_.coldStart;
         // The key is settled and the helper is next: from here to the first
         // frame is model preparation, which is what the warm-up line says.
-        {NeuralRenderProgress preparing{};preparing.phase=NeuralRenderPhase::NeuralRendering;PostProgress(preparing);}
+        // Only while there is no rendered frame yet - the one time that line
+        // is shown. A later job of the session (a hole behind the playhead)
+        // posting it cost 2-3 dropped frames in 2 of 3 runs at the moment the
+        // first job finished; without it, none in 3.
+        if(in_.liveIndex&&in_.liveIndex->Count()==0){NeuralRenderProgress preparing{};preparing.phase=NeuralRenderPhase::NeuralRendering;PostProgress(preparing);}
         staging_=cache_.BeginRenderStaging(renderKey_);if(!staging_){completion_->result.detail=in_.cacheFailureText.Describe(cache_);return false;}
         {std::ofstream settingsFile(*staging_/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot_->data(),static_cast<std::streamsize>(settingsSnapshot_->size()));if(!settingsFile){cache_.MarkInvalid(*staging_);completion_->result.detail=L"The neural settings snapshot could not be staged.";return false;}}
         const auto& range=in_.range;
@@ -7953,7 +7957,7 @@ private:
         }
         LOG("Live session coverage complete; the timeline marks it.");
         if(m_glowTimer&&m_hwnd)KillTimer(m_hwnd,m_glowTimer);
-        m_glowTimer=m_hwnd?SetTimer(m_hwnd,kGlowTimerId,m_activityMotionEnabled?chrome_motion::kFrameMs:UINT(chrome_motion::kCompleteGlow.count()),nullptr):0;
+        m_glowTimer=m_hwnd?SetTimer(m_hwnd,kGlowTimerId,m_activityMotionEnabled?chrome_motion::kPlaybackFrameMs:UINT(chrome_motion::kCompleteGlow.count()),nullptr):0;
         InvalidatePlaybackProgress();
     }
     void AnimateCompletionGlow(){
@@ -8739,11 +8743,17 @@ private:
         }
         if(!ControlsVisible())return;
         RECT bar{0,c.bottom-ControlHeight(),c.right,c.bottom};HBRUSH bg=CreateSolidBrush(ui_palette::ControlSurface);FillRect(dc,&bar,bg);DeleteObject(bg);HPEN line=CreatePen(PS_SOLID,1,RGB(54,56,61));auto op=SelectObject(dc,line);MoveToEx(dc,0,bar.top,nullptr);LineTo(dc,c.right,bar.top);SelectObject(dc,op);DeleteObject(line);
-        if(CompareBarVisible())DrawCompareBar(dc);
+        // Only what the dirty rectangle reaches is drawn. The chrome's
+        // animations repaint one row at a time - the status row for a toast,
+        // the timeline for the glow - up to 60 times a second on the thread
+        // that presents the video, and every button measured its label and the
+        // compare bar re-measured all of its own on each of those paints.
+        const auto reaches=[&](RECT r){InflateRect(&r,Dip(2),Dip(2));return RectVisible(dc,&r)!=FALSE;};
+        if(CompareBarVisible()&&reaches(RECT{0,c.bottom-ControlHeight(),c.right,c.bottom-ControlHeight()+Dip(compare_bar::kBarHeightDip)}))DrawCompareBar(dc);
         const auto toolbarItems=ToolbarItems();
-        for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,FocusCueFor(item.action),item.compact,content.working);}
+        for(const auto& item:toolbarItems){if(!reaches(item.bounds))continue;const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,FocusCueFor(item.action),item.compact,content.working);}
         const auto volumeRect=LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),toolbarItems);
-        if(volumeRect){
+        if(volumeRect&&reaches(RECT{volumeRect->left-Dip(24),volumeRect->top-Dip(16),c.right,volumeRect->bottom})){
             const auto now=Clock::now();
             const slider::Geometry g=VolumeSliderGeometry(*volumeRect,now);
             DrawSliderRail(dc,g,true);DrawSliderKnob(dc,g,true,false,ActiveWindowDpi(m_hwnd));
@@ -8861,7 +8871,9 @@ private:
             const RECT spinner{sr.left,sr.top,sr.left+Dip(18),sr.top+Dip(18)};
             DrawActivitySpinner(dc,spinner,ResolveActivityVisual({},ActivityElapsedMs(),0,0,false,m_activityMotionEnabled).spinnerStep);sr.left+=Dip(25);
         }
-        DrawTextW(dc,m_cachedStatus.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);if(volumeRect){const RECT& vr=*volumeRect;std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");RECT label{vr.right+Dip(8),vr.top,std::max<LONG>(vr.right+Dip(8),c.right-Dip(16)),vr.bottom};DrawTextW(dc,vol.c_str(),int(vol.size()),&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);}SelectObject(dc,of);
+        DrawTextW(dc,m_cachedStatus.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+        PaintToast(dc,RECT{statusRow.text.left-Dip(2),statusRow.text.top,statusRow.text.right,statusRow.text.bottom});
+        if(volumeRect){const RECT& vr=*volumeRect;std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");RECT label{vr.right+Dip(8),vr.top,std::max<LONG>(vr.right+Dip(8),c.right-Dip(16)),vr.bottom};DrawTextW(dc,vol.c_str(),int(vol.size()),&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);}SelectObject(dc,of);
     }
 
     void Paint(){
@@ -9967,71 +9979,54 @@ private:
     }
     // ---- Toasts --------------------------------------------------------------
     // A short confirmation - a file saved, a subtitle shift, a whole video
-    // rendered - that rises from the strip at the picture's bottom-left, holds
-    // and goes (chrome_motion::Toast). A layered popup owned by the main window,
-    // as the buffering panel is, because the picture is a D3D12 child a sibling
-    // would fight for z-order. It never takes the mouse or the focus, and it
-    // sits in the corner, away from the compare seam and the tags at the top.
-    static LRESULT CALLBACK ToastWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l){
-        if(m==WM_NCCREATE){SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));return DefWindowProcW(h,m,w,l);}
-        auto* app=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
-        if(m==WM_NCHITTEST)return HTTRANSPARENT;
-        if(m==WM_MOUSEACTIVATE)return MA_NOACTIVATE;
-        if(m==WM_ERASEBKGND)return 1;
-        if(m==WM_PAINT&&app){PAINTSTRUCT ps{};HDC dc=BeginPaint(h,&ps);RECT c{};GetClientRect(h,&c);app->PaintToast(dc,c);EndPaint(h,&ps);return 0;}
-        if(m==WM_NCDESTROY&&app&&app->m_toastWnd==h)app->m_toastWnd=nullptr;
-        return DefWindowProcW(h,m,w,l);
-    }
+    // rendered - that rises into the status row and holds there
+    // (chrome_motion::Toast), over the line it would otherwise be buried in.
+    // Drawn by the strip's own GDI paint, not as a popup over the picture: a
+    // layered popup over the D3D12 swap chain cost frames. Measured on the
+    // fixture's render completion, three runs each: 6, 6 and 2 dropped with
+    // the popup, 2, 2 and 0 with it fading in place, 0, 0 and 1 with no toast.
+    // Here it repaints the status row only, as the chips' flash does.
     void ShowToast(std::wstring text,COLORREF mark=ui_palette::PrimaryBlue){
         if(!m_hwnd||text.empty())return;
         m_toastText=std::move(text);m_toastMark=mark;
-        if(!m_toastWnd){
-            static constexpr const wchar_t* kClassName=L"DLSSVideoToastClassV1";
-            const HINSTANCE instance=reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd,GWLP_HINSTANCE));
-            WNDCLASSW cls{};cls.lpfnWndProc=ToastWndProcStatic;cls.hInstance=instance;cls.lpszClassName=kClassName;cls.hCursor=LoadCursor(nullptr,IDC_ARROW);
-            if(!RegisterClassW(&cls)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
-            m_toastWnd=CreateWindowExW(WS_EX_LAYERED|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_TRANSPARENT,kClassName,L"",WS_POPUP,0,0,10,10,m_hwnd,nullptr,instance,this);
-            if(!m_toastWnd)return;
-        }
         LOG("Toast: "<<WideToUtf8(m_toastText));
         m_toast.Show(Clock::now());
         AnimateToast();
     }
-    // Where the toast settles: 16 dip in from the picture area's left, 12 dip
-    // above the strip, sized to its text.
-    RECT ToastRect(double rise)const{
-        RECT area{};if(!m_viewport||!GetWindowRect(m_viewport,&area))return {};
-        HDC dc=GetDC(m_hwnd);SIZE text{};
-        if(dc){const HGDIOBJ old=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);GetTextExtentPoint32W(dc,m_toastText.c_str(),int(m_toastText.size()),&text);SelectObject(dc,old);ReleaseDC(m_hwnd,dc);}
-        const LONG width=std::min<LONG>(text.cx+Dip(3+14+16),std::max<LONG>(Dip(120),area.right-area.left-Dip(32)));
-        const LONG height=Dip(34);
-        const LONG left=area.left+Dip(16),bottom=area.bottom-Dip(12)+LONG(std::lround(rise*Dip(chrome_motion::kToastRiseDip)));
-        return RECT{left,bottom-height,left+width,bottom};
-    }
     void AnimateToast(){
-        if(!m_toastWnd)return;
+        if(!m_hwnd)return;
         const auto now=Clock::now();
-        const auto frame=m_toast.At(now,m_activityMotionEnabled);
-        if(!frame.visible){ShowWindow(m_toastWnd,SW_HIDE);if(m_toastTimer){KillTimer(m_hwnd,m_toastTimer);m_toastTimer=0;}m_toast.Hide();return;}
-        const RECT r=ToastRect(frame.rise);
-        const int radius=Dip(8);
-        SetWindowRgn(m_toastWnd,CreateRoundRectRgn(0,0,r.right-r.left+1,r.bottom-r.top+1,radius*2,radius*2),FALSE);
-        SetLayeredWindowAttributes(m_toastWnd,0,BYTE(std::lround(245.0*frame.alpha)),LWA_ALPHA);
-        SetWindowPos(m_toastWnd,HWND_TOP,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOACTIVATE|SWP_SHOWWINDOW);
-        InvalidateRect(m_toastWnd,nullptr,FALSE);
+        if(m_loaded&&ControlsVisible()){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}
+        if(!m_toast.At(now,m_activityMotionEnabled).visible){if(m_toastTimer){KillTimer(m_hwnd,m_toastTimer);m_toastTimer=0;}m_toast.Hide();return;}
         if(const auto next=m_toast.NextChange(now,m_activityMotionEnabled))
             m_toastTimer=SetTimer(m_hwnd,kToastTimerId,UINT(std::max<long long>(USER_TIMER_MINIMUM,next->count())),nullptr);
     }
-    void PaintToast(HDC dc,const RECT& c){
-        HBRUSH panel=CreateSolidBrush(ui_palette::Inactive);FillRect(dc,&c,panel);DeleteObject(panel);
-        // The mark says what kind of news it is, as a mark and not a fill: teal
-        // for a render, the accent for a file or a setting.
-        RECT mark{c.left,c.top,c.left+Dip(3),c.bottom};HBRUSH ink=CreateSolidBrush(m_toastMark);FillRect(dc,&mark,ink);DeleteObject(ink);
-        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,ui_palette::PrimaryText);
-        const HGDIOBJ old=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
-        RECT text{c.left+Dip(3+14),c.top,c.right-Dip(14),c.bottom};
-        DrawTextW(dc,m_toastText.c_str(),-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
-        SelectObject(dc,old);
+    // The toast over the start of the status row: an Inactive-grey panel with
+    // a mark on its left edge (teal for a render, the accent otherwise). It
+    // fades by mixing toward the strip, which is one flat colour, and rises
+    // from below the row, clipped to it.
+    void PaintToast(HDC dc,const RECT& row){
+        const auto frame=m_toast.At(Clock::now(),m_activityMotionEnabled);
+        if(!frame.visible||row.right<=row.left)return;
+        const int saved=SaveDC(dc);if(!saved)return;
+        IntersectClipRect(dc,row.left,row.top,row.right,row.bottom);
+        const HGDIOBJ oldFont=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
+        SIZE text{};GetTextExtentPoint32W(dc,m_toastText.c_str(),int(m_toastText.size()),&text);
+        const LONG width=std::min<LONG>(text.cx+Dip(3+10+12),row.right-row.left);
+        RECT panel{row.left,row.top,row.left+width,row.bottom};
+        OffsetRect(&panel,0,LONG(std::lround(frame.rise*Dip(chrome_motion::kToastRiseDip))));
+        const COLORREF under=ui_palette::ControlSurface;
+        const int radius=std::max(1,Dip(4));
+        HBRUSH fill=CreateSolidBrush(chrome_motion::Mix(under,ui_palette::Inactive,frame.alpha));HPEN pen=CreatePen(PS_SOLID,1,chrome_motion::Mix(under,ui_palette::Inactive,frame.alpha));
+        const HGDIOBJ oldBrush=SelectObject(dc,fill),oldPen=SelectObject(dc,pen);
+        RoundRect(dc,panel.left,panel.top,panel.right,panel.bottom,radius*2,radius*2);
+        SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(fill);DeleteObject(pen);
+        RECT markRect{panel.left,panel.top+Dip(3),panel.left+Dip(3),panel.bottom-Dip(3)};
+        HBRUSH ink=CreateSolidBrush(chrome_motion::Mix(under,m_toastMark,frame.alpha));FillRect(dc,&markRect,ink);DeleteObject(ink);
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,chrome_motion::Mix(under,ui_palette::PrimaryText,frame.alpha));
+        RECT label{panel.left+Dip(3+10),panel.top,panel.right-Dip(12),panel.bottom};
+        DrawTextW(dc,m_toastText.c_str(),-1,&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        SelectObject(dc,oldFont);RestoreDC(dc,saved);
     }
     // Buffering panel. A popup owned by the main window, because the video is a
     // D3D12 child window that a sibling would have to fight for z-order.
@@ -11607,7 +11602,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // moving on the last frame, so the frame it lands gets painted too.
     std::array<chrome_motion::Fade,static_cast<size_t>(ToolbarAction::None)+1> m_hoverFades{};uint32_t m_hoverAnimating=0;UINT_PTR m_hoverTimer=0;
     chrome_motion::Glow m_completeGlow;chrome_motion::CompletionLatch m_completionLatch;UINT_PTR m_glowTimer=0;
-    HWND m_toastWnd=nullptr;chrome_motion::Toast m_toast;std::wstring m_toastText;COLORREF m_toastMark=ui_palette::PrimaryBlue;UINT_PTR m_toastTimer=0;
+    chrome_motion::Toast m_toast;std::wstring m_toastText;COLORREF m_toastMark=ui_palette::PrimaryBlue;UINT_PTR m_toastTimer=0;
     Clock::time_point m_liveSessionStartedAt{};
     // The sliders' hover (knob size) and the volume's value bubble, which
     // lingers slider::kBubbleLingerMs after a drag ends before it fades.
