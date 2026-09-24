@@ -116,6 +116,9 @@ new capture defaults, so the first conversion of each video renders it again.
 
 ### Fixes
 
+- **A finished render plays back clean in the DLSS 5 view.** Replaying one
+  could draw fine vertical stripes over a yellow cast, because the render was
+  decoded in a different pixel format from the one the picture expected.
 - **The cache keeps what it should.** An NVIDIA App model update no longer
   orphans every render, a render made while NVIDIA rewrote its files is no
   longer lost or evicted, and leftovers of driver updates and crashes are
