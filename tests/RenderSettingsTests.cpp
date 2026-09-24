@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -734,6 +735,64 @@ void neural_settings_round_trip_and_format_renodx_overrides()
     CHECK_EQ(0, clamped.style);
 }
 
+// Skin structure is Off plus 0.00..0.99 because that is what RenoDX 6.5.3 acts
+// on: every negative value and +1.00 render the default picture byte for byte
+// (docs/measurements/knobs-653-20260924). A value an older build saved from the
+// -1..1 slider loads as what it always rendered as, and Off is still written as
+// the -1.000000 the default has always sent, so the default render keeps its key.
+void skin_structure_is_off_or_what_the_runtime_acts_on()
+{
+    using namespace skin_structure;
+    CHECK_EQ(-1.0f, kOff);
+    CHECK_EQ(-1.0f, NeuralSettings{}.skinStructure);
+    CHECK(IsOff(NeuralSettings{}.skinStructure));
+    for (const float off : {-1.0f, -0.5f, -0.01f, 1.0f, 1.5f, std::numeric_limits<float>::quiet_NaN()}) {
+        CHECK(IsOff(off));
+        CHECK_EQ(kOff, Normalize(off));
+        CHECK_EQ(0, SliderPosition(off));
+    }
+    for (const float on : {0.0f, 0.25f, 0.5f, 0.99f}) {
+        CHECK(!IsOff(on));
+        CHECK_EQ(on, Normalize(on));
+        CHECK_EQ(Normalize(on), Normalize(Normalize(on)));
+    }
+    CHECK_EQ(kMax, Normalize(0.995f));
+    // The trackbar: 0 is Off, 1..100 are 0.00..0.99, and every position
+    // round-trips through the value it writes.
+    CHECK_EQ(kOff, FromSliderPosition(0));
+    CHECK_EQ(kOff, FromSliderPosition(-3));
+    CHECK_EQ(0.0f, FromSliderPosition(1));
+    CHECK_EQ(0.99f, FromSliderPosition(kSliderMax));
+    CHECK_EQ(0.99f, FromSliderPosition(kSliderMax + 7));
+    for (int position = 0; position <= kSliderMax; ++position)
+        CHECK_EQ(position, SliderPosition(FromSliderPosition(position)));
+    CHECK_EQ(26, SliderPosition(0.25f));
+
+    // Off reaches the add-on and the render identity exactly as the default did.
+    NeuralSettings off;
+    off.skinStructure = FromSliderPosition(0);
+    CHECK(NeuralAddonOverridesFor(off) == NeuralAddonOverridesFor(NeuralSettings{}));
+    CHECK_EQ(CanonicalNeuralSettings(NeuralSettings{}), CanonicalNeuralSettings(off));
+
+    // The migration: what the old slider saved loads as what it rendered as.
+    TempDirectory temp;
+    const auto ini = temp.path / L"DLSSVideoPlayer.ini";
+    const std::pair<const char*, float> saved[]{
+        {"-1.000000", kOff}, {"-0.500000", kOff}, {"-0.010000", kOff}, {"1.000000", kOff},
+        {"0.000000", 0.0f}, {"0.250000", 0.25f}, {"0.990000", 0.99f}, {"0.995000", 0.99f}};
+    for (const auto& [text, expected] : saved) {
+        Write(ini, std::string("[NeuralSettings]\r\nSkinStructure=") + text + "\r\n");
+        NeuralSettings loaded;
+        CHECK(LoadNeuralSettings(ini, loaded));
+        CHECK_EQ(expected, loaded.skinStructure);
+        // Saved back, it stays what it loaded as.
+        CHECK(SaveNeuralSettings(ini, loaded));
+        NeuralSettings again;
+        CHECK(LoadNeuralSettings(ini, again));
+        CHECK(again == loaded);
+    }
+}
+
 void removing_one_owned_entry_preserves_other_entries_and_outside_files()
 {
     TempDirectory temp;
@@ -935,6 +994,7 @@ int main()
     overrides_follow_managed_keys_and_replace_existing_values();
     writing_the_ini_sweeps_only_temporaries_older_than_this_process();
     neural_settings_round_trip_and_format_renodx_overrides();
+    skin_structure_is_off_or_what_the_runtime_acts_on();
     removing_one_owned_entry_preserves_other_entries_and_outside_files();
     default_cache_root_owns_new_writes_under_windows_appdata_virtualization();
     a_cache_root_that_cannot_become_a_directory_is_invalid_and_names_the_cause();

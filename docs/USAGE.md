@@ -347,9 +347,12 @@ change still costs a full re-render. It remains in `DLSSVideoPlayer.ini` as
 remains part of the render identity so a runtime that does honour it cannot be
 served a stale cache entry. Color strength was hidden for the same reason on
 RenoDX 4.70 and is back, because 6.5.3 honours it. Skin structure only acts
-between 0.00 and 0.99 and only with Automatic mask on: every negative value and
-+1.00 render the default picture, which is why the default -1.00 means off. See
-[Benchmark](BENCHMARK.md).
+between 0.00 and 0.99 and only with Automatic mask on, so its slider reads **Off**
+(the default) at the left end and 0.00 to 0.99 after it, and it is greyed out with
+"Mask off" while Automatic mask is off; it keeps its value for when the mask comes
+back. A value saved by an older build's -1 to +1 slider loads as what it rendered
+as: every negative value and +1.00 render the default picture, so they load as Off.
+See [Benchmark](BENCHMARK.md).
 
 Photos support PNG, JPEG, BMP, TIFF and static WebP. They remain paused on the
 single processed frame; the cache uses a one-second carrier without adding

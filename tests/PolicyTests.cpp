@@ -11023,7 +11023,9 @@ void neural_presets_round_trip_and_default_to_the_shipped_settings_test()
         CHECK(preset.settings.intensity >= 0.0f && preset.settings.intensity <= 2.0f);
         CHECK(preset.settings.localTone >= 0.0f && preset.settings.localTone <= 2.0f);
         CHECK(preset.settings.localStructure >= 0.0f && preset.settings.localStructure <= 2.0f);
-        CHECK(preset.settings.skinStructure >= -1.0f && preset.settings.skinStructure <= 1.0f);
+        // Off or a value the runtime acts on - never one it renders as Off -
+        // so a preset is exactly what loading it back from the ini gives.
+        CHECK_EQ(skin_structure::Normalize(preset.settings.skinStructure), preset.settings.skinStructure);
         CHECK(preset.settings.colorStrength >= 0.0f && preset.settings.colorStrength <= 1.0f);
         CHECK(preset.settings.preset >= 0 && preset.settings.preset <= 3);
         CHECK(preset.settings.style >= 0 && preset.settings.style <= 2);

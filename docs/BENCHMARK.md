@@ -609,8 +609,11 @@ What moved since 4.70, and what the UI does about it:
   each change it, and by less as they rise. So the shipped −1.00 means *off*, half of
   the dialog's −1..+1 slider is inert, and the add-on's own overlay text ("negative
   smooths, positive enhances, 0 = neutral") does not describe what the runtime does.
-  The slider and its default are unchanged - moving the default would change every
-  render - and its tooltip now says this.
+  The dialog's slider now offers exactly that: **Off** at its left end, then 0.00 to
+  0.99, greyed out with "Mask off" while Automatic mask is off. Off is still
+  written as −1.00, so the default render and its cache key are unchanged, and a
+  value an older build saved loads as what it rendered as (a negative value or +1.00
+  as Off).
 - **Skin structure needs the automatic mask**: with `NRAutoMask=0` its value changes
   nothing, which matches the add-on's description of the mask ("so the
   Character/Skin Structure response applies to them"). The mask's own tooltip said it

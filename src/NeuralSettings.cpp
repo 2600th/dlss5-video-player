@@ -110,6 +110,9 @@ bool LoadNeuralSettings(const std::filesystem::path& ini, NeuralSettings& settin
         ReadInt(path, L"Passes", settings.passes, 1, 4),
         ReadBool(path, L"ChainedHistory", settings.chainedHistory),
     };
+    // The migration of a pre-Off value: see skin_structure. The next save
+    // writes the normalized value back.
+    settings.skinStructure = skin_structure::Normalize(settings.skinStructure);
     return std::ranges::any_of(present, [](bool value) { return value; });
 }
 

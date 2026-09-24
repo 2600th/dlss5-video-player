@@ -3229,11 +3229,29 @@ struct PlayerAppTestAccess {
         if (!app.m_neuralWnd) return;
         const HWND dialog = app.m_neuralWnd;
         const auto setTrack = [&](int id, int pos) { SendMessageW(GetDlgItem(dialog, id), TBM_SETPOS, TRUE, pos); };
-        setTrack(IDC_NS_INTENSITY, 150); setTrack(IDC_NS_SKIN, 25);
+        // Skin structure opens at Off - the left end, which is the -1.000000 the
+        // default has always written - and spans only the 0.00..0.99 RenoDX 6.5.3
+        // acts on: its trackbar is Off plus a hundred steps, not -1..1.
+        const HWND skin = GetDlgItem(dialog, IDC_NS_SKIN);
+        CHECK_EQ(int(SendMessageW(skin, TBM_GETPOS, 0, 0)), 0);
+        CHECK_EQ(int(SendMessageW(skin, TBM_GETRANGEMAX, 0, 0)), 100);
+        CHECK_EQ(std::wstring(L"Off"), ReadText(GetDlgItem(dialog, IDC_NS_SKIN + 100)));
+        CHECK(IsWindowEnabled(skin) != FALSE);
+        setTrack(IDC_NS_INTENSITY, 150); setTrack(IDC_NS_SKIN, 26);
         app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
         CHECK(std::abs(app.m_neuralSettings.intensity - 1.5f) < 0.001f);
-        CHECK(std::abs(app.m_neuralSettings.skinStructure + 0.75f) < 0.001f);
+        CHECK(std::abs(app.m_neuralSettings.skinStructure - 0.25f) < 0.001f);
+        CHECK_EQ(std::wstring(L"0.25"), ReadText(GetDlgItem(dialog, IDC_NS_SKIN + 100)));
         CHECK_EQ(std::wstring(L"1.50"), ReadText(GetDlgItem(dialog, IDC_NS_INTENSITY + 100)));
+        setTrack(IDC_NS_SKIN, 100);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
+        CHECK(std::abs(app.m_neuralSettings.skinStructure - 0.99f) < 0.001f);
+        setTrack(IDC_NS_SKIN, 0);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
+        CHECK_EQ(app.m_neuralSettings.skinStructure, -1.0f);
+        CHECK(NeuralAddonOverridesFor(app.m_neuralSettings)[3] == NeuralAddonOverride("NRSkinStructure", "-1.000000"));
+        setTrack(IDC_NS_SKIN, 26);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
         // Colour strength is offered again: RenoDX 6.5.3 honours it, where 4.70
         // ignored it. Its slider is 0..100 for 0.00..1.00, and the value reaches
         // the add-on - and with it the render identity - as NRColorStrength.
@@ -3250,6 +3268,18 @@ struct PlayerAppTestAccess {
         SendMessageW(GetDlgItem(dialog, IDC_NS_STYLE), CB_SETCURSEL, 2, 0);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STYLE, CBN_SELCHANGE), 0);
         CHECK_EQ(app.m_neuralSettings.style, 2);
+        SendMessageW(GetDlgItem(dialog, IDC_NS_AUTOMASK), BM_SETCHECK, BST_UNCHECKED, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_AUTOMASK, BN_CLICKED), 0);
+        CHECK(!app.m_neuralSettings.autoMask);
+        // With the mask off no skin value changes the picture, so the slider is
+        // greyed out and says why - and keeps its value for when the mask is back.
+        CHECK(IsWindowEnabled(skin) == FALSE);
+        CHECK_EQ(std::wstring(L"Mask off"), ReadText(GetDlgItem(dialog, IDC_NS_SKIN + 100)));
+        CHECK(std::abs(app.m_neuralSettings.skinStructure - 0.25f) < 0.001f);
+        SendMessageW(GetDlgItem(dialog, IDC_NS_AUTOMASK), BM_SETCHECK, BST_CHECKED, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_AUTOMASK, BN_CLICKED), 0);
+        CHECK(IsWindowEnabled(skin) != FALSE);
+        CHECK_EQ(std::wstring(L"0.25"), ReadText(GetDlgItem(dialog, IDC_NS_SKIN + 100)));
         SendMessageW(GetDlgItem(dialog, IDC_NS_AUTOMASK), BM_SETCHECK, BST_UNCHECKED, 0);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_AUTOMASK, BN_CLICKED), 0);
         CHECK(!app.m_neuralSettings.autoMask);

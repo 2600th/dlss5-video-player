@@ -5385,7 +5385,12 @@ private:
         SetAdjustmentValue(h,IDC_NS_INTENSITY,PlainValue(m_neuralSettings.intensity));
         SetAdjustmentValue(h,IDC_NS_STRUCTURE,PlainValue(m_neuralSettings.localStructure));
         SetAdjustmentValue(h,IDC_NS_TONE,PlainValue(m_neuralSettings.localTone));
-        SetAdjustmentValue(h,IDC_NS_SKIN,SignedValue(m_neuralSettings.skinStructure));
+        // Skin structure reads Off rather than a number the runtime ignores, and
+        // says why it is greyed out when Automatic mask is off - the only state
+        // in which no value of it changes the picture.
+        SetAdjustmentValue(h,IDC_NS_SKIN,!m_neuralSettings.autoMask?T(L"neural.settings.skin_needs_mask")
+            :skin_structure::IsOff(m_neuralSettings.skinStructure)?T(L"neural.settings.skin_off")
+            :PlainValue(m_neuralSettings.skinStructure));
         SetAdjustmentValue(h,IDC_NS_COLOR,PlainValue(m_neuralSettings.colorStrength));
     }
 
@@ -5393,7 +5398,7 @@ private:
         SetTrack(h,IDC_NS_INTENSITY,0,200,int(std::lround(m_neuralSettings.intensity*100.0f)));
         SetTrack(h,IDC_NS_STRUCTURE,0,200,int(std::lround(m_neuralSettings.localStructure*100.0f)));
         SetTrack(h,IDC_NS_TONE,0,200,int(std::lround(m_neuralSettings.localTone*100.0f)));
-        SetTrack(h,IDC_NS_SKIN,0,200,int(std::lround((m_neuralSettings.skinStructure+1.0f)*100.0f)));
+        SetTrack(h,IDC_NS_SKIN,0,skin_structure::kSliderMax,skin_structure::SliderPosition(m_neuralSettings.skinStructure));
         SetTrack(h,IDC_NS_COLOR,0,100,int(std::lround(m_neuralSettings.colorStrength*100.0f)));
         const auto select=[&](int id,int index){if(HWND combo=GetDlgItem(h,id))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(index),0);};
         select(IDC_NS_STYLE,std::clamp(m_neuralSettings.style,0,2));
@@ -5409,6 +5414,7 @@ private:
         // Chained history only governs passes 2+, so it is dead UI at one
         // pass rather than a setting that quietly does nothing.
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
+        EnableDependentNeuralControls(h);
         UpdateNeuralSettingValueLabels(h);
     }
 
@@ -5419,13 +5425,14 @@ private:
         m_neuralSettings.intensity=float(pos(IDC_NS_INTENSITY))/100.0f;
         m_neuralSettings.localStructure=float(pos(IDC_NS_STRUCTURE))/100.0f;
         m_neuralSettings.localTone=float(pos(IDC_NS_TONE))/100.0f;
-        m_neuralSettings.skinStructure=float(pos(IDC_NS_SKIN))/100.0f-1.0f;
+        m_neuralSettings.skinStructure=skin_structure::FromSliderPosition(pos(IDC_NS_SKIN));
         m_neuralSettings.colorStrength=float(pos(IDC_NS_COLOR))/100.0f;
         m_neuralSettings.style=sel(IDC_NS_STYLE,m_neuralSettings.style);
         m_neuralSettings.autoMask=checked(IDC_NS_AUTOMASK);
         m_neuralSettings.passes=std::clamp(sel(IDC_NS_PASSES,m_neuralSettings.passes-1)+1,1,4);
         m_neuralSettings.chainedHistory=checked(IDC_NS_CHAINED);
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
+        EnableDependentNeuralControls(h);
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
         TemporalSettings temporal=m_temporalSettings;
         temporal.sceneCuts=static_cast<scene_cut::Sensitivity>(std::clamp(sel(IDC_NS_SCENE_CUTS,static_cast<int>(temporal.sceneCuts)),0,3));
@@ -5434,6 +5441,14 @@ private:
         UpdateNeuralSettingValueLabels(h);
         // Sliders fire continuously; the preview waits for them to settle.
         SchedulePausedSettingsPreview();
+    }
+
+    // Skin structure acts only on what Automatic mask finds: measured on 6.5.3,
+    // with the mask off every skin value renders the mask-off picture byte for
+    // byte. So its slider is greyed out then, keeping the chosen value for when
+    // the mask comes back, and its value label says what it is waiting for.
+    void EnableDependentNeuralControls(HWND h){
+        if(HWND skin=GetDlgItem(h,IDC_NS_SKIN))EnableWindow(skin,m_neuralSettings.autoMask);
     }
 
     // The persisted guide switches also drive the live (non-cached) guide
