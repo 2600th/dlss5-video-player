@@ -236,6 +236,29 @@ Pin a lower rung, or turn runtime upscaling off, to isolate its cost. For YouTub
 There are no legacy Auto/Balanced/Performance render-quality modes. Check the
 player log for SR startup/evaluation failures; ordinary playback remains available.
 
+## RTX VSR is grey
+
+The **RTX VSR** compare view needs an NVIDIA RTX GPU, driver 550 or newer, the
+`nvngx_vsr.dll` feature DLL beside `DLSSVideoPlayer.exe`, and a player built with
+the NVIDIA RTX Video SDK ([Building](BUILDING.md)). The grey segment's tooltip,
+and the notice `R` shows, name the one that is missing:
+
+- **not in this build** - it was built without `-DRTX_VIDEO_SDK`, as the public
+  CI build is;
+- **needs an NVIDIA RTX GPU** - NGX did not start on this adapter;
+- **needs NVIDIA driver ... or newer** - the driver's NGX reported
+  `VSR.NeedsUpdatedDriver`; update the driver;
+- **nvngx_vsr.dll is missing** - restore it from the package or the SDK's
+  `bin/Windows/x64/rel` folder;
+- **not supported on this GPU or driver**, or **could not start (NGX 0x...)** -
+  the runtime refused it; `DLSSVideoPlayer.log` has the `RTX VSR capability:`
+  line with what NGX answered, and the create's result.
+
+Like every compare mode, RTX VSR is live only during cached playback on the
+neural view (`D`). Its cost is logged every 300 frames as `RTX VSR GPU:`; if
+playback drops frames with it on, pick a lower rung under **Video > Compare >
+RTX VSR quality**.
+
 ## Generate frames is unavailable, or refuses
 
 **DLSS > Generate frames** converts a video to a higher frame rate and writes a

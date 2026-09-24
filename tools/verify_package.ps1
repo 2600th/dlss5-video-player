@@ -110,6 +110,7 @@ function Read-PackageIdentity {
 # The allowlist depends on the variant, which package mode only knows once it
 # has found the manifest - inside the zip, for -Zip - so it is chosen per root.
 $expected = @()
+$optionalVsrRuntime = 'nvngx_vsr.dll'
 function Select-PackageVariant {
     param([string]$Root)
     if ($repositoryMode) {
@@ -228,6 +229,17 @@ function Assert-ReleaseExecutableIdentity {
 
 function Assert-LockedFiles {
     param([string]$Root)
+    # The optional RTX VSR feature DLL is NVIDIA's release build from the RTX Video
+    # SDK. No pinned copy lives in the repository - the SDK is behind a developer
+    # login - so what can be checked in both modes is NVIDIA's signature on it.
+    $vsrPath = Join-Path $Root $optionalVsrRuntime
+    if (Test-Path -LiteralPath $vsrPath -PathType Leaf) {
+        $signature = Get-AuthenticodeSignature -LiteralPath $vsrPath
+        $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
+        if ([string]$signature.Status -cne 'Valid' -or $subject -notlike '*NVIDIA*') {
+            throw "Packaged $optionalVsrRuntime is not validly NVIDIA-signed: status=$($signature.Status) signer=$subject"
+        }
+    }
     if (-not $repositoryMode) {
         # An unpacked package has no pinned SDK and no lock files to compare
         # against; the manifest check that follows holds every byte to what
@@ -320,7 +332,11 @@ function Assert-Stage {
         Get-RelativePackagePath -Root $resolvedRoot -Path $_.FullName
     })
     $actual = @(Sort-PackagePathsOrdinal -Paths $actualUnsorted)
-    $expectedSorted = @(Sort-PackagePathsOrdinal -Paths $expected)
+    # RTX VSR's feature DLL ships only from a build made with the RTX Video SDK
+    # (docs/BUILDING.md), so it is allowed at the root and never required.
+    $allowed = @($expected)
+    if ($actual -ccontains $optionalVsrRuntime) { $allowed += $optionalVsrRuntime }
+    $expectedSorted = @(Sort-PackagePathsOrdinal -Paths $allowed)
     if ([string]::Join("`n", $actual) -cne [string]::Join("`n", $expectedSorted)) {
         $missing = @($expectedSorted | Where-Object { $_ -cnotin $actual })
         $unexpected = @($actual | Where-Object { $_ -cnotin $expectedSorted })

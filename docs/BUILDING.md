@@ -129,8 +129,8 @@ CTest still does not establish visual quality. For changes to rendering, timing
 or decoding, also run the applicable GPU/media checks from the most recent of
 the dated [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).
 
-CMake accepts absolute `DLSS_SDK`, `FFMPEG_STAGED_DIR` and `YOUTUBE_STAGED_DIR`
-paths when verified inputs live elsewhere. Keep downloaded binaries out of Git.
+CMake accepts absolute `DLSS_SDK`, `FFMPEG_STAGED_DIR`, `YOUTUBE_STAGED_DIR` and
+`RTX_VIDEO_SDK` paths when verified inputs live elsewhere. Keep downloaded binaries out of Git.
 
 ## Optical flow
 
@@ -155,6 +155,35 @@ If the headers are missing the build still succeeds and the player falls back
 to its own CPU motion estimator, which is also what happens on a pre-Turing
 card or an older driver. The `NVOFA ready:` line in `DLSSVideoPlayer.log` tells
 you which backend actually came up.
+
+## RTX Video Super Resolution (optional)
+
+The player's **RTX VSR** comparison view (see [USAGE](USAGE.md)) needs the NVIDIA
+RTX Video SDK, which is not in this repository and cannot be fetched by a script:
+it is downloaded from https://developer.nvidia.com/rtx-video-sdk after signing in
+with an NVIDIA developer account, and its licence allows it to ship only as part
+of an application (see [third-party notices](../THIRD_PARTY.md)). Extract it
+anywhere outside the repository - or into `external/rtx-video-sdk`, which Git
+ignores - and point CMake at it:
+
+```
+cmake -S . -B build-vsr -G "Visual Studio 17 2022" -A x64 -DRTX_VIDEO_SDK=<path to the extracted SDK> ...
+```
+
+CMake checks for `include/nvsdk_ngx_helpers_vsr.h` and
+`bin/Windows/x64/rel/nvngx_vsr.dll` and reports:
+
+```
+-- NVIDIA RTX Video SDK found at ...; the RTX VSR comparison view is built.
+```
+
+The build then compiles the engine (`DLSS_VIDEO_PLAYER_HAS_RTX_VSR`), copies the
+release `nvngx_vsr.dll` beside the player and registers the `gpu`-labelled
+`VsrGpuSmoke` test. No other library is linked: the DLSS SDK's NGX core creates
+the feature. Left empty, as on CI, `RTX_VIDEO_SDK` compiles the engine out, the
+view says the build does not include it, and everything else builds and tests
+exactly as without it. A package made from such a build includes
+`nvngx_vsr.dll`; one made without it does not, and the verifier accepts both.
 
 ## Direct NVENC encoding
 

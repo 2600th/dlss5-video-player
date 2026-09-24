@@ -380,6 +380,22 @@ Rules:
 - **Dialogs** fit a 1080p screen at 175%: at most 1920x1032 px including the
   frame, which is why Neural settings is two columns.
 
+### Compare views
+
+The compare bar's modes read left to right from single pictures to the modes
+that combine them: DLSS 5, Original, RTX VSR, then Split, Wipe, Difference,
+Side by side and 2 x 2. RTX VSR is the second engine (P2.8), shown beside the
+render it is compared with and never over it. In the 2 x 2 it takes the fourth
+pane - Original | DLSS 5 over Difference | RTX VSR - because the question that
+view answers is "what did each engine do to this frame": the two engines share
+the right-hand column so the eye moves straight down between them, the original
+and the difference share the left, and the pane it replaces (DLSS 5 at a second
+Mix) is a tuning aid the Mix itself already covers. Where RTX VSR cannot run
+the grid is the one it always was. Every pane and every side keeps its tag,
+and a tag names what is shown with the setting that shaped it (`RTX VSR ·
+HIGH`, `DIFFERENCE · RTX VSR ×4 · LUMA`), because a picture without its
+provenance cannot be judged.
+
 ### Tooltips
 
 Every toolbar control has a tip (`src/ToolbarTipPolicy.h`). A control with a

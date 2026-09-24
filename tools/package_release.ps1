@@ -290,6 +290,16 @@ $sources += @(
     @('docs/EXAMPLE_VIDEOS.md', (Join-Path $repositoryRoot 'docs\EXAMPLE_VIDEOS.md'))
 )
 
+# RTX Video Super Resolution's feature DLL is optional: CMake stages it beside the
+# player only in a build configured with -DRTX_VIDEO_SDK (docs/BUILDING.md), the
+# SDK sits behind an NVIDIA developer login, and a build without it has no RTX VSR
+# view to load it. Packaged when the build has it, in either variant, and never
+# required.
+$vsrRuntime = Join-Path $buildRoot 'nvngx_vsr.dll'
+if (Test-Path -LiteralPath $vsrRuntime -PathType Leaf) {
+    $sources += ,@('nvngx_vsr.dll', $vsrRuntime)
+}
+
 foreach ($source in $sources) {
     if (-not (Test-Path -LiteralPath $source[1] -PathType Leaf)) { throw "Required package input is missing: $($source[1])" }
 }

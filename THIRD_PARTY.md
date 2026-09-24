@@ -27,6 +27,29 @@ player creates the Frame Generation feature - and `tools/verify_package.ps1`
 holds the packaged copy to the pinned SDK's own bytes instead. NVIDIA files are not
 relicensed by this project.
 
+## NVIDIA RTX Video SDK (optional)
+
+Source and terms: https://developer.nvidia.com/rtx-video-sdk (behind an NVIDIA
+developer login; the RTX Video SDK licence agreement and its supplement)
+
+The **RTX VSR** comparison view (P2.8) uses NVIDIA's RTX Video Super Resolution,
+NGX feature 16. It is optional and off by default: a build compiles it only when
+CMake is given `-DRTX_VIDEO_SDK=<path>` (docs/BUILDING.md), and only such a build
+carries the NVIDIA-signed feature DLL `nvngx_vsr.dll` (1.6.0.0, from the SDK's
+`bin/Windows/x64/rel` folder, unmodified) beside the player. The public CI build
+has no SDK and ships neither the view nor the DLL; `tools/verify_package.ps1`
+allows the DLL at the package root when present and holds it to NVIDIA's
+signature.
+
+Nothing from the SDK is in this repository: no headers, libraries, DLLs, sample
+code or documentation. The player's own code (`src/VsrEngine.cpp`) is written
+against the Programming Guide's documented API and reads the SDK's VSR feature
+header at build time only. No library from the RTX Video SDK is linked: the NGX
+core from the DLSS SDK above creates feature 16. The SDK's licence permits
+distribution only as object code incorporated into an application and forbids
+making it subject to an open-source licence, so its files are not relicensed by
+this project and remain under NVIDIA's terms.
+
 ## NVIDIA Streamline
 
 Source and terms: https://github.com/NVIDIA-RTX/Streamline

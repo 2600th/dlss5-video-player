@@ -222,8 +222,31 @@ still, the modes fold into one button that opens a menu of them:
   frame - one pair, so always one timestamp - each fitted whole into its half.
   **2 × 2** adds Difference and DLSS 5 at a second Mix below them; pick that
   Mix under **Video > Compare > 2 × 2 fourth pane Mix** (25% to 200%, 50% by
-  default). Zoom, pan and the loupe move every pane together, each pane is
-  tagged, and Swap swaps the first two.
+  default). Where RTX VSR can run (below), the fourth pane is **RTX VSR**
+  instead, so the two engines share the right-hand column: Original | DLSS 5
+  over Difference | RTX VSR. Zoom, pan and the loupe move every pane together,
+  each pane is tagged, and Swap swaps the first two.
+- **RTX VSR** (`R`) shows NVIDIA's RTX Video Super Resolution of the original:
+  a second engine, trained on compressed video, made live from the original
+  frame the player already decodes - it needs no render and no cache, and it
+  never reaches the cache, an export or a saved render's identity. Where the
+  window shows the picture larger than the video, RTX VSR makes it at the size
+  it is shown; otherwise it runs at the video's own size, where it cleans up
+  compression. Its tag names the quality, e.g. `RTX VSR · HIGH`.
+  **Video > Compare > Compare against RTX VSR** (`Shift+R`) makes Split, Wipe,
+  Difference, Side by side and the loupe compare the original with RTX VSR
+  instead of DLSS 5 (the Mix and the mask stay DLSS 5's); press it again to go
+  back. **Video > Compare > RTX VSR quality** is a ladder of **Low**,
+  **Medium**, **High** (the default) and **Ultra**; on an RTX 4080 SUPER one
+  frame costs about 1.0, 1.3, 3.2 and 4.3 ms of GPU time for a 1080p video and
+  1.9, 2.2, 5.3 and 7.2 ms for a 1440p one, whatever size it is shown at, and a
+  1440p 30 fps video played at High and in 2 × 2 without dropping a frame.
+  RTX VSR needs an NVIDIA RTX GPU, driver 550 or newer, and a player built with
+  the NVIDIA RTX Video SDK (the releases say whether they are, see
+  [BUILDING.md](BUILDING.md)). Where any of that is missing the **RTX VSR**
+  segment is grey, its tooltip says which, and `R` shows the same reason. It
+  takes an SDR original, so an HDR video is compared at SDR in every view that
+  shows RTX VSR.
 - **Mix** is how much of the neural result you see: 100% is the render
   untouched, lower mixes back toward the original, higher extends the model's
   own change. Drag the slider or press `[` and `]` (a tenth per press). It
@@ -256,7 +279,8 @@ To look closely:
 - **Pan** a zoomed picture by dragging it with the left button, or with the
   middle button in any mode (in Split and Wipe the left drag moves the divider).
 - **Loupe** (`L`, or the bar) shows two magnified circles beside the pointer:
-  the original on the left and DLSS 5 on the right, both at the same spot, at
+  the original on the left and DLSS 5 (or RTX VSR, in its own view and when
+  comparing against it) on the right, both at the same spot, at
   4x the rendered pixels (twice the view's own zoom when that is higher) and
   without smoothing, so single pixels are visible. With Swap on, the sides
   swap.
@@ -273,8 +297,8 @@ neural settings, the neural runtime's version and when it was saved. It is
 meant as evidence you can share: the footer travels with the pixels.
 
 Pause and step with `.` to judge a single frame; `D` still switches the whole
-view between original and neural. The mode, Mix, split position, swap, zoom step, difference settings and
-the fourth pane's Mix are remembered in `[Comparison]`.
+view between original and neural. The mode, Mix, split position, swap, zoom step, difference settings,
+the fourth pane's Mix and the RTX VSR choices (`AgainstVsr`, `VsrQuality`) are remembered in `[Comparison]`.
 
 ### HDR sources
 
@@ -301,7 +325,7 @@ you hold the picture. The player follows the display it is on - drag it to an
 SDR monitor and it presents SDR again - and never turns Windows HDR on or off
 itself. **Video > Compare > Compare HDR at SDR** shows the original tone mapped
 instead, exactly as the model saw it, for a like-for-like comparison. A Mix
-other than 100%, a mask, Difference and 2 × 2 always compare at SDR:
+other than 100%, a mask, Difference, 2 × 2 and every view that shows RTX VSR always compare at SDR:
 they compute with both pictures, and mixing HDR light with SDR light would
 measure the tone map rather than the model. **Save comparison image**, exports
 and the cache stay SDR.
