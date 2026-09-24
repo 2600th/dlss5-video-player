@@ -1342,6 +1342,32 @@ struct PlayerAppTestAccess {
         app.m_loaded = loaded;
     }
 
+    // A greyed compare mode says what would make it work; a live one names
+    // itself and the keys that step through the modes.
+    static void compare_mode_tips_say_why_a_mode_is_greyed_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, requested = app.m_neuralRequested;
+        app.m_loaded = true;
+        app.m_cachedPlayback = false;
+        const std::wstring greyed = app.CallbackTipText(PlayerApp::kCompareModeTipIdBase);
+        CHECK(greyed.find(L"Neural Rendering (D)") != std::wstring::npos);
+        app.m_cachedPlayback = true;
+        app.m_neuralRequested = true;
+        const std::wstring live = app.CallbackTipText(PlayerApp::kCompareModeTipIdBase + 1);
+        CHECK(live.find(L"Shift+C") != std::wstring::npos);
+        CHECK(app.CallbackTipText(PlayerApp::kCompareModeTipIdBase + 7).empty() || app.CompareBarModes().size() > 7);
+        CHECK(app.CallbackTipText(1).empty());
+        // The notification hands the text over.
+        NMTTDISPINFOW info{};
+        info.hdr.hwndFrom = nullptr;
+        info.hdr.idFrom = PlayerApp::kCompareModeTipIdBase;
+        info.hdr.code = TTN_GETDISPINFOW;
+        app.WndProc(app.m_hwnd, WM_NOTIFY, 0, reinterpret_cast<LPARAM>(&info));
+        CHECK(info.lpszText != nullptr && std::wstring(info.lpszText) == app.CallbackTipText(PlayerApp::kCompareModeTipIdBase));
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested;
+    }
+
     static void keyboard_cheat_sheet_test()
     {
         PlayerApp& app = fixture->app;
@@ -2281,6 +2307,7 @@ struct PlayerAppTestAccess {
         UI_CASE(timeline_keeps_the_render_lane_clear_during_a_live_session_test),
         UI_CASE(render_complete_glow_lights_the_lane_then_stops_test),
         UI_CASE(volume_slider_bubble_follows_the_drag_and_lingers_test),
+        UI_CASE(compare_mode_tips_say_why_a_mode_is_greyed_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),

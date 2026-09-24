@@ -2060,6 +2060,28 @@ void chrome_motion_fades_ease_without_overshoot_and_honour_reduced_motion_test()
     CHECK(!fade.Animating(start + kHoverIn));
 }
 
+void chrome_motion_compare_mark_slides_from_the_old_mode_to_the_new_test()
+{
+    using namespace chrome_motion;
+    const Clock::time_point start{};
+    Slide slide;
+    slide.Start(100, 180, 300, 360, start, true);
+    CHECK(slide.Animating(start));
+    CHECK(slide.At(start) == std::make_pair(LONG{100}, LONG{180}));
+    // Ease-out: more than half-way at the half time, and moving only forward.
+    const auto half = slide.At(start + kMarkSlide / 2);
+    CHECK(half.first > 200 && half.first < 300);
+    CHECK(half.second > 270 && half.second < 360);
+    CHECK(slide.At(start + kMarkSlide) == std::make_pair(LONG{300}, LONG{360}));
+    CHECK(!slide.Animating(start + kMarkSlide));
+    CHECK(kMarkSlide.count() >= 120 && kMarkSlide.count() <= 220);
+    // Without motion it is at the end at once and never animates.
+    Slide still;
+    still.Start(100, 180, 300, 360, start, false);
+    CHECK(!still.Animating(start));
+    CHECK(still.At(start) == std::make_pair(LONG{300}, LONG{360}));
+}
+
 void chrome_motion_render_complete_glow_sweeps_once_and_only_for_a_render_watched_happening_test()
 {
     using namespace chrome_motion;
@@ -14143,6 +14165,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(native_button_palette_has_distinct_interaction_states_test),
     TEST_CASE(active_button_small_text_meets_wcag_contrast_test),
     TEST_CASE(chrome_motion_fades_ease_without_overshoot_and_honour_reduced_motion_test),
+    TEST_CASE(chrome_motion_compare_mark_slides_from_the_old_mode_to_the_new_test),
     TEST_CASE(chrome_motion_render_complete_glow_sweeps_once_and_only_for_a_render_watched_happening_test),
     TEST_CASE(failed_icon_font_uses_label_only_presentation_test),
     TEST_CASE(button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test),

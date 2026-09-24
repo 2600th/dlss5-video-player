@@ -5057,6 +5057,7 @@ private:
             LOG("Comparison mode refused: loaded="<<m_loaded<<" cachedPair="<<m_cachedPlayback<<" neuralView="<<m_neuralRequested);
             return;
         }
+        StartCompareMarkSlide(m_comparison.mode,mode);
         m_comparison.mode=mode;ApplyComparison();
         LOG("Comparison mode="<<static_cast<int>(mode)<<" splitX="<<m_comparison.splitX<<" zoomStep="<<m_zoomStep
             <<" reference="<<m_havePresentedPair);
@@ -5576,6 +5577,26 @@ private:
     // items, so every action this surface does not show gets an empty rect.
     // Tool ids past every ToolbarAction value, so the compare bar's tips never replace a toolbar one.
     static constexpr UINT_PTR kCompareTipIdBase=0x1000;
+    static constexpr UINT_PTR kCompareModeTipIdBase=0x1100;static constexpr size_t kCompareModeTipCount=8;
+    // Text for a tool registered with LPSTR_TEXTCALLBACK, built when the tip
+    // is about to show; empty means the tool has nothing to say (no tip).
+    std::wstring CallbackTipText(UINT_PTR id){
+        if(id>=kCompareModeTipIdBase&&id<kCompareModeTipIdBase+kCompareModeTipCount){
+            const auto modes=CompareBarModes();const size_t index=size_t(id-kCompareModeTipIdBase);
+            if(index>=modes.size())return {};
+            if(!ComparisonModesAvailable())return T(L"compare.hint.unavailable");
+            return CompareModeLabel(modes[index],false)+T(L"compare.tip.mode_cycle");
+        }
+        return {};
+    }
+    std::wstring m_callbackTip;
+    LRESULT TipNotify(const NMHDR& header){
+        if(header.code!=TTN_GETDISPINFOW)return 0;
+        auto& info=const_cast<NMTTDISPINFOW&>(reinterpret_cast<const NMTTDISPINFOW&>(header));
+        m_callbackTip=CallbackTipText(info.hdr.idFrom);
+        info.lpszText=m_callbackTip.data();info.szText[0]=L'\0';info.hinst=nullptr;
+        return 0;
+    }
     void RefreshToolbarTips(){
         if(!m_hwnd||!IsWindow(m_hwnd))return;
         const auto items=FocusableItems();
@@ -5620,6 +5641,20 @@ private:
             }
             text.push_back(std::make_unique<std::wstring>(T(key)));
             info.lpszText=text.back()->data();info.rect=bounds;
+            SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
+        }
+        // The mode segments' tips are asked for when shown (TTN_GETDISPINFO):
+        // a greyed mode says what would make it work, a live one names itself
+        // and the key that cycles.
+        for(int index=0;index<static_cast<int>(kCompareModeTipCount);++index){
+            RECT bounds{};
+            for(const auto& item:bar.items)if(item.part==compare_bar::Part::Mode&&item.index==index)bounds=item.bounds;
+            TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_SUBCLASS;
+            info.hwnd=m_hwnd;info.uId=kCompareModeTipIdBase+static_cast<UINT_PTR>(index);
+            if(SendMessageW(host,TTM_GETTOOLINFOW,0,reinterpret_cast<LPARAM>(&info))){
+                info.rect=bounds;SendMessageW(host,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&info));continue;
+            }
+            info.lpszText=LPSTR_TEXTCALLBACKW;info.rect=bounds;
             SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
         }
         // Multi-line tips need a width or comctl draws one long line.
@@ -7881,6 +7916,7 @@ private:
         for(auto& fade:m_hoverFades)fade.Reset();
         m_hoverAnimating=0;
         m_volumeHot.Reset();m_mixHot.Reset();m_volumeBubble.Reset();m_volumeBubbleOffAt.reset();m_slidersWereMoving=false;
+        m_compareFades.clear();m_compareWasMoving=false;
         if(m_hoverTimer&&m_hwnd){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
     }
     // One timer frame of the hover fades: repaints only the buttons whose tint
@@ -7898,7 +7934,8 @@ private:
         }
         m_hoverAnimating=animating;
         const bool sliders=AnimateSliders(now);
-        if(!animating&&!sliders&&m_hoverTimer){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
+        const bool compare=AnimateCompareBar(now);
+        if(!animating&&!sliders&&!compare&&m_hoverTimer){KillTimer(m_hwnd,m_hoverTimer);m_hoverTimer=0;}
     }
     // The volume slider's geometry at this moment: the knob grows with the
     // hover fade, and the bubble keeps inside the strip, above the button row.
@@ -8166,7 +8203,45 @@ private:
         if(!m_hwnd||!CompareBarVisible())return;
         const RECT bar=CompareBarLayout().bar;InvalidateRect(m_hwnd,&bar,FALSE);
     }
-    void SetCompareHover(CompareHover hover){if(hover==m_compareHover)return;m_compareHover=hover;InvalidateCompareBar();}
+    void SetCompareHover(CompareHover hover){
+        if(hover==m_compareHover)return;
+        // The same tint fade as the toolbar: the segment the pointer reached
+        // eases in, the one it left eases out.
+        const auto now=Clock::now();
+        if(m_compareHover.part!=compare_bar::Part::None)m_compareFades[CompareFadeKey(m_compareHover)].Set(false,now,m_activityMotionEnabled);
+        if(hover.part!=compare_bar::Part::None)m_compareFades[CompareFadeKey(hover)].Set(true,now,m_activityMotionEnabled);
+        m_compareHover=hover;InvalidateCompareBar();
+        if(m_activityMotionEnabled)EnsureHoverTimer();
+    }
+    static int CompareFadeKey(CompareHover hover){return static_cast<int>(hover.part)*64+hover.index;}
+    double CompareHoverLevel(const compare_bar::Item& item,Clock::time_point now)const{
+        const auto found=m_compareFades.find(CompareFadeKey({item.part,item.index}));
+        return found==m_compareFades.end()?0.0:found->second.Level(now);
+    }
+    // The mark leaves the old mode's segment and slides to the new one's.
+    // Only between two segments on show: a folded bar (Menu tier) has one
+    // button, whose mark does not move.
+    void StartCompareMarkSlide(ComparisonMode from,ComparisonMode to){
+        if(from==to||!CompareBarVisible())return;
+        const auto layout=CompareBarLayout();const auto modes=CompareBarModes();
+        const RECT* a=nullptr;const RECT* b=nullptr;
+        for(const auto& item:layout.items){
+            if(item.part!=compare_bar::Part::Mode||size_t(item.index)>=modes.size())continue;
+            if(modes[size_t(item.index)]==from)a=&item.bounds;
+            if(modes[size_t(item.index)]==to)b=&item.bounds;
+        }
+        if(!a||!b)return;
+        m_compareMark.Start(a->left,a->right-1,b->left,b->right-1,Clock::now(),m_activityMotionEnabled);
+        if(m_activityMotionEnabled)EnsureHoverTimer();
+    }
+    // One frame of the compare bar's motion; true while any of it moves.
+    bool AnimateCompareBar(Clock::time_point now){
+        bool moving=m_compareMark.Animating(now);
+        for(const auto& [key,fade]:m_compareFades)moving=moving||fade.Animating(now);
+        if(moving||m_compareWasMoving)InvalidateCompareBar();
+        m_compareWasMoving=moving;
+        return moving;
+    }
     bool CompareBarPartEnabled(compare_bar::Part part)const{
         switch(part){
         case compare_bar::Part::ZoomOut:case compare_bar::Part::ZoomIn:return m_loaded&&m_renderer!=nullptr;
@@ -8214,11 +8289,11 @@ private:
     }
     // `glyph` is drawn in the icon font ahead of the label, or alone when the label is
     // empty; a chevron after the label marks a button that opens a menu.
-    void DrawCompareSegment(HDC dc,RECT r,const std::wstring& label,bool enabled,bool selected,bool hover,wchar_t glyph=0,bool chevron=false){
+    void DrawCompareSegment(HDC dc,RECT r,const std::wstring& label,bool enabled,bool selected,double hover,wchar_t glyph=0,bool chevron=false,bool drawMark=true){
         // One pixel of the strip between neighbours, so a run of segments reads as a
         // segmented control without a border around each.
         r.right-=1;
-        HBRUSH fill=CreateSolidBrush(hover&&enabled?ui_palette::Hover:ui_palette::Inactive);FillRect(dc,&r,fill);DeleteObject(fill);
+        HBRUSH fill=CreateSolidBrush(enabled?chrome_motion::Mix(ui_palette::Inactive,ui_palette::Hover,hover):ui_palette::Inactive);FillRect(dc,&r,fill);DeleteObject(fill);
         SetTextColor(dc,!enabled?RGB(98,101,108):(selected?ui_palette::PrimaryText:ui_palette::SecondaryText));
         if(!m_iconFont){glyph=0;chevron=false;}
         if(!glyph&&!chevron){RECT text=r;DrawTextW(dc,label.c_str(),-1,&text,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);}
@@ -8235,7 +8310,7 @@ private:
             if(!label.empty()){RECT text{x,r.top,std::min<LONG>(r.right,x+labelSize.cx),r.bottom};DrawTextW(dc,label.c_str(),-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);x+=labelSize.cx;}
             if(chevron){SelectObject(dc,m_iconFont);RECT box{x+gap,r.top,x+gap+chevronSize.cx,r.bottom};DrawTextW(dc,&mark,1,&box,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);SelectObject(dc,textFont);}
         }
-        if(selected){RECT mark{r.left,r.bottom-std::max(1,Dip(2)),r.right,r.bottom};HBRUSH ink=CreateSolidBrush(enabled?kCompareMark:RGB(98,101,108));FillRect(dc,&mark,ink);DeleteObject(ink);}
+        if(selected&&drawMark){RECT line{r.left,r.bottom-std::max(1,Dip(2)),r.right,r.bottom};HBRUSH ink=CreateSolidBrush(enabled?kCompareMark:RGB(98,101,108));FillRect(dc,&line,ink);DeleteObject(ink);}
     }
     static std::wstring PercentText(float value){return std::to_wstring(int(std::lround(value*100.0f)))+L"%";}
     void DrawCompareBar(HDC dc){
@@ -8246,14 +8321,16 @@ private:
         SelectObject(dc,oldPen);DeleteObject(rule);
         SetBkMode(dc,TRANSPARENT);const HGDIOBJ oldFont=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
         const auto hovered=[&](const compare_bar::Item& item){return m_compareHover.part==item.part&&m_compareHover.index==item.index;};
+        const auto now=Clock::now();const bool sliding=m_compareMark.Animating(now);
+        const auto level=[&](const compare_bar::Item& item){return CompareHoverLevel(item,now);};
         for(const auto& item:layout.items){
             const bool enabled=CompareBarPartEnabled(item.part);
             switch(item.part){
             case compare_bar::Part::Mode:{
                 const ComparisonMode mode=CompareBarModes()[size_t(item.index)];
-                DrawCompareSegment(dc,item.bounds,CompareModeLabel(mode,item.face==compare_bar::Face::ShortLabel),enabled,mode==m_comparison.mode,hovered(item));break;}
+                DrawCompareSegment(dc,item.bounds,CompareModeLabel(mode,item.face==compare_bar::Face::ShortLabel),enabled,mode==m_comparison.mode,level(item),0,false,!sliding);break;}
             // Folded into one button, the mode is always the selected one: the mark says so.
-            case compare_bar::Part::ModeMenu:DrawCompareSegment(dc,item.bounds,CompareModeLabel(m_comparison.mode,item.face==compare_bar::Face::ShortLabel),enabled,true,hovered(item),0,true);break;
+            case compare_bar::Part::ModeMenu:DrawCompareSegment(dc,item.bounds,CompareModeLabel(m_comparison.mode,item.face==compare_bar::Face::ShortLabel),enabled,true,level(item),0,true);break;
             case compare_bar::Part::MixTrack:{
                 // The player's slider (slider::Layout), filled from 100% - the
                 // render untouched - to the Mix, so more and less read as two
@@ -8269,15 +8346,21 @@ private:
                 HBRUSH tb=CreateSolidBrush(ui_palette::SecondaryText);FillRect(dc,&tick,tb);DeleteObject(tb);
                 DrawSliderKnob(dc,g,enabled,false,ActiveWindowDpi(m_hwnd));
                 break;}
-            case compare_bar::Part::ZoomOut:DrawCompareSegment(dc,item.bounds,L"\u2212",enabled&&m_zoomStep>0,false,hovered(item));break;
-            case compare_bar::Part::ZoomIn:DrawCompareSegment(dc,item.bounds,L"+",enabled&&compare_zoom::Step(m_zoomStep,1,ZoomOutputWidth(),ZoomViewWidth(),false)!=m_zoomStep,false,hovered(item));break;
+            case compare_bar::Part::ZoomOut:DrawCompareSegment(dc,item.bounds,L"\u2212",enabled&&m_zoomStep>0,false,level(item));break;
+            case compare_bar::Part::ZoomIn:DrawCompareSegment(dc,item.bounds,L"+",enabled&&compare_zoom::Step(m_zoomStep,1,ZoomOutputWidth(),ZoomViewWidth(),false)!=m_zoomStep,false,level(item));break;
             case compare_bar::Part::Swap:case compare_bar::Part::Loupe:{
                 const bool swap=item.part==compare_bar::Part::Swap;
                 const bool icon=item.face==compare_bar::Face::Icon||item.face==compare_bar::Face::IconLabel;
-                DrawCompareSegment(dc,item.bounds,item.face==compare_bar::Face::Icon?std::wstring{}:T(swap?L"compare.swap":L"compare.loupe"),enabled,swap?m_comparison.swap:m_loupe,hovered(item),
+                DrawCompareSegment(dc,item.bounds,item.face==compare_bar::Face::Icon?std::wstring{}:T(swap?L"compare.swap":L"compare.loupe"),enabled,swap?m_comparison.swap:m_loupe,level(item),
                                    icon?(swap?kCompareSwapGlyph:kCompareLoupeGlyph):wchar_t(0));break;}
             default:break;
             }
+        }
+        if(sliding){
+            const auto [left,right]=m_compareMark.At(now);
+            LONG bottom=layout.bar.bottom;
+            for(const auto& item:layout.items)if(item.part==compare_bar::Part::Mode){bottom=item.bounds.bottom;break;}
+            RECT line{left,bottom-std::max(1,Dip(2)),right,bottom};HBRUSH ink=CreateSolidBrush(kCompareMark);FillRect(dc,&line,ink);DeleteObject(ink);
         }
         SetTextColor(dc,available?ui_palette::SecondaryText:RGB(98,101,108));
         if(layout.mixLabel.right>layout.mixLabel.left){RECT mixLabel=layout.mixLabel;DrawTextW(dc,T(L"compare.mix").c_str(),-1,&mixLabel,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);}
@@ -11002,6 +11085,7 @@ private:
             break;
         }
         case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}CompareBarMouseMove(m_mouseX,m_mouseY);if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();ScrubToPreview();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));UpdateTimelineHover(m_mouseX,m_mouseY);if(!m_loaded)UpdateStartHover(m_mouseX,m_mouseY);SyncSliderHover();return 0;}
+        case WM_NOTIFY:if(const auto* header=reinterpret_cast<const NMHDR*>(l);header&&header->code==TTN_GETDISPINFOW)return TipNotify(*header);break;
         case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);SetCompareHover({});if(!m_dragSeek)ClearTimelineHover();SyncSliderHover();return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
@@ -11242,6 +11326,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     chrome_motion::Glow m_completeGlow;chrome_motion::CompletionLatch m_completionLatch;UINT_PTR m_glowTimer=0;
     // The sliders' hover (knob size) and the volume's value bubble, which
     // lingers slider::kBubbleLingerMs after a drag ends before it fades.
+    // The compare bar's segment tints by part and index, and its sliding mark.
+    std::map<int,chrome_motion::Fade> m_compareFades;chrome_motion::Slide m_compareMark;bool m_compareWasMoving=false;
     chrome_motion::Fade m_volumeHot,m_mixHot,m_volumeBubble;std::optional<Clock::time_point> m_volumeBubbleOffAt;bool m_slidersWereMoving=false;
     // Windows' own rule for focus cues: hidden until the keyboard is used to move
     // between controls, hidden again by the mouse. The focused action is always the

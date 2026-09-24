@@ -58,7 +58,7 @@ private:
             {L"compare.mode.neural.short", L"DLSS 5"}, {L"compare.mode.original.short", L"Orig."}, {L"compare.mode.split.short", L"Split"}, {L"compare.mode.wipe.short", L"Wipe"}, {L"compare.mode.difference.short", L"Diff."}, {L"compare.mode.side_by_side.short", L"Side"}, {L"compare.mode.quad.short", L"2 \u00d7 2"},
             {L"compare.tip.mode", L"Compare mode (C)"}, {L"compare.tip.swap", L"Swap sides (X)"}, {L"compare.tip.loupe", L"Loupe (L)"}, {L"compare.tip.zoom_in", L"Zoom in (Z)"}, {L"compare.tip.zoom_out", L"Zoom out (Shift+Z)"},
             {L"compare.hint.hold", L"Hold on the picture to see the original"},
-            {L"compare.hint.unavailable", L"Turn on Neural Rendering (D) to compare"},
+            {L"compare.hint.unavailable", L"Turn on Neural Rendering (D) to compare"}, {L"compare.tip.mode_cycle", L" (C and Shift+C step through the modes)"},
             {L"compare.tag.original", L"ORIGINAL"}, {L"compare.tag.dlss", L"DLSS 5"},
             {L"compare.tag.difference", L"DIFFERENCE"}, {L"compare.tag.mix", L"MIX"}, {L"compare.tag.luma", L"LUMA"}, {L"compare.tag.color", L"COLOR"},
             {L"menu.final", L"Final image\t1"}, {L"menu.input", L"DLSS input\t2"}, {L"menu.mv", L"Motion vectors\t3"},

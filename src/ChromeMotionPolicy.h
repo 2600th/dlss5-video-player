@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <optional>
+#include <utility>
 
 // The player chrome's motion, as numbers. DESIGN.md "Player" is the spec this
 // implements: motion says where something came from or went, it is short
@@ -30,6 +31,8 @@ inline constexpr std::chrono::milliseconds kHoverOut{180};
 // across what was rendered, then a settle. Longer than a hover because it
 // announces something that took minutes, and it happens once per render.
 inline constexpr std::chrono::milliseconds kCompleteGlow{900};
+// The compare bar's orange mark moving from the old mode to the new one.
+inline constexpr std::chrono::milliseconds kMarkSlide{160};
 // One repaint per display frame at 60 Hz is all a GDI tint can use.
 inline constexpr unsigned kFrameMs = 16;
 
@@ -99,6 +102,37 @@ private:
     bool on_{false};
     bool motion_{true};
     double from_{0.0};
+    std::optional<Clock::time_point> started_;
+};
+
+// A horizontal span moving from one place to another: the compare bar's mark
+// sliding from the mode it left to the mode it chose, so the eye follows the
+// change instead of finding the mark again. Eases out; without motion there
+// is nothing to follow and it is simply at the end.
+class Slide {
+public:
+    void Start(LONG fromLeft, LONG fromRight, LONG toLeft, LONG toRight, Clock::time_point now, bool motion)
+    {
+        from_ = {fromLeft, fromRight};
+        to_ = {toLeft, toRight};
+        started_ = motion ? std::optional<Clock::time_point>(now) : std::nullopt;
+    }
+    [[nodiscard]] bool Animating(Clock::time_point now) const
+    {
+        return started_ && now - *started_ < kMarkSlide;
+    }
+    // The span now: left, right.
+    [[nodiscard]] std::pair<LONG, LONG> At(Clock::time_point now) const
+    {
+        if (!Animating(now)) return to_;
+        const double t = EaseOut(std::chrono::duration<double>(now - *started_).count() /
+                                 std::chrono::duration<double>(kMarkSlide).count());
+        const auto lerp = [t](LONG a, LONG b) { return a + static_cast<LONG>(std::lround((b - a) * t)); };
+        return {lerp(from_.first, to_.first), lerp(from_.second, to_.second)};
+    }
+
+private:
+    std::pair<LONG, LONG> from_{}, to_{};
     std::optional<Clock::time_point> started_;
 };
 
