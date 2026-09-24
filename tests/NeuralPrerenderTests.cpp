@@ -2985,6 +2985,87 @@ void offline_job_cancel_stops_before_promotion_and_marks_result_cancelled_test()
     CHECK_EQ(NeuralRenderFailure::Cancelled,result.failure);
 }
 
+// A source that fails its Nth open, or opens and has nothing to read from its
+// Nth open on: the two ways the job's reopen at the preroll can go wrong.
+class ScriptedOpenSource final : public IFrameSource {
+public:
+    bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds) override
+    {
+        ++opens;
+        if(failOpen&&opens==*failOpen)return false;
+        if(emptyFromOpen&&opens>=*emptyFromOpen)empty_=true;
+        return inner.Open(path,stop,seekSeconds);
+    }
+    void Close() override { ++closes;inner.Close(); }
+    OfflineFrameRead Read(OfflineDecodedFrame& frame,std::stop_token stop) override
+    {
+        if(empty_)return OfflineFrameRead::EndOfStream;
+        return inner.Read(frame,stop);
+    }
+    FakeOfflineSource inner;
+    std::optional<int> failOpen,emptyFromOpen;
+    int opens{},closes{};
+private:
+    bool empty_{};
+};
+
+// P3.4: RunJob is NeuralRenderJob's named steps now - check the request,
+// bring the source and evaluator up, prime and arm, restart at the preroll,
+// capture, judge. Each step that can end the job ends it with its own
+// failure, closes the source it opened, and reaches nothing after it.
+void offline_job_steps_end_where_they_fail_and_close_the_source_test()
+{
+    // The first open: nothing is initialized, nothing is encoded.
+    {
+        TempDirectory fixture;ScriptedOpenSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        source.failOpen=1;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{});
+        CHECK(!result.ok);CHECK(!result.cancelled);CHECK_EQ(NeuralRenderFailure::Source,result.failure);
+        CHECK(result.detail==L"The source video could not be opened.");
+        CHECK(!evaluator.initialized);CHECK(encoder.starts.empty());
+    }
+    // The reopen at the capture start, after priming and arming.
+    {
+        TempDirectory fixture;ScriptedOpenSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        source.failOpen=2;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{});
+        CHECK(!result.ok);CHECK_EQ(NeuralRenderFailure::Source,result.failure);
+        CHECK(result.detail==L"The source could not be restarted at the capture start.");
+        CHECK(evaluator.featureCreated);CHECK(result.feature18ArmedBeforeCapture);
+        CHECK(encoder.starts.empty());CHECK(evaluator.captured.empty());
+    }
+    // A source that has nothing at the capture start is the source's failure.
+    // Falling through to the encoder's finish used to report the error that
+    // cancelling the encoder produces instead.
+    {
+        TempDirectory fixture;ScriptedOpenSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        source.emptyFromOpen=2;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{});
+        CHECK(!result.ok);CHECK(!result.cancelled);CHECK_EQ(NeuralRenderFailure::Source,result.failure);
+        CHECK(result.detail==L"The source decoder failed during neural rendering.");
+        CHECK_EQ(std::vector<EncoderKind>({EncoderKind::HevcNvenc}),encoder.starts);
+        CHECK_EQ(0,encoder.finishes);CHECK(encoder.cancels>=1);
+        CHECK(evaluator.captured.empty());CHECK(source.closes>=2);
+    }
+    // The software retry is held to fresh evidence: a runtime whose log went
+    // bad between the passes is refused before the second pass starts.
+    {
+        TempDirectory fixture;ScriptedOpenSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        encoder.failNvencWriteAt=2;int calls=0;
+        OfflineNeuralRenderer job(source,evaluator,encoder,[&]{
+            ++calls;return calls<=2?NeuralEvidenceWithCount(uint64_t(calls)*4u):std::string("the log went away\n");
+        });
+        const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{});
+        CHECK(!result.ok);CHECK_EQ(NeuralRenderFailure::Neural,result.failure);
+        CHECK(result.detail==L"Feature 18 evidence was not valid before the software retry.");
+        CHECK_EQ(std::vector<EncoderKind>({EncoderKind::HevcNvenc}),encoder.starts);
+        CHECK_EQ(3,source.opens);
+    }
+}
+
 void offline_job_nvenc_start_failure_restarts_from_frame_zero_with_h264_test()
 {
     TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
@@ -5626,6 +5707,7 @@ int wmain(int argc, wchar_t* argv[])
     segmented_offline_job_makes_only_the_first_file_short_test();
     segmented_offline_job_software_retry_deletes_the_failed_attempts_files_test();
     segmented_offline_job_cancel_leaves_no_unpublished_file_or_live_encoder_test();
+    offline_job_steps_end_where_they_fail_and_close_the_source_test();
     reshade_evidence_requires_native_resolution_inline_path_create_and_evaluate_test();
     reshade_evidence_rejects_a_later_feature18_failure_in_the_same_job_segment_test();
     reshade_evidence_rejects_any_failure_or_passthrough_in_the_job_segment_test();

@@ -20,6 +20,7 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "D3D12Renderer.h"
@@ -918,375 +919,250 @@ private:
     std::jthread worker_;
 };
 
+// One neural render job: the request's checks, the source and feature 18
+// brought up, a capture pass per encoder, and the verdicts on what the last
+// pass captured. RunJob drives it and keeps the encoder choice; the steps
+// share the result, the progress state, the cold-start timeline, the segment
+// writer and the evidence baseline through the members below. Each step that
+// can end the job returns the result it ended with, or nothing to go on.
 template<class Source, class Evaluator, class Encoder, class Evidence, class Clock, class Paused>
-NeuralRenderResult RunJob(const NeuralRenderRequest& request,
-                          OfflineNeuralRenderer::ProgressCallback progress,
-                          std::stop_token stop, Source& source, Evaluator& evaluator,
-                          Encoder& encoder, Evidence evidenceProvider, Clock clock, Paused paused,
-                          const NeuralSegmentSink& segments,
-                          const NeuralColdStartCallback& coldStart)
-{
-    NeuralRenderResult result;
-    result.jobId = request.jobId;
-    result.neural = request.requireNeural;
-    // Cold-start phases run on the real clock rather than the job's progress
-    // clock: the first-output boundary is only observable on the finalize
-    // thread, and a caller-supplied clock is not shared across threads.
-    NeuralColdStartTimeline coldStartTimeline;
-    SteadyClock::time_point coldStartMark = SteadyClock::now();
-    std::atomic<bool> coldStartReported{false};
-    auto markColdStart = [&](NeuralColdStartPhase phase) {
-        const auto now = SteadyClock::now();
-        coldStartTimeline.Record(
-            phase, std::chrono::duration_cast<std::chrono::microseconds>(now - coldStartMark));
-        coldStartMark = now;
-    };
-    auto reportColdStart = [&] {
-        if (coldStart && !coldStartReported.exchange(true)) coldStart(coldStartTimeline);
-    };
+class NeuralRenderJob {
+public:
+    NeuralRenderJob(const NeuralRenderRequest& request, OfflineNeuralRenderer::ProgressCallback progress,
+                    std::stop_token stop, Source& source, Evaluator& evaluator, Encoder& encoder,
+                    Evidence evidenceProvider, Clock clock, Paused paused,
+                    const NeuralSegmentSink& segments, const NeuralColdStartCallback& coldStart)
+        : request_(request), progress_(std::move(progress)), stop_(std::move(stop)), source_(source),
+          evaluator_(evaluator), encoder_(encoder), evidenceProvider_(std::move(evidenceProvider)),
+          clock_(std::move(clock)), paused_(std::move(paused)), segments_(segments), coldStart_(coldStart)
+    {
+        result_.jobId = request.jobId;
+        result_.neural = request.requireNeural;
+    }
+    NeuralRenderJob(const NeuralRenderJob&) = delete;
+    NeuralRenderJob& operator=(const NeuralRenderJob&) = delete;
     // Reports on every exit, so a run that stopped before it published anything
-    // still says how far the stack got. Declared ahead of the segment writer so
-    // it runs after that writer's thread has joined.
-    ScopeExit<decltype(reportColdStart)> reportColdStartOnExit{reportColdStart};
-    auto fail = [&](NeuralRenderFailure failure, std::wstring detail) {
-        result.failure = failure;result.detail = std::move(detail);return result;
-    };
-    if (request.sourcePath.empty() || request.stagingVideoPath.empty() ||
-        !request.width || !request.height || !std::isfinite(request.fps) || request.fps <= 0.0 ||
-        !std::isfinite(request.durationSeconds) || request.durationSeconds <= 0.0) {
-        return fail(NeuralRenderFailure::Source, L"Invalid neural render request.");
+    // still says how far the stack got - after the segment writer's thread has
+    // joined, which is why the writer goes first.
+    ~NeuralRenderJob()
+    {
+        writer_.reset();
+        ReportColdStart();
     }
-    const int64_t frameDuration = static_cast<int64_t>(std::llround(10000000.0 / request.fps));
-    const int64_t sourceDuration = static_cast<int64_t>(std::llround(request.durationSeconds * 10000000.0));
-    const int64_t rangeStart = request.range.start100ns;
-    const bool boundedEnd = request.range.end100ns != 0;
-    const int64_t rangeEnd = boundedEnd ? request.range.end100ns : sourceDuration;
-    if (rangeStart < 0 || rangeStart >= rangeEnd || rangeEnd > sourceDuration + frameDuration) {
-        return fail(NeuralRenderFailure::Source,
-                    L"The neural render range is outside the source timeline.");
-    }
-    const uint64_t totalFrames = std::max<uint64_t>(1, static_cast<uint64_t>(
-        std::llround(double(rangeEnd - rangeStart) / 10000000.0 * request.fps)));
-    // The capture size, resolved once. 0 means "no upscale", which is every
-    // caller that predates Super Resolution being part of an export.
-    const uint32_t outputWidth = request.outputWidth ? request.outputWidth : request.width;
-    const uint32_t outputHeight = request.outputHeight ? request.outputHeight : request.height;
-    // An output SMALLER than the source is not an upscale, and DLSS refuses it.
-    // Caught here rather than at the renderer so the refusal names the request.
-    if (outputWidth < request.width || outputHeight < request.height) {
-        return fail(NeuralRenderFailure::Source,
-                    L"The neural render output size is smaller than the source, which is not an upscale.");
-    }
-    // What the model is shown. Below 100% the source adapter hands over frames
-    // already reduced to this size, and the carrier restores the source size.
-    const ProcessingInput modelInput =
-        ProcessingSize(request.width, request.height, request.processingScale);
-    if (!IsProcessingScaleRung(request.processingScale) ||
-        (request.processingScale != kDefaultProcessingScale &&
-         (outputWidth != request.width || outputHeight != request.height))) {
-        return fail(NeuralRenderFailure::Source,
-                    L"A reduced processing scale renders back to the source size and cannot also upscale.");
-    }
-    const uint64_t expectedBytes64 = uint64_t{outputWidth} * outputHeight * 4u;
-    if (expectedBytes64 > std::numeric_limits<size_t>::max()) {
-        return fail(NeuralRenderFailure::Source, L"Neural render dimensions are too large.");
-    }
-    // Replaced once the evaluator has settled on a capture format: a GPU-converted
-    // capture is NV12, which is 1.5 bytes per pixel rather than 4.
-    size_t expectedBytes = static_cast<size_t>(expectedBytes64);
-    // The finalize thread publishes each file, so the first-output boundary is
-    // stamped there. Everything above it is written before capture can begin
-    // and the encoder queue's lock orders the two, so the timeline that leaves
-    // with the first file is complete. A relaunched sequence repeats index 0;
-    // only the first one is a cold start.
-    NeuralSegmentSink instrumented = segments;
-    instrumented.onSegment = [&, forward = segments.onSegment](const NeuralRenderSegment& segment) {
-        if (!segment.index && !coldStartTimeline.Phase(NeuralColdStartPhase::FirstOutput))
-            markColdStart(NeuralColdStartPhase::FirstOutput);
-        if (forward) forward(segment);
-        reportColdStart();
-    };
-    // A segmented job publishes finalized files while it renders; segmentFrames
-    // == 0 keeps the single staging file and never starts a finalize thread.
-    std::optional<SegmentWriter<Encoder>> writer;
-    if (request.segmentFrames) {
-        writer.emplace([&encoder] { return encoder.Create(); }, request.stagingVideoPath,
-                       request.segmentFrames, frameDuration, instrumented, stop,
-                       request.firstSegmentFrames);
-    }
-    auto cancelOutput = [&] { if (writer) writer->Cancel(); else encoder.Cancel(); };
-    const auto started = clock();
-    auto lastProgressTime = started;
-    uint64_t reportedCompleted = 0;
-    uint64_t reportedBytes = 0;
-    double smoothedFramesPerMs = 0.0;
-    NeuralRenderProgress previous{};
-    auto emitProgress = [&](NeuralRenderPhase phase, uint64_t completed, uint64_t bytes,
-                            bool frameTick, NeuralRenderFailure recovering) {
-        const auto now = clock();
-        reportedCompleted = std::max(reportedCompleted, completed);
-        reportedBytes = std::max(reportedBytes, bytes);
-        if (frameTick && completed > previous.completedFrames) {
-            const double milliseconds = std::max(1.0,
-                std::chrono::duration<double, std::milli>(now - lastProgressTime).count());
-            const double instant = double(completed - previous.completedFrames) / milliseconds;
-            smoothedFramesPerMs = smoothedFramesPerMs == 0.0
-                ? instant : smoothedFramesPerMs * 0.75 + instant * 0.25;
-            lastProgressTime = now;
-        }
-        NeuralRenderProgress snapshot;
-        snapshot.phase = phase;
-        snapshot.completedFrames = reportedCompleted;
-        snapshot.totalFrames = std::max(totalFrames, reportedCompleted);
-        snapshot.bytes = reportedBytes;
-        snapshot.elapsed = std::max(previous.elapsed,
-            std::chrono::duration_cast<std::chrono::milliseconds>(now - started));
-        if (snapshot.completedFrames < snapshot.totalFrames && smoothedFramesPerMs > 0.0) {
-            snapshot.estimatedRemaining = std::chrono::milliseconds(static_cast<int64_t>(
-                std::ceil(double(snapshot.totalFrames - snapshot.completedFrames) /
-                          smoothedFramesPerMs)));
-        }
-        snapshot.recovering = recovering;
-        snapshot.retries = result.frameRetries;
-        if (progress) progress(snapshot);
-        previous = snapshot;
-    };
-    auto emit = [&](NeuralRenderPhase phase, uint64_t completed, uint64_t bytes, bool frameTick) {
-        emitProgress(phase, completed, bytes, frameTick, NeuralRenderFailure::None);
-    };
-    auto cancelled = [&](std::wstring detail) {
-        cancelOutput();source.Close();result.cancelled = true;
-        return fail(NeuralRenderFailure::Cancelled, std::move(detail));
-    };
-    auto evaluatorFailure = [&] {
-        const NeuralRenderFailure failure = evaluator.LastFailure();
-        return failure == NeuralRenderFailure::None ? NeuralRenderFailure::Neural : failure;
-    };
-    // The job's own history generation: bumped for every reset it requests.
-    // The evaluator stamps its own generation on its outputs; SameSource
-    // comparisons ignore both.
-    uint32_t historyGeneration = 0;
-    auto identity = [&](const JobFrame& frame, HistoryReset reset) {
-        if (reset != HistoryReset::None) ++historyGeneration;
-        return FrameIdentity{frame.frameNumber, frame.timestamp100ns, frame.sourceGeneration,
-                             historyGeneration, request.jobId, reset};
-    };
 
-    emit(NeuralRenderPhase::Acquiring, 0, 0, false);
-    if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-    if (!source.Open(request.sourcePath, stop, double(rangeStart) / 10000000.0)) {
-        if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-        return fail(NeuralRenderFailure::Source, L"The source video could not be opened.");
+    // Everything before the first capture pass: the request checked, the
+    // output started, the source opened and the evaluator brought up, feature
+    // 18 primed and armed, and the source restarted at the preroll.
+    std::optional<NeuralRenderResult> Prepare()
+    {
+        if (auto ended = CheckRequest()) return ended;
+        StartOutput();
+        if (auto ended = BringUp()) return ended;
+        if (auto ended = PrimeFeature()) return ended;
+        if (auto ended = ArmBeforeCapture()) return ended;
+        return RestartAtPreroll();
     }
-    emit(NeuralRenderPhase::Decoding, 0, 0, false);
-    if (!evaluator.Initialize(request.renderWindow, modelInput.width, modelInput.height,
-                              outputWidth, outputHeight, request.fps,
-                              request.guides, source.Layout(), source.ColorDescription())) {
-        source.Close();
-        return fail(NeuralRenderFailure::Neural, L"The neural renderer could not be initialized.");
+
+    // One capture pass with `kind`; see CaptureAttempt.
+    AttemptResult RunAttempt(EncoderKind kind)
+    {
+        CaptureAttempt pass(*this, kind);
+        pass.Run();
+        return std::move(pass.attempt_);
     }
-    // Super Resolution from the source size may not reach every rung: DLSS
-    // admits a bounded input-to-output ratio, and the renderer adopts the
-    // largest output the runtime accepts for this source. Encoding that under
-    // the size the caller asked for would be a wrong-sized file, so the job
-    // says what the runtime can do instead.
-    if constexpr (requires { evaluator.OutputSize(); }) {
-        const auto [settledWidth, settledHeight] = evaluator.OutputSize();
-        if (settledWidth != outputWidth || settledHeight != outputHeight) {
-            source.Close();
+
+    // After an encoder failure the software retry is allowed: the failed
+    // output discarded, the source back at the preroll, and the evidence
+    // checked again before a second pass.
+    std::optional<NeuralRenderResult> PrepareSoftwareRetry()
+    {
+        CancelOutput();
+        std::error_code removeError;std::filesystem::remove(request_.stagingVideoPath, removeError);
+        if (!ReopenAtPreroll()) {
+            if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
+            return Fail(NeuralRenderFailure::Source,
+                        L"The source could not be restarted for software encoding.");
+        }
+        const NeuralRuntimeEvidence retryEvidence=
+            ParseNeuralRuntimeEvidence(evidenceProvider_());
+        if(request_.requireNeural&&!retryEvidence.Valid()){
+            return Fail(NeuralRenderFailure::Neural,
+                        L"Feature 18 evidence was not valid before the software retry.");
+        }
+        // The retry is held to the reused-evaluator standard. The first pass
+        // already watched the log counter advance, which is what vouches for
+        // this process; the counter then stops at 60, and NVENC failing after
+        // the first 60 evaluations - every range render's preroll, every live
+        // session - left the retry resubmitting frame 0 120 times for a line
+        // that never came, then failing with "evidence did not advance". The
+        // backend's per-frame count and the timing floor below still judge
+        // every frame this pass captures.
+        holdToLogReceipt_=false;
+        return std::nullopt;
+    }
+
+    NeuralRenderResult Cancelled(std::wstring detail)
+    {
+        CancelOutput();source_.Close();result_.cancelled = true;
+        return Fail(NeuralRenderFailure::Cancelled, std::move(detail));
+    }
+
+    // The verdicts on the last pass, and the result that carries it.
+    NeuralRenderResult Finish(AttemptResult& attempt, EncoderKind selected)
+    {
+        // Read after the last attempt, and on every exit from it: the counters describe the
+        // job, so a software-encoder retry's second pass belongs in the same tally. Only the
+        // production adapter owns a guide generator; the test one is compiled past.
+        if constexpr(requires{evaluator_.SceneCuts();})result_.sceneCuts=evaluator_.SceneCuts();
+        if (attempt.failure == NeuralRenderFailure::Cancelled)
+            return Cancelled(L"Neural render was cancelled.");
+        if (attempt.failure != NeuralRenderFailure::None) {
+            CancelOutput();source_.Close();
+            result_.historyResets=attempt.historyResets;
+            return Fail(attempt.failure, AttemptFailureDetail(attempt.failure));
+        }
+        source_.Close();
+        result_.metrics=attempt.metrics.Finish();
+        Emit(NeuralRenderPhase::Encoding,attempt.frames,attempt.bytes,false);
+        Emit(NeuralRenderPhase::Validating,attempt.frames,attempt.bytes,false);
+        result_.evidence=ParseNeuralRuntimeEvidence(evidenceProvider_());
+        result_.historyResets=attempt.historyResets;
+        // Summarized before the verdicts below so a refusal carries the numbers it
+        // was based on into the receipt.
+        result_.timing=SummarizeTiming(attempt,evaluator_.PeakLocalVideoMemoryMiB());
+        // Everything from here to the timing floor judges the NEURAL pass, so a job
+        // that asked for Super Resolution alone is not held to any of it. Each one
+        // exists to stop frames that never went through feature 18 being published
+        // as neural output; an upscale-only job makes no such claim, and its result
+        // says neural=false with verifiedNeuralFrames=0 so nothing downstream can
+        // infer one. It is held to the opposite claim instead. With the add-on
+        // disabled the session log names no feature-18 evaluation; one that does
+        // means the add-on ran, and the frames are neural output under a label
+        // that says otherwise - exactly the byte-identical pair this job existed
+        // to end.
+        if(!request_.requireNeural&&(result_.evidence.feature18Created||result_.evidence.feature18Evaluated)){
+            return Fail(NeuralRenderFailure::Neural,
+                        L"The neural add-on ran in a job that asked for Super Resolution alone, "
+                        L"so its frames are not Super Resolution-only output.");
+        }
+        if(request_.requireNeural&&!result_.evidence.Valid()){
+            return Fail(NeuralRenderFailure::Neural,
+                        L"Feature 18 runtime evidence was incomplete or contained a later failure.");
+        }
+        // The add-on's log counter can only be watched to advance once per process
+        // (see the receipt gate). A fresh evaluator is held to it for the job as a
+        // whole: the baseline was read when the feature was armed, so an advance
+        // the first pass watched still counts after a software-encoder retry, and
+        // a retry whose first pass never got that far is still refused when the
+        // counter never moved. Only the in-loop gate skips it on the retry. A
+        // reused evaluator cannot be held to it at all. Every job is held to the
+        // backend's own count as well, which is per process, monotonic, and has to
+        // have advanced at least once for every frame this attempt captured - the
+        // count the cache entry then carries as its own evidence.
+        if(request_.requireNeural&&!evaluatorReused_&&
+           result_.evidence.highestObservedEvaluation<=successfulAttemptBaseline_){
+            return Fail(NeuralRenderFailure::Neural,
+                        L"Feature 18 runtime evidence did not advance after captured rendering.");
+        }
+        // The backend's count is NGX's own tally of Evaluate calls, which is the
+        // Super Resolution carrier whichever job this is. A job that asked for
+        // Super Resolution alone is held to it too: a captured frame NGX never
+        // evaluated is the source at its own size, not an upscale.
+        if(attempt.neuralEvaluations<attempt.frames){
             std::wostringstream detail;
-            detail << L"DLSS Super Resolution cannot reach " << outputWidth << L"x" << outputHeight
-                   << L" from a " << request.width << L"x" << request.height << L" source on this runtime; "
-                   << L"the largest output it admits is " << settledWidth << L"x" << settledHeight
-                   << L". Choose a lower output height.";
-            return fail(NeuralRenderFailure::Source, detail.str());
-        }
-    }
-    // The source open and the evaluator's own bring-up (device, NGX) are one
-    // boundary: nothing between them is separately observable from here.
-    //
-    // A job served by an evaluator an earlier job left initialized did not pay
-    // that bring-up, so it reports no value for the phase rather than a zero:
-    // an absent phase did not happen, which is a different claim from one that
-    // took no time, and a cold-start table that cannot tell them apart is
-    // worthless. The mark is deliberately not advanced either, which leaves the
-    // source open this job DID pay inside the next boundary it reports instead
-    // of dropping it on the floor.
-    const bool evaluatorReused = [&] {
-        if constexpr (requires { evaluator.Reused(); }) return evaluator.Reused();
-        else return false;
-    }();
-    if (!evaluatorReused) markColdStart(NeuralColdStartPhase::NeuralInit);
-    // The neural backend's own Evaluate tally: the NGX count in production, and
-    // whatever the injected evaluator vouches for in the tests.
-    auto neuralEvaluations = [&]() -> uint64_t { return evaluator.NeuralEvaluations(); };
-    expectedBytes = static_cast<size_t>(
-        EncoderFrameBytes(evaluator.CapturePixelFormat(), outputWidth, outputHeight));
-
-    const bool singleFrameSource = totalFrames == 1;
-    const uint64_t primeLimit = singleFrameSource
-        ? 120 : std::max<uint64_t>(2, std::min<uint64_t>(totalFrames, 120));
-    uint64_t primed = 0;
-    JobFrame primingFrame;
-    // Presents a priming frame that has already been decoded, without capturing
-    // it. Priming presents are what let the add-on observe the raw NGX calls.
-    auto presentPrimingFrame = [&](HistoryReset reason) {
-        JobEvaluation ignored;
-        return evaluator.Submit(primingFrame, identity(primingFrame, reason), false, ignored);
-    };
-    for (; !evaluator.FeatureCreated() && primed < primeLimit; ++primed) {
-        if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-        if (!singleFrameSource || primed == 0) {
-            const JobRead read = source.Read(primingFrame, stop);
-            if (read == JobRead::Cancelled) return cancelled(L"Neural render was cancelled.");
-            if (read != JobRead::FrameReady) {
-                source.Close();
-                return fail(NeuralRenderFailure::Source,
-                            L"Feature 18 could not be primed from the source.");
+            if(request_.requireNeural){
+                detail<<L"The neural backend evaluated "<<attempt.neuralEvaluations
+                      <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
+                      <<L"are not all neural output.";
+            }else{
+                detail<<L"DLSS Super Resolution evaluated "<<attempt.neuralEvaluations
+                      <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
+                      <<L"are not all upscaled.";
             }
-        } else {
-            // A photo may need several presents to create feature 18. Reuse it
-            // only for warm-up; capture below still reopens and reads it once.
-            primingFrame.discontinuity = false;
+            return Fail(NeuralRenderFailure::Neural,detail.str());
         }
-        const HistoryReset reason = primed == 0 ? HistoryReset::FirstFrame
-            : primingFrame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
-        if (!presentPrimingFrame(reason)) {
-            source.Close();
-            return fail(evaluatorFailure(), L"Feature 18 priming failed.");
+        if(request_.requireNeural&&!NeuralTimingClearsFloor(result_.timing,outputWidth_,outputHeight_)){
+            std::wostringstream detail;
+            detail<<std::fixed<<std::setprecision(2)
+                  <<L"The neural pass did not run: median neural GPU time was "<<result_.timing.neuralGpuMsP50
+                  <<L" ms per frame at "<<outputWidth_<<L"x"<<outputHeight_<<L", below the "
+                  <<NeuralGpuMsFloor(outputWidth_,outputHeight_)
+                  <<L" ms floor for that geometry, so the frames are upscaler output. "
+                  <<L"Check that the neural add-on is loaded and that feature 18 stays armed, then render again.";
+            return Fail(NeuralRenderFailure::Neural,detail.str());
         }
-    }
-    if (!evaluator.FeatureCreated()) {
-        source.Close();
-        return fail(NeuralRenderFailure::Neural, L"Feature 18 was not created.");
-    }
-    // The priming loop above runs for a Super Resolution-only job too: what it
-    // waits for is the NGX carrier feature, which D3D12Renderer creates on the
-    // second present whether or not an add-on is watching, and a capture
-    // before that would encode the un-upscaled source. Everything from here to
-    // the capture is about feature 18 - the add-on's arming, the re-hook that
-    // coaxes it and the log baseline the receipt gate reads - and a job that
-    // runs with the add-on disabled has none of it to wait for.
-    NeuralRuntimeEvidence armedEvidence;
-    if (request.requireNeural) armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider());
-    if (request.requireNeural && !armedEvidence.Valid() && primed > 0 && evaluator.RequestFeatureRehook()) {
-        // The add-on arms its NGX detours asynchronously, and a build that
-        // missed the very first CreateFeature stays in a standby state until it
-        // sees another one. One hook-visible re-create clears that. It belongs
-        // here, before capture: the only evidence the job has that the neural
-        // pass ran is the add-on's own evaluation counter, so releasing the
-        // feature once capture is waiting on that counter destroys the state it
-        // is waiting for. Sixty presents is the same asynchronous-arming budget
-        // the sibling feeder projects hold a rebuild for, and the counter shows
-        // up on the add-on's first neural evaluation, well inside it.
-        constexpr uint64_t kRehookArmPresents = 60;
-        for (uint64_t rearm = 0; rearm < kRehookArmPresents; ++rearm) {
-            if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-            if (!presentPrimingFrame(HistoryReset::None)) {
-                source.Close();
-                return fail(evaluatorFailure(), L"Feature 18 priming failed.");
-            }
-            // The runtime logs sparsely; re-reading its log every present costs
-            // more than it learns.
-            if (rearm % 10 != 9) continue;
-            armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider());
-            if (armedEvidence.Valid()) break;
-        }
-    }
-    if (request.requireNeural && !armedEvidence.Valid()) {
-        source.Close();
-        return fail(NeuralRenderFailure::Neural,
-                    L"Feature 18 inline interception was not armed before frame capture.");
-    }
-    result.feature18ArmedBeforeCapture=request.requireNeural;
-    // Priming is what creates feature 18 and what the add-on arms its detours
-    // on; a retained feature skips the loop above entirely, so on that path
-    // nothing this phase names happened and it reports nothing rather than a
-    // zero. A reused evaluator that still had to prime - the add-on lost the
-    // feature under us - reports the arm it really paid.
-    if (!evaluatorReused || primed > 0) markColdStart(NeuralColdStartPhase::FeatureArm);
-    // Baseline read after any re-hook, so a create the add-on observed late
-    // cannot be mistaken for the captured sequence's own evaluation.
-    const uint64_t successfulAttemptBaseline=armedEvidence.highestObservedEvaluation;
-    // Whether the capture pass is held to the add-on's log counter advancing
-    // past that baseline. It is a one-shot proof per process (see the receipt
-    // gate), so only the first capture pass of a fresh evaluator can be held
-    // to it; a reused evaluator and a software-encoder retry are held to the
-    // backend's own count and the timing floor instead.
-    bool holdToLogReceipt=request.requireNeural&&!evaluatorReused;
-    // Set once the gate has seen that receipt. The log only grows, so a pass that
-    // restarts after the gate opened has nothing left to wait for.
-    bool receiptGateOpened=false;
-    // The gate's polls. It needs to know whether a line has appeared, not to wait
-    // for the file to settle, so a reader that can tail the log without the
-    // stability wait is asked that way; every verdict read below still waits.
-    auto pollEvidence=[&]()->std::string{
-        if constexpr(requires{evidenceProvider.get().Poll();})return evidenceProvider.get().Poll();
-        else return evidenceProvider();
-    };
-
-    // Capture restarts from the preroll position: frames before the range are
-    // evaluated without capture so the history at range.start matches a
-    // continuous render. A whole-source render has no preroll.
-    const int64_t prerollStart = rangeStart > 0
-        ? std::max<int64_t>(0, rangeStart - int64_t{request.prerollFrames} * frameDuration) : 0;
-    auto reopenAtPreroll = [&] {
-        source.Close();
-        if (!source.Open(request.sourcePath, stop, double(prerollStart) / 10000000.0)) return false;
-        evaluator.ResetTemporal();
-        return true;
-    };
-    if (!reopenAtPreroll()) {
-        if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-        return fail(NeuralRenderFailure::Source,
-                    L"The source could not be restarted at the capture start.");
+        result_.ok=true;result_.encoder=selected;result_.frameCount=attempt.frames;
+        result_.nativeEvaluations=attempt.neuralEvaluations;
+        result_.verifiedNeuralFrames=request_.requireNeural?attempt.frames:0;
+        result_.firstTimestamp100ns=attempt.firstTimestamp;
+        result_.duration100ns=attempt.lastTimestamp-attempt.firstTimestamp+frameDuration_;
+        Emit(NeuralRenderPhase::Ready,attempt.frames,attempt.bytes,false);
+        return result_;
     }
 
-    auto runAttempt = [&](EncoderKind kind) {
-        // The backend's own evaluation count, read at the first capture and on
-        // every exit, so the attempt can be held to having actually evaluated
-        // the frames it claims. Sampled around the capture pass rather than
-        // per frame because a retry pass re-renders everything and only its
-        // own work counts; sampled after the preroll because those frames are
-        // evaluated without being captured.
-        uint64_t neuralEvaluationsBefore = neuralEvaluations();
-        AttemptResult attempt;
+private:
+    // One capture pass with one encoder: the preroll evaluated without
+    // capture, the receipt gate on the first captured frame, then every frame
+    // of the range submitted, pipelined, read back in order and written. The
+    // attempt's counters describe this pass alone; a software retry runs a
+    // second one from the preroll.
+    class CaptureAttempt {
+    public:
+        CaptureAttempt(NeuralRenderJob& job, EncoderKind kind) : job_(job), kind_(kind) {}
+
+        void Run()
         {
-            // Capped so a nonsense duration cannot reserve gigabytes up front: past
-            // about 4.8 hours at 60 fps the series simply grow as they did before.
-            constexpr uint64_t kReservedFramesCap = uint64_t{1} << 20;
-            const size_t frames = static_cast<size_t>(std::min(totalFrames, kReservedFramesCap));
-            attempt.stages.Reserve(frames);attempt.neuralGpuMs.reserve(frames);
-        }
-        // The captured frames, not the source: an upscaling job encodes what
-        // came out of Super Resolution.
-        EncoderSpec spec{outputWidth, outputHeight, request.fps, kind,
-                         evaluator.CapturePixelFormat()};
-        spec.nvencPreset = request.nvencPreset;
-        spec.quality = request.quality;
-        if (writer) {
-            // Segment 0's encoder is armed here and starts while this attempt
-            // prerolls, so the first captured frame never waits for a spawn.
-            writer->BeginAttempt(spec);
-        } else {
-            const EncodeError startError = encoder.Start(spec, request.stagingVideoPath);
-            if (startError != EncodeError::None) {
-                attempt.failure = startError == EncodeError::Cancelled
-                    ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
-                attempt.encoderError = startError;return attempt;
+            // The backend's own evaluation count, read at the first capture and on
+            // every exit, so the attempt can be held to having actually evaluated
+            // the frames it claims. Sampled around the capture pass rather than
+            // per frame because a retry pass re-renders everything and only its
+            // own work counts; sampled after the preroll because those frames are
+            // evaluated without being captured.
+            neuralEvaluationsBefore_ = job_.NeuralEvaluations();
+            {
+                // Capped so a nonsense duration cannot reserve gigabytes up front: past
+                // about 4.8 hours at 60 fps the series simply grow as they did before.
+                constexpr uint64_t kReservedFramesCap = uint64_t{1} << 20;
+                const size_t frames = static_cast<size_t>(std::min(job_.totalFrames_, kReservedFramesCap));
+                attempt_.stages.Reserve(frames);attempt_.neuralGpuMs.reserve(frames);
+            }
+            if (!StartEncoder()) return;
+            if constexpr (requires { job_.evaluator_.ResetStageDetail(); }) job_.evaluator_.ResetStageDetail();
+            const auto reportStages=[&]{ReportStageTimings(kind_,stages_,attempt_,job_.evaluator_);};
+            ScopeExit<decltype(reportStages)> reportOnExit{reportStages};
+            const auto recordNeuralEvaluations = [&] {
+                const uint64_t now = job_.NeuralEvaluations();
+                attempt_.neuralEvaluations = now > neuralEvaluationsBefore_ ? now - neuralEvaluationsBefore_ : 0;
+            };
+            // Declared after the stage report so it runs before it: the stage table
+            // is the last thing an attempt writes.
+            ScopeExit<decltype(recordNeuralEvaluations)> recordOnExit{recordNeuralEvaluations};
+            job_.evaluator_.DiscardPending();
+            captureLayout_=job_.evaluator_.CapturePixelFormat()==EncoderPixelFormat::Nv12
+                ?PixelLayout::Nv12:PixelLayout::Bgra;
+            // Joined on every exit from the attempt, so no thread is left holding
+            // the decoder when the caller closes or reopens it.
+            // Optional only so the receipt gate can restart the pass from the preroll.
+            std::optional<FramePrefetch<Source>> prefetch;
+            prefetch.emplace(job_.source_, job_.stop_);
+            if (!CaptureRange(prefetch)) return;
+            while (!inFlight_.empty()) {
+                if (job_.stop_.stop_requested()) {Abort(NeuralRenderFailure::Cancelled);return;}
+                const NeuralRenderFailure failure = DrainOldest();
+                if (failure != NeuralRenderFailure::None) {Abort(failure);return;}
+            }
+            LogStageTable(attempt_.stages);
+            const EncodeError finishError=job_.writer_?job_.writer_->Finish():job_.encoder_.Finish(job_.stop_);
+            if(finishError!=EncodeError::None){
+                attempt_.failure=finishError==EncodeError::Cancelled
+                    ? NeuralRenderFailure::Cancelled:NeuralRenderFailure::Encoder;
+                attempt_.encoderError=finishError;return;
             }
         }
-        StageTimers stages;
-        if constexpr (requires { evaluator.ResetStageDetail(); }) evaluator.ResetStageDetail();
-        const auto reportStages=[&]{ReportStageTimings(kind,stages,attempt,evaluator);};
-        ScopeExit<decltype(reportStages)> reportOnExit{reportStages};
-        const auto recordNeuralEvaluations = [&] {
-            const uint64_t now = neuralEvaluations();
-            attempt.neuralEvaluations = now > neuralEvaluationsBefore ? now - neuralEvaluationsBefore : 0;
-        };
-        // Declared after the stage report so it runs before it: the stage table
-        // is the last thing an attempt writes.
-        ScopeExit<decltype(recordNeuralEvaluations)> recordOnExit{recordNeuralEvaluations};
+
+        AttemptResult attempt_;
+
+    private:
         // Submission runs ahead of encoding, so frame accounting has to be tracked
         // separately from what has actually been written out.
         struct InFlightCapture {
@@ -1299,63 +1175,81 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             SteadyClock::time_point frameStart{};
             MetricSample metric;
         };
-        std::deque<InFlightCapture> inFlight;
-        uint64_t submitted = 0;
-        evaluator.DiscardPending();
-        // What draining an older frame's capture cost inside the current iteration. The
-        // drain belongs to the iteration that runs it, not to the frame it drains, and
-        // keeping the two apart is what stops pipeline latency leaking into the
-        // throughput numbers. Reset at the top of every iteration.
-        double iterationDrainMs = 0.0;
+        enum class Gate { Open, Restart, Ended };
+
+        // The captured frames, not the source: an upscaling job encodes what
+        // came out of Super Resolution.
+        bool StartEncoder()
+        {
+            EncoderSpec spec{job_.outputWidth_, job_.outputHeight_, job_.request_.fps, kind_,
+                             job_.evaluator_.CapturePixelFormat()};
+            spec.nvencPreset = job_.request_.nvencPreset;
+            spec.quality = job_.request_.quality;
+            if (job_.writer_) {
+                // Segment 0's encoder is armed here and starts while this attempt
+                // prerolls, so the first captured frame never waits for a spawn.
+                job_.writer_->BeginAttempt(spec);
+            } else {
+                const EncodeError startError = job_.encoder_.Start(spec, job_.request_.stagingVideoPath);
+                if (startError != EncodeError::None) {
+                    attempt_.failure = startError == EncodeError::Cancelled
+                        ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
+                    attempt_.encoderError = startError;return false;
+                }
+            }
+            return true;
+        }
 
         // The render report's two halves (TemporalMetrics.h). The source is reduced
         // at submit, on the guide generator's own grid so its vectors move the cells
         // they were solved for; the capture is reduced when it comes back, in the
         // layout it was captured in. A frame that cannot be sampled is left out of
         // the report and never fails the render.
-        const PixelLayout captureLayout=evaluator.CapturePixelFormat()==EncoderPixelFormat::Nv12
-            ?PixelLayout::Nv12:PixelLayout::Bgra;
-        auto sampleSource=[&](const JobFrame& submittedFrame,JobEvaluation& evaluation)->MetricSample{
+        MetricSample SampleSource(const JobFrame& submittedFrame,JobEvaluation& evaluation)
+        {
+            const NeuralRenderRequest& request=job_.request_;
             MetricSample sample;
             uint32_t gridWidth=evaluation.gridWidth,gridHeight=evaluation.gridHeight;
             if(!gridWidth||!gridHeight){
                 const auto grid=TemporalGuideGenerator::AnalysisGrid(request.width,request.height,request.fps);
                 gridWidth=grid.first;gridHeight=grid.second;
             }
-            if(!temporal_metrics::Sample(submittedFrame.bgra,source.Layout(),request.width,request.height,
+            if(!temporal_metrics::Sample(submittedFrame.bgra,job_.source_.Layout(),request.width,request.height,
                                          gridWidth,gridHeight,sample.source))sample.source={};
             sample.motion=std::move(evaluation.motionCells);
             sample.newShot=evaluation.id.reset!=HistoryReset::None;
             return sample;
-        };
-        auto measure=[&](const MetricSample& sample,std::span<const uint8_t> captured){
+        }
+        void Measure(const MetricSample& sample,std::span<const uint8_t> captured)
+        {
             if(sample.source.y.empty())return;
             temporal_metrics::Plane output;
-            if(!temporal_metrics::Sample(captured,captureLayout,outputWidth,outputHeight,
+            if(!temporal_metrics::Sample(captured,captureLayout_,job_.outputWidth_,job_.outputHeight_,
                                          sample.source.width,sample.source.height,output))return;
-            attempt.metrics.Add(sample.source,output,sample.motion,sample.newShot);
-        };
+            attempt_.metrics.Add(sample.source,output,sample.motion,sample.newShot);
+        }
 
         // Waits on the oldest in-flight capture only, then hands its pixels to the
         // segment writer or the encoder's feeder thread. The buffer is recycled from a
         // finished write so the full-frame allocation and its zero-fill do not repeat
         // every frame.
-        auto drainOldest = [&]() -> NeuralRenderFailure {
-            const InFlightCapture queued = inFlight.front();
+        NeuralRenderFailure DrainOldest()
+        {
+            const InFlightCapture queued = inFlight_.front();
             std::vector<uint8_t> pixels;
-            const bool recycled = writer ? writer->TakeRecycled(pixels)
-                                         : encoder.TakeRecycled(pixels);
+            const bool recycled = job_.writer_ ? job_.writer_->TakeRecycled(pixels)
+                                               : job_.encoder_.TakeRecycled(pixels);
             if (!recycled) pixels.clear();
             double captureMs = 0.0;
             FrameIdentity resolved{};
             {
-                StageClock clock(stages.resolve);
-                if (!evaluator.ResolveOldest(pixels, resolved, captureMs) ||
-                    pixels.size() != expectedBytes) {
-                    return evaluatorFailure();
+                StageClock clock(stages_.resolve);
+                if (!job_.evaluator_.ResolveOldest(pixels, resolved, captureMs) ||
+                    pixels.size() != job_.expectedBytes_) {
+                    return job_.EvaluatorFailure();
                 }
             }
-            inFlight.pop_front();
+            inFlight_.pop_front();
             // The slot and the queue advance together, so the bytes that just came
             // back must be the frame queued first. A ring that slid out of step would
             // otherwise publish every later frame one place off, as verified.
@@ -1365,38 +1259,40 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     << " pts=" << resolved.pts100ns);
                 return NeuralRenderFailure::Identity;
             }
-            measure(queued.metric,pixels);
+            Measure(queued.metric,pixels);
             const size_t written = pixels.size();
             double writeMs = 0.0;
             EncodeError writeError;
             {
-                StageClock clock(stages.write);
+                StageClock clock(stages_.write);
                 const auto writeStart = SteadyClock::now();
                 JobFrame frameMeta;
                 frameMeta.frameNumber = queued.frameNumber;
                 frameMeta.timestamp100ns = queued.timestamp100ns;
-                writeError = writer ? writer->Write(frameMeta, std::move(pixels), stop)
-                                    : encoder.WriteFrameAsync(std::move(pixels), stop);
+                writeError = job_.writer_ ? job_.writer_->Write(frameMeta, std::move(pixels), job_.stop_)
+                                          : job_.encoder_.WriteFrameAsync(std::move(pixels), job_.stop_);
                 writeMs = MillisecondsSince(writeStart);
             }
             if (writeError != EncodeError::None) {
-                attempt.encoderError=writeError;
+                attempt_.encoderError=writeError;
                 return writeError == EncodeError::Cancelled
                     ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
             }
-            ++attempt.frames;attempt.bytes+=written;
-            if (!attempt.hasTimestamp) {
-                attempt.firstTimestamp=queued.timestamp100ns;
-                attempt.hasTimestamp=true;
+            ++attempt_.frames;attempt_.bytes+=written;
+            if (!attempt_.hasTimestamp) {
+                attempt_.firstTimestamp=queued.timestamp100ns;
+                attempt_.hasTimestamp=true;
             }
-            attempt.lastTimestamp=queued.timestamp100ns;
-            attempt.neuralGpuMs.push_back(queued.neuralGpuMs);
-            emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
-            attempt.stages.Push(queued.readMs, queued.guideMs, captureMs, queued.evalMs, writeMs,
-                                MillisecondsSince(queued.frameStart));
+            attempt_.lastTimestamp=queued.timestamp100ns;
+            attempt_.neuralGpuMs.push_back(queued.neuralGpuMs);
+            job_.Emit(NeuralRenderPhase::NeuralRendering,attempt_.frames,attempt_.bytes,true);
+            attempt_.stages.Push(queued.readMs, queued.guideMs, captureMs, queued.evalMs, writeMs,
+                                 MillisecondsSince(queued.frameStart));
             return NeuralRenderFailure::None;
-        };
-        auto abort = [&](NeuralRenderFailure failure) {
+        }
+
+        void Abort(NeuralRenderFailure failure)
+        {
             // Frames already captured but not yet read back are valid output: write
             // them out so a failed attempt never omits a frame it successfully
             // evaluated. A cancelled job discards them instead, which keeps
@@ -1404,22 +1300,26 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             // is out of step, so nothing still in it can be trusted to be the frame
             // it claims.
             if (failure != NeuralRenderFailure::Cancelled && failure != NeuralRenderFailure::Identity) {
-                while (!inFlight.empty() && drainOldest() == NeuralRenderFailure::None) {}
+                while (!inFlight_.empty() && DrainOldest() == NeuralRenderFailure::None) {}
             }
-            attempt.failure = failure;
-            if (failure == NeuralRenderFailure::Cancelled) attempt.encoderError = EncodeError::Cancelled;
-            cancelOutput();
-        };
+            attempt_.failure = failure;
+            if (failure == NeuralRenderFailure::Cancelled) attempt_.encoderError = EncodeError::Cancelled;
+            job_.CancelOutput();
+        }
+
         // Submits one frame, retrying the exact same frame on neural/GPU-stall
         // failures. The last permitted retry resets history; a frame that still
         // fails ends the attempt (never skipped). Device loss is not retried.
         // `pipelined` records the capture without waiting for the GPU: the pixels
-        // come back from drainOldest, which waits only on that frame's fence.
-        auto evaluate = [&](const JobFrame& frame, HistoryReset reason, bool capture,
-                            bool pipelined, JobEvaluation& out) {
-            FrameIdentity id = identity(frame, reason);
+        // come back from DrainOldest, which waits only on that frame's fence.
+        NeuralRenderFailure Evaluate(const JobFrame& frame, HistoryReset reason, bool capture,
+                                     bool pipelined, JobEvaluation& out)
+        {
+            Evaluator& evaluator = job_.evaluator_;
+            const NeuralRenderRequest& request = job_.request_;
+            FrameIdentity id = job_.Identity(frame, reason);
             for (uint32_t retry = 0;; ++retry) {
-                if (stop.stop_requested()) return NeuralRenderFailure::Cancelled;
+                if (job_.stop_.stop_requested()) return NeuralRenderFailure::Cancelled;
                 const uint64_t before = evaluator.EvaluationCount();
                 // Keep the pixel buffer's capacity across retries: the receipt gate
                 // resubmits the same frame up to 120 times, and re-growing a full
@@ -1429,179 +1329,195 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 out.bgra = std::move(recycledPixels);
                 bool ok;
                 {
-                    StageClock clock(stages.submit);
+                    StageClock clock(stages_.submit);
                     ok = pipelined
                         ? evaluator.SubmitAsync(frame, id, out) &&
                               evaluator.EvaluationCount() > before
                         : evaluator.Submit(frame, id, capture, out) &&
                               evaluator.EvaluationCount() > before &&
-                              (!capture || out.bgra.size() == expectedBytes);
+                              (!capture || out.bgra.size() == job_.expectedBytes_);
                 }
                 if (ok) {
                     if (!out.id.SameSource(id)) return NeuralRenderFailure::Identity;
-                    if (out.id.reset != HistoryReset::None) ++attempt.historyResets;
+                    if (out.id.reset != HistoryReset::None) ++attempt_.historyResets;
                     return NeuralRenderFailure::None;
                 }
-                NeuralRenderFailure failure = evaluatorFailure();
+                NeuralRenderFailure failure = job_.EvaluatorFailure();
                 if (failure == NeuralRenderFailure::DeviceRemoved) return failure;
                 if (failure != NeuralRenderFailure::GpuStall) failure = NeuralRenderFailure::Neural;
                 if (request.frameRetryLimit == 0) return failure;
                 if (retry >= request.frameRetryLimit) return NeuralRenderFailure::RetryExhausted;
-                ++result.frameRetries;
-                emitProgress(NeuralRenderPhase::Recovering, attempt.frames, attempt.bytes, false, failure);
+                ++job_.result_.frameRetries;
+                job_.EmitProgress(NeuralRenderPhase::Recovering, attempt_.frames, attempt_.bytes, false, failure);
                 // Earlier retries resubmit the identical identity; only the
                 // final one discards history so a poisoned state cannot fail
                 // the same frame forever.
                 if (retry + 1 == request.frameRetryLimit) {
-                    id.reset = HistoryReset::Retry;id.historyGeneration = ++historyGeneration;
+                    id.reset = HistoryReset::Retry;id.historyGeneration = ++job_.historyGeneration_;
                 }
             }
-        };
-        // Joined on every exit from the attempt, so no thread is left holding
-        // the decoder when the caller closes or reopens it.
-        // Optional only so the receipt gate can restart the pass from the preroll.
-        std::optional<FramePrefetch<Source>> prefetch;
-        prefetch.emplace(source, stop);
-        // Lives across iterations only so its BGRA buffer can be handed back to the
-        // decoder on the next read. Every read assigns the whole frame, so nothing
-        // from the previous iteration survives into this one.
-        JobFrame frame;
-        bool prerollEvaluated = false;
-        bool hasPrevious = false;
-        int64_t previousTimestamp = 0;
-        uint64_t previousFrameNumber = 0;
-        for (;;) {
-            if (stop.stop_requested()) {abort(NeuralRenderFailure::Cancelled);return attempt;}
-            if (paused()) {
-                emit(NeuralRenderPhase::Paused, attempt.frames, attempt.bytes, false);
-                while (paused()) {
-                    if (stop.stop_requested()) {abort(NeuralRenderFailure::Cancelled);return attempt;}
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-            }
-            const auto frameStart = SteadyClock::now();
-            iterationDrainMs = 0.0;
-            JobRead read;
-            {
-                StageClock clock(stages.source);
-                read = prefetch->Next(frame);
-            }
-            // What the loop still pays for the decode: the residual wait for a
-            // frame the decoder started while the previous one was on the GPU.
-            const double readMs = MillisecondsSince(frameStart);
-            if (read == JobRead::EndOfStream) {
-                // Report the source failure directly. Falling through to Finish here used
-                // to overwrite it with the encoder error that cancelling produces.
-                if (submitted == 0) {abort(NeuralRenderFailure::Source);return attempt;}
-                break;
-            }
-            if (read == JobRead::Cancelled) {abort(NeuralRenderFailure::Cancelled);return attempt;}
-            if (read != JobRead::FrameReady) {abort(NeuralRenderFailure::Source);return attempt;}
-            if (frame.timestamp100ns < 0 ||
-                (hasPrevious && (frame.timestamp100ns <= previousTimestamp ||
-                                 frame.frameNumber != previousFrameNumber + 1))) {
-                abort(NeuralRenderFailure::Source);return attempt;
-            }
-            hasPrevious = true;previousTimestamp = frame.timestamp100ns;
-            previousFrameNumber = frame.frameNumber;
-            if (frame.timestamp100ns < rangeStart) {
-                JobEvaluation ignored;
-                const HistoryReset reason = !prerollEvaluated ? HistoryReset::Preroll
-                    : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
-                const NeuralRenderFailure failure = evaluate(frame, reason, false, false, ignored);
-                if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
-                prerollEvaluated = true;
-                continue;
-            }
-            if (boundedEnd && frame.timestamp100ns >= rangeEnd) {
-                if (submitted == 0) {abort(NeuralRenderFailure::Source);return attempt;}
-                break;
-            }
-            if (submitted == 0 && holdToLogReceipt && !receiptGateOpened) {
-                // The add-on's log counter is a one-shot proof per PROCESS, not
-                // per job. It reports "inline feature 18 evaluation succeeded
-                // (count=N)" at N=1 and N=60 and then goes quiet: measured on
-                // this machine's RTX 4080 SUPER, a first job took the NGX
-                // evaluation count 0 -> 120 and logged exactly those two lines,
-                // and a second job in the same process took it 120 -> 240 and
-                // logged nothing at all while evaluating every frame at 5.26 ms
-                // of real GPU time. So a reused evaluator can never watch that
-                // counter advance, however many times it resubmits, and waiting
-                // for it would refuse a healthy job after 120 pointless
-                // resubmits of its first frame.
-                //
-                // What a reused job proves instead, per job and without any
-                // session high-water mark: the backend's own evaluation count
-                // advanced at least once per captured frame (checked with the
-                // verdicts below) and the neural GPU time per frame clears the
-                // floor a DLAA-only run cannot (NeuralTimingClearsFloor, which
-                // is the check that actually catches the failure this gate was
-                // built for). The session evidence itself was already verified
-                // before capture and describes the live feature this job used.
-                //
-                // A fresh process is held to the counter as well: frame 0 is
-                // resubmitted until a receipt past the armed baseline exists.
-                // The resubmits are not captured - each used to be a full
-                // synchronous capture and readback - and a preroll of about 60
-                // frames usually opens the gate before the first one.
-                const HistoryReset firstReason = !prerollEvaluated ? HistoryReset::FirstFrame
-                    : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
-                // The observed add-on cadence is one log line every sixty
-                // evaluations, so twice that carries a full cadence of margin
-                // wherever the baseline happened to land. Nothing may release
-                // the NGX feature while this gate is running: the counter it
-                // waits for stops advancing when the add-on's worksets go.
-                constexpr uint64_t kReceiptGateResubmits = 120;
-                uint64_t resubmits = 0;
-                for (;; ++resubmits) {
-                    if (stop.stop_requested()) {abort(NeuralRenderFailure::Cancelled);return attempt;}
-                    const auto receipt = ParseNeuralRuntimeEvidence(pollEvidence());
-                    if (!receipt.Valid()) {abort(NeuralRenderFailure::Neural);return attempt;}
-                    if (receipt.highestObservedEvaluation > successfulAttemptBaseline) break;
-                    if (resubmits >= kReceiptGateResubmits) {abort(NeuralRenderFailure::Neural);return attempt;}
-                    JobEvaluation ignored;
-                    const NeuralRenderFailure failure = evaluate(
-                        frame, resubmits == 0 ? firstReason : HistoryReset::None, false, false, ignored);
-                    if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
-                }
-                receiptGateOpened = true;
-                if (resubmits) {
-                    // Every resubmit fed frame 0 into the temporal history again, and
-                    // how many it took depends on when the add-on's log flushed, so
-                    // the same cache key produced different bytes run to run. The
-                    // capture starts from the history it would have had with none.
-                    LOG("Feature 18 receipt gate opened after " << resubmits
-                        << " uncaptured resubmit(s) of the first frame; restoring its history.");
-                    if (prerollEvaluated) {
-                        // Resetting here would throw the preroll away, and the preroll
-                        // is what makes a range's first frame match a continuous render.
-                        // Run it again instead; the gate stays open.
-                        prefetch.reset();
-                        if (!reopenAtPreroll()) {
-                            abort(stop.stop_requested() ? NeuralRenderFailure::Cancelled
-                                                        : NeuralRenderFailure::Source);
-                            return attempt;
-                        }
-                        prefetch.emplace(source, stop);
-                        prerollEvaluated = false;hasPrevious = false;
-                        continue;
+        }
+
+        // Every frame the source has for this pass, in order: the preroll
+        // evaluated uncaptured, the receipt gate held on the first captured
+        // frame, the first capture synchronous and the rest pipelined. False
+        // when the attempt ended here.
+        bool CaptureRange(std::optional<FramePrefetch<Source>>& prefetch)
+        {
+            // Lives across iterations only so its BGRA buffer can be handed back to the
+            // decoder on the next read. Every read assigns the whole frame, so nothing
+            // from the previous iteration survives into this one.
+            JobFrame frame;
+            for (;;) {
+                if (job_.stop_.stop_requested()) {Abort(NeuralRenderFailure::Cancelled);return false;}
+                if (job_.paused_()) {
+                    job_.Emit(NeuralRenderPhase::Paused, attempt_.frames, attempt_.bytes, false);
+                    while (job_.paused_()) {
+                        if (job_.stop_.stop_requested()) {Abort(NeuralRenderFailure::Cancelled);return false;}
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
-                    // No preroll: frame 0 resets history anyway, and a full reset of
-                    // the guides with it leaves nothing the resubmits touched.
-                    evaluator.ResetTemporal();
                 }
+                const auto frameStart = SteadyClock::now();
+                iterationDrainMs_ = 0.0;
+                JobRead read;
+                {
+                    StageClock clock(stages_.source);
+                    read = prefetch->Next(frame);
+                }
+                // What the loop still pays for the decode: the residual wait for a
+                // frame the decoder started while the previous one was on the GPU.
+                const double readMs = MillisecondsSince(frameStart);
+                if (read == JobRead::EndOfStream) {
+                    // Report the source failure directly. Falling through to Finish here used
+                    // to overwrite it with the encoder error that cancelling produces.
+                    if (submitted_ == 0) {Abort(NeuralRenderFailure::Source);return false;}
+                    break;
+                }
+                if (read == JobRead::Cancelled) {Abort(NeuralRenderFailure::Cancelled);return false;}
+                if (read != JobRead::FrameReady) {Abort(NeuralRenderFailure::Source);return false;}
+                if (frame.timestamp100ns < 0 ||
+                    (hasPrevious_ && (frame.timestamp100ns <= previousTimestamp_ ||
+                                      frame.frameNumber != previousFrameNumber_ + 1))) {
+                    Abort(NeuralRenderFailure::Source);return false;
+                }
+                hasPrevious_ = true;previousTimestamp_ = frame.timestamp100ns;
+                previousFrameNumber_ = frame.frameNumber;
+                if (frame.timestamp100ns < job_.rangeStart_) {
+                    JobEvaluation ignored;
+                    const HistoryReset reason = !prerollEvaluated_ ? HistoryReset::Preroll
+                        : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
+                    const NeuralRenderFailure failure = Evaluate(frame, reason, false, false, ignored);
+                    if (failure != NeuralRenderFailure::None) {Abort(failure);return false;}
+                    prerollEvaluated_ = true;
+                    continue;
+                }
+                if (job_.boundedEnd_ && frame.timestamp100ns >= job_.rangeEnd_) {
+                    if (submitted_ == 0) {Abort(NeuralRenderFailure::Source);return false;}
+                    break;
+                }
+                if (submitted_ == 0 && job_.holdToLogReceipt_ && !job_.receiptGateOpened_) {
+                    const Gate gate = HoldReceiptGate(frame, prefetch);
+                    if (gate == Gate::Ended) return false;
+                    if (gate == Gate::Restart) continue;
+                }
+                if (!Capture(frame, frameStart, readMs)) return false;
             }
+            return true;
+        }
+
+        // The add-on's log counter is a one-shot proof per PROCESS, not
+        // per job. It reports "inline feature 18 evaluation succeeded
+        // (count=N)" at N=1 and N=60 and then goes quiet: measured on
+        // this machine's RTX 4080 SUPER, a first job took the NGX
+        // evaluation count 0 -> 120 and logged exactly those two lines,
+        // and a second job in the same process took it 120 -> 240 and
+        // logged nothing at all while evaluating every frame at 5.26 ms
+        // of real GPU time. So a reused evaluator can never watch that
+        // counter advance, however many times it resubmits, and waiting
+        // for it would refuse a healthy job after 120 pointless
+        // resubmits of its first frame.
+        //
+        // What a reused job proves instead, per job and without any
+        // session high-water mark: the backend's own evaluation count
+        // advanced at least once per captured frame (checked with the
+        // verdicts in Finish) and the neural GPU time per frame clears the
+        // floor a DLAA-only run cannot (NeuralTimingClearsFloor, which
+        // is the check that actually catches the failure this gate was
+        // built for). The session evidence itself was already verified
+        // before capture and describes the live feature this job used.
+        //
+        // A fresh process is held to the counter as well: frame 0 is
+        // resubmitted until a receipt past the armed baseline exists.
+        // The resubmits are not captured - each used to be a full
+        // synchronous capture and readback - and a preroll of about 60
+        // frames usually opens the gate before the first one.
+        Gate HoldReceiptGate(const JobFrame& frame, std::optional<FramePrefetch<Source>>& prefetch)
+        {
+            const HistoryReset firstReason = !prerollEvaluated_ ? HistoryReset::FirstFrame
+                : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
+            // The observed add-on cadence is one log line every sixty
+            // evaluations, so twice that carries a full cadence of margin
+            // wherever the baseline happened to land. Nothing may release
+            // the NGX feature while this gate is running: the counter it
+            // waits for stops advancing when the add-on's worksets go.
+            constexpr uint64_t kReceiptGateResubmits = 120;
+            uint64_t resubmits = 0;
+            for (;; ++resubmits) {
+                if (job_.stop_.stop_requested()) {Abort(NeuralRenderFailure::Cancelled);return Gate::Ended;}
+                const auto receipt = ParseNeuralRuntimeEvidence(job_.PollEvidence());
+                if (!receipt.Valid()) {Abort(NeuralRenderFailure::Neural);return Gate::Ended;}
+                if (receipt.highestObservedEvaluation > job_.successfulAttemptBaseline_) break;
+                if (resubmits >= kReceiptGateResubmits) {Abort(NeuralRenderFailure::Neural);return Gate::Ended;}
+                JobEvaluation ignored;
+                const NeuralRenderFailure failure = Evaluate(
+                    frame, resubmits == 0 ? firstReason : HistoryReset::None, false, false, ignored);
+                if (failure != NeuralRenderFailure::None) {Abort(failure);return Gate::Ended;}
+            }
+            job_.receiptGateOpened_ = true;
+            if (resubmits) {
+                // Every resubmit fed frame 0 into the temporal history again, and
+                // how many it took depends on when the add-on's log flushed, so
+                // the same cache key produced different bytes run to run. The
+                // capture starts from the history it would have had with none.
+                LOG("Feature 18 receipt gate opened after " << resubmits
+                    << " uncaptured resubmit(s) of the first frame; restoring its history.");
+                if (prerollEvaluated_) {
+                    // Resetting here would throw the preroll away, and the preroll
+                    // is what makes a range's first frame match a continuous render.
+                    // Run it again instead; the gate stays open.
+                    prefetch.reset();
+                    if (!job_.ReopenAtPreroll()) {
+                        Abort(job_.stop_.stop_requested() ? NeuralRenderFailure::Cancelled
+                                                          : NeuralRenderFailure::Source);
+                        return Gate::Ended;
+                    }
+                    prefetch.emplace(job_.source_, job_.stop_);
+                    prerollEvaluated_ = false;hasPrevious_ = false;
+                    return Gate::Restart;
+                }
+                // No preroll: frame 0 resets history anyway, and a full reset of
+                // the guides with it leaves nothing the resubmits touched.
+                job_.evaluator_.ResetTemporal();
+            }
+            return Gate::Open;
+        }
+
+        // One frame of the range captured: pipelined behind the GPU after the
+        // first, synchronous (and written here) for the first. False when the
+        // attempt ended here.
+        bool Capture(const JobFrame& frame, SteadyClock::time_point frameStart, double readMs)
+        {
             // Sampled here, after any gate resubmits, so the backend's count is held
             // to exactly the submissions that produced captured frames and their retries.
-            if (submitted == 0) neuralEvaluationsBefore = neuralEvaluations();
+            if (submitted_ == 0) neuralEvaluationsBefore_ = job_.NeuralEvaluations();
             const auto evalStart = SteadyClock::now();
             JobEvaluation evaluation;
-            const bool pipelined = submitted > 0;
+            const bool pipelined = submitted_ > 0;
             {
-                const HistoryReset reason = (attempt.frames == 0 && !prerollEvaluated) ? HistoryReset::FirstFrame
+                const HistoryReset reason = (attempt_.frames == 0 && !prerollEvaluated_) ? HistoryReset::FirstFrame
                     : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
-                const NeuralRenderFailure failure = evaluate(frame, reason, true, pipelined, evaluation);
-                if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
+                const NeuralRenderFailure failure = Evaluate(frame, reason, true, pipelined, evaluation);
+                if (failure != NeuralRenderFailure::None) {Abort(failure);return false;}
             }
             const double evalMs = MillisecondsSince(evalStart);
             if (pipelined) {
@@ -1610,73 +1526,480 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 InFlightCapture queued;
                 queued.frameNumber = frame.frameNumber;
                 queued.timestamp100ns = frame.timestamp100ns;
-                queued.id = identity(frame, HistoryReset::None);
+                queued.id = job_.Identity(frame, HistoryReset::None);
                 queued.readMs = readMs;queued.guideMs = evaluation.guideMs;
                 queued.evalMs = evalMs;queued.neuralGpuMs = evaluation.neuralGpuMs;
                 queued.frameStart = frameStart;
-                queued.metric = sampleSource(frame, evaluation);
-                inFlight.push_back(std::move(queued));
-                ++submitted;
-                if (evaluator.Pending() >= evaluator.MaxPending()) {
+                queued.metric = SampleSource(frame, evaluation);
+                inFlight_.push_back(std::move(queued));
+                ++submitted_;
+                if (job_.evaluator_.Pending() >= job_.evaluator_.MaxPending()) {
                     const auto drainStart = SteadyClock::now();
-                    const NeuralRenderFailure failure = drainOldest();
-                    iterationDrainMs += MillisecondsSince(drainStart);
-                    if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
+                    const NeuralRenderFailure failure = DrainOldest();
+                    iterationDrainMs_ += MillisecondsSince(drainStart);
+                    if (failure != NeuralRenderFailure::None) {Abort(failure);return false;}
                 }
-                attempt.stages.PushLoop(MillisecondsSince(frameStart), readMs, evalMs,
-                                        iterationDrainMs);
-                continue;
+                attempt_.stages.PushLoop(MillisecondsSince(frameStart), readMs, evalMs,
+                                         iterationDrainMs_);
+                return true;
             }
             // The first captured frame stays synchronous: the receipt gate above needs
             // the pixels in hand, and they are written here once the gate opens. A
             // segmented job takes ownership of them; the single-file encoder hands
             // them to its feeder thread.
-            measure(sampleSource(frame, evaluation), evaluation.bgra);
+            Measure(SampleSource(frame, evaluation), evaluation.bgra);
             const uint64_t captured = evaluation.bgra.size();
             double writeMs = 0.0;
             EncodeError writeError;
             {
-                StageClock clock(stages.write);
+                StageClock clock(stages_.write);
                 const auto writeStart = SteadyClock::now();
-                writeError = writer ? writer->Write(frame, std::move(evaluation.bgra), stop)
-                                    : encoder.WriteFrameAsync(std::move(evaluation.bgra), stop);
+                writeError = job_.writer_ ? job_.writer_->Write(frame, std::move(evaluation.bgra), job_.stop_)
+                                          : job_.encoder_.WriteFrameAsync(std::move(evaluation.bgra), job_.stop_);
                 writeMs = MillisecondsSince(writeStart);
             }
             if (writeError != EncodeError::None) {
-                attempt.encoderError=writeError;
-                abort(writeError == EncodeError::Cancelled
+                attempt_.encoderError=writeError;
+                Abort(writeError == EncodeError::Cancelled
                     ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder);
-                return attempt;
+                return false;
             }
-            ++attempt.frames;attempt.bytes+=captured;
-            if (!attempt.hasTimestamp) {
-                attempt.firstTimestamp=frame.timestamp100ns;
-                attempt.hasTimestamp=true;
+            ++attempt_.frames;attempt_.bytes+=captured;
+            if (!attempt_.hasTimestamp) {
+                attempt_.firstTimestamp=frame.timestamp100ns;
+                attempt_.hasTimestamp=true;
             }
-            attempt.lastTimestamp=frame.timestamp100ns;
-            attempt.neuralGpuMs.push_back(evaluation.neuralGpuMs);
-            emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
-            attempt.stages.Push(readMs, evaluation.guideMs, evaluation.captureMs, evalMs, writeMs,
-                                MillisecondsSince(frameStart));
+            attempt_.lastTimestamp=frame.timestamp100ns;
+            attempt_.neuralGpuMs.push_back(evaluation.neuralGpuMs);
+            job_.Emit(NeuralRenderPhase::NeuralRendering,attempt_.frames,attempt_.bytes,true);
+            attempt_.stages.Push(readMs, evaluation.guideMs, evaluation.captureMs, evalMs, writeMs,
+                                 MillisecondsSince(frameStart));
             // Nothing is pipelined yet on this frame: it captured synchronously inside
             // evalMs, so only the write is left to count as this iteration's drain.
-            attempt.stages.PushLoop(MillisecondsSince(frameStart), readMs, evalMs, writeMs);
-            ++submitted;
+            attempt_.stages.PushLoop(MillisecondsSince(frameStart), readMs, evalMs, writeMs);
+            ++submitted_;
+            return true;
         }
-        while (!inFlight.empty()) {
-            if (stop.stop_requested()) {abort(NeuralRenderFailure::Cancelled);return attempt;}
-            const NeuralRenderFailure failure = drainOldest();
-            if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
-        }
-        LogStageTable(attempt.stages);
-        const EncodeError finishError=writer?writer->Finish():encoder.Finish(stop);
-        if(finishError!=EncodeError::None){
-            attempt.failure=finishError==EncodeError::Cancelled
-                ? NeuralRenderFailure::Cancelled:NeuralRenderFailure::Encoder;
-            attempt.encoderError=finishError;return attempt;
-        }
-        return attempt;
+
+        NeuralRenderJob& job_;
+        const EncoderKind kind_;
+        uint64_t neuralEvaluationsBefore_{};
+        StageTimers stages_;
+        std::deque<InFlightCapture> inFlight_;
+        uint64_t submitted_ = 0;
+        // What draining an older frame's capture cost inside the current iteration. The
+        // drain belongs to the iteration that runs it, not to the frame it drains, and
+        // keeping the two apart is what stops pipeline latency leaking into the
+        // throughput numbers. Reset at the top of every iteration.
+        double iterationDrainMs_ = 0.0;
+        PixelLayout captureLayout_{PixelLayout::Bgra};
+        bool prerollEvaluated_ = false;
+        bool hasPrevious_ = false;
+        int64_t previousTimestamp_ = 0;
+        uint64_t previousFrameNumber_ = 0;
     };
+
+    // The request itself: a source and a staging file, a positive rate and
+    // duration, a range inside the source, and an output that is an upscale
+    // or the source size.
+    std::optional<NeuralRenderResult> CheckRequest()
+    {
+        const NeuralRenderRequest& request = request_;
+        if (request.sourcePath.empty() || request.stagingVideoPath.empty() ||
+            !request.width || !request.height || !std::isfinite(request.fps) || request.fps <= 0.0 ||
+            !std::isfinite(request.durationSeconds) || request.durationSeconds <= 0.0) {
+            return Fail(NeuralRenderFailure::Source, L"Invalid neural render request.");
+        }
+        frameDuration_ = static_cast<int64_t>(std::llround(10000000.0 / request.fps));
+        const int64_t sourceDuration = static_cast<int64_t>(std::llround(request.durationSeconds * 10000000.0));
+        rangeStart_ = request.range.start100ns;
+        boundedEnd_ = request.range.end100ns != 0;
+        rangeEnd_ = boundedEnd_ ? request.range.end100ns : sourceDuration;
+        if (rangeStart_ < 0 || rangeStart_ >= rangeEnd_ || rangeEnd_ > sourceDuration + frameDuration_) {
+            return Fail(NeuralRenderFailure::Source,
+                        L"The neural render range is outside the source timeline.");
+        }
+        totalFrames_ = std::max<uint64_t>(1, static_cast<uint64_t>(
+            std::llround(double(rangeEnd_ - rangeStart_) / 10000000.0 * request.fps)));
+        // The capture size, resolved once. 0 means "no upscale", which is every
+        // caller that predates Super Resolution being part of an export.
+        outputWidth_ = request.outputWidth ? request.outputWidth : request.width;
+        outputHeight_ = request.outputHeight ? request.outputHeight : request.height;
+        // An output SMALLER than the source is not an upscale, and DLSS refuses it.
+        // Caught here rather than at the renderer so the refusal names the request.
+        if (outputWidth_ < request.width || outputHeight_ < request.height) {
+            return Fail(NeuralRenderFailure::Source,
+                        L"The neural render output size is smaller than the source, which is not an upscale.");
+        }
+        // What the model is shown. Below 100% the source adapter hands over frames
+        // already reduced to this size, and the carrier restores the source size.
+        modelInput_ = ProcessingSize(request.width, request.height, request.processingScale);
+        if (!IsProcessingScaleRung(request.processingScale) ||
+            (request.processingScale != kDefaultProcessingScale &&
+             (outputWidth_ != request.width || outputHeight_ != request.height))) {
+            return Fail(NeuralRenderFailure::Source,
+                        L"A reduced processing scale renders back to the source size and cannot also upscale.");
+        }
+        const uint64_t expectedBytes64 = uint64_t{outputWidth_} * outputHeight_ * 4u;
+        if (expectedBytes64 > std::numeric_limits<size_t>::max()) {
+            return Fail(NeuralRenderFailure::Source, L"Neural render dimensions are too large.");
+        }
+        // Replaced once the evaluator has settled on a capture format: a GPU-converted
+        // capture is NV12, which is 1.5 bytes per pixel rather than 4.
+        expectedBytes_ = static_cast<size_t>(expectedBytes64);
+        return std::nullopt;
+    }
+
+    // The segment writer for a segmented job, and the progress clock.
+    void StartOutput()
+    {
+        // The finalize thread publishes each file, so the first-output boundary is
+        // stamped there. Everything above it is written before capture can begin
+        // and the encoder queue's lock orders the two, so the timeline that leaves
+        // with the first file is complete. A relaunched sequence repeats index 0;
+        // only the first one is a cold start.
+        instrumented_ = segments_;
+        instrumented_.onSegment = [this, forward = segments_.onSegment](const NeuralRenderSegment& segment) {
+            if (!segment.index && !coldStartTimeline_.Phase(NeuralColdStartPhase::FirstOutput))
+                MarkColdStart(NeuralColdStartPhase::FirstOutput);
+            if (forward) forward(segment);
+            ReportColdStart();
+        };
+        // A segmented job publishes finalized files while it renders; segmentFrames
+        // == 0 keeps the single staging file and never starts a finalize thread.
+        if (request_.segmentFrames) {
+            writer_.emplace([this] { return encoder_.Create(); }, request_.stagingVideoPath,
+                            request_.segmentFrames, frameDuration_, instrumented_, stop_,
+                            request_.firstSegmentFrames);
+        }
+        started_ = clock_();
+        lastProgressTime_ = started_;
+    }
+
+    // The source opened at the range start and the evaluator brought up at
+    // the size the runtime settles on.
+    std::optional<NeuralRenderResult> BringUp()
+    {
+        const NeuralRenderRequest& request = request_;
+        Emit(NeuralRenderPhase::Acquiring, 0, 0, false);
+        if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
+        if (!source_.Open(request.sourcePath, stop_, double(rangeStart_) / 10000000.0)) {
+            if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
+            return Fail(NeuralRenderFailure::Source, L"The source video could not be opened.");
+        }
+        Emit(NeuralRenderPhase::Decoding, 0, 0, false);
+        if (!evaluator_.Initialize(request.renderWindow, modelInput_.width, modelInput_.height,
+                                   outputWidth_, outputHeight_, request.fps,
+                                   request.guides, source_.Layout(), source_.ColorDescription())) {
+            source_.Close();
+            return Fail(NeuralRenderFailure::Neural, L"The neural renderer could not be initialized.");
+        }
+        // Super Resolution from the source size may not reach every rung: DLSS
+        // admits a bounded input-to-output ratio, and the renderer adopts the
+        // largest output the runtime accepts for this source. Encoding that under
+        // the size the caller asked for would be a wrong-sized file, so the job
+        // says what the runtime can do instead.
+        if constexpr (requires { evaluator_.OutputSize(); }) {
+            const auto [settledWidth, settledHeight] = evaluator_.OutputSize();
+            if (settledWidth != outputWidth_ || settledHeight != outputHeight_) {
+                source_.Close();
+                std::wostringstream detail;
+                detail << L"DLSS Super Resolution cannot reach " << outputWidth_ << L"x" << outputHeight_
+                       << L" from a " << request.width << L"x" << request.height << L" source on this runtime; "
+                       << L"the largest output it admits is " << settledWidth << L"x" << settledHeight
+                       << L". Choose a lower output height.";
+                return Fail(NeuralRenderFailure::Source, detail.str());
+            }
+        }
+        // The source open and the evaluator's own bring-up (device, NGX) are one
+        // boundary: nothing between them is separately observable from here.
+        //
+        // A job served by an evaluator an earlier job left initialized did not pay
+        // that bring-up, so it reports no value for the phase rather than a zero:
+        // an absent phase did not happen, which is a different claim from one that
+        // took no time, and a cold-start table that cannot tell them apart is
+        // worthless. The mark is deliberately not advanced either, which leaves the
+        // source open this job DID pay inside the next boundary it reports instead
+        // of dropping it on the floor.
+        evaluatorReused_ = [&] {
+            if constexpr (requires { evaluator_.Reused(); }) return evaluator_.Reused();
+            else return false;
+        }();
+        if (!evaluatorReused_) MarkColdStart(NeuralColdStartPhase::NeuralInit);
+        expectedBytes_ = static_cast<size_t>(
+            EncoderFrameBytes(evaluator_.CapturePixelFormat(), outputWidth_, outputHeight_));
+        return std::nullopt;
+    }
+
+    // Priming presents are what let the add-on observe the raw NGX calls, and
+    // what creates the carrier feature at all.
+    std::optional<NeuralRenderResult> PrimeFeature()
+    {
+        const bool singleFrameSource = totalFrames_ == 1;
+        const uint64_t primeLimit = singleFrameSource
+            ? 120 : std::max<uint64_t>(2, std::min<uint64_t>(totalFrames_, 120));
+        for (; !evaluator_.FeatureCreated() && primed_ < primeLimit; ++primed_) {
+            if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
+            if (!singleFrameSource || primed_ == 0) {
+                const JobRead read = source_.Read(primingFrame_, stop_);
+                if (read == JobRead::Cancelled) return Cancelled(L"Neural render was cancelled.");
+                if (read != JobRead::FrameReady) {
+                    source_.Close();
+                    return Fail(NeuralRenderFailure::Source,
+                                L"Feature 18 could not be primed from the source.");
+                }
+            } else {
+                // A photo may need several presents to create feature 18. Reuse it
+                // only for warm-up; capture below still reopens and reads it once.
+                primingFrame_.discontinuity = false;
+            }
+            const HistoryReset reason = primed_ == 0 ? HistoryReset::FirstFrame
+                : primingFrame_.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
+            if (!PresentPrimingFrame(reason)) {
+                source_.Close();
+                return Fail(EvaluatorFailure(), L"Feature 18 priming failed.");
+            }
+        }
+        if (!evaluator_.FeatureCreated()) {
+            source_.Close();
+            return Fail(NeuralRenderFailure::Neural, L"Feature 18 was not created.");
+        }
+        return std::nullopt;
+    }
+
+    // The priming loop above runs for a Super Resolution-only job too: what it
+    // waits for is the NGX carrier feature, which D3D12Renderer creates on the
+    // second present whether or not an add-on is watching, and a capture
+    // before that would encode the un-upscaled source. Everything from here to
+    // the capture is about feature 18 - the add-on's arming, the re-hook that
+    // coaxes it and the log baseline the receipt gate reads - and a job that
+    // runs with the add-on disabled has none of it to wait for.
+    std::optional<NeuralRenderResult> ArmBeforeCapture()
+    {
+        const NeuralRenderRequest& request = request_;
+        NeuralRuntimeEvidence armedEvidence;
+        if (request.requireNeural) armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider_());
+        if (request.requireNeural && !armedEvidence.Valid() && primed_ > 0 && evaluator_.RequestFeatureRehook()) {
+            // The add-on arms its NGX detours asynchronously, and a build that
+            // missed the very first CreateFeature stays in a standby state until it
+            // sees another one. One hook-visible re-create clears that. It belongs
+            // here, before capture: the only evidence the job has that the neural
+            // pass ran is the add-on's own evaluation counter, so releasing the
+            // feature once capture is waiting on that counter destroys the state it
+            // is waiting for. Sixty presents is the same asynchronous-arming budget
+            // the sibling feeder projects hold a rebuild for, and the counter shows
+            // up on the add-on's first neural evaluation, well inside it.
+            constexpr uint64_t kRehookArmPresents = 60;
+            for (uint64_t rearm = 0; rearm < kRehookArmPresents; ++rearm) {
+                if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
+                if (!PresentPrimingFrame(HistoryReset::None)) {
+                    source_.Close();
+                    return Fail(EvaluatorFailure(), L"Feature 18 priming failed.");
+                }
+                // The runtime logs sparsely; re-reading its log every present costs
+                // more than it learns.
+                if (rearm % 10 != 9) continue;
+                armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider_());
+                if (armedEvidence.Valid()) break;
+            }
+        }
+        if (request.requireNeural && !armedEvidence.Valid()) {
+            source_.Close();
+            return Fail(NeuralRenderFailure::Neural,
+                        L"Feature 18 inline interception was not armed before frame capture.");
+        }
+        result_.feature18ArmedBeforeCapture=request.requireNeural;
+        // Priming is what creates feature 18 and what the add-on arms its detours
+        // on; a retained feature skips the loop above entirely, so on that path
+        // nothing this phase names happened and it reports nothing rather than a
+        // zero. A reused evaluator that still had to prime - the add-on lost the
+        // feature under us - reports the arm it really paid.
+        if (!evaluatorReused_ || primed_ > 0) MarkColdStart(NeuralColdStartPhase::FeatureArm);
+        // Baseline read after any re-hook, so a create the add-on observed late
+        // cannot be mistaken for the captured sequence's own evaluation.
+        successfulAttemptBaseline_=armedEvidence.highestObservedEvaluation;
+        // Whether the capture pass is held to the add-on's log counter advancing
+        // past that baseline. It is a one-shot proof per process (see the receipt
+        // gate), so only the first capture pass of a fresh evaluator can be held
+        // to it; a reused evaluator and a software-encoder retry are held to the
+        // backend's own count and the timing floor instead.
+        holdToLogReceipt_=request.requireNeural&&!evaluatorReused_;
+        return std::nullopt;
+    }
+
+    // Capture restarts from the preroll position: frames before the range are
+    // evaluated without capture so the history at range.start matches a
+    // continuous render. A whole-source render has no preroll.
+    std::optional<NeuralRenderResult> RestartAtPreroll()
+    {
+        prerollStart_ = rangeStart_ > 0
+            ? std::max<int64_t>(0, rangeStart_ - int64_t{request_.prerollFrames} * frameDuration_) : 0;
+        if (!ReopenAtPreroll()) {
+            if (stop_.stop_requested()) return Cancelled(L"Neural render was cancelled.");
+            return Fail(NeuralRenderFailure::Source,
+                        L"The source could not be restarted at the capture start.");
+        }
+        return std::nullopt;
+    }
+
+    bool ReopenAtPreroll()
+    {
+        source_.Close();
+        if (!source_.Open(request_.sourcePath, stop_, double(prerollStart_) / 10000000.0)) return false;
+        evaluator_.ResetTemporal();
+        return true;
+    }
+
+    NeuralRenderResult Fail(NeuralRenderFailure failure, std::wstring detail)
+    {
+        result_.failure = failure;result_.detail = std::move(detail);return result_;
+    }
+    void CancelOutput() { if (writer_) writer_->Cancel(); else encoder_.Cancel(); }
+    NeuralRenderFailure EvaluatorFailure()
+    {
+        const NeuralRenderFailure failure = evaluator_.LastFailure();
+        return failure == NeuralRenderFailure::None ? NeuralRenderFailure::Neural : failure;
+    }
+    // The neural backend's own Evaluate tally: the NGX count in production, and
+    // whatever the injected evaluator vouches for in the tests.
+    uint64_t NeuralEvaluations() { return evaluator_.NeuralEvaluations(); }
+
+    // The job's own history generation: bumped for every reset it requests.
+    // The evaluator stamps its own generation on its outputs; SameSource
+    // comparisons ignore both.
+    FrameIdentity Identity(const JobFrame& frame, HistoryReset reset)
+    {
+        if (reset != HistoryReset::None) ++historyGeneration_;
+        return FrameIdentity{frame.frameNumber, frame.timestamp100ns, frame.sourceGeneration,
+                             historyGeneration_, request_.jobId, reset};
+    }
+    // Presents a priming frame that has already been decoded, without capturing
+    // it. Priming presents are what let the add-on observe the raw NGX calls.
+    bool PresentPrimingFrame(HistoryReset reason)
+    {
+        JobEvaluation ignored;
+        return evaluator_.Submit(primingFrame_, Identity(primingFrame_, reason), false, ignored);
+    }
+    // The gate's polls. It needs to know whether a line has appeared, not to wait
+    // for the file to settle, so a reader that can tail the log without the
+    // stability wait is asked that way; every verdict read still waits.
+    std::string PollEvidence()
+    {
+        if constexpr(requires{evidenceProvider_.get().Poll();})return evidenceProvider_.get().Poll();
+        else return evidenceProvider_();
+    }
+
+    void EmitProgress(NeuralRenderPhase phase, uint64_t completed, uint64_t bytes,
+                      bool frameTick, NeuralRenderFailure recovering)
+    {
+        const auto now = clock_();
+        reportedCompleted_ = std::max(reportedCompleted_, completed);
+        reportedBytes_ = std::max(reportedBytes_, bytes);
+        if (frameTick && completed > previous_.completedFrames) {
+            const double milliseconds = std::max(1.0,
+                std::chrono::duration<double, std::milli>(now - lastProgressTime_).count());
+            const double instant = double(completed - previous_.completedFrames) / milliseconds;
+            smoothedFramesPerMs_ = smoothedFramesPerMs_ == 0.0
+                ? instant : smoothedFramesPerMs_ * 0.75 + instant * 0.25;
+            lastProgressTime_ = now;
+        }
+        NeuralRenderProgress snapshot;
+        snapshot.phase = phase;
+        snapshot.completedFrames = reportedCompleted_;
+        snapshot.totalFrames = std::max(totalFrames_, reportedCompleted_);
+        snapshot.bytes = reportedBytes_;
+        snapshot.elapsed = std::max(previous_.elapsed,
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - started_));
+        if (snapshot.completedFrames < snapshot.totalFrames && smoothedFramesPerMs_ > 0.0) {
+            snapshot.estimatedRemaining = std::chrono::milliseconds(static_cast<int64_t>(
+                std::ceil(double(snapshot.totalFrames - snapshot.completedFrames) /
+                          smoothedFramesPerMs_)));
+        }
+        snapshot.recovering = recovering;
+        snapshot.retries = result_.frameRetries;
+        if (progress_) progress_(snapshot);
+        previous_ = snapshot;
+    }
+    void Emit(NeuralRenderPhase phase, uint64_t completed, uint64_t bytes, bool frameTick)
+    {
+        EmitProgress(phase, completed, bytes, frameTick, NeuralRenderFailure::None);
+    }
+
+    // Cold-start phases run on the real clock rather than the job's progress
+    // clock: the first-output boundary is only observable on the finalize
+    // thread, and a caller-supplied clock is not shared across threads.
+    void MarkColdStart(NeuralColdStartPhase phase)
+    {
+        const auto now = SteadyClock::now();
+        coldStartTimeline_.Record(
+            phase, std::chrono::duration_cast<std::chrono::microseconds>(now - coldStartMark_));
+        coldStartMark_ = now;
+    }
+    void ReportColdStart()
+    {
+        if (coldStart_ && !coldStartReported_.exchange(true)) coldStart_(coldStartTimeline_);
+    }
+
+    using TimePoint = std::invoke_result_t<Clock&>;
+
+    // What the job was given.
+    const NeuralRenderRequest& request_;
+    OfflineNeuralRenderer::ProgressCallback progress_;
+    std::stop_token stop_;
+    Source& source_;
+    Evaluator& evaluator_;
+    Encoder& encoder_;
+    Evidence evidenceProvider_;
+    Clock clock_;
+    Paused paused_;
+    const NeuralSegmentSink& segments_;
+    const NeuralColdStartCallback& coldStart_;
+
+    NeuralRenderResult result_;
+    NeuralColdStartTimeline coldStartTimeline_;
+    SteadyClock::time_point coldStartMark_ = SteadyClock::now();
+    std::atomic<bool> coldStartReported_{false};
+    // CheckRequest
+    int64_t frameDuration_{}, rangeStart_{}, rangeEnd_{};
+    bool boundedEnd_{};
+    uint64_t totalFrames_{};
+    uint32_t outputWidth_{}, outputHeight_{};
+    ProcessingInput modelInput_{};
+    size_t expectedBytes_{};
+    // StartOutput. The writer is reset first on destruction: see ~NeuralRenderJob.
+    NeuralSegmentSink instrumented_;
+    std::optional<SegmentWriter<Encoder>> writer_;
+    // EmitProgress
+    TimePoint started_{}, lastProgressTime_{};
+    uint64_t reportedCompleted_ = 0;
+    uint64_t reportedBytes_ = 0;
+    double smoothedFramesPerMs_ = 0.0;
+    NeuralRenderProgress previous_{};
+    uint32_t historyGeneration_ = 0;
+    // BringUp, PrimeFeature, ArmBeforeCapture, RestartAtPreroll
+    bool evaluatorReused_ = false;
+    uint64_t primed_ = 0;
+    JobFrame primingFrame_;
+    uint64_t successfulAttemptBaseline_ = 0;
+    bool holdToLogReceipt_ = false;
+    // Set once the gate has seen that receipt. The log only grows, so a pass that
+    // restarts after the gate opened has nothing left to wait for.
+    bool receiptGateOpened_ = false;
+    int64_t prerollStart_ = 0;
+};
+
+template<class Source, class Evaluator, class Encoder, class Evidence, class Clock, class Paused>
+NeuralRenderResult RunJob(const NeuralRenderRequest& request,
+                          OfflineNeuralRenderer::ProgressCallback progress,
+                          std::stop_token stop, Source& source, Evaluator& evaluator,
+                          Encoder& encoder, Evidence evidenceProvider, Clock clock, Paused paused,
+                          const NeuralSegmentSink& segments,
+                          const NeuralColdStartCallback& coldStart)
+{
+    NeuralRenderJob<Source, Evaluator, Encoder, Evidence, Clock, Paused> job(
+        request, std::move(progress), std::move(stop), source, evaluator, encoder,
+        std::move(evidenceProvider), std::move(clock), std::move(paused), segments, coldStart);
+    if (std::optional<NeuralRenderResult> ended = job.Prepare()) return std::move(*ended);
 
     // NVENC accepts odd dimensions but silently pads them to an even size,
     // which breaks exact source/neural pairing and cache validation. libx264's
@@ -1684,124 +2007,16 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // any size, and ShouldRetryWithSoftware never retries it.
     EncoderKind selected = request.quality == EncoderQuality::Lossless ? EncoderKind::Ffv1
         : (request.width % 2 || request.height % 2) ? EncoderKind::H264Software : EncoderKind::HevcNvenc;
-    AttemptResult attempt = runAttempt(selected);
+    AttemptResult attempt = job.RunAttempt(selected);
     if (attempt.failure == NeuralRenderFailure::Cancelled)
-        return cancelled(L"Neural render was cancelled.");
+        return job.Cancelled(L"Neural render was cancelled.");
     if (attempt.failure == NeuralRenderFailure::Encoder &&
         ShouldRetryWithSoftware(selected, attempt.encoderError)) {
-        cancelOutput();
-        std::error_code removeError;std::filesystem::remove(request.stagingVideoPath, removeError);
-        if (!reopenAtPreroll()) {
-            if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-            return fail(NeuralRenderFailure::Source,
-                        L"The source could not be restarted for software encoding.");
-        }
-        const NeuralRuntimeEvidence retryEvidence=
-            ParseNeuralRuntimeEvidence(evidenceProvider());
-        if(request.requireNeural&&!retryEvidence.Valid()){
-            return fail(NeuralRenderFailure::Neural,
-                        L"Feature 18 evidence was not valid before the software retry.");
-        }
-        // The retry is held to the reused-evaluator standard. The first pass
-        // already watched the log counter advance, which is what vouches for
-        // this process; the counter then stops at 60, and NVENC failing after
-        // the first 60 evaluations - every range render's preroll, every live
-        // session - left the retry resubmitting frame 0 120 times for a line
-        // that never came, then failing with "evidence did not advance". The
-        // backend's per-frame count and the timing floor below still judge
-        // every frame this pass captures.
-        holdToLogReceipt=false;
+        if (std::optional<NeuralRenderResult> ended = job.PrepareSoftwareRetry()) return std::move(*ended);
         selected=EncoderKind::H264Software;
-        attempt=runAttempt(selected);
+        attempt=job.RunAttempt(selected);
     }
-    // Read after the last attempt, and on every exit from it: the counters describe the
-    // job, so a software-encoder retry's second pass belongs in the same tally. Only the
-    // production adapter owns a guide generator; the test one is compiled past.
-    if constexpr(requires{evaluator.SceneCuts();})result.sceneCuts=evaluator.SceneCuts();
-    if (attempt.failure == NeuralRenderFailure::Cancelled)
-        return cancelled(L"Neural render was cancelled.");
-    if (attempt.failure != NeuralRenderFailure::None) {
-        cancelOutput();source.Close();
-        result.historyResets=attempt.historyResets;
-        return fail(attempt.failure, AttemptFailureDetail(attempt.failure));
-    }
-    source.Close();
-    result.metrics=attempt.metrics.Finish();
-    emit(NeuralRenderPhase::Encoding,attempt.frames,attempt.bytes,false);
-    emit(NeuralRenderPhase::Validating,attempt.frames,attempt.bytes,false);
-    result.evidence=ParseNeuralRuntimeEvidence(evidenceProvider());
-    result.historyResets=attempt.historyResets;
-    // Summarized before the verdicts below so a refusal carries the numbers it
-    // was based on into the receipt.
-    result.timing=SummarizeTiming(attempt,evaluator.PeakLocalVideoMemoryMiB());
-    // Everything from here to the timing floor judges the NEURAL pass, so a job
-    // that asked for Super Resolution alone is not held to any of it. Each one
-    // exists to stop frames that never went through feature 18 being published
-    // as neural output; an upscale-only job makes no such claim, and its result
-    // says neural=false with verifiedNeuralFrames=0 so nothing downstream can
-    // infer one. It is held to the opposite claim instead. With the add-on
-    // disabled the session log names no feature-18 evaluation; one that does
-    // means the add-on ran, and the frames are neural output under a label
-    // that says otherwise - exactly the byte-identical pair this job existed
-    // to end.
-    if(!request.requireNeural&&(result.evidence.feature18Created||result.evidence.feature18Evaluated)){
-        return fail(NeuralRenderFailure::Neural,
-                    L"The neural add-on ran in a job that asked for Super Resolution alone, "
-                    L"so its frames are not Super Resolution-only output.");
-    }
-    if(request.requireNeural&&!result.evidence.Valid()){
-        return fail(NeuralRenderFailure::Neural,
-                    L"Feature 18 runtime evidence was incomplete or contained a later failure.");
-    }
-    // The add-on's log counter can only be watched to advance once per process
-    // (see the receipt gate). A fresh evaluator is held to it for the job as a
-    // whole: the baseline was read when the feature was armed, so an advance
-    // the first pass watched still counts after a software-encoder retry, and
-    // a retry whose first pass never got that far is still refused when the
-    // counter never moved. Only the in-loop gate skips it on the retry. A
-    // reused evaluator cannot be held to it at all. Every job is held to the
-    // backend's own count as well, which is per process, monotonic, and has to
-    // have advanced at least once for every frame this attempt captured - the
-    // count the cache entry then carries as its own evidence.
-    if(request.requireNeural&&!evaluatorReused&&
-       result.evidence.highestObservedEvaluation<=successfulAttemptBaseline){
-        return fail(NeuralRenderFailure::Neural,
-                    L"Feature 18 runtime evidence did not advance after captured rendering.");
-    }
-    // The backend's count is NGX's own tally of Evaluate calls, which is the
-    // Super Resolution carrier whichever job this is. A job that asked for
-    // Super Resolution alone is held to it too: a captured frame NGX never
-    // evaluated is the source at its own size, not an upscale.
-    if(attempt.neuralEvaluations<attempt.frames){
-        std::wostringstream detail;
-        if(request.requireNeural){
-            detail<<L"The neural backend evaluated "<<attempt.neuralEvaluations
-                  <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
-                  <<L"are not all neural output.";
-        }else{
-            detail<<L"DLSS Super Resolution evaluated "<<attempt.neuralEvaluations
-                  <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
-                  <<L"are not all upscaled.";
-        }
-        return fail(NeuralRenderFailure::Neural,detail.str());
-    }
-    if(request.requireNeural&&!NeuralTimingClearsFloor(result.timing,outputWidth,outputHeight)){
-        std::wostringstream detail;
-        detail<<std::fixed<<std::setprecision(2)
-              <<L"The neural pass did not run: median neural GPU time was "<<result.timing.neuralGpuMsP50
-              <<L" ms per frame at "<<outputWidth<<L"x"<<outputHeight<<L", below the "
-              <<NeuralGpuMsFloor(outputWidth,outputHeight)
-              <<L" ms floor for that geometry, so the frames are upscaler output. "
-              <<L"Check that the neural add-on is loaded and that feature 18 stays armed, then render again.";
-        return fail(NeuralRenderFailure::Neural,detail.str());
-    }
-    result.ok=true;result.encoder=selected;result.frameCount=attempt.frames;
-    result.nativeEvaluations=attempt.neuralEvaluations;
-    result.verifiedNeuralFrames=request.requireNeural?attempt.frames:0;
-    result.firstTimestamp100ns=attempt.firstTimestamp;
-    result.duration100ns=attempt.lastTimestamp-attempt.firstTimestamp+frameDuration;
-    emit(NeuralRenderPhase::Ready,attempt.frames,attempt.bytes,false);
-    return result;
+    return job.Finish(attempt, selected);
 }
 
 // The processing-scale reduction, applied where the frame is read so it runs

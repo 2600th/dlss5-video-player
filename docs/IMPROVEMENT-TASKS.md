@@ -57,7 +57,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
 | **P3** | | | | |
-| [P3.4](#p34) | Extract testable units from `main.cpp` | M | Player | |
 | [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | |
 | [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | |
 | [P3.7](#p37) | Feed NVENC directly from D3D12 | M | Pipeline | |
@@ -128,22 +127,6 @@ Ref: [RTX Video SDK](https://developer.nvidia.com/blog/enhancing-low-resolution-
 ---
 
 # P3 — Strategic or large
-
-<a id="p34"></a>
-### P3.4 · Extract testable units from `main.cpp`
-
-`M` · **Player** · _old 3.14_
-
-`main.cpp` is now 7,852 lines, and `PlayerApp` holds about 83% of it. `Tick`,
-`Position` and `PerformSeek` depend on the concrete decoder, audio and renderer
-members, which is why P0.2 and P1.4 cannot be tested without hardware.
-
-**Do** — follow the existing `*Policy.h` pattern, not a new abstraction layer.
-Start with `ClampSeek` (`main.cpp:4480`), the render-pace load/save, and
-`ParseArgs`. Then split `StartNeuralJob` (`:6258`) and
-`OfflineNeuralRenderer::RunJob`.
-
----
 
 <a id="p35"></a>
 ### P3.5 · Prefer NVIDIA's signed runtime on RTX 50
