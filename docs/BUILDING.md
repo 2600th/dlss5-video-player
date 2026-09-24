@@ -1,6 +1,6 @@
 # Building and testing
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
+_Verified against main (9d3e6cc) on 2026-09-25._
 
 Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
 C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the
@@ -90,11 +90,14 @@ frame identity, update checks, the release API surface, prerender, playback and
 native UI regressions. Every test carries a time limit, and the real-media suite
 reports itself skipped rather than failed when FFmpeg is not staged.
 
-Twelve more are registered under the `gpu` label and need an RTX card with the
+Sixteen more are registered under the `gpu` label and need an RTX card with the
 neural runtime staged beside the executable: `UpscalingGpuSmoke`,
-`MediaGpuSmoke`, `NeuralRangeRenderSmoke`, `NeuralPreflightSmoke`,
-`ExportMatrixSmoke`, `DlssgProbeSmoke`, `DlssgEvaluateSmoke`, the four
-`FrameGenerationSmoke` registrations and `NetworkPreparedRendererSmoke`. That
+`UpscalingSrQualitySmoke`, `DebugViewGpuSmoke`, `MediaGpuSmoke`,
+`NvencDirectIdentitySmoke`, `NeuralRangeRenderSmoke`, `NeuralDirectEncodeSmoke`,
+`NeuralPreflightSmoke`, `ExportMatrixSmoke`, `DlssgProbeSmoke`,
+`DlssgEvaluateSmoke`, the four `FrameGenerationSmoke` registrations and
+`NetworkPreparedRendererSmoke` (a build with the RTX Video SDK adds
+`VsrGpuSmoke`). That
 last one is the `--gpu` case set of the `PlayerUiRegressionTests` binary rather
 than a target of its own: it drives the prepared network renderer path - the one
 a YouTube open commits through - which nothing else in the suite reaches.
@@ -104,7 +107,7 @@ whole session on its own. `ExportMatrixSmoke` renders all seven combinations of
 Super Resolution, neural rendering and frame generation through a 3.5 s 720p30
 clip and checks the geometry, the frame count and the bytes of each.
 
-One of the twelve skips on hardware that is working correctly.
+One of them skips on hardware that is working correctly.
 `DlssgEvaluateSmoke` needs three generated frames per source pair, and
 multi-frame generation is Blackwell-only, so every RTX 40 and earlier reports
 it skipped. `FrameGenerationSmoke` runs on `external/test-media/dlaa-smoke.mp4`

@@ -1,6 +1,6 @@
 # DLSS 5 Video Player
 
-_Verified against `main` (dced888) on 2026-09-24._
+_Verified against main (9d3e6cc) on 2026-09-25._
 
 **Put any video through NVIDIA's DLSS 5 neural renderer, and check every frame
 against the original.**
@@ -46,8 +46,8 @@ it has no runtime.
 
 > [!NOTE]
 > The video, the pictures above and the features marked **new** below come from
-> `main`, after v0.25.0: the compare views, subtitles, HDR, the render quality
-> ladder and the command line. The next release will carry them; until then,
+> `main`, after v0.25.0: the compare views, RTX VSR, subtitles, HDR, the render
+> quality ladder and the command line. The next release will carry them; until then,
 > [build it yourself](docs/BUILDING.md).
 
 ### Check what you downloaded
@@ -104,8 +104,13 @@ the render covered the whole video. Press `D` at the start to get one.
   DLSS 5, Original, Split, Wipe, **Difference** (where the model changed the
   picture, amplified), **Side by side** and **2 × 2**, a Mix slider from the
   original to past the render, zoom to 8x, a **loupe** that puts both at 4x
-  under the pointer, and press-and-hold for the original. Every view is one
-  frame at one timestamp, so the playhead never moves when you switch.
+  under the pointer, a mask that limits DLSS 5 to part of the frame, and
+  press-and-hold for the original. Every view is one frame at one timestamp,
+  so the playhead never moves when you switch.
+- **Compares against NVIDIA's own upscaler.** *New.* In builds made with the
+  optional RTX Video SDK, `R` shows RTX Video Super Resolution of the original
+  as a view of its own and in the 2 × 2, and `Shift+R` compares the other views
+  against it. It never enters a render or the cache.
 - **Saves the evidence.** *New.* **File > Save comparison image** writes exactly
   what the picture shows, with a footer that records the video, the frame, the
   view, a digest of the neural settings and the runtime.
@@ -115,8 +120,9 @@ the render covered the whole video. Press `D` at the start to get one.
   renders in SDR; on an HDR display the original is still shown in HDR.
 - **Keeps your renders, at the quality you choose.** A render of the whole video
   is reused whenever the source, runtime and settings still match. *New:* a
-  Standard, High (10-bit) or Lossless render quality, and a dithered 8-bit
-  capture by default.
+  Standard, High (10-bit) or Lossless render quality, a dithered 8-bit
+  capture by default, and **Advanced > Render report** for the flicker, grain
+  and colour shift a render added.
 - **Exports.** PNG or JPEG for photos, GIF for animations, MP4 or MKV for video.
   MKV keeps the source audio, subtitles and chapters without re-encoding.
   **Export with DLSS stages** (`Ctrl+S`) runs any mix of Super Resolution,
@@ -129,7 +135,10 @@ the render covered the whole video. Press `D` at the start to get one.
   bicubic upscale on every clip measured, because it is built for rendered
   games, not decoded footage.
 - **Tunes the model.** Neural settings live at `Ctrl+N`. Change one while paused
-  and that frame re-renders, so you judge on the picture.
+  and that frame re-renders, so you judge on the picture. *New:* **DLSS >
+  Processing scale** runs the model at 75% or 50% of the source, for speed.
+- **Plays like a player.** *New.* Audio passthrough of AC-3, E-AC-3 and DTS to
+  a receiver, and Windows media controls with taskbar thumbnail buttons.
 - **Comes with test material.** Seven official game trailers under
   **File > Game trailers** and on the start screen, each under three minutes and
   chosen for faces, skin and light.
@@ -280,9 +289,7 @@ separate helper process; playback upscaling runs in the player.
 size and frame rate, steps to reproduce, and log excerpts. Remove private paths
 and signed media URLs from logs first.
 
-**Pull requests:** `ctest -LE gpu` must pass on a clean checkout of `main`.
-Renderer changes also need `ctest -L gpu` on an RTX card. Keep the
-source-resolution and neural-validation contracts intact.
+**Pull requests:** [CONTRIBUTING.md](CONTRIBUTING.md) lists the checks.
 
 ## Credits and license
 

@@ -1,10 +1,6 @@
 # Using DLSS 5 Video Player
 
-_Verified against 0.25.0 (1988cac) on 2026-09-22._
-
-This guide covers whole-video session coverage and seeking,
-recent history, settings-aware cache identity, media export and
-highest-bitrate YouTube selection.
+_Verified against main (9d3e6cc) on 2026-09-25._
 
 The interface is English-only. It does not load external language packs;
 legacy language settings in the INI are ignored.
@@ -529,8 +525,7 @@ closes current playback and removes owned cache data, keeping recent titles and
 original-source references. Work belonging to another player that is still
 running - its live session and its unfinished renders - is kept, and so is any
 entry that player has open. Clearing is blocked during acquisition, rendering or
-export. Retention is unbounded and manual: not a count, not a byte quota, and
-not a backup.
+export.
 
 ## Saved settings and reproducibility
 
@@ -668,9 +663,6 @@ render start and completion prevents publication of that result.
 The snapshot includes add-on enable state and the neural add-on's settings;
 overlay appearance is excluded. Playback adjustments and runtime upscaling do
 not affect the offline render. This adds no unverified sliders or presets.
-
-Launch `DLSSVideoPlayer.exe` directly. Select optional 2160p playback upscaling
-in the player; the old quality arguments and 4K launch scripts are retired.
 
 ## Choosing the audio track
 
@@ -953,8 +945,9 @@ remain separate; they are not enhanced or burned into the image, and the
 subtitles the player shows (see "Subtitles") never reach an export.
 
 The output uses the cached video, even when the original view is selected.
-Playback image adjustments and runtime upscaling are not baked in. The current
-cache is 8-bit; another container or bit-depth label cannot recover lost precision.
+Playback image adjustments and runtime upscaling are not baked in. At the
+default Standard quality the cache is 8-bit, and no container can recover
+precision it lost.
 
 MKV must support every selected codec. Incompatible subtitles such as mov_text
 produce an explicit error instead of being silently discarded or converted.
