@@ -179,14 +179,16 @@ inline uint64_t DefaultDurationNanoseconds(Rational rate)
 // NVENC has coded that frame. The render thread takes a surface for every
 // capture and waits when none is free, so the pool must be deep enough that the
 // frames holding surfaces never depend on the render thread to finish:
-//  * the capture ring's other slots, whose frames the render thread still owns;
+//  * the capture ring, whose frames the render thread still owns - the one
+//    being captured among them;
 //  * the B-frames NVENC holds back for their next anchor (frameIntervalP - 1),
 //    whose anchor may be one of those ring frames;
 //  * the lookahead, which keeps that many more inputs before it codes one;
 //  * the frames whose output the encoder has not locked yet (lockDepth);
-// plus the one being captured and two frames of slack so a jittery encode does
-// not stall the render thread. Measured need is the same as FFmpeg's own input
-// surface count for this configuration, max(4, 4 * frameIntervalP).
+// plus two frames of slack so a jittery encode does not stall the render
+// thread. For p5's frameIntervalP of 4 that is 11 surfaces, where FFmpeg's own
+// session allocates max(4, 4 * frameIntervalP) = 16 input surfaces for the same
+// configuration.
 inline uint32_t SurfacePoolSize(uint32_t captureSlots, int32_t frameIntervalP, uint32_t lookahead,
                                 uint32_t lockDepth)
 {
@@ -242,8 +244,8 @@ inline constexpr uint32_t kFfmpegGopSize = 250;
 inline constexpr uint32_t kFfmpegMaxRegisteredFrames = 64;
 
 struct Plan {
-    // What FFmpeg would hand nvEncInitializeEncoder, and the two numbers the
-    // direct session sizes itself from.
+    // The two numbers of the final configuration the direct session sizes its
+    // surfaces and bitstream buffers from.
     uint32_t lookahead{};
     int32_t frameIntervalP{1};
 };
