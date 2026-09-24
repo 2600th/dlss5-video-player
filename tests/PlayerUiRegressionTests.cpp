@@ -1438,16 +1438,25 @@ struct PlayerAppTestAccess {
         const bool visible = IsWindowVisible(app.m_hwnd) != FALSE;
         WINDOWPLACEMENT moved = original;
         moved.showCmd = SW_SHOWNOACTIVATE;
-        moved.rcNormalPosition = RECT{120, 90, 120 + 1500, 90 + 900};
+        // Sized to fit the work area this runs on. Windows shrinks a placement
+        // that does not fit, and CI's virtual display is smaller than 1500x900:
+        // the test then read back Windows' correction, not the player's save.
+        // (Placement rectangles are in work-area coordinates.)
+        RECT work{};
+        REQUIRE(SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) != FALSE);
+        const LONG width = std::min<LONG>(1500, (work.right - work.left) - 240);
+        const LONG height = std::min<LONG>(900, (work.bottom - work.top) - 180);
+        REQUIRE(width > 200 && height > 200);
+        moved.rcNormalPosition = RECT{120, 90, 120 + width, 90 + height};
         SetWindowPlacement(app.m_hwnd, &moved);
         app.SaveWindowPlacement();
         wchar_t text[128]{};
         GetPrivateProfileStringW(L"Window", L"Placement", L"", text, 128, app.SettingsPath().c_str());
         const auto saved = window_placement::Parse(text);
         REQUIRE(saved.has_value());
-        CHECK(saved->normal.left == 120 && saved->normal.right == 1620);
+        CHECK(saved->normal.left == 120 && saved->normal.right == 120 + width);
         // Somewhere else, then restored.
-        moved.rcNormalPosition = RECT{300, 300, 300 + 1500, 300 + 900};
+        moved.rcNormalPosition = RECT{60, 60, 60 + width, 60 + height};
         SetWindowPlacement(app.m_hwnd, &moved);
         app.RestoreWindowPlacement();
         WINDOWPLACEMENT restored{sizeof(restored)};
@@ -1550,14 +1559,25 @@ struct PlayerAppTestAccess {
             DeleteObject(bitmap);
             DeleteDC(dc);
 
-            // Moving to a monitor at 1.5x: the controls, the font and the
-            // client all follow, from the dialog's own baseline.
-            const UINT larger = dpi * 3 / 2;
+            // Moving to a monitor at a higher dpi: the controls, the font and
+            // the client all follow, from the dialog's own baseline. 1.5x where
+            // the scaled window fits this display, else the largest step that
+            // does: Windows caps a window at the screen's maximum tracking size,
+            // so on CI's small virtual display a 1.5x Neural settings window was
+            // clamped and the client check measured the cap, not the dialog.
             RECT button96{};
             GetWindowRect(button, &button96);
             RECT window{};
             GetWindowRect(dialog, &window);
             const DWORD style = DWORD(GetWindowLongPtrW(dialog, GWL_STYLE)), exStyle = DWORD(GetWindowLongPtrW(dialog, GWL_EXSTYLE));
+            UINT larger = 0;
+            for (const UINT candidate : {dpi * 3 / 2, dpi * 5 / 4, dpi * 9 / 8}) {
+                RECT scaled{0, 0, MulDiv(dialogCase.designW, int(candidate), 96), MulDiv(dialogCase.designH, int(candidate), 96)};
+                AdjustWindowRectForDpi(scaled, style, FALSE, exStyle, dpi);
+                if (scaled.right - scaled.left <= GetSystemMetrics(SM_CXMAXTRACK) &&
+                    scaled.bottom - scaled.top <= GetSystemMetrics(SM_CYMAXTRACK)) { larger = candidate; break; }
+            }
+            REQUIRE(larger > dpi);
             // What Windows would suggest: the client scaled to the new dpi. The
             // frame is added at the monitor's real dpi, because only the
             // message is faked here and the frame Windows draws is not.
