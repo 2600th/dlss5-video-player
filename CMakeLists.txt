@@ -476,6 +476,10 @@ if(BUILD_TESTING)
     # identical frames used to do. See RunSrQualityProbe.
     add_test(NAME UpscalingSrQualitySmoke COMMAND UpscalingGpuSmoke
         "${FFMPEG_STAGED_DIR}" sr-quality "${CMAKE_BINARY_DIR}/sr-quality")
+    # The motion and depth views on a paused frame whose guides were never drawn
+    # named the wrong resource states; this holds the renderer to no debug-layer
+    # error before and after the first guided frame. Needs no clip.
+    add_test(NAME DebugViewGpuSmoke COMMAND UpscalingGpuSmoke debug-views)
     add_test(NAME MediaGpuSmoke COMMAND MediaGpuSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
     add_test(NAME NeuralRangeRenderSmoke COMMAND NeuralRangeRenderSmoke
@@ -631,7 +635,7 @@ if(BUILD_TESTING)
     # "skipped" would hide the regressions a GPU runner exists to catch. Each
     # smoke opens with gpu_test_gate::SkipWithoutGpu(), so `ctest -L gpu` on a
     # machine with no adapter skips rather than reporting five hard failures.
-    set_tests_properties(UpscalingGpuSmoke UpscalingSrQualitySmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
+    set_tests_properties(UpscalingGpuSmoke UpscalingSrQualitySmoke DebugViewGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
         FrameGenerationSmoke FrameGenerationSmokeTextured FrameGenerationSmokeSceneCut
         FrameGenerationSmokeStreamSource NeuralRangeRenderSmoke
         PROPERTIES LABELS gpu SKIP_RETURN_CODE 125)

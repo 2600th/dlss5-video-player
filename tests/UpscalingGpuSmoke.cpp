@@ -81,6 +81,12 @@ int RunSubtitleUploadProbe();
 // for a comparison against ffmpeg's float chain.
 int RunHdrToneMapProbe(const wchar_t* source,const wchar_t* rawOut);
 
+// `debug-views` as the only argument shows the motion and depth views on a paused
+// frame whose guides were never drawn - Super Resolution off, the final view - then
+// on frames that drew them, under the debug layer: every step must leave no error.
+// Needs no source clip.
+int RunDebugViewProbe();
+
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if(argc==4&&std::wstring_view(argv[2])==L"sr-quality")return RunSrQualityProbe(argv[1],argv[3]);
@@ -95,6 +101,7 @@ int wmain(int argc,wchar_t** argv) {
     if(argc==4&&std::wstring_view(argv[3])==L"device-loss")return RunDeviceLossProbe(argv[1],std::wcstoul(argv[2],nullptr,10));
     if(argc==3&&std::wstring_view(argv[2])==L"hdr-output")return RunHdrOutputProbe(argv[1]);
     if(argc==2&&std::wstring_view(argv[1])==L"subtitle-upload")return RunSubtitleUploadProbe();
+    if(argc==2&&std::wstring_view(argv[1])==L"debug-views")return RunDebugViewProbe();
     if((argc==3||argc==4)&&std::wstring_view(argv[1])==L"hdr-tonemap")return RunHdrToneMapProbe(argv[2],argc==4?argv[3]:nullptr);
     if(argc!=3)return 2; // source path, target height (1440 or 2160)
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
@@ -436,9 +443,9 @@ int RunHdrOutputProbe(const wchar_t* source)
             if(ok)++presented;
         }
         renderer->SetComparison({});
-        // The debug views draw guides, so each is shown on a frame rendered with one:
-        // presenting a guide view before any guided frame reads textures that were
-        // never drawn, which the debug layer reports whatever the swapchain is.
+        // The debug views draw guides, so each is shown on a frame rendered with one.
+        // (A guide view before any guided frame is DebugViewGpuSmoke's case: the
+        // renderer clears the never-drawn guides into their read states.)
         uint32_t debugViews=0;TemporalGuideGenerator guides;
         for(const auto view:{D3D12Renderer::DebugView::MotionVectors,D3D12Renderer::DebugView::Depth,D3D12Renderer::DebugView::Final}){
             if(!ok||!hdrOn)break;
@@ -829,4 +836,59 @@ int RunHdrToneMapProbe(const wchar_t* source,const wchar_t* rawOut)
         code=identical&&tables==4&&frames>0&&allGpu&&decoder.ToneMapsItself()?0:6;
     }
     MFShutdown();CoUninitialize();return code;
+}
+
+int RunDebugViewProbe()
+{
+    Microsoft::WRL::ComPtr<ID3D12Debug> debug;
+    const bool debugLayer=SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)));
+    if(debugLayer)debug->EnableDebugLayer();
+    using Access=D3D12RendererTestAccess;
+    constexpr uint32_t w=640,h=360;
+    const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(w,h,30.0);
+    std::vector<uint8_t> frame(size_t(w)*h*4u);
+    for(size_t i=0;i<frame.size();++i)frame[i]=uint8_t((i*7u)&0xFFu);
+    HWND window=CreateWindowExW(0,L"STATIC",L"debug view probe",WS_POPUP,0,0,w,h,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+    int code=1;
+    {
+        auto renderer=MakeD3D12Renderer();
+        renderer->SetPresentFollowsWindow(true);
+        bool ok=renderer->Initialize(window,w,h,w,h,gw,gh,DefaultNeuralCarrierQuality());
+        if(ok)renderer->SetDLSS(false);
+        // A paused frame rendered with nothing reading the guides - Super Resolution
+        // off, the final view - so the guide pass never ran: exactly the frame the
+        // player is on when a guide view is picked from the menu while paused.
+        ok=ok&&renderer->RenderFrame(frame.data(),frame.size(),nullptr,0,gw,gh,true,false,33.3f);
+        const DebugLayerReport before=ok?ReadDebugLayer(Access::Device(*renderer),"before-views"):DebugLayerReport{};
+        uint32_t presented=0;
+        std::vector<uint8_t> composed;uint32_t cw=0,ch=0;
+        for(const auto view:{D3D12Renderer::DebugView::MotionVectors,D3D12Renderer::DebugView::Depth,
+                             D3D12Renderer::DebugView::Input,D3D12Renderer::DebugView::MotionVectors,D3D12Renderer::DebugView::Final}){
+            if(!ok)break;
+            renderer->SetDebugView(view);
+            ok=renderer->PresentCurrent()&&renderer->CaptureComposedView(composed,cw,ch)&&!renderer->GpuUnusable();
+            if(ok)++presented;
+        }
+        const DebugLayerReport paused=ok?ReadDebugLayer(Access::Device(*renderer),"guide-views-before-guides"):DebugLayerReport{};
+        // Then a frame that does draw the guides, and the views over it.
+        uint32_t guided=0;TemporalGuideGenerator guides;
+        for(const auto view:{D3D12Renderer::DebugView::MotionVectors,D3D12Renderer::DebugView::Depth}){
+            if(!ok)break;
+            renderer->SetDebugView(view);
+            VideoFrame source;source.bgra=frame;source.frameNumber=guided+1;source.timestamp100ns=int64_t(guided+1)*333333;
+            GuideFrame guide;
+            const FrameIdentity id=IdentityOf(source,guides.HistoryGeneration(),0,guided?HistoryReset::None:HistoryReset::FirstFrame);
+            ok=guides.Generate(source.bgra.data(),source.bgra.size(),w,h,w,h,30.0,id,guide)&&
+               renderer->RenderFrame(source.bgra.data(),source.bgra.size(),id,guide,33.3f)&&renderer->PresentCurrent();
+            if(ok)++guided;
+        }
+        const DebugLayerReport after=ok?ReadDebugLayer(Access::Device(*renderer),"guide-views-after-guides"):DebugLayerReport{};
+        std::cout<<"debug-views: presented="<<presented<<" guided="<<guided<<" composed="<<cw<<"x"<<ch
+                 <<" debugLayer="<<(debugLayer?"on":"off")<<" errors before="<<before.errors<<" paused="<<paused.errors
+                 <<" after="<<after.errors<<"\n";
+        code=ok&&presented==5&&guided==2&&before.errors==0&&paused.errors==0&&after.errors==0?0:6;
+        renderer.reset();
+    }
+    DestroyWindow(window);
+    return code;
 }

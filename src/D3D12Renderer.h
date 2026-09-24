@@ -780,6 +780,9 @@ private:
                              uint32_t bytesPerPixel, uint32_t srvIndex, const wchar_t* name);
     // PresentCurrent's draw into `rtv`: viewport, constants, program, the view it reads.
     // hdrTarget: `rtv` is the HDR backbuffer, which takes the HDR compositor.
+    // Puts the motion and depth guides in the states the guide views read them in,
+    // clearing them first when no frame has drawn them yet. See the definition.
+    void PrepareGuideView(ID3D12GraphicsCommandList* cmd);
     void RecordViewDraw(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
                         const present_scale::Target& target, bool hdrTarget);
     // The program and view the backbuffer pass binds for the current debug view,

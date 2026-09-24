@@ -1628,6 +1628,7 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         ID3D12PipelineState* presentPso=BackbufferProgram(target.scaled,m_hdrOutput);
         // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
         // debug/fallback presentation pass is temporarily made pixel-shader readable.
+        if(m_debugView==DebugView::MotionVectors||m_debugView==DebugView::Depth)PrepareGuideView(cmd);
         ID3D12Resource* debugPixelResource=nullptr;
         D3D12_RESOURCE_STATES debugBefore=GuideReadState;
         switch(m_debugView){
@@ -2452,6 +2453,27 @@ bool D3D12Renderer::PresentCurrent(){
     return SignalFrameSlot(slot)&&presented;
 }
 
+// A guide view samples the motion and depth textures as they stand. A frame draws
+// them only when something reads them - Super Resolution, or a guide view already
+// up - so a paused frame the view is switched to has never drawn them: the motion
+// texture is still the render target it was created as and depth is in DEPTH_WRITE,
+// and the view's barriers named the read states, which the debug layer reported as
+// errors and which left the next guided frame's own barriers wrong too. Such
+// guides are cleared to what a frame without motion or depth reads as - zero motion,
+// far depth, the values the guide pass starts from - and moved to their read states;
+// the next frame that draws them overwrites both.
+void D3D12Renderer::PrepareGuideView(ID3D12GraphicsCommandList*cmd){
+    if(m_guidesInRT){
+        const FLOAT none[4]{};
+        cmd->ClearRenderTargetView(RTV(FrameCount+1),none,0,nullptr);
+        Barrier(cmd,m_motion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,GuideReadState);m_guidesInRT=false;
+    }
+    if(m_depthInWrite){
+        cmd->ClearDepthStencilView(DSV(),D3D12_CLEAR_FLAG_DEPTH,1.0f,0,0,nullptr);
+        Barrier(cmd,m_depth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,DepthGuideReadState);m_depthInWrite=false;
+    }
+}
+
 void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCRIPTOR_HANDLE rtv,const present_scale::Target&target,bool hdrTarget){
     D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};
     D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};
@@ -2463,6 +2485,7 @@ void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCR
     SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
     ID3D12PipelineState* presentPso=BackbufferProgram(target.scaled,hdrTarget);
 
+    if(m_debugView==DebugView::MotionVectors||m_debugView==DebugView::Depth)PrepareGuideView(cmd);
     ID3D12Resource* debugPixelResource=nullptr;
     D3D12_RESOURCE_STATES debugBefore=GuideReadState;
     switch(m_debugView){
