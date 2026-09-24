@@ -8871,8 +8871,10 @@ private:
             const RECT spinner{sr.left,sr.top,sr.left+Dip(18),sr.top+Dip(18)};
             DrawActivitySpinner(dc,spinner,ResolveActivityVisual({},ActivityElapsedMs(),0,0,false,m_activityMotionEnabled).spinnerStep);sr.left+=Dip(25);
         }
+        // A toast takes the start of the row and the line moves over for it.
+        if(const LONG toastEnd=PaintToast(dc,RECT{statusRow.text.left-Dip(2),statusRow.text.top,statusRow.text.right,statusRow.text.bottom});toastEnd>statusRow.text.left-Dip(2))
+            sr.left=std::min<LONG>(sr.right,toastEnd+Dip(10));
         DrawTextW(dc,m_cachedStatus.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
-        PaintToast(dc,RECT{statusRow.text.left-Dip(2),statusRow.text.top,statusRow.text.right,statusRow.text.bottom});
         if(volumeRect){const RECT& vr=*volumeRect;std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");RECT label{vr.right+Dip(8),vr.top,std::max<LONG>(vr.right+Dip(8),c.right-Dip(16)),vr.bottom};DrawTextW(dc,vol.c_str(),int(vol.size()),&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);}SelectObject(dc,of);
     }
 
@@ -10005,10 +10007,13 @@ private:
     // a mark on its left edge (teal for a render, the accent otherwise). It
     // fades by mixing toward the strip, which is one flat colour, and rises
     // from below the row, clipped to it.
-    void PaintToast(HDC dc,const RECT& row){
+    // Returns where the panel ends, so the status line can start after it
+    // instead of running on out from under it; the row's left edge when there
+    // is no toast.
+    LONG PaintToast(HDC dc,const RECT& row){
         const auto frame=m_toast.At(Clock::now(),m_activityMotionEnabled);
-        if(!frame.visible||row.right<=row.left)return;
-        const int saved=SaveDC(dc);if(!saved)return;
+        if(!frame.visible||row.right<=row.left)return row.left;
+        const int saved=SaveDC(dc);if(!saved)return row.left;
         IntersectClipRect(dc,row.left,row.top,row.right,row.bottom);
         const HGDIOBJ oldFont=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
         SIZE text{};GetTextExtentPoint32W(dc,m_toastText.c_str(),int(m_toastText.size()),&text);
@@ -10027,6 +10032,7 @@ private:
         RECT label{panel.left+Dip(3+10),panel.top,panel.right-Dip(12),panel.bottom};
         DrawTextW(dc,m_toastText.c_str(),-1,&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         SelectObject(dc,oldFont);RestoreDC(dc,saved);
+        return panel.right;
     }
     // Buffering panel. A popup owned by the main window, because the video is a
     // D3D12 child window that a sibling would have to fight for z-order.

@@ -332,14 +332,15 @@ never decorates. The numbers live in `src/ChromeMotionPolicy.h`, with tests.
 | Compare mark | the compare mode changes | slides from the old segment to the new over 160 ms, ease-out | jumps |
 | Comparison tags | the compare mode changes | fade in over 120 ms, ease-out (the compositor's tag alpha) | there at once |
 | Start tile lift | pointer on a tile | rises 2 dip, picture +6% brighter, blue edge, on the hover fade | lands at once |
-| Toast | a file saved, a subtitle shift, a whole video rendered | rises 8 dip and fades in over 160 ms (ease-out), holds 2.4 s, fades out over 140 ms (ease-in); a second one replaces it without rising | there for the hold, then gone |
+| Toast | a file saved, a subtitle shift, a whole video rendered | rises 8 dip into the status row and fades in over 160 ms (ease-out), holds 2.4 s, fades out over 140 ms (ease-in), repainted at 30 Hz; a second one replaces it without rising | there for the hold, then gone |
 | Rendering-now hatch | a live job is running | drifts with the 50 ms activity timer | still hatch, 1 s repaint |
 
 Rules:
 - 120-220 ms for anything that answers the pointer; ease-out when something
   arrives, ease-in when it leaves; no bounce, no overshoot.
 - A timer runs only while something is moving, and it repaints only the
-  rectangle that moves. Chrome animation must never cost a video frame:
+  rectangle that moves; a paint draws only what that rectangle reaches.
+  Moments that arrive during playback (the glow, a toast) repaint at 30 Hz. Chrome animation must never cost a video frame:
   the playback-health line (`Playback health: ... dropped=`) is the measure.
 - Every animation has a static equivalent that says the same thing.
 - Nothing flashes over the picture.
@@ -355,11 +356,12 @@ Rules:
   control at its default shows no fill. A value bubble appears over the knob
   only where it cannot cover the picture (the volume); the Mix's value is
   already read out beside its track.
-- **Toast**: a 34 dip Inactive-grey panel with an 8 dip radius and a 3 dip
-  mark on its left edge (teal for a render, the accent otherwise), at the
-  picture's bottom-left above the strip, never over the compare seam or the
-  tags. It takes neither the mouse nor the focus. The status line keeps the
-  same notice.
+- **Toast**: an Inactive-grey panel with a 4 dip radius and a 3 dip mark on
+  its left edge (teal for a render, the accent otherwise), at the start of the
+  status row; the line moves over for it. It is painted by the strip, never
+  as a window over the picture: a layered popup over the swap chain cost
+  frames (6, 6 and 2 dropped at a render's completion, against 0, 0 and 1).
+  The status line keeps the same notice after it goes.
 - **Dialog group heading**: Segoe UI 11 dip semibold, upper case, tracked
   1 dip, in SecondaryText, with a `RGB(62,65,70)` hairline to the column's
   edge. It labels a group; it is never a decorative kicker.
