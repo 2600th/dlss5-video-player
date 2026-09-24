@@ -470,6 +470,17 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 }
 .readout__k { color: var(--flag); }
 .readout__v { color: var(--text-dim); }
+/* The limits ledger: the same key/value shape, but its values are sentences,
+   so they are set in the body voice. Only the measured figures inside them
+   switch to the Data voice. */
+.readout__v--prose {
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  letter-spacing: 0;
+  max-width: var(--measure);
+}
+.readout__v--prose .data { font-size: 0.86em; color: var(--text); }
 
 /* --- beats ---------------------------------------------------------------- */
 
@@ -651,6 +662,8 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   padding-left: 1rem;
   position: relative;
 }
+/* A flag or a command is one word to the reader: never break it at a hyphen. */
+.matrix__list code { white-space: nowrap; }
 /* A tick on the rule, not a bullet glyph. */
 .matrix__list li::before {
   content: '';

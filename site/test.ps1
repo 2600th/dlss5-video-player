@@ -355,6 +355,25 @@ Test-Case 'the binding disclaimers survive into the page' {
     Assert-Contains $htmlFull 'not an NVIDIA product' 'community-project notice present'
 }
 
+Test-Case 'the honest limits are stated beside the features' {
+    # The page sells on evidence, so the caveats are part of the pitch rather
+    # than fine print: the hardware floor, the measured case where DLSS Super
+    # Resolution loses to bicubic, and the unsigned runtime.
+    $limits = [regex]::Match($htmlFull, '(?s)<section class="section" id="limits">(.*?)</section>').Groups[1].Value
+    Assert-True ($limits.Length -gt 0) 'the limits section ships'
+    Assert-Contains $limits '610.47' 'the driver floor is stated'
+    Assert-Contains $limits 'bicubic' 'Super Resolution losing to bicubic on video is stated'
+    Assert-Contains $limits 'unsigned' 'the unsigned runtime is stated'
+    Assert-Contains $limits 'untested' 'the untested GPU generations are named'
+}
+
+Test-Case 'the FAQ answers what a first-time visitor asks' {
+    $visible = @([regex]::Matches($htmlFull, '<summary>(.*?)</summary>') | ForEach-Object { $_.Groups[1].Value })
+    foreach ($topic in @('safe', 'unsigned', 'GPU', 'render take', 'upload')) {
+        Assert-True (@($visible | Where-Object { $_ -like "*$topic*" }).Count -eq 1) "one question covers '$topic'"
+    }
+}
+
 Test-Case 'structured data is valid JSON and describes this release' {
     $m = [regex]::Match($htmlFull, '(?s)<script type="application/ld\+json">(.*?)</script>')
     Assert-True $m.Success 'a JSON-LD block is present'

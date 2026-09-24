@@ -62,12 +62,14 @@
       "image": "{{SITE_URL}}assets/hero/social-card.jpg",
       "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
       "featureList": [
-        "Neural rendering while playback continues",
-        "Frame-accurate comparison of the original and the render",
+        "DLSS 5 neural rendering while the video plays",
+        "The original and the render compared on the same frame: split, wipe, side by side, 2x2, Difference and a loupe",
         "Seek anywhere, rendered or not",
-        "Export to PNG, JPEG, GIF, MP4 or MKV",
-        "Optional DLSS Super Resolution",
-        "Renders are cached and reused"
+        "HDR10 and HLG tone mapping, and subtitles drawn after the render",
+        "A constant-quality render cache, reused while the source, runtime and settings match",
+        "Export to PNG, JPEG, GIF, MP4 or MKV, from the player or the --render command line",
+        "Super Resolution, neural rendering and frame generation combined in one export",
+        "SHA-256 checksums and signed build provenance"
       ],
       "codeRepository": "{{REPO_URL}}"
     },
@@ -77,33 +79,38 @@
       "mainEntity": [
         {
           "@type": "Question",
-          "name": "Why is the runtime unsigned?",
-          "acceptedAnswer": { "@type": "Answer", "text": "The neural runtime is a modified community build of NVIDIA's, not a redistribution of a signed NVIDIA package. Nobody is in a position to sign it, so it ships unsigned and says so. If that is not acceptable to you, take the core package and supply your own runtime." }
+          "name": "Is it safe to run?",
+          "acceptedAnswer": { "@type": "Answer", "text": "It is open source and says what it contains, but part of it is unsigned, so decide with that in view. Each zip has a SHA-256 beside it. The core zip is built by CI from this repository and carries a signed build attestation (gh attestation verify); the complete zip is assembled by the maintainer and has a checksum only. Inside either, verify_package.ps1 checks every file against a pinned manifest before the first run. The exception is the neural runtime, a modified community build nobody can sign. Scan it as you would any unsigned software, or take the core zip and supply your own." }
         },
         {
           "@type": "Question",
-          "name": "Do I need an RTX card?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Yes, for neural rendering, along with NVIDIA driver 610.47 or newer. The player itself opens and plays video without one; the render is what needs the hardware." }
+          "name": "Why is the neural runtime unsigned?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Because it has been modified. It includes NVIDIA's neural DLL patched to run on RTX 40 cards, which invalidates NVIDIA's signature, alongside community ReShade and RenoDX files that were never signed. It is not a redistribution of a signed NVIDIA package and nobody is in a position to re-sign it, so it ships unsigned and says so. Its files are pinned by size and SHA-256, and the package verifier rejects anything that has drifted." }
         },
         {
           "@type": "Question",
-          "name": "Does it upload my video anywhere?",
-          "acceptedAnswer": { "@type": "Answer", "text": "No. Rendering runs on your own GPU and the cache is on your own disk. The only network traffic is fetching a YouTube link if you paste one." }
+          "name": "Which GPUs does it need?",
+          "acceptedAnswer": { "@type": "Answer", "text": "An NVIDIA RTX card and driver 610.47 or newer for neural rendering; with an older driver the player says so up front. It has been checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack native FP8 and should be several times slower; nobody has tested one yet. The player itself opens and plays video without one; the render is what needs the hardware." }
         },
         {
           "@type": "Question",
           "name": "How long does a render take?",
-          "acceptedAnswer": { "@type": "Answer", "text": "It depends on the card, the resolution and the clip. The point of the design is that you do not wait for it: playback joins the render a few seconds after you press D, and the rest fills in while you watch." }
+          "acceptedAnswer": { "@type": "Answer", "text": "You do not wait for it to start: playback joins the render a few seconds after you press D, and the rest fills in while you watch. A live 1080p30 session costs 8.4 ms a frame on an RTX 5090 and 15.3 ms on an RTX 4080 SUPER, both faster than the video plays; 1440p30 on the 5090 costs 15.4 ms. A whole 4K film on the 4080 SUPER rendered at 14.8 frames a second. After your first session the player knows your GPU and warns you before a video it expects to fall behind on." }
         },
         {
           "@type": "Question",
-          "name": "What is frame generation, and is it the same thing?",
-          "acceptedAnswer": { "@type": "Answer", "text": "No. Neural rendering rebuilds detail in the frames a video already has; frame generation makes new frames between them, so a 30 fps clip becomes 60. It runs as a conversion rather than during playback - DLSS > Generate frames writes a new file, shows the time left, then switches to the result where you were watching. The multiple is yours to set, from 2x up to as many as your display can show evenly. The two features are independent: use either, or both." }
+          "name": "Does it upload my video anywhere?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. Rendering runs on your GPU and the cache stays on your disk. The player goes online to fetch a YouTube link you paste, and once a day to ask GitHub whether there is a new release, which [Updates] Enabled=0 in its settings file turns off." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does it upscale video too?",
+          "acceptedAnswer": { "@type": "Answer", "text": "It can, with DLSS Super Resolution, but that is off by default because on video it does not beat a plain scaler: from 960×540 to 1080p on six clips, a bicubic upscale scored higher VMAF every time. DLSS Super Resolution is built for rendered games, not decoded footage, so turn it on for its look, not for detail. Neural rendering itself keeps the source resolution." }
         },
         {
           "@type": "Question",
           "name": "Can I keep the result?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Yes - PNG or JPEG for photos, GIF for animations, MP4 or MKV for video. MKV keeps the source audio, subtitles and chapters without re-encoding them." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video, from the player or from a script with --render. MKV keeps the source audio, subtitles and chapters without re-encoding them. Export with DLSS stages writes Super Resolution, neural rendering and frame generation into one file, in NVIDIA's order." }
         }
       ]
     }
@@ -123,7 +130,8 @@
   </a>
   <nav class="masthead__nav">
     <a href="#evidence">The difference</a>
-    <a href="#how">How it works</a>
+    <a href="#features">Features</a>
+    <a href="#faq">FAQ</a>
     <a class="masthead__nav-primary" href="#download">Download</a>
     <!-- The mark is the one icon most visitors recognise without reading;
          below 34rem it stands alone, and the label stays in the accessible
@@ -178,11 +186,11 @@
   </figure>
 
   <div class="hero__type">
-    <h1 class="hero__headline">The same frame,<br>rendered twice.</h1>
+    <h1 class="hero__headline">See what DLSS&nbsp;5 does to your videos.</h1>
     <p class="hero__lede">
-      Point a video, photo or GIF at NVIDIA's DLSS&nbsp;5 neural renderer and keep
-      watching while it works. The original stays beside the render, on the same
-      frame, so you judge it on the picture instead of the claim.
+      A free, open-source Windows player that runs your videos through
+      NVIDIA's DLSS&nbsp;5 neural renderer on your own RTX card while you
+      watch, and keeps the original one key away, on the same frame.
     </p>
     <div class="hero__actions">
       <a class="button button--primary" href="{{PRIMARY_URL}}" data-download="hero">
@@ -192,7 +200,8 @@
       <a class="button button--ghost" href="#evidence">See what changes</a>
     </div>
     <p class="hero__caveat">
-      Windows · RTX card · driver 610.47+. Community project, not an NVIDIA product.
+      Windows · NVIDIA RTX · driver 610.47+ · MIT licensed. A community
+      project, not an NVIDIA product.
     </p>
   </div>
 
@@ -202,14 +211,15 @@
 <!-- ============================ evidence ============================ -->
 <section class="section" id="evidence">
   <div class="section__head">
-    <h2 class="section__title">What the renderer actually changed</h2>
+    <h2 class="section__title">The same frame, rendered twice</h2>
     <p class="section__note">
-      Both plates above are one frame: on the left as the source file decodes
-      it, on the right the same frame out of the render the player wrote for
-      that file, cropped identically. Nothing was retouched, sharpened or
-      colour-corrected. The two differ by 31.7&nbsp;dB PSNR — the renderer is
-      rebuilding skin, hair and light across the face, not laying a filter over
-      the whole picture.
+      Drag the seam above. Both plates are one frame of Grand Theft Auto VI
+      Trailer 2: on the left as the source file decodes it, on the right the
+      same frame from the render the player wrote for that file, cropped
+      identically. Nothing was retouched, sharpened or colour-graded. The two
+      differ by 31.7&nbsp;dB PSNR, and the change sits in skin, hair and light
+      across the face: the renderer rebuilds detail rather than laying a filter
+      over the picture.
     </p>
   </div>
 
@@ -221,6 +231,41 @@
   </div>
 </section>
 
+<!-- ============================== demo ============================== -->
+<section class="section" id="demo">
+  <h2 class="section__title">Twenty seconds of it running</h2>
+  <p class="section__note">
+    The Matrix and Grand Theft Auto VI, each source against the player's own
+    render of the same frame: paused frames wiped across the face, then
+    playback with the divider held still. Same frames and the same crop on both
+    sides. No sound.
+  </p>
+
+  <div class="demo" data-video="media/neural-comparison-demo.mp4">
+    <img class="demo__poster" src="assets/demo/demo-poster.jpg" width="1920" height="1080"
+         loading="lazy" decoding="async"
+         alt="A paused frame of The Matrix split down Trinity's face: the original on the left, the DLSS 5 neural render on the right.">
+    <button class="demo__play" type="button">
+      <!-- The backing is a plate behind the label, not a wash over the frame:
+           this section's job is to show image quality, so the footage keeps
+           its own luminance. -->
+      <span class="demo__plate">
+        <span class="demo__play-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M8 5.5v13l11-6.5z" stroke-linejoin="round"></path>
+          </svg>
+        </span>
+        <span class="demo__play-label">Play the 20-second demonstration</span>
+        <span class="demo__play-meta">7.2 MB · loads only when you ask</span>
+      </span>
+    </button>
+  </div>
+  <p class="demo__credit">
+    Poster: frame 110 of the video. The Matrix — Warner Bros.; Grand Theft
+    Auto VI — Rockstar Games.
+  </p>
+</section>
+
 <!-- ============================= gallery ============================ -->
 <section class="section" id="gallery">
   <div class="section__head">
@@ -229,9 +274,9 @@
       Each pair is one frame: the source, and the same frame from the player's
       render of it. <strong>Flip</strong> swaps the whole picture between the
       two; <strong>1:1</strong> opens the captured file itself, one image pixel
-      to one screen pixel, so nothing on this page is doing the resizing. Not
-      every source moves as much: The Matrix pair differs by 5.2 levels on
-      average, GTA&nbsp;VI's by 9.5.
+      to one screen pixel, so nothing on this page does the resizing. Not every
+      source changes as much: The Matrix pair differs by 5.2 levels on average,
+      GTA&nbsp;VI's by 9.5.
     </p>
   </div>
 
@@ -338,9 +383,8 @@
       <h3 class="beat__title">Press <kbd>D</kbd> and keep watching</h3>
       <p>
         Rendering is not an export queue. Press <kbd>D</kbd> at any point and
-        playback continues on rendered frames a few seconds later, while the
-        session keeps filling in the rest of the video — nearest the playhead
-        first.
+        playback moves onto rendered frames a few seconds later, while the rest
+        of the video renders behind you, nearest the playhead first.
       </p>
     </div>
     <figure class="beat__figure">
@@ -377,11 +421,13 @@
 
   <article class="beat">
     <div class="beat__text">
-      <h3 class="beat__title">Judge it while it is paused</h3>
+      <h3 class="beat__title">Compare without moving the playhead</h3>
       <p>
-        Compare as a split, a wipe or a blend without moving the playhead, and
-        step frames on either view. Change a neural setting while paused and
-        that frame is re-rendered immediately, so you decide on the picture.
+        Split, wipe, side by side or 2&nbsp;×&nbsp;2, all on one timestamp.
+        <strong>Difference</strong> shows where the model changed the picture,
+        and the loupe magnifies both at the same spot, pixel for pixel. Change
+        a neural setting while paused and that frame re-renders, so you decide
+        on the picture.
       </p>
     </div>
     <figure class="beat__figure">
@@ -395,10 +441,11 @@
     <div class="beat__text">
       <h3 class="beat__title">Come back and it is still there</h3>
       <p>
-        Renders stay on disk until you clear them or the drive runs low. Reopen
-        a film weeks later and a render of the whole film is still attached,
-        reused whenever the source, the runtime and the neural settings all
-        still match — so what you reopen is what you rendered.
+        Renders stay on disk until you clear them or the drive falls below
+        20&nbsp;GB free. Reopen a film weeks later and its whole-film render is
+        still attached, reused only while the source, the runtime and the
+        neural settings all still match, so what you reopen is what you
+        rendered.
       </p>
     </div>
     <figure class="beat__figure">
@@ -409,89 +456,86 @@
   </article>
 </section>
 
-<!-- ============================= formats ============================ -->
-<section class="section" id="formats">
-  <h2 class="section__title">What goes in, what comes out</h2>
+<!-- ============================ features ============================ -->
+<section class="section" id="features">
+  <h2 class="section__title">What it does</h2>
   <p class="section__note">
-    The renderer works on whatever the player can open, and what you render can
-    be written back out to a file. Nothing is uploaded: the work happens on your
-    own GPU and the cache sits on your own disk.
+    Every item here is in the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md" rel="noopener">usage guide</a>,
+    with the measurements behind it. Nothing is uploaded: the work happens on
+    your GPU and the cache sits on your disk.
   </p>
 
   <div class="matrix">
     <section class="matrix__group">
-      <h3 class="matrix__title">Opens</h3>
+      <h3 class="matrix__title">Compare</h3>
       <ul class="matrix__list">
-        <li>Local video files</li>
-        <li>Public YouTube links, pasted with <kbd>Ctrl</kbd>+<kbd>L</kbd></li>
-        <li>Photos and animated GIFs</li>
-        <li>Six bundled game trailers, each under three minutes</li>
+        <li>Split, wipe, side by side and 2&nbsp;×&nbsp;2, all on one timestamp</li>
+        <li>A Difference view of where the model changed the picture, amplified 1× to 32×</li>
+        <li>A loupe and zoom to 8×, down to single pixels</li>
+        <li>Hold the mouse on the picture to see the original in place</li>
+        <li>Save comparison image: exactly what is on screen, with a provenance footer</li>
       </ul>
     </section>
 
     <section class="matrix__group">
-      <h3 class="matrix__title">Writes</h3>
+      <h3 class="matrix__title">Play</h3>
       <ul class="matrix__list">
-        <li>PNG or JPEG, for photos</li>
-        <li>GIF, for animations</li>
-        <li>MP4, encoded with NVENC</li>
-        <li>MKV, keeping the source audio, subtitles and chapters without re-encoding them</li>
-        <li>One file with Super Resolution, neural rendering and frame generation combined, in NVIDIA&rsquo;s own order</li>
+        <li>Renders while you watch, and seeks anywhere, rendered or not</li>
+        <li>Local files, public YouTube links, photos, animated GIFs and six bundled game trailers</li>
+        <li>HDR10 and HLG tone-mapped for the model on the GPU, and the original shown in HDR on an HDR display</li>
+        <li>Subtitles (SRT, ASS, WebVTT, PGS, VobSub) drawn after the render, so text is never warped</li>
       </ul>
     </section>
 
     <section class="matrix__group">
-      <h3 class="matrix__title">On top</h3>
+      <h3 class="matrix__title">Keep and export</h3>
       <ul class="matrix__list">
-        <li>Optional DLSS Super Resolution, on either view</li>
-        <li>Optional frame generation: convert a video to 2× its frame rate, or up to 5×</li>
-        <li>Output follows the display: 1080p, 1440p or 2160p, whichever it can scan out</li>
-        <li>Any rung can be pinned. A live render stays at source resolution; an export can bake the upscale in</li>
-        <li>Neural strength from 0 to 200%, re-mixed without re-rendering</li>
+        <li>A constant-quality render cache: HEVC at CQ&nbsp;16 by default, 10-bit or lossless if you ask</li>
+        <li>PNG, JPEG, GIF, MP4 or MKV; MKV keeps the audio, subtitles and chapters untouched</li>
+        <li>Super Resolution, neural rendering and frame generation in one file, in NVIDIA&rsquo;s order</li>
+        <li>Frame generation from 2× to 5× the frame rate, as a conversion</li>
+        <li>The same export from a script: <code>--render</code>, with exit codes</li>
+      </ul>
+    </section>
+
+    <section class="matrix__group">
+      <h3 class="matrix__title">Check</h3>
+      <ul class="matrix__list">
+        <li>A SHA-256 beside every zip</li>
+        <li>Signed build provenance on the core zip, checked with <code>gh attestation verify</code></li>
+        <li><code>verify_package.ps1</code> checks every file against a pinned manifest before the first run</li>
+        <li>MIT licensed, built in the open on <a href="{{REPO_URL}}" rel="noopener">GitHub</a></li>
       </ul>
     </section>
   </div>
 </section>
 
-<!-- ============================== demo ============================== -->
-<section class="section" id="demo">
-  <h2 class="section__title">Twenty seconds of it running</h2>
-  <p class="section__note">
-    The Matrix and Grand Theft Auto VI, each source against the player's own
-    render of it: paused frames wiped across the face, then playback with the
-    divider held still. Same frames, same crop on both sides. No sound.
-  </p>
-
-  <div class="demo" data-video="media/neural-comparison-demo.mp4">
-    <img class="demo__poster" src="assets/demo/demo-poster.jpg" width="1920" height="1080"
-         loading="lazy" decoding="async"
-         alt="A paused frame of The Matrix split down Trinity's face: the original on the left, the DLSS 5 neural render on the right.">
-    <button class="demo__play" type="button">
-      <!-- The backing is a plate behind the label, not a wash over the frame:
-           this section's job is to show image quality, so the footage keeps
-           its own luminance. -->
-      <span class="demo__plate">
-        <span class="demo__play-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M8 5.5v13l11-6.5z" stroke-linejoin="round"></path>
-          </svg>
-        </span>
-        <span class="demo__play-label">Play the 20-second demonstration</span>
-        <span class="demo__play-meta">7.2 MB · loads only when you ask</span>
-      </span>
-    </button>
+<!-- ============================== limits ============================= -->
+<section class="section" id="limits">
+  <div class="section__head">
+    <h2 class="section__title">Limits and requirements</h2>
+    <p class="section__note">
+      The limits, stated as plainly as the features. Each is measured or
+      documented in the repository.
+    </p>
   </div>
-  <p class="demo__credit">
-    Poster: frame 110 of the video. The Matrix — Warner Bros.; Grand Theft
-    Auto VI — Rockstar Games.
-  </p>
+
+  <div class="readout">
+    <p class="readout__row"><span class="readout__k">Hardware</span><span class="readout__v readout__v--prose">An NVIDIA RTX card and driver 610.47 or newer; older drivers are refused up front. Checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 cards lack native FP8, should be several times slower, and are untested.</span></p>
+    <p class="readout__row"><span class="readout__k">Speed</span><span class="readout__v readout__v--prose">A live 1080p30 session costs <span class="data">8.4&nbsp;ms</span> a frame on an RTX 5090 and <span class="data">15.3&nbsp;ms</span> on an RTX 4080 SUPER. A whole 4K render on the 4080 SUPER ran at <span class="data">14.8&nbsp;fps</span>, slower than a 30&nbsp;fps film plays.</span></p>
+    <p class="readout__row"><span class="readout__k">Upscaling</span><span class="readout__v readout__v--prose">DLSS Super Resolution scored below a plain bicubic upscale on all six video clips measured. It is built for games, so it is off by default and there for its look, not for detail.</span></p>
+    <p class="readout__row"><span class="readout__k">Runtime</span><span class="readout__v readout__v--prose">The neural runtime is a modified, unsigned community build, not a signed NVIDIA package.</span></p>
+    <p class="readout__row"><span class="readout__k">Artifacts</span><span class="readout__v readout__v--prose">Depth is estimated from the picture, and so is motion on cards without the optical flow engine. Expect some artifacts.</span></p>
+    <p class="readout__row"><span class="readout__k">Cache</span><span class="readout__v readout__v--prose">A render started partway into a video is not joined to the rest, and below 20&nbsp;GB free the least recently watched renders are deleted first.</span></p>
+  </div>
 </section>
 
 <!-- ============================ download ============================ -->
 <section class="section" id="download">
   <h2 class="section__title">Download</h2>
   <p class="section__note">
-    {{VERSION_LABEL}}, published {{RELEASE_DATE}}. Every build is listed on the
+    {{VERSION_LABEL}}, published {{RELEASE_DATE}}. Free, with no account and
+    no installer: unzip it and run it. Every build is on the
     <a href="{{RELEASE_URL}}" rel="noopener">release page</a> with its checksum.
   </p>
 
@@ -531,59 +575,84 @@
 <section class="section" id="faq">
   <h2 class="section__title">Questions</h2>
   <div class="faq">
-    <details class="faq__item">
-      <summary>Why is the runtime unsigned?</summary>
+    <details class="faq__item" id="faq-safe">
+      <summary>Is it safe to run?</summary>
       <p>
-        The neural runtime is a modified community build of NVIDIA's, not a
-        redistribution of a signed NVIDIA package. Nobody is in a position to
-        sign it, so it ships unsigned and says so. If that is not acceptable to
-        you, take the core package and supply your own runtime.
+        It is open source and says what it contains, but part of it is
+        unsigned, so decide with that in view. Each zip has a SHA-256 beside
+        it. The core zip is built by CI from this repository and carries a
+        signed build attestation (<code>gh attestation verify</code>); the
+        complete zip is assembled by the maintainer and has a checksum only.
+        Inside either, <code>verify_package.ps1</code> checks every file against
+        a pinned manifest before the first run. The exception is the neural
+        runtime, a modified community build nobody can sign. Scan it as you
+        would any unsigned software, or take the core zip and supply your own.
       </p>
     </details>
-    <details class="faq__item">
-      <summary>Do I need an RTX card?</summary>
+    <details class="faq__item" id="faq-unsigned">
+      <summary>Why is the neural runtime unsigned?</summary>
       <p>
-        Yes, for neural rendering, along with NVIDIA driver 610.47 or newer. The
-        player itself opens and plays video without one; the render is what
-        needs the hardware.
+        Because it has been modified. It includes NVIDIA's neural DLL patched
+        to run on RTX 40 cards, which invalidates NVIDIA's signature, alongside
+        community ReShade and RenoDX files that were never signed. It is not a
+        redistribution of a signed NVIDIA package and nobody is in a position
+        to re-sign it, so it ships unsigned and says so. Its files are pinned
+        by size and SHA-256, and the package verifier rejects anything that has
+        drifted.
       </p>
     </details>
-    <details class="faq__item">
-      <summary>Does it upload my video anywhere?</summary>
+    <details class="faq__item" id="faq-gpu">
+      <summary>Which GPUs does it need?</summary>
       <p>
-        No. Rendering runs on your own GPU and the cache is on your own disk.
-        The only network traffic is fetching a YouTube link if you paste one.
+        An NVIDIA RTX card and driver 610.47 or newer for neural rendering;
+        with an older driver the player says so up front. It has been checked
+        on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack
+        native FP8 and should be several times slower; nobody has tested one
+        yet. The player itself opens and plays video without one; the render
+        is what needs the hardware.
       </p>
     </details>
-    <details class="faq__item">
+    <details class="faq__item" id="faq-speed">
       <summary>How long does a render take?</summary>
       <p>
-        It depends on the card, the resolution and the clip. The point of the
-        design is that you do not wait for it: playback joins the render a few
+        You do not wait for it to start: playback joins the render a few
         seconds after you press <kbd>D</kbd>, and the rest fills in while you
-        watch. Measured figures, each with the card and the build it came
-        from, are in the README&rsquo;s
-        <a href="{{REPO_URL}}#limits" rel="noopener">limits</a>.
+        watch. A live 1080p30 session costs 8.4&nbsp;ms a frame on an RTX 5090
+        and 15.3&nbsp;ms on an RTX 4080 SUPER, both faster than the video
+        plays; 1440p30 on the 5090 costs 15.4&nbsp;ms. A whole 4K film on the
+        4080 SUPER rendered at 14.8 frames a second. After your first session
+        the player knows your GPU and warns you before a video it expects to
+        fall behind on.
       </p>
     </details>
-    <details class="faq__item">
-      <summary>What is frame generation, and is it the same thing?</summary>
+    <details class="faq__item" id="faq-upload">
+      <summary>Does it upload my video anywhere?</summary>
       <p>
-        No. Neural rendering rebuilds detail in the frames a video already has;
-        frame generation makes new frames between them, so a 30&nbsp;fps clip
-        becomes 60. It runs as a conversion rather than during playback —
-        <strong>DLSS&nbsp;&gt; Generate frames</strong> writes a new file, shows
-        the time left, then switches to the result where you were watching. The
-        multiple is yours to set, from 2× up to as many as your display can
-        show evenly. The two features are independent: use either, or both.
+        No. Rendering runs on your GPU and the cache stays on your disk. The
+        player goes online to fetch a YouTube link you paste, and once a day
+        to ask GitHub whether there is a new release, which
+        <code>[Updates] Enabled=0</code> in its settings file turns off.
       </p>
     </details>
-    <details class="faq__item">
+    <details class="faq__item" id="faq-upscale">
+      <summary>Does it upscale video too?</summary>
+      <p>
+        It can, with DLSS Super Resolution, but that is off by default because
+        on video it does not beat a plain scaler: from 960×540 to 1080p on six
+        clips, a bicubic upscale scored higher VMAF every time. DLSS Super
+        Resolution is built for rendered games, not decoded footage, so turn it
+        on for its look, not for detail. Neural rendering itself keeps the
+        source resolution.
+      </p>
+    </details>
+    <details class="faq__item" id="faq-export">
       <summary>Can I keep the result?</summary>
       <p>
-        Yes — PNG or JPEG for photos, GIF for animations, MP4 or MKV for video.
-        MKV keeps the source audio, subtitles and chapters without re-encoding
-        them.
+        Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video,
+        from the player or from a script with <code>--render</code>. MKV keeps
+        the source audio, subtitles and chapters without re-encoding them.
+        Export with DLSS stages writes Super Resolution, neural rendering and
+        frame generation into one file, in NVIDIA's order.
       </p>
     </details>
   </div>
