@@ -76,6 +76,7 @@
 #include "DitherPolicy.h"
 #include "DebandPolicy.h"
 #include "SeekPolicy.h"
+#include "RenderPacePolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -13130,6 +13131,75 @@ void seek_clamp_stays_on_a_decodable_frame_and_inside_a_finished_range_test()
     CHECK(std::abs(seek_policy::Clamp(5.0, sliver) - 2.0) < 1e-9);
 }
 
+// P3.4: the render-pace record, out of PlayerApp's load and save. The
+// contended session that started it: 42.33 ms/frame for 1920x1080 among idle
+// sessions near 11.42 ms, persisted, and forecast from on every later start.
+void render_pace_median_outvotes_a_contended_sample_and_round_trips_test()
+{
+    using playback_timing::PredictRenderMs;
+    std::vector<render_pace::History> histories;
+    for (const double ms : {11.40, 11.45, 42.333431, 11.42}) render_pace::Record(histories, 1920, 1080, ms);
+    playback_timing::RenderPaceProfile source;
+    render_pace::ReducedProfiles reduced{};
+    render_pace::Rebuild(histories, source, reduced);
+    CHECK(std::abs(PredictRenderMs(source, 1920, 1080, 0.0) - (11.42 + 11.45) * 0.5) < 1e-9);
+    CHECK_EQ(11.42, render_pace::Median({11.42}));
+    CHECK_EQ(0.0, render_pace::Median({}));
+
+    // The ring keeps the newest five: the outlier ages out.
+    for (int index = 0; index < 5; ++index) render_pace::Record(histories, 1920, 1080, 11.0 + index);
+    CHECK_EQ(render_pace::kRingSamples, render_pace::SamplesKept(histories, 100, 1920, 1080));
+    CHECK_EQ(size_t{0}, render_pace::SamplesKept(histories, 50, 1920, 1080));
+    render_pace::Rebuild(histories, source, reduced);
+    CHECK_EQ(13.0, PredictRenderMs(source, 1920, 1080, 0.0));
+
+    // Nothing that is not a measurement is recorded.
+    const size_t before = histories.size();
+    render_pace::Record(histories, 0, 1080, 10.0);
+    render_pace::Record(histories, 1280, 720, 0.0);
+    render_pace::Record(histories, 1280, 720, std::nan(""));
+    render_pace::Record(histories, 1280, 720, 10.0, 60);
+    CHECK_EQ(before, histories.size());
+
+    // Per rung, and bounded per rung: six more geometries at 50% evict the
+    // oldest 50% one and never the source-scale history.
+    for (uint32_t index = 0; index < 7; ++index) render_pace::Record(histories, 640 + index * 2, 360, 5.0, 50);
+    CHECK_EQ(render_pace::kRingSamples, render_pace::SamplesKept(histories, 100, 1920, 1080));
+    CHECK_EQ(size_t{0}, render_pace::SamplesKept(histories, 50, 640, 360));
+    CHECK_EQ(size_t{1}, render_pace::SamplesKept(histories, 50, 652, 360));
+    render_pace::Rebuild(histories, source, reduced);
+    CHECK_EQ(size_t{1}, source.samples.size());
+    CHECK_EQ(playback_timing::RenderPaceProfile::kMaxSamples, render_pace::ProfileAt(50, source, reduced).samples.size());
+    CHECK(render_pace::ProfileAt(75, source, reduced).samples.empty());
+    CHECK(&render_pace::ProfileAt(100, source, reduced) == &source);
+
+    // The INI text: keys per rung, the source rung keeping the key older
+    // builds read, and a rung nobody measured writing nothing.
+    CHECK(render_pace::SamplesKey(100) == L"Samples");
+    CHECK(render_pace::SamplesKey(75) == L"Samples75");
+    CHECK(render_pace::SamplesKey(50) == L"Samples50");
+    CHECK(render_pace::Format(histories, 75).empty());
+    CHECK(render_pace::Format(histories, 100) ==
+          L"1920x1080:11.000000,12.000000,13.000000,14.000000,15.000000");
+    std::vector<render_pace::History> loaded;
+    for (const uint32_t scale : kProcessingScaleRungs) render_pace::Parse(render_pace::Format(histories, scale), scale, loaded);
+    CHECK_EQ(histories.size(), loaded.size());
+    for (const uint32_t scale : kProcessingScaleRungs)
+        CHECK(render_pace::Format(loaded, scale) == render_pace::Format(histories, scale));
+
+    // The single-value form earlier versions wrote loads as a one-sample
+    // ring; an entry without a geometry, and a sample that is not a number,
+    // are skipped on their own.
+    std::vector<render_pace::History> legacy;
+    render_pace::Parse(L"1280x720:9.5;garbage;x:3;1920x1080:abc,12.5,;3840x2160", 100, legacy);
+    CHECK_EQ(size_t{2}, legacy.size());
+    CHECK_EQ(size_t{1}, render_pace::SamplesKept(legacy, 100, 1280, 720));
+    CHECK_EQ(size_t{1}, render_pace::SamplesKept(legacy, 100, 1920, 1080));
+    CHECK(render_pace::Format(legacy, 100) == L"1280x720:9.500000;1920x1080:12.500000");
+    render_pace::Parse(L"", 50, legacy);
+    CHECK_EQ(size_t{2}, legacy.size());
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -13484,6 +13554,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(media_tools_are_found_the_same_way_by_every_caller_test),
     TEST_CASE(utf8_text_lossy_keeps_the_message_and_strict_refuses_it_test),
     TEST_CASE(seek_clamp_stays_on_a_decodable_frame_and_inside_a_finished_range_test),
+    TEST_CASE(render_pace_median_outvotes_a_contended_sample_and_round_trips_test),
 };
 
 

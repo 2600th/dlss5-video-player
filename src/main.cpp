@@ -66,6 +66,7 @@
 #include "DroppedFilesPolicy.h"
 #include "StatusNotePolicy.h"
 #include "SeekPolicy.h"
+#include "RenderPacePolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
 #include "SourceDigestMemo.h"
@@ -4240,85 +4241,17 @@ private:
         LoadRenderPace();
     }
 
-    // The steady-state neural render paces this machine measured, so the
-    // live-session forecast speaks for this GPU rather than the reference.
-    // Stored per source geometry as `Samples=WxH:ms,ms,...;WxH:ms` for the
-    // named GPU; a different GPU starts from an empty profile, and the
-    // single-value `WxH:ms` form earlier versions wrote still loads as a
-    // one-sample ring.
-    //
-    // One sample per geometry used to be the whole record, newest replacing
-    // oldest unconditionally. A session measured while another process
-    // saturated the CPU wrote 42.333431 ms/frame for 1920x1080 - 3.7x the
-    // 11.4222 ms mean of the eight idle sessions around it, with the GPU free -
-    // and because this record is persisted, that one number followed the user
-    // across restarts: the next sessions forecast under a third of real time
-    // and raised the "watching it live would pause to buffer almost
-    // continuously" warning on hardware that renders that clip at 2.9x real
-    // time. Contention can only ever make a render look slower, so the error is
-    // one-sided and the newest sample is not the most trustworthy one; keeping
-    // a few and taking the median lets the measurements outvote the outlier.
-    //
-    // The median rather than the minimum, which would be the fastest way to
-    // erase a contended sample: this forecast exists to refuse sessions that
-    // cannot keep up, an optimistic estimator hides exactly the warning that
-    // was missing when a 4K60 session dropped 848 of 869 frames, and one-sided
-    // error means a low quantile drifts towards the best case the machine has
-    // ever had rather than the case the user is about to get.
-    //
-    // Kept per processing-scale rung as well (live_session::
-    // ForecastAtProcessingScale): a 50% session's pace used to be filed under
-    // the source geometry, where it pulled the 100% forecast toward a pace
-    // 100% never reaches. The reduced rungs persist under `Samples75` and
-    // `Samples50`, which a build without rungs does not read.
-    static constexpr size_t kPaceRingSamples=5;
-    struct PaceHistory{uint32_t width{},height{};std::vector<double> msPerFrame;uint32_t scale{kDefaultProcessingScale};};
-    static double MedianMsPerFrame(std::vector<double> samples){
-        if(samples.empty())return 0.0;
-        std::sort(samples.begin(),samples.end());
-        const size_t middle=samples.size()/2;
-        return samples.size()%2?samples[middle]:(samples[middle-1]+samples[middle])*0.5;
-    }
+    // The steady-state neural render paces this machine measured, per GPU,
+    // source geometry and processing-scale rung; the record, its INI text
+    // and the profiles the forecast reads are RenderPacePolicy.h's.
     void RecordPaceSample(uint32_t width,uint32_t height,double msPerFrame,uint32_t scale=kDefaultProcessingScale){
-        if(!width||!height||!(msPerFrame>0.0)||!IsProcessingScaleRung(scale))return;
-        size_t atScale=0;
-        for(PaceHistory& history:m_paceHistory){
-            if(history.scale!=scale)continue;
-            ++atScale;
-            if(history.width!=width||history.height!=height)continue;
-            history.msPerFrame.push_back(msPerFrame);
-            if(history.msPerFrame.size()>kPaceRingSamples)history.msPerFrame.erase(history.msPerFrame.begin());
-            return;
-        }
-        // Same bound as the profile the forecast reads, and the same eviction:
-        // a geometry nobody has played for six geometries is the one to lose.
-        // Per rung, so trying a rung cannot evict the source-scale history.
-        if(atScale==playback_timing::RenderPaceProfile::kMaxSamples)
-            m_paceHistory.erase(std::find_if(m_paceHistory.begin(),m_paceHistory.end(),[&](const PaceHistory& history){return history.scale==scale;}));
-        m_paceHistory.push_back({width,height,{msPerFrame},scale});
+        render_pace::Record(m_paceHistory,width,height,msPerFrame,scale);
     }
-    // The forecast reads one number per geometry; that number is the geometry's
-    // median, recomputed whenever the history changes.
-    void RebuildRenderPace(){
-        m_renderPace={};
-        for(auto& profile:m_reducedRenderPace)profile={};
-        for(const PaceHistory& history:m_paceHistory)
-            MutableRenderPaceAt(history.scale).Record({history.width,history.height,MedianMsPerFrame(history.msPerFrame)});
-    }
+    void RebuildRenderPace(){render_pace::Rebuild(m_paceHistory,m_renderPace,m_reducedRenderPace);}
     // m_renderPace is the source-scale profile; the reduced rungs follow in
     // kProcessingScaleRungs order.
-    playback_timing::RenderPaceProfile& MutableRenderPaceAt(uint32_t scale){
-        for(size_t rung=1;rung<std::size(kProcessingScaleRungs);++rung)
-            if(kProcessingScaleRungs[rung]==scale)return m_reducedRenderPace[rung-1];
-        return m_renderPace;
-    }
     const playback_timing::RenderPaceProfile& RenderPaceAt(uint32_t scale)const{
-        for(size_t rung=1;rung<std::size(kProcessingScaleRungs);++rung)
-            if(kProcessingScaleRungs[rung]==scale)return m_reducedRenderPace[rung-1];
-        return m_renderPace;
-    }
-    static std::wstring PaceSamplesKey(uint32_t scale){
-        return scale==kDefaultProcessingScale?std::wstring(L"Samples"):L"Samples"+std::to_wstring(scale);
+        return render_pace::ProfileAt(scale,m_renderPace,m_reducedRenderPace);
     }
     // The keep-up forecast for a live session on this source at the current
     // processing scale, which is the one the session would render at.
@@ -4335,46 +4268,20 @@ private:
         if(gpu!=m_opt.detectedGpu.description)return;
         for(const uint32_t scale:kProcessingScaleRungs){
             std::wstring samples(2048,L'\0');
-            length=GetPrivateProfileStringW(L"NeuralPace",PaceSamplesKey(scale).c_str(),L"",samples.data(),static_cast<DWORD>(samples.size()),SettingsPath().c_str());
+            length=GetPrivateProfileStringW(L"NeuralPace",render_pace::SamplesKey(scale).c_str(),L"",samples.data(),static_cast<DWORD>(samples.size()),SettingsPath().c_str());
             samples.resize(length);
-            for(size_t start=0;start<samples.size();){
-                size_t end=samples.find(L';',start);if(end==std::wstring::npos)end=samples.size();
-                const std::wstring entry=samples.substr(start,end-start);
-                start=end+1;
-                const size_t cross=entry.find(L'x');if(cross==std::wstring::npos)continue;
-                const size_t colon=entry.find(L':',cross);if(colon==std::wstring::npos)continue;
-                unsigned width=0,height=0;
-                if(swscanf_s(entry.c_str(),L"%ux%u",&width,&height)!=2)continue;
-                for(size_t sample=colon+1;sample<=entry.size();){
-                    size_t sampleEnd=entry.find(L',',sample);if(sampleEnd==std::wstring::npos)sampleEnd=entry.size();
-                    double ms=0.0;
-                    if(swscanf_s(entry.substr(sample,sampleEnd-sample).c_str(),L"%lf",&ms)==1)
-                        RecordPaceSample(width,height,ms,scale);
-                    sample=sampleEnd+1;
-                }
-            }
+            render_pace::Parse(samples,scale,m_paceHistory);
         }
         RebuildRenderPace();
     }
     void SaveRenderPace()const{
         WritePrivateProfileStringW(L"NeuralPace",L"Gpu",m_opt.detectedGpu.description.c_str(),SettingsPath().c_str());
         for(const uint32_t scale:kProcessingScaleRungs){
-            std::wstring samples;
-            for(const PaceHistory& history:m_paceHistory){
-                if(history.scale!=scale||history.msPerFrame.empty())continue;
-                if(!samples.empty())samples+=L';';
-                wchar_t geometry[32]{};swprintf_s(geometry,L"%ux%u:",history.width,history.height);
-                samples+=geometry;
-                for(size_t index=0;index<history.msPerFrame.size();++index){
-                    wchar_t text[32]{};swprintf_s(text,L"%.6f",history.msPerFrame[index]);
-                    if(index)samples+=L',';
-                    samples+=text;
-                }
-            }
+            const std::wstring samples=render_pace::Format(m_paceHistory,scale);
             // A reduced rung nobody has measured writes no key at all, so an
             // ini that never used the ladder looks exactly as it did.
             const bool source=scale==kDefaultProcessingScale;
-            WritePrivateProfileStringW(L"NeuralPace",PaceSamplesKey(scale).c_str(),source||!samples.empty()?samples.c_str():nullptr,SettingsPath().c_str());
+            WritePrivateProfileStringW(L"NeuralPace",render_pace::SamplesKey(scale).c_str(),source||!samples.empty()?samples.c_str():nullptr,SettingsPath().c_str());
         }
         // Keys from the single-sample layout that preceded `Samples`.
         for(const wchar_t* stale:{L"MsPerFrame",L"Width",L"Height"})
@@ -4395,7 +4302,7 @@ private:
         RecordPaceSample(m_livePaceWidth,m_livePaceHeight,pace.MsPerFrame(),m_livePaceScale);
         RebuildRenderPace();
         SaveRenderPace();
-        const size_t kept=[&]{for(const PaceHistory& history:m_paceHistory)if(history.scale==m_livePaceScale&&history.width==m_livePaceWidth&&history.height==m_livePaceHeight)return history.msPerFrame.size();return size_t{0};}();
+        const size_t kept=render_pace::SamplesKept(m_paceHistory,m_livePaceScale,m_livePaceWidth,m_livePaceHeight);
         const auto& profile=RenderPaceAt(m_livePaceScale);
         LOG("Measured neural render pace: "<<m_livePaceWidth<<"x"<<m_livePaceHeight<<" at "<<m_livePaceScale<<"% processing scale, "<<pace.MsPerFrame()
             <<" ms/frame over "<<pace.frames<<" frames ("<<playback_timing::RenderPaceScale(pace.MsPerFrame(),m_livePaceWidth,m_livePaceHeight)
@@ -11301,11 +11208,11 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     playback_timing::RenderPaceProfile m_renderPace;
     // The same for the reduced processing-scale rungs, in kProcessingScaleRungs
     // order after 100.
-    std::array<playback_timing::RenderPaceProfile,std::size(kProcessingScaleRungs)-1> m_reducedRenderPace{};
+    render_pace::ReducedProfiles m_reducedRenderPace{};
     // Every pace this GPU measured per geometry and rung, newest last;
     // m_renderPace and m_reducedRenderPace carry the median of each and are
     // what the forecast reads.
-    std::vector<PaceHistory> m_paceHistory;
+    std::vector<render_pace::History> m_paceHistory;
     // The cold start of the newest neural job, or null when no job has run.
     std::shared_ptr<NeuralColdStartRecord> m_coldStart;
     HWND m_bufferWnd=nullptr;
