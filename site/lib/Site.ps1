@@ -243,6 +243,86 @@ function Get-StarSummary {
     }
 }
 
+function Get-MediaSize {
+    <#  The pixel size a media file declares in its own header: PNG, JPEG, WebP,
+        AVIF or MP4. Returns [pscustomobject]@{ Width; Height } or $null.
+
+        Read from the bytes rather than through System.Drawing, because CI runs
+        these tests under pwsh on Linux, and because AVIF, WebP and MP4 are not
+        formats System.Drawing reads at all. Only the header is parsed; nothing
+        is decoded.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $b = [System.IO.File]::ReadAllBytes($Path)
+    if ($b.Length -lt 32) { return $null }
+    # Every byte is widened before it is shifted: -shl on a [byte] stays a
+    # [byte] in PowerShell and silently drops the high bits.
+    $u = { param($i) [long]$b[$i] }
+    $be16 = { param($i) ((& $u $i) -shl 8) -bor (& $u ($i + 1)) }
+    $be32 = { param($i) ((& $u $i) -shl 24) -bor ((& $u ($i + 1)) -shl 16) -bor ((& $u ($i + 2)) -shl 8) -bor (& $u ($i + 3)) }
+    $le16 = { param($i) (& $u $i) -bor ((& $u ($i + 1)) -shl 8) }
+    $le24 = { param($i) (& $u $i) -bor ((& $u ($i + 1)) -shl 8) -bor ((& $u ($i + 2)) -shl 16) }
+    $size = { param($w, $h) [pscustomobject]@{ Width = [int]$w; Height = [int]$h } }
+    $ascii = { param($i, $n) [System.Text.Encoding]::ASCII.GetString($b, $i, $n) }
+
+    # PNG: the IHDR chunk is always first.
+    if ($b[0] -eq 0x89 -and (& $ascii 1 3) -eq 'PNG') { return & $size (& $be32 16) (& $be32 20) }
+
+    # JPEG: walk the markers to the first start-of-frame.
+    if ($b[0] -eq 0xFF -and $b[1] -eq 0xD8) {
+        $i = 2
+        while ($i + 9 -lt $b.Length) {
+            if ($b[$i] -ne 0xFF) { $i++; continue }
+            $marker = $b[$i + 1]
+            if ($marker -eq 0xD8 -or $marker -eq 0x01 -or ($marker -ge 0xD0 -and $marker -le 0xD7)) { $i += 2; continue }
+            if ($marker -ge 0xC0 -and $marker -le 0xCF -and $marker -notin 0xC4, 0xC8, 0xCC) {
+                return & $size (& $be16 ($i + 7)) (& $be16 ($i + 5))
+            }
+            $i += 2 + (& $be16 ($i + 2))
+        }
+        return $null
+    }
+
+    # WebP: lossy (VP8), lossless (VP8L) or extended (VP8X).
+    if ((& $ascii 0 4) -eq 'RIFF' -and (& $ascii 8 4) -eq 'WEBP') {
+        switch (& $ascii 12 4) {
+            'VP8 ' { return & $size ((& $le16 26) -band 0x3FFF) ((& $le16 28) -band 0x3FFF) }
+            'VP8L' {
+                $bits = [long]$b[21] -bor ([long]$b[22] -shl 8) -bor ([long]$b[23] -shl 16) -bor ([long]$b[24] -shl 24)
+                return & $size (($bits -band 0x3FFF) + 1) ((($bits -shr 14) -band 0x3FFF) + 1)
+            }
+            'VP8X' { return & $size ((& $le24 24) + 1) ((& $le24 27) + 1) }
+        }
+        return $null
+    }
+
+    # AVIF (the 'ispe' property) and MP4 (the video track's 'tkhd', 16.16
+    # fixed point). Both are ISO boxes; a scan for the box type is enough for
+    # files this project writes, which carry one image or one video track.
+    if ((& $ascii 4 4) -eq 'ftyp') {
+        $brand = & $ascii 8 4
+        $text = [System.Text.Encoding]::ASCII.GetString($b)
+        if ($brand -match '^avi[fs]$') {
+            $at = $text.IndexOf('ispe')
+            if ($at -ge 0) { return & $size (& $be32 ($at + 8)) (& $be32 ($at + 12)) }
+            return $null
+        }
+        $at = 0
+        while (($at = $text.IndexOf('tkhd', $at)) -ge 0) {
+            $version = $b[$at + 4]
+            # Width follows version/flags, the times and ids (20 or 32 bytes),
+            # 16 bytes of layer/volume/reserved and the 36-byte matrix.
+            $end = $at + $(if ($version -eq 1) { 92 } else { 80 })
+            $w = (& $be32 $end) -shr 16
+            $h = (& $be32 ($end + 4)) -shr 16
+            if ($w -gt 0 -and $h -gt 0) { return & $size $w $h }
+            $at += 4
+        }
+    }
+    return $null
+}
+
 function ConvertTo-HtmlText {
     param([AllowNull()][string]$Text)
     if ($null -eq $Text) { return '' }

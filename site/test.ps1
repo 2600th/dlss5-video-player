@@ -497,6 +497,93 @@ Test-Case 'every image names what it shows and reserves its box' {
     }
 }
 
+Test-Case 'every image, srcset candidate, poster and video is declared at its real size' {
+    # A width/height that disagrees with the file stretches the picture - on a
+    # page whose whole argument is its pixels - and a srcset descriptor that
+    # disagrees makes the browser pick the wrong file. Both have shipped: a
+    # recaptured screenshot kept its predecessor's 1493x1100. Every size here
+    # is read from the file's own header in dist, so a replaced file is caught.
+    $checked = 0
+    $bad = @()
+    $sizeOf = {
+        param([string]$Rel)
+        $path = Join-Path $distFull ($Rel -replace '^\./', '')
+        if (-not (Test-Path $path)) { return $null }
+        Get-MediaSize -Path $path
+    }
+    foreach ($m in [regex]::Matches($htmlFull, '<img\b[^>]*>')) {
+        $tag = $m.Value
+        $src = [regex]::Match($tag, '\ssrc="([^"]+)"').Groups[1].Value
+        $w = [int][regex]::Match($tag, 'width="(\d+)"').Groups[1].Value
+        $h = [int][regex]::Match($tag, 'height="(\d+)"').Groups[1].Value
+        $real = & $sizeOf $src
+        if ($null -eq $real) { $bad += "$src has no readable size"; continue }
+        if ($real.Width -ne $w -or $real.Height -ne $h) { $bad += "$src is $($real.Width)x$($real.Height) but declared ${w}x${h}" }
+        $checked++
+    }
+    # A <picture>'s candidates must share its <img>'s shape and say their width.
+    $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
+    foreach ($pic in [regex]::Matches($htmlFull, '<picture>(.*?)</picture>', $options)) {
+        $img = [regex]::Match($pic.Groups[1].Value, '<img\b[^>]*>').Value
+        $w = [double][regex]::Match($img, 'width="(\d+)"').Groups[1].Value
+        $h = [double][regex]::Match($img, 'height="(\d+)"').Groups[1].Value
+        foreach ($set in [regex]::Matches($pic.Groups[1].Value, 'srcset="([^"]+)"')) {
+            foreach ($candidate in $set.Groups[1].Value.Split(',')) {
+                $parts = $candidate.Trim() -split '\s+'
+                $real = & $sizeOf $parts[0]
+                if ($null -eq $real) { $bad += "$($parts[0]) has no readable size"; continue }
+                if ($parts.Count -gt 1 -and $parts[1] -match '^(\d+)w$' -and [int]$Matches[1] -ne $real.Width) { $bad += "$($parts[0]) is $($real.Width) wide but offered as $($parts[1])" }
+                if ([math]::Abs($real.Height - [math]::Round($real.Width * $h / $w)) -gt 1) { $bad += "$($parts[0]) is $($real.Width)x$($real.Height), not the ${w}x${h} shape of its <img>" }
+                $checked++
+            }
+        }
+    }
+    foreach ($pre in [regex]::Matches($htmlFull, 'imagesrcset="([^"]+)"')) {
+        foreach ($candidate in $pre.Groups[1].Value.Split(',')) {
+            $parts = $candidate.Trim() -split '\s+'
+            $real = & $sizeOf $parts[0]
+            if ($null -eq $real -or ($parts[1] -match '^(\d+)w$' -and [int]$Matches[1] -ne $real.Width)) { $bad += "preload $($parts[0]) does not match its descriptor" }
+            $checked++
+        }
+    }
+    # The demo: the video it loads must be the poster's shape and size, or the
+    # frame jumps when the poster gives way to the video.
+    $demo = [regex]::Match($htmlFull, '(?s)<div class="demo" data-video="([^"]+)">.*?<img\b[^>]*?width="(\d+)" height="(\d+)"')
+    Assert-True $demo.Success 'the demo names its video and sizes its poster'
+    $video = & $sizeOf $demo.Groups[1].Value
+    if ($null -eq $video -or $video.Width -ne [int]$demo.Groups[2].Value -or $video.Height -ne [int]$demo.Groups[3].Value) {
+        $bad += "the demo video is $($video.Width)x$($video.Height), its poster is declared $($demo.Groups[2].Value)x$($demo.Groups[3].Value)"
+    }
+    # The social card, which a crawler sizes from these tags.
+    $siteUrl = [regex]::Match($htmlFull, '<link rel="canonical" href="([^"]+)"').Groups[1].Value
+    $og = [regex]::Match($htmlFull, '<meta property="og:image" content="([^"]+)"').Groups[1].Value
+    $card = & $sizeOf $og.Substring($siteUrl.Length)
+    $ogW = [int][regex]::Match($htmlFull, 'og:image:width" content="(\d+)"').Groups[1].Value
+    $ogH = [int][regex]::Match($htmlFull, 'og:image:height" content="(\d+)"').Groups[1].Value
+    if ($null -eq $card -or $card.Width -ne $ogW -or $card.Height -ne $ogH) { $bad += "the social card is $($card.Width)x$($card.Height), declared ${ogW}x${ogH}" }
+
+    Assert-True ($checked -ge 30) "expected every image and candidate to be checked, checked $checked"
+    Assert-True ($bad.Count -eq 0) ("declared sizes disagree with the files:`n       " + ($bad -join "`n       "))
+}
+
+Test-Case 'the media header reader agrees with the formats the page ships' {
+    # The size test above is only as good as this reader, so it is checked
+    # against files whose sizes are fixed facts of the repository.
+    $repo = Split-Path $siteRoot -Parent
+    $cases = @(
+        @{ Path = 'site/src/assets/hero/hero-neural.jpg'; W = 1920; H = 1080 }
+        @{ Path = 'site/src/assets/hero/hero-neural-960.avif'; W = 960; H = 540 }
+        @{ Path = 'site/src/assets/hero/hero-neural-960.webp'; W = 960; H = 540 }
+        @{ Path = 'docs/media/stills/gta6-lucia.png'; W = 1460; H = 992 }
+        @{ Path = 'docs/media/neural-comparison-demo.mp4'; W = 1920; H = 1080 }
+    )
+    foreach ($c in $cases) {
+        $real = Get-MediaSize -Path (Join-Path $repo $c.Path)
+        Assert-True ($null -ne $real) "$($c.Path) is read"
+        Assert-Equal "$($c.W)x$($c.H)" "$($real.Width)x$($real.Height)" "$($c.Path) size"
+    }
+}
+
 Test-Case 'every in-page link lands on something' {
     $ids = @{}
     foreach ($m in [regex]::Matches($htmlFull, '\sid="([^"]+)"')) { $ids[$m.Groups[1].Value] = $true }
