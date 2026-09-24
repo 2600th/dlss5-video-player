@@ -9,6 +9,133 @@ decisions that still shape the code are in
 
 ## Unreleased
 
+Renders made before this release are not reused: the cache key changed with the
+new capture defaults, so the first conversion of each video renders it again.
+**Clear Neural Cache** frees what the old ones hold.
+
+### New
+
+- **Subtitles** (**Playback > Subtitles**): the source's text and picture tracks
+  or a loaded SRT, ASS, VTT, PGS or VobSub file; a same-named file beside the
+  video loads by itself. `V` switches track, `H`/`J` shift it 0.1 s, and both
+  are remembered per video. They are drawn over the render, so the model never
+  warps them, and never enter the cache or an export.
+- **HDR sources** (HDR10, HLG) are tone mapped to SDR for the model, and the
+  status line says so. On a display in Windows HDR mode the original shows in
+  HDR; **Video > Compare > Compare HDR at SDR** shows what the model saw.
+- **DLSS > Processing scale** runs the model at 75% or 50% of the source: 17.3
+  and 22.0 fps against 14.8 on a 4K clip (RTX 4080 SUPER). 100% stays default.
+- **Audio passthrough** (**Playback > Audio**, off by default) sends AC-3,
+  E-AC-3 and DTS to a receiver, falling back to PCM with the reason shown.
+- **`DLSSVideoPlayer.exe --render <input>`** writes what **Export with DLSS
+  stages** would, with no window. `Ctrl+C` cancels.
+- **Advanced > Render report** shows the flicker, grain and colour shift a
+  render added.
+- **Windows media controls** play, pause, stop and seek, and the taskbar
+  thumbnail has play/pause, Neural Rendering and side-by-side buttons.
+
+### Picture quality
+
+- **The window scales and dithers the picture itself.** Windows used to shrink
+  a 4K frame with no filtering, which looked jagged, and dark gradients the
+  model lifts showed flat bands.
+- **The Standard cache is constant quality.** It was held near 11 Mbit/s at
+  1080p whatever its CQ; now VMAF averages 96.9 (worst 93.9, was 80.3) at about
+  twice the size. **Encoder settings > Cache quality** adds **High** (10-bit
+  HEVC) and **Lossless** (FFV1). Cached frames are now dithered by default:
+  45-71% less banding where there was any, VMAF unchanged.
+- **Renders are reproducible.** Three renders of one clip could differ in half
+  their bytes where lighting changed; the same settings now give the same file.
+- **A held frame stays still.** False motion from the GPU's flow engine made a
+  still shot creep under the model and wore down Super Resolution (a demo clip's
+  VMAF went from 63.9 to 75.2 with the fix).
+- **DLSS > Upscaling history** defaults to **Per-frame**, which scored higher
+  than Temporal on 5 of 6 clips. The menu says plainly that Super Resolution
+  still scores below bicubic on video.
+- **Neural settings** gains **Temporal stability** (off by default) and a
+  **Scene cuts** sensitivity choice. **Color strength** is back, measured to
+  matter on the current runtime, and **Skin structure** offers only the values
+  that change the picture. Encoder settings gains deband and supplied exposure,
+  both off.
+- **Untagged HD video decodes as BT.709**, as other players assume; frame
+  generation used to shift its colours.
+
+### Playback and rendering
+
+- **The first `D` after opening a video starts in about half the time**: 7.9
+  to 9.0 s instead of 17.9 to 21.9 s. While it starts, the status line names
+  the step instead of showing a frozen ETA.
+- **Live sessions stop dropping frames at segment boundaries** (0, 0 and 4 in
+  three runs, against 14, 10 and 78) **and when a render is published** (8 to
+  0), and keep one copy of the render on disk instead of two.
+- **High renders encode straight from the GPU**: 3-7% faster, 5-19% less CPU
+  and about 250 MiB less GPU memory at 4K. HDR tone mapping moved to the GPU
+  too: 84.7 fps at 4K instead of 30.7.
+- **Video keeps playing through open menus and window drags**, and closing the
+  player no longer waits up to 8 s for the update check.
+- **Audio.** A stop or seek right after starting takes about 35 ms, not 600.
+  Sound returns when a device is plugged in after none, and a pause no longer
+  drops a slice of it.
+
+### Comparison and export
+
+- **A compare bar** switches DLSS 5, Original, Split, Wipe and the new views
+  (`C`, `Shift+C`; `X` swaps). Hold the left button on the picture to see the
+  original. One **Mix** slider replaces Neural strength and Blend.
+- **Difference, Side by side and 2 x 2 views.** Difference shows where the
+  model changed the frame, amplified 1x to 32x (`Shift+[`, `Shift+]`).
+- **Zoom Fit to 8x** at the pointer (`Z`, `Ctrl`+wheel) with panning, a loupe
+  on both pictures (`L`), and **Video > 1:1 pixels**.
+- **Video > Compare > Load mask image** limits DLSS 5 to the mask's white
+  areas, with feather and invert, remembered per video.
+- **File > Save comparison image** (`Ctrl+Shift+S`) saves the view as shown,
+  with a footer recording the version, video, timecode, view and settings.
+- **Super Resolution alone can be exported**, and the export's Super
+  Resolution stage is real DLSS SR; it had been a plain resize.
+- **Exports keep their audio.** Without frame generation they came out
+  silent. A `.mp4` is now an MP4, not renamed Matroska. Ranged exports keep
+  chapters, audio and subtitles on time. The export uses your Neural settings.
+  **Save converted video** after a range render no longer writes an empty
+  video track.
+
+### Start screen and interface
+
+- **A start screen** checks your GPU, driver and runtime and forecasts live
+  rendering, and shows recent videos with a frame of their render.
+- **Seven new game trailers**, open to 2160p with no age limit, with thumbnails.
+- **The timeline is a render map** with chapters and hover thumbnails. Status
+  chips show render progress, frame rate and drops, and brief confirmations
+  appear in the status row.
+- **Help > Keyboard shortcuts** (`?`, `F1`) lists every key. Toolbar tooltips
+  name each control's key.
+- **Dialogs and menus are dark and scale to the monitor.** Neural settings
+  fits a 1080p screen at 175%.
+- **The window opens at 80% of the screen**, reopens where you left it, and is
+  titled **DLSS 5 Video Player**.
+- **`Esc` leaves fullscreen first**; it used to stop the render.
+
+### Fixes
+
+- **The cache keeps what it should.** An NVIDIA App model update no longer
+  orphans every render, a render made while NVIDIA rewrote its files is no
+  longer lost or evicted, and leftovers of driver updates and crashes are
+  reclaimed.
+- **A failed neural check gives its real reason.** A stray DLL or add-on beside
+  the runtime is named and refused, and the refusal clears once it is removed.
+- Renders that fell back to the software encoder no longer fail, and a yt-dlp
+  warning no longer stops a YouTube video opening.
+- A mid-file decode error says so, and Play resumes at that frame. Dropping
+  several files opens the first and says how many were skipped.
+- Frame generation reads frame spacing correctly on most films and phone video.
+- **Clear Neural Cache** no longer empties the live files of another running
+  player, and seeking works in WebM files that don't record their length.
+
+### Privacy and network
+
+- **The start screen fetches trailer thumbnails from i.ytimg.com** (HTTPS, at
+  most monthly, no cookies). `[Start] ThumbnailFetch=0` turns this off, and
+  **Clear Neural Cache** deletes the saved images.
+
 ### New media for the README and site
 
 - **A new demonstration video.** 19.7 seconds of *The Matrix* and *GTA VI*
@@ -36,8 +163,15 @@ decisions that still shape the code are in
   when the drive falls below 20 GB free; it does not keep everything. A session
   started partway into a video leaves partial renders that are not joined yet,
   so reopening that video renders it again.
+- `docs/USAGE.md` gives the NVENC preset default as p5, not p7, and
+  `docs/RELATED_PROJECTS.md` is rewritten.
 - Removed stale files: the design spec for the already-shipped website, and a
   screenshot provenance history for images that no longer exist.
+
+### For builders and contributors
+
+- The packaged `verify_package.ps1` runs from an extracted download. Releases
+  publish debug symbols, and the core zip is reproducible.
 
 ## 0.25.0 - 2026-09-22
 
