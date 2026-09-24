@@ -68,6 +68,7 @@
 #include "SeekPolicy.h"
 #include "RenderPacePolicy.h"
 #include "PlayerCommandLine.h"
+#include "PlaybackTickPolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
 #include "SourceDigestMemo.h"
@@ -2348,7 +2349,7 @@ public:
         UpdateLiveSession();
         WatchNeuralJobProgress();
         SyncHdrPresentation();
-        if(m_seekPending) {
+        if(playback_tick::PerformsPendingSeek(TickNow())) {
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
         }
@@ -2360,7 +2361,7 @@ public:
         // not otherwise. It used to be re-presented at 60 Hz whether or not
         // anything had changed: a full-screen draw and a Present per 16 ms of
         // every pause, for an image the compositor already holds.
-        if(m_loaded&&!m_playing&&!m_seeking&&m_renderer&&(m_staticPresentPending||m_renderer->PresentationStale())){
+        if(playback_tick::PresentsPausedFrame(TickNow(),static_cast<bool>(m_renderer),m_staticPresentPending,m_renderer&&m_renderer->PresentationStale())){
             m_staticPresentPending=false;++m_staticPresents;
             if(!m_renderer->PresentCurrent()&&RecoverUnusableRenderer())return;
         }
@@ -2370,13 +2371,13 @@ public:
         // all - was the quietest: one measured session logged a single line
         // covering 132 s and two presented frames.
         ReportPlaybackHealth();
-        if(m_loaded&&m_cachedPlayback&&m_playing&&!m_haveNext&&!m_seeking){
+        if(playback_tick::ReadsCachedAhead(TickNow())){
             if(!ReadNextCachedFrame())return;
         }
-        if(m_loaded&&m_playing&&NetworkPlayback()&&!m_haveNext&&!m_seeking){
+        if(playback_tick::ReadsNetworkAhead(TickNow())){
             if(ApplyNetworkRead(m_decoder.ReadNextAvailable(m_next),NetworkReadPosition::BeforeRender)!=NetworkReadAction::UseFrame)return;
         }
-        if(!m_loaded||!m_playing||!m_haveNext||m_seeking) return;
+        if(!playback_tick::AdvancesFrame(TickNow())) return;
         double now=Position(); const double frameDur=1.0/std::max(1.0,m_decoder.FrameRate());
         bool dropped=false;
         // A neural pair is not a frame this loop can afford to discard. Every
@@ -2404,17 +2405,17 @@ public:
         }else{
         while(m_haveNext) {
             double due=double(m_next.timestamp100ns)*1e-7;
-            if(now-due <= playback_timing::LateFrameThreshold(frameDur)) break;
+            if(!playback_tick::IsLate(now,due,frameDur)) break;
             VideoFrame skip=std::move(m_next); (void)skip; ++m_droppedFrames; dropped=true;
             if(NetworkPlayback()){if(ApplyNetworkRead(m_decoder.ReadNextAvailable(m_next),NetworkReadPosition::BeforeRender)!=NetworkReadAction::UseFrame)break;}
             else if(!readLocal()){m_haveNext=false;break;}
         }
         }
         if(dropped){m_guides.Reset();m_guideReset=true;m_dlssReset=true;}
-        if(!m_haveNext){if(!NetworkPlayback()){m_playing=false;Audio().Pause(true);}InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();return;}
+        if(!m_haveNext){if(playback_tick::EndsPlaybackWhenQueueEmpty(NetworkPlayback())){m_playing=false;Audio().Pause(true);}InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();return;}
         const VideoFrame& next=NextFrame();
         double due=double(next.timestamp100ns)*1e-7;
-        if(now+0.001<due) return;
+        if(playback_tick::IsEarly(now,due)) return;
         if(RenderVideoFrame(next,next.discontinuity||m_guideReset)) {
             LeaveSettingsPreviewFrame();
             RememberRenderedCachedPair();
@@ -2437,7 +2438,7 @@ public:
 
     bool Running()const{return m_running;}
     bool NeedsRealtimeTick()const{return m_loaded;}
-    DWORD TickSleepMs()const{return (m_loaded&&!m_playing&&!m_seekPending&&!m_seeking)?8u:0u;}
+    DWORD TickSleepMs()const{return playback_tick::SleepMs(TickNow());}
     // Blocks until there is something to do, rather than yielding and coming
     // straight back. While playing, TickSleepMs() was 0, so this loop spun a
     // core at 100% and every wasted iteration re-walked the live coverage
@@ -6382,11 +6383,17 @@ private:
         w=std::max(64u,w&~1u);h=std::max(64u,h&~1u);return{w,h};
     }
 
+    // The playback clock (PlaybackTickPolicy.h): the presented frame while
+    // paused, the audio clock while playing, and the steady clock from the
+    // last anchor when there is no audio clock at all.
     double Position() const {
-        if(!m_loaded)return 0;if(!m_playing)return m_currentSec;
-        double audio=Audio().PositionSeconds();
-        if(audio>=0.0){double d=m_decoder.DurationSeconds();return d>0?std::clamp(audio,0.0,d):audio;}
-        double s=m_playStartSec+std::chrono::duration<double>(Clock::now()-m_playStart).count();double d=m_decoder.DurationSeconds();return d>0?std::clamp(s,0.0,d):std::max(0.0,s);
+        return playback_tick::Position({m_loaded,m_playing,m_currentSec,m_playStartSec,m_decoder.DurationSeconds()},
+                                       [&]{return Audio().PositionSeconds();},
+                                       [&]{return std::chrono::duration<double>(Clock::now()-m_playStart).count();});
+    }
+    // What the tick's decisions read (PlaybackTickPolicy.h), as it is now.
+    playback_tick::TickState TickNow()const{
+        return {m_loaded,m_playing,m_seeking,m_seekPending,m_cachedPlayback,NetworkPlayback(),m_haveNext};
     }
 
     // Where a seek may land (SeekPolicy.h): inside the source's last frame,
@@ -6397,7 +6404,7 @@ private:
     }
 
     void RequestSeek(double sec) {
-        const bool resume=m_seekPending?m_seekResumePlaying:m_playing; RequestSeek(sec,resume);
+        const bool resume=seek_policy::ResumeAfterRequest(m_seekPending,m_seekResumePlaying,m_playing); RequestSeek(sec,resume);
     }
 
     void RequestSeek(double sec,bool resumeAfter) {
@@ -6473,15 +6480,14 @@ private:
             // A drag preview would respawn the audio helper on every step; the
             // release restarts it once.
             m_currentSec=double(frame.timestamp100ns)*1e-7;
-            if(!m_dragSeek){const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}}
-            m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter;m_synchronizedPlayback.SetPaused(!resumeAfter);m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return true;
+            if(seek_policy::RestartsAudioAfterSeek(m_dragSeek)){const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}}
+            m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=seek_policy::PlaysAfterSeek(resumeAfter,true,m_haveNext);m_synchronizedPlayback.SetPaused(!resumeAfter);m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return true;
         }
         m_haveNext=false;m_next=VideoFrame{};m_nextPairFrame.reset();
         auto readAt=[&](double target,VideoFrame& frame)->bool{
             if(!m_decoder.SeekSeconds(target))return false;
             if(m_decoder.ReadNext(frame))return true;
-            const double dur=m_decoder.DurationSeconds(),fd=1.0/std::max(1.0,m_decoder.FrameRate());
-            if(dur>0.0&&target>0.0){const double safe=std::max(0.0,std::min(target,dur-fd*1.5));if(safe<target&&m_decoder.SeekSeconds(safe)&&m_decoder.ReadNext(frame))return true;}
+            if(const auto safe=seek_policy::RetryTarget(target,m_decoder.DurationSeconds(),m_decoder.FrameRate());safe&&m_decoder.SeekSeconds(*safe)&&m_decoder.ReadNext(frame))return true;
             return false;
         };
         VideoFrame f; bool got=readAt(sec,f);
@@ -6496,11 +6502,11 @@ private:
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         if(!RenderVideoFrame(f,true)){LOG("Seek frame render failed.");m_playing=false;SetSeeking(false);return false;}
         m_currentSec=double(f.timestamp100ns)*1e-7;m_haveNext=m_decoder.ReadNext(m_next);
-        if(!m_dragSeek){const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");}
-        m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter&&m_haveNext;m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();LOG("Seek complete actual="<<m_currentSec);return true;
+        if(seek_policy::RestartsAudioAfterSeek(m_dragSeek)){const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");}
+        m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=seek_policy::PlaysAfterSeek(resumeAfter,false,m_haveNext);m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();LOG("Seek complete actual="<<m_currentSec);return true;
     }
 
-    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=playback_timing::PausePosition(m_currentSec);m_playing=false;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);}else{if(!m_cachedPlayback&&!NetworkPlayback()&&!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(status_note::PlayRestartSeconds(!m_decodeNotice.empty(),m_currentSec),true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;ResumeAudio();if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}InvalidateControls();InvalidatePlaybackProgress();}
+    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=playback_timing::PausePosition(m_currentSec);m_playing=false;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);}else{if(playback_tick::ResumeRestartsWithSeek(TickNow(),m_decoder.DurationSeconds())){RequestSeek(status_note::PlayRestartSeconds(!m_decodeNotice.empty(),m_currentSec),true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;ResumeAudio();if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}InvalidateControls();InvalidatePlaybackProgress();}
     // Frame steps stop audio rather than respawning it per step. Anything that
     // started it since (a seek, a scrub) leaves it active, and then a resume
     // is only a resume.

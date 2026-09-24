@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 
 #include "NeuralRenderTypes.h"
 
@@ -49,5 +50,38 @@ inline double Clamp(double seconds, const Timeline& timeline)
     if (high > 0) return std::clamp(seconds, low, high);
     return std::max(low, seconds);
 }
+
+// Whether playback resumes after a requested seek. A second request before the
+// tick has run the first keeps the first one's intent: the first request
+// already paused playback, so reading "playing" again would turn every step of
+// a drag after the first into a pause.
+inline bool ResumeAfterRequest(bool seekPending, bool pendingResume, bool playing)
+{
+    return seekPending ? pendingResume : playing;
+}
+
+// A restarted decoder that returns no frame at the target - it lies in the
+// last frame's tail - is asked again a frame and a half before the end.
+// nullopt when there is no earlier target to try.
+inline std::optional<double> RetryTarget(double target, double durationSeconds, double frameRate)
+{
+    const double frameDuration = 1.0 / std::max(1.0, frameRate);
+    if (!(durationSeconds > 0.0 && target > 0.0)) return std::nullopt;
+    const double safe = std::max(0.0, std::min(target, durationSeconds - frameDuration * 1.5));
+    if (safe < target) return safe;
+    return std::nullopt;
+}
+
+// A plain file plays on after a seek only when a frame follows the one it
+// showed; at the end of the file it stays paused on that frame. A cached pair
+// reads its next frame on the next tick, so it plays on whenever it was asked to.
+inline bool PlaysAfterSeek(bool resumeAfter, bool cachedPlayback, bool haveNext)
+{
+    return cachedPlayback ? resumeAfter : resumeAfter && haveNext;
+}
+
+// A drag preview would respawn the audio helper on every step; the release
+// restarts it once.
+inline bool RestartsAudioAfterSeek(bool dragSeek) { return !dragSeek; }
 
 } // namespace seek_policy

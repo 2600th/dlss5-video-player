@@ -78,6 +78,7 @@
 #include "SeekPolicy.h"
 #include "RenderPacePolicy.h"
 #include "PlayerCommandLine.h"
+#include "PlaybackTickPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -13242,6 +13243,173 @@ void player_command_line_takes_the_output_box_and_the_last_file_test()
     CHECK(quality.file == L"clip.mp4");
 }
 
+// P3.4: Position and the tick's decisions, out of PlayerApp, driven with fake
+// clocks. The audio clock is a callable so a test can see whether it was read.
+void playback_clock_reads_audio_only_while_playing_and_clamps_to_the_file_test()
+{
+    int audioReads = 0, wallReads = 0;
+    double audio = 12.5, wall = 3.0;
+    const auto readAudio = [&] { ++audioReads; return audio; };
+    const auto readWall = [&] { ++wallReads; return wall; };
+    playback_tick::ClockState state{true, true, 7.0, 40.0, 60.0};
+
+    CHECK_EQ(0.0, playback_tick::Position({false, true, 7.0, 40.0, 60.0}, readAudio, readWall));
+    // Paused: the presented frame, and the audio clock is not read. Reading
+    // it moves audio_clock's continuity and the position a restart resumes
+    // from; P0.2 was a restart from a reading taken before a paused seek.
+    state.playing = false;
+    CHECK_EQ(7.0, playback_tick::Position(state, readAudio, readWall));
+    CHECK_EQ(0, audioReads);
+    CHECK_EQ(0, wallReads);
+
+    // Playing with an audio clock: the audio clock, clamped to the file, and
+    // the steady clock is never consulted.
+    state.playing = true;
+    CHECK_EQ(12.5, playback_tick::Position(state, readAudio, readWall));
+    audio = 75.0;
+    CHECK_EQ(60.0, playback_tick::Position(state, readAudio, readWall));
+    CHECK_EQ(2, audioReads);
+    CHECK_EQ(0, wallReads);
+    // An unknown duration clamps nothing.
+    state.durationSeconds = 0.0;
+    CHECK_EQ(75.0, playback_tick::Position(state, readAudio, readWall));
+
+    // No audio clock (no stream, no endpoint): the steady clock from the last
+    // anchor. A stall does not land here any more - audio_clock::Present
+    // carries the clock through it (P1.4) - so this is the silent-file path.
+    audio = -1.0;
+    state.durationSeconds = 60.0;
+    CHECK_EQ(43.0, playback_tick::Position(state, readAudio, readWall));
+    wall = 30.0;
+    CHECK_EQ(60.0, playback_tick::Position(state, readAudio, readWall));
+    state.playStartSeconds = -5.0;
+    wall = 1.0;
+    CHECK_EQ(0.0, playback_tick::Position(state, readAudio, readWall));
+    state.durationSeconds = 0.0;
+    CHECK_EQ(0.0, playback_tick::Position(state, readAudio, readWall));
+    state.playStartSeconds = 100.0;
+    CHECK_EQ(101.0, playback_tick::Position(state, readAudio, readWall));
+}
+
+void playback_tick_seeks_first_presents_paused_frames_once_and_times_frames_test()
+{
+    using playback_tick::TickState;
+    TickState playing{};
+    playing.loaded = true; playing.playing = true; playing.haveNext = true;
+
+    // A requested seek runs before anything else, whatever else is true.
+    TickState pending = playing;
+    pending.seekPending = true;
+    CHECK(playback_tick::PerformsPendingSeek(pending));
+    CHECK(!playback_tick::PerformsPendingSeek(playing));
+
+    // A paused frame is presented only when something invalidated it; it
+    // used to be re-presented at 60 Hz for an image the compositor held.
+    TickState paused = playing;
+    paused.playing = false;
+    CHECK(!playback_tick::PresentsPausedFrame(paused, true, false, false));
+    CHECK(playback_tick::PresentsPausedFrame(paused, true, true, false));
+    CHECK(playback_tick::PresentsPausedFrame(paused, true, false, true));
+    CHECK(!playback_tick::PresentsPausedFrame(paused, false, true, true));
+    CHECK(!playback_tick::PresentsPausedFrame(playing, true, true, true));
+    TickState pausedSeeking = paused;
+    pausedSeeking.seeking = true;
+    CHECK(!playback_tick::PresentsPausedFrame(pausedSeeking, true, true, true));
+
+    // Read-ahead refills an empty queue for a cached pair or a stream only.
+    TickState empty = playing;
+    empty.haveNext = false;
+    CHECK(!playback_tick::ReadsCachedAhead(empty));
+    CHECK(!playback_tick::ReadsNetworkAhead(empty));
+    empty.cachedPlayback = true;
+    CHECK(playback_tick::ReadsCachedAhead(empty));
+    CHECK(!playback_tick::ReadsNetworkAhead(empty));
+    empty.cachedPlayback = false; empty.networkPlayback = true;
+    CHECK(playback_tick::ReadsNetworkAhead(empty));
+    empty.seeking = true;
+    CHECK(!playback_tick::ReadsNetworkAhead(empty));
+    CHECK(!playback_tick::ReadsCachedAhead(playing));
+
+    CHECK(playback_tick::AdvancesFrame(playing));
+    CHECK(!playback_tick::AdvancesFrame(paused));
+    CHECK(!playback_tick::AdvancesFrame(pausedSeeking));
+    TickState dry = playing;
+    dry.haveNext = false;
+    CHECK(!playback_tick::AdvancesFrame(dry));
+
+    // At 30 fps a frame more than 1.5 intervals late is dropped; one more
+    // than a millisecond early waits; anything between is presented.
+    const double frame = 1.0 / 30.0;
+    CHECK(!playback_tick::IsLate(10.0 + frame, 10.0, frame));
+    CHECK(playback_tick::IsLate(10.0 + frame * 1.5 + 1e-6, 10.0, frame));
+    CHECK(playback_tick::IsLate(std::nan(""), 10.0, frame));
+    CHECK(!playback_tick::IsEarly(9.9995, 10.0));
+    CHECK(playback_tick::IsEarly(9.998, 10.0));
+    CHECK(!playback_tick::IsEarly(10.2, 10.0));
+
+    // A dry queue ends a file or a pair; a stream is only waiting for data.
+    CHECK(playback_tick::EndsPlaybackWhenQueueEmpty(false));
+    CHECK(!playback_tick::EndsPlaybackWhenQueueEmpty(true));
+
+    // Only a paused, settled player lets the pump block.
+    CHECK_EQ(8u, playback_tick::SleepMs(paused));
+    CHECK_EQ(0u, playback_tick::SleepMs(playing));
+    TickState pausedPending = paused;
+    pausedPending.seekPending = true;
+    CHECK_EQ(0u, playback_tick::SleepMs(pausedPending));
+    CHECK_EQ(0u, playback_tick::SleepMs(pausedSeeking));
+    CHECK_EQ(0u, playback_tick::SleepMs(TickState{}));
+
+    // Play on a local file with nothing queued restarts through a seek.
+    CHECK(playback_tick::ResumeRestartsWithSeek(dry, 60.0));
+    CHECK(!playback_tick::ResumeRestartsWithSeek(dry, 0.0));
+    CHECK(!playback_tick::ResumeRestartsWithSeek(playing, 60.0));
+    TickState dryPair = dry;
+    dryPair.cachedPlayback = true;
+    CHECK(!playback_tick::ResumeRestartsWithSeek(dryPair, 60.0));
+    TickState dryStream = dry;
+    dryStream.networkPlayback = true;
+    CHECK(!playback_tick::ResumeRestartsWithSeek(dryStream, 60.0));
+}
+
+void seek_requests_coalesce_and_a_seek_at_the_end_retries_before_it_test()
+{
+    // The first request pauses playback, so a second one before the tick
+    // runs keeps the first one's intent rather than reading "paused".
+    CHECK(seek_policy::ResumeAfterRequest(false, false, true));
+    CHECK(!seek_policy::ResumeAfterRequest(false, true, false));
+    CHECK(seek_policy::ResumeAfterRequest(true, true, false));
+    CHECK(!seek_policy::ResumeAfterRequest(true, false, true));
+
+    // A decoder that returns nothing at the target is asked again a frame
+    // and a half before the end; never past the target, never below zero.
+    const double frame = 1.0 / 30.0;
+    const auto retry = seek_policy::RetryTarget(10.0, 10.0, 30.0);
+    CHECK(retry.has_value());
+    if (retry) CHECK(std::abs(*retry - (10.0 - frame * 1.5)) < 1e-12);
+    CHECK(!seek_policy::RetryTarget(5.0, 10.0, 30.0).has_value());
+    CHECK(!seek_policy::RetryTarget(0.0, 10.0, 30.0).has_value());
+    CHECK(!seek_policy::RetryTarget(10.0, 0.0, 30.0).has_value());
+    const auto tiny = seek_policy::RetryTarget(0.02, 0.03, 30.0);
+    CHECK(tiny.has_value());
+    if (tiny) CHECK_EQ(0.0, *tiny);
+    // An unknown rate is read as 1 fps.
+    const auto slow = seek_policy::RetryTarget(10.0, 10.0, 0.0);
+    CHECK(slow.has_value());
+    if (slow) CHECK_EQ(8.5, *slow);
+
+    // A plain file plays on after a seek only if a frame follows the one
+    // shown; a cached pair reads its own next frame on the next tick.
+    CHECK(seek_policy::PlaysAfterSeek(true, false, true));
+    CHECK(!seek_policy::PlaysAfterSeek(true, false, false));
+    CHECK(seek_policy::PlaysAfterSeek(true, true, false));
+    CHECK(!seek_policy::PlaysAfterSeek(false, true, true));
+    // A drag preview would respawn the audio helper on every step; the
+    // release restarts it once.
+    CHECK(!seek_policy::RestartsAudioAfterSeek(true));
+    CHECK(seek_policy::RestartsAudioAfterSeek(false));
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -13598,6 +13766,9 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(seek_clamp_stays_on_a_decodable_frame_and_inside_a_finished_range_test),
     TEST_CASE(render_pace_median_outvotes_a_contended_sample_and_round_trips_test),
     TEST_CASE(player_command_line_takes_the_output_box_and_the_last_file_test),
+    TEST_CASE(playback_clock_reads_audio_only_while_playing_and_clamps_to_the_file_test),
+    TEST_CASE(playback_tick_seeks_first_presents_paused_frames_once_and_times_frames_test),
+    TEST_CASE(seek_requests_coalesce_and_a_seek_at_the_end_retries_before_it_test),
 };
 
 
