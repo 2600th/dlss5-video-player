@@ -1287,6 +1287,73 @@ void render_metrics_report_colour_in_one_scale_for_both_layouts_test()
     CHECK(!temporal_metrics::Sample(std::span<const uint8_t>(nv12), PixelLayout::Bgra, kW, kH, kGridW, kGridH, fromBgra));
 }
 
+// The direct NVENC capture (P3.7) never reads a frame back whole: it reads back the
+// rows the report samples, and a High capture is P010. Both have to give the
+// report the plane the whole frame gives, or a render's metrics would depend on
+// which encoder wrote it.
+void render_metrics_sample_rows_and_p010_the_way_they_sample_a_frame_test()
+{
+    using namespace metrics_test;
+    // A textured NV12 frame, and the same picture as P010 with every 8-bit code
+    // carried at 10 bits (code * 4, in the top bits), which the sampler reads back
+    // on the 8-bit scale exactly.
+    std::vector<uint8_t> nv12(size_t(kW) * kH * 3u / 2u);
+    for (size_t index = 0; index < nv12.size(); ++index) nv12[index] = uint8_t(16 + (index * 37 + index / 7) % 220);
+    std::vector<uint8_t> p010(nv12.size() * 2u);
+    for (size_t index = 0; index < nv12.size(); ++index) {
+        const uint16_t sample = uint16_t((uint32_t(nv12[index]) * 4u) << 6);
+        p010[index * 2u] = uint8_t(sample & 0xFFu);
+        p010[index * 2u + 1u] = uint8_t(sample >> 8);
+    }
+    temporal_metrics::Plane fromNv12, fromP010;
+    CHECK(temporal_metrics::Sample(nv12, temporal_metrics::SampleLayout::Nv12, kW, kH, kGridW, kGridH, fromNv12));
+    CHECK(temporal_metrics::Sample(p010, temporal_metrics::SampleLayout::P010, kW, kH, kGridW, kGridH, fromP010));
+    CHECK(fromNv12.y == fromP010.y && fromNv12.cb == fromP010.cb && fromNv12.cr == fromP010.cr);
+    // The PixelLayout entry point is the same sampler.
+    temporal_metrics::Plane viaPixelLayout;
+    CHECK(temporal_metrics::Sample(nv12, PixelLayout::Nv12, kW, kH, kGridW, kGridH, viaPixelLayout));
+    CHECK(viaPixelLayout.y == fromNv12.y && viaPixelLayout.cr == fromNv12.cr);
+
+    // The rows the grid reads, packed as the renderer packs them, sample to the
+    // same plane in both layouts - on the grid they were chosen for, and on a
+    // taller output such as an upscale.
+    for (const uint32_t height : {kH, 360u}) {
+        const uint32_t width = height == kH ? kW : 640u;
+        std::vector<uint8_t> frame(size_t(width) * height * 3u / 2u);
+        for (size_t index = 0; index < frame.size(); ++index) frame[index] = uint8_t(16 + (index * 13 + index / 11) % 220);
+        std::vector<uint8_t> wide(frame.size() * 2u);
+        for (size_t index = 0; index < frame.size(); ++index) {
+            const uint16_t sample = uint16_t((uint32_t(frame[index]) * 4u + (index & 3u)) << 6);
+            wide[index * 2u] = uint8_t(sample & 0xFFu);
+            wide[index * 2u + 1u] = uint8_t(sample >> 8);
+        }
+        const temporal_metrics::RowSet rows = temporal_metrics::SampledRows(height, kGridH);
+        CHECK(!rows.luma.empty() && rows.luma.size() <= size_t(kGridH) * 2u);
+        CHECK(std::is_sorted(rows.luma.begin(), rows.luma.end()) && std::is_sorted(rows.chroma.begin(), rows.chroma.end()));
+        for (const auto layout : {temporal_metrics::SampleLayout::Nv12, temporal_metrics::SampleLayout::P010}) {
+            const std::vector<uint8_t>& whole = layout == temporal_metrics::SampleLayout::Nv12 ? frame : wide;
+            const size_t row = temporal_metrics::SampleRowBytes(layout, width);
+            std::vector<uint8_t> payload;
+            for (const uint32_t y : rows.luma)
+                payload.insert(payload.end(), whole.begin() + std::ptrdiff_t(row * y), whole.begin() + std::ptrdiff_t(row * (y + 1)));
+            const size_t chroma = row * height;
+            for (const uint32_t y : rows.chroma)
+                payload.insert(payload.end(), whole.begin() + std::ptrdiff_t(chroma + row * y),
+                               whole.begin() + std::ptrdiff_t(chroma + row * (y + 1)));
+            CHECK_EQ(temporal_metrics::RowPayloadBytes(layout, width, rows.luma.size(), rows.chroma.size()), payload.size());
+            temporal_metrics::Plane full, sparse;
+            CHECK(temporal_metrics::Sample(whole, layout, width, height, kGridW, kGridH, full));
+            CHECK(temporal_metrics::SampleRowPayload(payload, layout, width, height, kGridW, kGridH, rows, sparse));
+            CHECK(full.y == sparse.y && full.cb == sparse.cb && full.cr == sparse.cr);
+            // Rows chosen for another grid do not pass for these: refused, not misread.
+            temporal_metrics::Plane other;
+            CHECK(!temporal_metrics::SampleRowPayload(payload, layout, width, height, kGridW, kGridH + 5, rows, other));
+            CHECK(!temporal_metrics::SampleRowPayload(std::span<const uint8_t>(payload).first(payload.size() - 1), layout,
+                                                      width, height, kGridW, kGridH, rows, other));
+        }
+    }
+}
+
 // The supplied exposure's arithmetic: middle grey over the log-average luminance,
 // bounded, and a one-pole low-pass in log units that a reset restarts and a
 // re-submitted frame leaves alone.
@@ -1390,6 +1457,7 @@ int main()
     render_metrics_see_flicker_the_source_did_not_have_test();
     render_metrics_follow_the_flow_and_stop_at_a_cut_test();
     render_metrics_report_colour_in_one_scale_for_both_layouts_test();
+    render_metrics_sample_rows_and_p010_the_way_they_sample_a_frame_test();
     exposure_meter_and_smoother_follow_the_policy_test();
     guide_meter_restarts_the_exposure_at_a_cut_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

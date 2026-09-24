@@ -1141,9 +1141,15 @@ private:
                 nvenc_direct::Eligibility(kind, capture, writer_.has_value(), request_.encoderPath);
             std::string unavailable;
             NvencSurfacePool* pool = nullptr;
+            // The render report samples the capture on the guide generator's grid,
+            // which is laid over the frame the model is shown; these are the only
+            // rows of the capture a direct frame reads back.
+            metricRows_ = temporal_metrics::SampledRows(
+                outputHeight_,
+                TemporalGuideGenerator::AnalysisGrid(modelInput_.width, modelInput_.height, request_.fps).second);
             if (reason == nvenc_direct::Ineligible::None && directAllowed_ &&
                 nvenc_direct::DriverAvailable(&unavailable))
-                pool = evaluator_.PrepareDirectEncode(true);
+                pool = evaluator_.PrepareDirectEncode(true, metricRows_);
             if (!pool) evaluator_.PrepareDirectEncode(false);
             encoder_.UseDirect(pool);
             if (pool) LOG("Neural render encoder: NVENC direct from the D3D12 capture.");
@@ -1157,6 +1163,14 @@ private:
             (void)kind;(void)capture;
             return false;
         }
+    }
+
+    // What the report's rows add to a resolved direct frame.
+    size_t MetricPayloadBytes(EncoderPixelFormat capture) const
+    {
+        const auto layout = capture == EncoderPixelFormat::P010 ? temporal_metrics::SampleLayout::P010
+                                                                 : temporal_metrics::SampleLayout::Nv12;
+        return temporal_metrics::RowPayloadBytes(layout, outputWidth_, metricRows_.luma.size(), metricRows_.chroma.size());
     }
 
     // One capture pass with one encoder: the preroll evaluated without
@@ -1196,8 +1210,13 @@ private:
             // is the last thing an attempt writes.
             ScopeExit<decltype(recordNeuralEvaluations)> recordOnExit{recordNeuralEvaluations};
             job_.evaluator_.DiscardPending();
-            captureLayout_=job_.evaluator_.CapturePixelFormat()==EncoderPixelFormat::Nv12
-                ?PixelLayout::Nv12:PixelLayout::Bgra;
+            // The layout the report samples the capture in: all three the capture
+            // produces, P010 included, so a High render is measured like the others.
+            switch(job_.evaluator_.CapturePixelFormat()){
+                case EncoderPixelFormat::Nv12:captureLayout_=temporal_metrics::SampleLayout::Nv12;break;
+                case EncoderPixelFormat::P010:captureLayout_=temporal_metrics::SampleLayout::P010;break;
+                case EncoderPixelFormat::Bgra:captureLayout_=temporal_metrics::SampleLayout::Bgra;break;
+            }
             // Joined on every exit from the attempt, so no thread is left holding
             // the decoder when the caller closes or reopens it.
             // Optional only so the receipt gate can restart the pass from the preroll.
@@ -1274,7 +1293,8 @@ private:
             // the token naming the surface NVENC reads the frame from. Progress keeps
             // counting the frame's pixels either way, so the byte count means the same.
             pixelBytes_ = static_cast<size_t>(EncoderFrameBytes(spec.pixelFormat, job_.outputWidth_, job_.outputHeight_));
-            job_.expectedBytes_ = attempt_.direct ? sizeof(NvencDirectToken) : pixelBytes_;
+            job_.expectedBytes_ = attempt_.direct
+                ? sizeof(NvencDirectToken) + job_.MetricPayloadBytes(spec.pixelFormat) : pixelBytes_;
             return true;
         }
 
@@ -1302,8 +1322,17 @@ private:
         {
             if(sample.source.y.empty())return;
             temporal_metrics::Plane output;
-            if(!temporal_metrics::Sample(captured,captureLayout_,job_.outputWidth_,job_.outputHeight_,
-                                         sample.source.width,sample.source.height,output))return;
+            // A direct-encode frame is its token followed by just the rows the grid
+            // samples (D3D12Renderer::SetDirectEncodeSurfaces), which give the same
+            // plane the whole frame would.
+            const bool sampled=attempt_.direct
+                ?captured.size()>sizeof(NvencDirectToken)&&
+                 temporal_metrics::SampleRowPayload(captured.subspan(sizeof(NvencDirectToken)),captureLayout_,
+                     job_.outputWidth_,job_.outputHeight_,sample.source.width,sample.source.height,
+                     job_.metricRows_,output)
+                :temporal_metrics::Sample(captured,captureLayout_,job_.outputWidth_,job_.outputHeight_,
+                                          sample.source.width,sample.source.height,output);
+            if(!sampled)return;
             attempt_.metrics.Add(sample.source,output,sample.motion,sample.newShot);
         }
 
@@ -1670,7 +1699,7 @@ private:
         // keeping the two apart is what stops pipeline latency leaking into the
         // throughput numbers. Reset at the top of every iteration.
         double iterationDrainMs_ = 0.0;
-        PixelLayout captureLayout_{PixelLayout::Bgra};
+        temporal_metrics::SampleLayout captureLayout_{temporal_metrics::SampleLayout::Bgra};
         // One frame of the capture's pixels, whatever travels to the encoder.
         size_t pixelBytes_{};
         bool prerollEvaluated_ = false;
@@ -2066,8 +2095,10 @@ private:
     // restarts after the gate opened has nothing left to wait for.
     bool receiptGateOpened_ = false;
     int64_t prerollStart_ = 0;
-    // SelectDirect: false once a direct session failed on this render.
+    // SelectDirect: false once a direct session failed on this render, and the
+    // capture rows the render report samples, which a direct capture reads back.
     bool directAllowed_ = true;
+    temporal_metrics::RowSet metricRows_;
 };
 
 template<class Source, class Evaluator, class Encoder, class Evidence, class Clock, class Paused>
@@ -2468,14 +2499,15 @@ struct ProductionEvaluatorAdapter {
     // so every surface a failed attempt left taken is free again. Null when the
     // capture cannot feed NVENC directly - an 8-bit BGRA capture, or a device the
     // surfaces cannot be made on - and the attempt keeps the readback.
-    NvencSurfacePool* PrepareDirectEncode(bool on){
+    NvencSurfacePool* PrepareDirectEncode(bool on,const temporal_metrics::RowSet& metricRows={}){
         if(!renderer)return nullptr;
         const EncoderPixelFormat format=CapturePixelFormat();
         if(on&&format!=EncoderPixelFormat::Bgra&&
            directSurfaces.Configure(renderer->Device(),renderer->CaptureFence(),format,renderer->OutputW(),
                                     renderer->OutputH(),D3D12Renderer::CaptureSlots)){
             directSurfaces.ReleaseAll();
-            if(renderer->SetDirectEncodeSurfaces(&directSurfaces))return &directSurfaces;
+            if(renderer->SetDirectEncodeSurfaces(&directSurfaces,metricRows.luma,metricRows.chroma))
+                return &directSurfaces;
         }
         renderer->SetDirectEncodeSurfaces(nullptr);
         return nullptr;

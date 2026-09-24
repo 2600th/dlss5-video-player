@@ -54,6 +54,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <format>
@@ -288,6 +289,7 @@ int DirectEncodeIdentity(const fs::path& helpers, const fs::path& worker, const 
     int failures = 0;
     for (const CaptureArm& arm : kDirectArms) {
         std::string digests[2];
+        TemporalMetrics metrics[2];
         for (const EncoderPath path : {EncoderPath::Direct, EncoderPath::Ffmpeg}) {
             const std::wstring label = std::wstring(arm.name) + (path == EncoderPath::Direct ? L"-direct" : L"-child");
             NeuralRenderRequest request{nullptr, source, root / (label + L".mkv"), kIdentityWidth, kIdentityHeight,
@@ -307,6 +309,7 @@ int DirectEncodeIdentity(const fs::path& helpers, const fs::path& worker, const 
             }
             digests[path == EncoderPath::Direct ? 0 : 1] =
                 PacketDigest(helpers, request.stagingVideoPath, root / (label + L".framemd5"));
+            metrics[path == EncoderPath::Direct ? 0 : 1] = result.metrics;
         }
         if (digests[0].empty() || digests[0] != digests[1]) {
             std::wcerr << L"FAIL: " << arm.name << L": the direct path's packets differ from the encoder "
@@ -315,6 +318,29 @@ int DirectEncodeIdentity(const fs::path& helpers, const fs::path& worker, const 
         } else {
             std::wcout << arm.name << L": direct and child packets identical ("
                        << std::count(digests[0].begin(), digests[0].end(), '\n') << L" digest lines)\n";
+        }
+        // The render report (P2.11) is part of what a direct render must not lose:
+        // the direct capture reads back only the rows the report samples, and has
+        // to arrive at the child's numbers from them - both rungs measured, the
+        // counts equal and every value within float noise of the child's.
+        const TemporalMetrics& direct = metrics[0];
+        const TemporalMetrics& child = metrics[1];
+        const auto close = [](double a, double b) { return std::abs(a - b) <= 1e-6 + 1e-6 * std::abs(b); };
+        const bool sameMetrics = direct.Measured() && child.Measured() && direct.frames == child.frames &&
+            direct.pairs == child.pairs && direct.shots == child.shots &&
+            close(direct.sourceWarpError, child.sourceWarpError) && close(direct.outputWarpError, child.outputWarpError) &&
+            close(direct.sourceSigma, child.sourceSigma) && close(direct.outputSigma, child.outputSigma) &&
+            close(direct.lumaShift, child.lumaShift) && close(direct.colorDelta, child.colorDelta);
+        std::wcout << std::format(L"{}: metrics direct frames={} outputWarp={:.6f} sigma={:.6f} lumaShift={:.6f} "
+                                  L"colorDelta={:.6f}; child frames={} outputWarp={:.6f} sigma={:.6f} "
+                                  L"lumaShift={:.6f} colorDelta={:.6f}\n",
+                                  arm.name, direct.frames, direct.outputWarpError, direct.outputSigma,
+                                  direct.lumaShift, direct.colorDelta, child.frames, child.outputWarpError,
+                                  child.outputSigma, child.lumaShift, child.colorDelta);
+        if (!sameMetrics) {
+            std::wcerr << L"FAIL: " << arm.name << L": the render report's metrics differ between the direct "
+                          L"path and the encoder child, or one of them measured nothing.\n";
+            ++failures;
         }
     }
     std::wcout << L"evidence: " << root.wstring() << L'\n';

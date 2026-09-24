@@ -2130,10 +2130,19 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     return ResolveOldestCapture(capture);
 }
 
-bool D3D12Renderer::SetDirectEncodeSurfaces(NvencSurfacePool*pool){
+bool D3D12Renderer::SetDirectEncodeSurfaces(NvencSurfacePool*pool,std::vector<uint32_t> metricLumaRows,
+                                            std::vector<uint32_t> metricChromaRows){
     if(m_capturePending)return false;
     if(pool&&!d3d12_renderer_detail::CaptureFormatIsPlanar(m_captureFormat))return false;
+    // A row past the plane would be a copy the debug layer refuses; such a list is
+    // not one SampledRows made for this output, so the report is simply skipped.
+    const auto inside=[](const std::vector<uint32_t>&rows,uint32_t height){
+        return std::all_of(rows.begin(),rows.end(),[&](uint32_t row){return row<height;});};
+    if(!pool||!inside(metricLumaRows,m_outputH)||!inside(metricChromaRows,m_outputH/2u)){
+        metricLumaRows.clear();metricChromaRows.clear();
+    }
     m_directSurfaces=pool;
+    m_directMetricLumaRows=std::move(metricLumaRows);m_directMetricChromaRows=std::move(metricChromaRows);
     return true;
 }
 
@@ -2214,15 +2223,38 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     // NV12/P010 surface, which is what NVENC's D3D12 interface reads. Each capture
     // plane is the format of the surface plane it lands in (R8/R8G8 for NV12,
     // R16/R16G16 for P010), so it is a plain subresource copy, and the samples are
-    // the ones the readback copy would have handed the encoder child.
-    auto copyPlaneToSurface=[&](ID3D12Resource*plane,ID3D12Resource*surface,UINT subresource){
-        Barrier(cmd,plane,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
-        D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=surface;
-        destination.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;destination.SubresourceIndex=subresource;
-        D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=plane;
-        source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
-        Barrier(cmd,plane,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    // the ones the readback copy would have handed the encoder child. The render
+    // report's rows go to the readback slot at the places a whole-frame copy would
+    // have put them, one row per copy.
+    auto copyPlanesToSurface=[&](ID3D12Resource*surface){
+        ID3D12Resource*planes[2]={m_captureLuma.Get(),m_captureChroma.Get()};
+        for(ID3D12Resource*plane:planes)
+            Barrier(cmd,plane,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        // COMMON on both sides: that is the state the encode engine reads it in.
+        Barrier(cmd,surface,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
+        for(UINT subresource=0;subresource<2;++subresource){
+            D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=surface;
+            destination.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;destination.SubresourceIndex=subresource;
+            D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=planes[subresource];
+            source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
+        }
+        const auto copyRows=[&](ID3D12Resource*plane,const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&footprint,
+                                const std::vector<uint32_t>&rows,uint32_t width){
+            D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=m_cacheReadback[readbackSlot].Get();
+            destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;destination.PlacedFootprint=footprint;
+            D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=plane;
+            source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            for(const uint32_t row:rows){
+                const D3D12_BOX box{0,row,0,width,row+1u,1};
+                cmd->CopyTextureRegion(&destination,0,row,0,&source,&box);
+            }
+        };
+        copyRows(planes[0],m_lumaFootprint,m_directMetricLumaRows,m_outputW);
+        copyRows(planes[1],m_chromaFootprint,m_directMetricChromaRows,m_outputW/2u);
+        Barrier(cmd,surface,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
+        for(ID3D12Resource*plane:planes)
+            Barrier(cmd,plane,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
     };
     if(planar){
         // The chroma pass reads the same neural output at half resolution, averaging each
@@ -2236,11 +2268,7 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
         if(directSurface!=CaptureReadbackView::kNoDirectSurface){
             ID3D12Resource*surface=m_directSurfaces->Surface(directSurface);
             if(!surface)return false;
-            // COMMON on both sides: that is the state the encode engine reads it in.
-            Barrier(cmd,surface,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
-            copyPlaneToSurface(m_captureLuma.Get(),surface,0);
-            copyPlaneToSurface(m_captureChroma.Get(),surface,1);
-            Barrier(cmd,surface,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
+            copyPlanesToSurface(surface);
         }else{
             copyPlane(m_captureLuma.Get(),m_lumaFootprint);
             copyPlane(m_captureChroma.Get(),m_chromaFootprint);
@@ -2341,8 +2369,9 @@ bool D3D12Renderer::RecordTemporalStability(ID3D12GraphicsCommandList*cmd,uint32
 
 bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
     if(!ReserveOldestCapture(view))return false;
-    // A direct-encode capture is waited for by NVENC, on the GPU.
-    if(view.directSurface!=CaptureReadbackView::kNoDirectSurface)return true;
+    // A direct-encode capture is waited for by NVENC, on the GPU; only one that
+    // also reads back the report's rows has anything here to wait for.
+    if(view.directSurface!=CaptureReadbackView::kNoDirectSurface&&!view.fence)return true;
     if(!WaitForFenceValue(view.fenceValue, &m_captureResolveWaitNanos)){
         EndResolveOldestCapture();view=CaptureReadbackView{};return false;
     }
@@ -2364,11 +2393,19 @@ bool D3D12Renderer::ReserveOldestCapture(CaptureReadbackView&view){
     view.fence=m_fence.Get();view.fenceValue=m_captureFence[readbackSlot];
     view.directSurface=m_captureSurface[readbackSlot];
     if(view.directSurface!=CaptureReadbackView::kNoDirectSurface){
-        // Nothing to copy out and nothing for the copy thread to wait on: the token
-        // carries the fence value to NVENC instead.
-        view.fence=nullptr;view.bytes=sizeof(NvencDirectToken);
+        // The token carries the fence value to NVENC. Without report rows there is
+        // nothing to copy out and nothing for the copy thread to wait on; with them
+        // the copy waits for the capture, as a readback does, and appends the rows.
         view.width=m_outputW;view.height=m_outputH;view.format=m_captureFormat;
         view.id=m_captureId[readbackSlot];
+        view.bytes=sizeof(NvencDirectToken);
+        if(m_directMetricLumaRows.empty()){view.fence=nullptr;return true;}
+        const size_t row=size_t(m_outputW)*(m_captureFormat==CaptureFormat::P010?2u:1u);
+        view.bytes+=row*(m_directMetricLumaRows.size()+m_directMetricChromaRows.size());
+        view.base=base+m_lumaFootprint.Offset;view.rowPitch=size_t(m_lumaFootprint.Footprint.RowPitch);
+        view.chromaBase=base+m_chromaFootprint.Offset;
+        view.chromaRowPitch=size_t(m_chromaFootprint.Footprint.RowPitch);
+        view.metricLumaRows=&m_directMetricLumaRows;view.metricChromaRows=&m_directMetricChromaRows;
         return true;
     }
     const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&plane=planar?m_lumaFootprint:m_cacheFootprint;
@@ -2444,6 +2481,14 @@ bool D3D12Renderer::CompleteReservedCapture(const CaptureReadbackView&view){
 void D3D12Renderer::CopyCaptureView(const CaptureReadbackView&view,std::vector<uint8_t>&pixels){
     if(view.directSurface!=CaptureReadbackView::kNoDirectSurface){
         WriteNvencDirectToken(NvencDirectToken{NvencDirectToken::kMagic,view.directSurface,view.fenceValue},pixels);
+        if(!view.metricLumaRows||!view.metricChromaRows)return;
+        // The report's rows after the token, luma then chroma, each tightly packed
+        // (temporal_metrics::SampleRowPayload reads exactly this).
+        const size_t row=size_t(view.width)*(view.format==CaptureFormat::P010?2u:1u);
+        pixels.resize(view.bytes);
+        uint8_t*out=pixels.data()+sizeof(NvencDirectToken);
+        for(const uint32_t y:*view.metricLumaRows){memcpy(out,view.base+view.rowPitch*y,row);out+=row;}
+        for(const uint32_t y:*view.metricChromaRows){memcpy(out,view.chromaBase+view.chromaRowPitch*y,row);out+=row;}
         return;
     }
     // Only resize when the caller handed back a differently sized buffer. Constructing a

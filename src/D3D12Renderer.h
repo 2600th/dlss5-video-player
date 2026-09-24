@@ -319,6 +319,11 @@ public:
         // `fenceValue`, which NVENC waits on itself, so nothing waits on the CPU.
         static constexpr uint32_t kNoDirectSurface = UINT32_MAX;
         uint32_t directSurface = kNoDirectSurface;
+        // The rows of the capture a direct-encode frame still reads back for the
+        // render report (SetDirectEncodeSurfaces), or null. With them the view keeps
+        // its fence and planes, and the copy appends those rows after the token.
+        const std::vector<uint32_t>* metricLumaRows = nullptr;
+        const std::vector<uint32_t>* metricChromaRows = nullptr;
     };
 
     // Asynchronous capture. EnqueueEvaluatedFrameCapture records the cache draw and the
@@ -365,7 +370,15 @@ public:
     // readback ring, which stays allocated so a render can fall back to the ffmpeg
     // child without a new device. Only with no capture pending; false when one is,
     // or when the capture is not planar.
-    bool SetDirectEncodeSurfaces(NvencSurfacePool* pool);
+    //
+    // `metricLumaRows` and `metricChromaRows` are the rows of the two planes the
+    // render report samples (temporal_metrics::SampledRows): each direct capture
+    // also copies just those rows into its readback slot - a few hundred KB where
+    // the frame is 3-25 MB - and the token comes back followed by them, so the
+    // report is computed from the same samples the readback path would read.
+    // Empty skips them, and nothing is read back at all.
+    bool SetDirectEncodeSurfaces(NvencSurfacePool* pool, std::vector<uint32_t> metricLumaRows = {},
+                                 std::vector<uint32_t> metricChromaRows = {});
     bool DirectEncodeActive() const { return m_directSurfaces != nullptr; }
     // What a direct-encode pool is created on and waits for.
     ID3D12Device* Device() const { return m_device.Get(); }
@@ -938,6 +951,7 @@ private:
     // CaptureReadbackView::kNoDirectSurface for one read back.
     uint32_t m_captureSurface[CaptureSlots]{};
     NvencSurfacePool* m_directSurfaces = nullptr;
+    std::vector<uint32_t> m_directMetricLumaRows, m_directMetricChromaRows;
     // Identity of the frame each readback slot holds, recorded at enqueue and handed
     // back when the slot resolves, so a ring that fell out of step is caught rather
     // than trusted.

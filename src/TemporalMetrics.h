@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -65,22 +66,35 @@ inline void YCbCrFromBgra(const uint8_t* p, float& y, float& cb, float& cr) noex
     cr = (r - y) / 1.5748f;
 }
 
-// Samples `pixels` - tightly packed BGRA, or NV12 in BT.709 limited range - onto a
-// gridWidth x gridHeight plane. False when the buffer is too small for the layout.
-inline bool Sample(std::span<const uint8_t> pixels, PixelLayout layout, uint32_t width, uint32_t height,
-                   uint32_t gridWidth, uint32_t gridHeight, Plane& out)
+// How a captured frame stores its samples. NV12 and P010 are the GPU capture's
+// two planar forms (D3D12Renderer's CaptureFormat), BT.709 limited range; P010
+// holds the 10-bit code in the top bits of each 16-bit sample.
+enum class SampleLayout { Bgra, Nv12, P010 };
+
+constexpr SampleLayout SampleLayoutFor(PixelLayout layout)
+{
+    return layout == PixelLayout::Nv12 ? SampleLayout::Nv12 : SampleLayout::Bgra;
+}
+
+// The sampler itself, over row accessors: `luma(y)` is row y of the Y plane (or of
+// the packed BGRA frame) and `chroma(y)` row y of the interleaved half-width UV
+// plane, either null when that row is not available. Each grid cell averages four
+// point samples - the cell's first row and column and its middle ones - so what a
+// frame contributes is fixed by the grid, which is what lets a capture that is
+// never read back whole hand over just those rows (SampledRows) and get the same
+// plane, sample for sample, as the whole frame gives.
+template <class LumaRow, class ChromaRow>
+inline bool SampleRows(SampleLayout layout, uint32_t width, uint32_t height, uint32_t gridWidth,
+                       uint32_t gridHeight, LumaRow&& luma, ChromaRow&& chroma, Plane& out)
 {
     if (!width || !height || !gridWidth || !gridHeight) return false;
-    if (pixels.size() < PixelLayoutFrameBytes(layout, width, height)) return false;
-    if (layout == PixelLayout::Nv12 && ((width | height) & 1u)) return false;
+    if (layout != SampleLayout::Bgra && ((width | height) & 1u)) return false;
     const size_t cells = size_t(gridWidth) * gridHeight;
     out.width = gridWidth;
     out.height = gridHeight;
     out.y.assign(cells, 0.0f);
     out.cb.assign(cells, 0.0f);
     out.cr.assign(cells, 0.0f);
-    const uint8_t* data = pixels.data();
-    const uint8_t* chroma = data + size_t(width) * height;
     for (uint32_t gy = 0; gy < gridHeight; ++gy) {
         const uint32_t y0 = uint32_t((uint64_t(gy) * height) / gridHeight);
         const uint32_t y1 = std::max(y0 + 1, uint32_t((uint64_t(gy + 1) * height) / gridHeight));
@@ -91,15 +105,29 @@ inline bool Sample(std::span<const uint8_t> pixels, PixelLayout layout, uint32_t
             const uint32_t xs[2] = {x0, std::min(width - 1, (x0 + x1) / 2)};
             float sy = 0.0f, scb = 0.0f, scr = 0.0f;
             for (const uint32_t py : ys) {
+                const uint8_t* row = luma(py);
+                const uint8_t* uvRow = layout == SampleLayout::Bgra ? row : chroma(py / 2);
+                if (!row || !uvRow) return false;
                 for (const uint32_t px : xs) {
                     float ly, lcb, lcr;
-                    if (layout == PixelLayout::Nv12) {
-                        const uint8_t* uv = chroma + size_t(py / 2) * width + size_t(px / 2) * 2;
-                        ly = (float(data[size_t(py) * width + px]) - 16.0f) * (255.0f / 219.0f);
+                    if (layout == SampleLayout::Nv12) {
+                        const uint8_t* uv = uvRow + size_t(px / 2) * 2;
+                        ly = (float(row[px]) - 16.0f) * (255.0f / 219.0f);
                         lcb = (float(uv[0]) - 128.0f) * (255.0f / 224.0f);
                         lcr = (float(uv[1]) - 128.0f) * (255.0f / 224.0f);
+                    } else if (layout == SampleLayout::P010) {
+                        // The 10-bit code over four is the 8-bit code it refines, so a
+                        // P010 capture reports on the NV12 scale; exact for any 8-bit
+                        // value the 10-bit one holds.
+                        const auto code = [](const uint8_t* sample) {
+                            return float(uint32_t(sample[0] | (sample[1] << 8)) >> 6) * 0.25f;
+                        };
+                        const uint8_t* uv = uvRow + size_t(px / 2) * 4;
+                        ly = (code(row + size_t(px) * 2) - 16.0f) * (255.0f / 219.0f);
+                        lcb = (code(uv) - 128.0f) * (255.0f / 224.0f);
+                        lcr = (code(uv + 2) - 128.0f) * (255.0f / 224.0f);
                     } else {
-                        YCbCrFromBgra(data + (size_t(py) * width + px) * 4u, ly, lcb, lcr);
+                        YCbCrFromBgra(row + size_t(px) * 4u, ly, lcb, lcr);
                     }
                     sy += ly; scb += lcb; scr += lcr;
                 }
@@ -111,6 +139,94 @@ inline bool Sample(std::span<const uint8_t> pixels, PixelLayout layout, uint32_t
         }
     }
     return true;
+}
+
+// Bytes of one row of the luma plane, which is also one row of the interleaved
+// chroma plane, or of a packed BGRA frame.
+constexpr size_t SampleRowBytes(SampleLayout layout, uint32_t width)
+{
+    return size_t(width) * (layout == SampleLayout::Bgra ? 4u : layout == SampleLayout::P010 ? 2u : 1u);
+}
+
+// Samples a whole frame: tightly packed BGRA, NV12 or P010 in BT.709 limited range,
+// onto a gridWidth x gridHeight plane. False when the buffer is too small for the
+// layout.
+inline bool Sample(std::span<const uint8_t> pixels, SampleLayout layout, uint32_t width, uint32_t height,
+                   uint32_t gridWidth, uint32_t gridHeight, Plane& out)
+{
+    const size_t row = SampleRowBytes(layout, width);
+    const size_t lumaBytes = row * height;
+    const size_t bytes = layout == SampleLayout::Bgra ? lumaBytes : lumaBytes + row * (height / 2u);
+    if (pixels.size() < bytes || ((layout != SampleLayout::Bgra) && ((width | height) & 1u))) return false;
+    const uint8_t* data = pixels.data();
+    return SampleRows(layout, width, height, gridWidth, gridHeight,
+                      [&](uint32_t y) { return data + row * y; },
+                      [&](uint32_t y) { return data + lumaBytes + row * y; }, out);
+}
+
+inline bool Sample(std::span<const uint8_t> pixels, PixelLayout layout, uint32_t width, uint32_t height,
+                   uint32_t gridWidth, uint32_t gridHeight, Plane& out)
+{
+    if (pixels.size() < PixelLayoutFrameBytes(layout, width, height)) return false;
+    return Sample(pixels, SampleLayoutFor(layout), width, height, gridWidth, gridHeight, out);
+}
+
+// The rows SampleRows reads from a planar frame of `height` rows on a grid
+// `gridHeight` cells tall: luma rows ascending, and the chroma rows they use.
+struct RowSet {
+    std::vector<uint32_t> luma, chroma;
+    friend bool operator==(const RowSet&, const RowSet&) = default;
+};
+
+inline RowSet SampledRows(uint32_t height, uint32_t gridHeight)
+{
+    RowSet rows;
+    if (!height || !gridHeight) return rows;
+    for (uint32_t gy = 0; gy < gridHeight; ++gy) {
+        const uint32_t y0 = uint32_t((uint64_t(gy) * height) / gridHeight);
+        const uint32_t y1 = std::max(y0 + 1, uint32_t((uint64_t(gy + 1) * height) / gridHeight));
+        rows.luma.push_back(y0);
+        rows.luma.push_back(std::min(height - 1, (y0 + y1) / 2));
+    }
+    std::sort(rows.luma.begin(), rows.luma.end());
+    rows.luma.erase(std::unique(rows.luma.begin(), rows.luma.end()), rows.luma.end());
+    for (const uint32_t y : rows.luma) rows.chroma.push_back(y / 2);
+    rows.chroma.erase(std::unique(rows.chroma.begin(), rows.chroma.end()), rows.chroma.end());
+    return rows;
+}
+
+// A frame reduced to those rows: every luma row of `rows` in order, then every
+// chroma row, each tightly packed. The direct NVENC capture reads back this and
+// not the frame (D3D12Renderer::CopyCaptureView).
+constexpr size_t RowPayloadBytes(SampleLayout layout, uint32_t width, size_t lumaRows, size_t chromaRows)
+{
+    return SampleRowBytes(layout, width) * (lumaRows + chromaRows);
+}
+
+// SampleRows over such a payload: the same plane the whole frame gives, as long
+// as `rows` is SampledRows for this height and grid. False otherwise.
+inline bool SampleRowPayload(std::span<const uint8_t> payload, SampleLayout layout, uint32_t width,
+                             uint32_t height, uint32_t gridWidth, uint32_t gridHeight, const RowSet& rows,
+                             Plane& out)
+{
+    if (layout == SampleLayout::Bgra) return false;
+    const size_t row = SampleRowBytes(layout, width);
+    if (payload.size() < RowPayloadBytes(layout, width, rows.luma.size(), rows.chroma.size())) return false;
+    const uint8_t* data = payload.data();
+    const uint8_t* chromaData = data + row * rows.luma.size();
+    const auto find = [](const std::vector<uint32_t>& list, uint32_t y) -> ptrdiff_t {
+        const auto at = std::lower_bound(list.begin(), list.end(), y);
+        return at != list.end() && *at == y ? at - list.begin() : -1;
+    };
+    return SampleRows(layout, width, height, gridWidth, gridHeight,
+                      [&](uint32_t y) -> const uint8_t* {
+                          const ptrdiff_t index = find(rows.luma, y);
+                          return index < 0 ? nullptr : data + row * size_t(index);
+                      },
+                      [&](uint32_t y) -> const uint8_t* {
+                          const ptrdiff_t index = find(rows.chroma, y);
+                          return index < 0 ? nullptr : chromaData + row * size_t(index);
+                      }, out);
 }
 
 inline float Bilinear(const std::vector<float>& plane, uint32_t width, uint32_t height, float x, float y) noexcept

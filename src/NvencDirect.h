@@ -31,8 +31,10 @@
 
 // What a direct capture resolves to in place of pixels: the surface the frame
 // was copied into and the capture fence value NVENC waits on before it reads it.
-// It travels through the job exactly where the pixels did, so it is a fixed
-// size and RunJob's frame-size check still means something.
+// It travels through the job exactly where the pixels did, and may be followed
+// by the rows the render report samples (D3D12Renderer::SetDirectEncodeSurfaces),
+// so a resolved direct frame is this plus a fixed payload and RunJob's
+// frame-size check still means something.
 struct NvencDirectToken {
     static constexpr uint32_t kMagic = 0x5444564Eu;  // "NVDT"
     uint32_t magic{kMagic};
@@ -49,7 +51,7 @@ inline void WriteNvencDirectToken(const NvencDirectToken& token, std::vector<uin
 
 inline bool ReadNvencDirectToken(std::span<const uint8_t> bytes, NvencDirectToken& token)
 {
-    if (bytes.size() != sizeof(token)) return false;
+    if (bytes.size() < sizeof(token)) return false;
     std::memcpy(&token, bytes.data(), sizeof(token));
     return token.magic == NvencDirectToken::kMagic;
 }
