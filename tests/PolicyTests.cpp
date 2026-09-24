@@ -2868,7 +2868,7 @@ void youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test()
 
 void fixed_youtube_examples_are_complete_safe_and_menu_routable_test()
 {
-    CHECK_EQ(size_t{6}, kExampleVideos.size());
+    CHECK_EQ(size_t{7}, kExampleVideos.size());
 
     std::vector<std::wstring_view> urls;
     for (const ExampleVideo& example : kExampleVideos) {
