@@ -59,9 +59,11 @@ for ($i = $start + 1; $i -lt $lines.Count; $i++) {
 # guide cannot quietly stop carrying one; records of a date (verification
 # reports, measurements, screenshots) and verbatim upstream text (licences,
 # notices) are deliberately absent because re-stamping them would claim they
-# describe the current tree, which is the opposite of what they are.
+# describe the current tree, which is the opposite of what they are. README is
+# absent too: it is the front page for people deciding whether to download, and
+# its release entry below is already checked against VERSION.
 $stampedDocs = @(
-    'README.md', 'TECHNICAL_OVERVIEW.md', 'CONTRIBUTING.md', 'SECURITY.md', 'THIRD_PARTY.md',
+    'TECHNICAL_OVERVIEW.md', 'CONTRIBUTING.md', 'SECURITY.md', 'THIRD_PARTY.md',
     'docs/USAGE.md', 'docs/BUILDING.md', 'docs/TROUBLESHOOTING.md', 'docs/ARCHITECTURE.md',
     'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md', 'docs/EXAMPLE_VIDEOS.md', 'docs/BENCHMARK.md',
     'docs/media/README.md', 'tools/benchmark/README.md', 'tools/demo-video/README.md',
