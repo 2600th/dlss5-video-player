@@ -1559,6 +1559,68 @@ struct PlayerAppTestAccess {
         }
     }
 
+    // A group heading's hairline starts after the tracked text, never inside
+    // its last word, at 100, 150 and 175%.
+    static void dialog_heading_rule_clears_its_text_at_every_scale_test()
+    {
+        PlayerApp& app = fixture->app;
+        app.ShowNeuralSettings();
+        const HWND dialog = app.m_neuralWnd;
+        REQUIRE(dialog != nullptr);
+        HWND heading = nullptr;
+        EnumChildWindows(dialog, [](HWND child, LPARAM parameter) -> BOOL {
+            wchar_t text[64]{};
+            GetWindowTextW(child, text, 64);
+            if (std::wstring_view(text) == L"Quality and render time") { *reinterpret_cast<HWND*>(parameter) = child; return FALSE; }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&heading));
+        REQUIRE(heading != nullptr);
+        UINT current = ActiveWindowDpi(dialog);
+        for (const UINT dpi : {96u, 144u, 168u}) {
+            if (dpi != current) {
+                RECT window{};
+                GetWindowRect(dialog, &window);
+                const DWORD style = DWORD(GetWindowLongPtrW(dialog, GWL_STYLE)), exStyle = DWORD(GetWindowLongPtrW(dialog, GWL_EXSTYLE));
+                RECT suggested{0, 0, MulDiv(PlayerApp::kNeuralDesignW, int(dpi), 96), MulDiv(PlayerApp::kNeuralDesignH, int(dpi), 96)};
+                AdjustWindowRectForDpi(suggested, style, FALSE, exStyle, ActiveWindowDpi(dialog));
+                OffsetRect(&suggested, window.left - suggested.left, window.top - suggested.top);
+                SendMessageW(dialog, WM_DPICHANGED, MAKEWPARAM(dpi, dpi), reinterpret_cast<LPARAM>(&suggested));
+                current = dpi;
+            }
+            RECT bounds{};
+            GetClientRect(heading, &bounds);
+            BITMAPINFO info{};
+            info.bmiHeader.biSize = sizeof(info.bmiHeader);
+            info.bmiHeader.biWidth = bounds.right;
+            info.bmiHeader.biHeight = -bounds.bottom;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            void* bits = nullptr;
+            HDC dc = CreateCompatibleDC(nullptr);
+            HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+            REQUIRE(bitmap != nullptr);
+            const HGDIOBJ old = SelectObject(dc, bitmap);
+            DRAWITEMSTRUCT item{};
+            item.CtlType = ODT_STATIC; item.hwndItem = heading; item.hDC = dc; item.rcItem = bounds;
+            SendMessageW(dialog, WM_DRAWITEM, 0, reinterpret_cast<LPARAM>(&item));
+            GdiFlush();
+            LONG lastText = -1, firstRule = -1;
+            const LONG mid = (bounds.top + bounds.bottom) / 2;
+            for (LONG x = 0; x < bounds.right; ++x) {
+                for (LONG y = 0; y < bounds.bottom; ++y) {
+                    const COLORREF c = GetPixel(dc, x, y);
+                    if (GetRValue(c) > 100) lastText = std::max(lastText, x);
+                }
+                if (firstRule < 0 && GetPixel(dc, x, mid) == dark_mode::Rule && x > lastText + 1) firstRule = x;
+            }
+            CHECK(lastText > 0);
+            CHECK(firstRule > lastText);
+            CHECK(firstRule - lastText >= MulDiv(6, int(dpi), 96));
+            SelectObject(dc, old); DeleteObject(bitmap); DeleteDC(dc);
+        }
+        DestroyWindow(dialog);
+    }
+
     // The modal prompts share the chrome: owner-drawn buttons, dark colours,
     // and a font of their own once a dpi change replaces the one lent to them.
     static void modal_prompts_are_dark_and_follow_the_dpi_test()
@@ -2427,6 +2489,7 @@ struct PlayerAppTestAccess {
         UI_CASE(volume_slider_bubble_follows_the_drag_and_lingers_test),
         UI_CASE(compare_mode_tips_say_why_a_mode_is_greyed_test),
         UI_CASE(toast_confirms_then_goes_with_its_timer_test),
+        UI_CASE(dialog_heading_rule_clears_its_text_at_every_scale_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
