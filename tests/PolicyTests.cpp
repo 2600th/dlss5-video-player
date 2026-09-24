@@ -63,6 +63,7 @@
 #include "ChromeMotionPolicy.h"
 #include "EscapeKeyPolicy.h"
 #include "InitialWindowPolicy.h"
+#include "WindowPlacementPolicy.h"
 #include "SliderPolicy.h"
 #include "WarmUpPolicy.h"
 #include "TimelinePolicy.h"
@@ -1456,6 +1457,34 @@ void slider_geometry_fills_from_its_origin_and_keeps_the_knob_and_bubble_inside_
         CHECK(edge.bubble.right <= bounds.right && edge.bubble.left >= bounds.left);
         CHECK(edge.bubble.top >= bounds.top);
     }
+}
+
+void window_placement_round_trips_and_is_dropped_off_the_current_screens_test()
+{
+    using window_placement::Saved;
+    const Saved saved{RECT{100, 80, 1700, 1000}, true};
+    const auto parsed = window_placement::Parse(window_placement::Format(saved));
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->normal.left == 100 && parsed->normal.top == 80 && parsed->normal.right == 1700 && parsed->normal.bottom == 1000);
+    CHECK(parsed->maximized);
+    CHECK(!window_placement::Parse(L"").has_value());
+    CHECK(!window_placement::Parse(L"1,2,3").has_value());
+    CHECK(!window_placement::Parse(L"10,10,5,5,0").has_value());
+    CHECK(!window_placement::Parse(L"0,0,800,600,2").has_value());
+    CHECK(!window_placement::Parse(L"0,0,800,600,0x").has_value());
+    // Two monitors side by side, then the right one gone.
+    const std::array<RECT, 2> both{RECT{0, 0, 3840, 2076}, RECT{3840, 0, 5760, 1040}};
+    const std::array<RECT, 1> one{RECT{0, 0, 3840, 2076}};
+    const SIZE minimum{900, 300};
+    const Saved onRight{RECT{4000, 100, 5600, 1000}, false};
+    CHECK(window_placement::Usable(onRight, both, minimum));
+    CHECK(!window_placement::Usable(onRight, one, minimum));
+    // Mostly off every screen, or with the caption above the top: dropped.
+    CHECK(!window_placement::Usable(Saved{RECT{3500, 100, 5100, 1000}, false}, one, minimum));
+    CHECK(!window_placement::Usable(Saved{RECT{100, -200, 1700, 900}, false}, one, minimum));
+    // Smaller than the player's minimum: dropped.
+    CHECK(!window_placement::Usable(Saved{RECT{100, 100, 700, 400}, false}, one, minimum));
+    CHECK(window_placement::Usable(Saved{RECT{100, 100, 1700, 1000}, false}, one, minimum));
 }
 
 void escape_leaves_fullscreen_before_it_stops_anything_test()
@@ -14229,6 +14258,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(status_chips_carry_the_rate_the_drops_and_the_render_test),
     TEST_CASE(first_window_takes_a_share_of_the_work_area_and_keeps_the_pill_words_test),
     TEST_CASE(slider_geometry_fills_from_its_origin_and_keeps_the_knob_and_bubble_inside_test),
+    TEST_CASE(window_placement_round_trips_and_is_dropped_off_the_current_screens_test),
     TEST_CASE(escape_leaves_fullscreen_before_it_stops_anything_test),
     TEST_CASE(toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test),
     TEST_CASE(warm_up_names_the_cold_start_step_and_the_chip_invents_no_eta_test),

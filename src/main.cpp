@@ -123,6 +123,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "ChromeMotionPolicy.h"
 #include "EscapeKeyPolicy.h"
 #include "InitialWindowPolicy.h"
+#include "WindowPlacementPolicy.h"
 #include "SliderPolicy.h"
 #include "WarmUpPolicy.h"
 #include "TimelinePolicy.h"
@@ -2824,6 +2825,7 @@ public:
         const std::wstring appTitle=m_loc.Get(L"app.title");
         m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,windowX,windowY,rc.right-rc.left,rc.bottom-rc.top,nullptr,app_menu::CreateMenuBar(m_loc,YouTubePlaybackAvailable()),hi,this);
         if(!m_hwnd) return false;
+        RestoreWindowPlacement();
         ReadAnimationPreference();
         app_menu::UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);
         UpdateRecentMenu();
@@ -8919,6 +8921,55 @@ private:
         finishPaint();
     }
 
+    // ---- Window placement --------------------------------------------------
+    // Saved on close (the placement from before fullscreen when it closes in
+    // fullscreen) and restored at start when window_placement::Usable says the
+    // screens it was on are still there; otherwise the first-run size stands.
+    // GetWindowPlacement's rectangles are in workspace coordinates; they are
+    // shifted by the primary monitor's work-area offset for the check only, and
+    // handed back to SetWindowPlacement as they were saved.
+    void SaveWindowPlacement(){
+        if(!m_hwnd)return;
+        WINDOWPLACEMENT placement{sizeof(placement)};
+        if(m_fullscreen&&m_placementBeforeFullscreen)placement=*m_placementBeforeFullscreen;
+        else if(!GetWindowPlacement(m_hwnd,&placement))return;
+        const bool maximized=placement.showCmd==SW_SHOWMAXIMIZED||(placement.showCmd==SW_SHOWMINIMIZED&&(placement.flags&WPF_RESTORETOMAXIMIZED));
+        const std::wstring text=window_placement::Format({placement.rcNormalPosition,maximized});
+        WritePrivateProfileStringW(L"Window",L"Placement",text.c_str(),SettingsPath().c_str());
+    }
+    static std::vector<RECT> MonitorWorkAreas(){
+        std::vector<RECT> areas;
+        EnumDisplayMonitors(nullptr,nullptr,[](HMONITOR monitor,HDC,LPRECT,LPARAM parameter)->BOOL{
+            MONITORINFO info{sizeof(info)};
+            if(GetMonitorInfoW(monitor,&info))reinterpret_cast<std::vector<RECT>*>(parameter)->push_back(info.rcWork);
+            return TRUE;
+        },reinterpret_cast<LPARAM>(&areas));
+        return areas;
+    }
+    void RestoreWindowPlacement(){
+        wchar_t text[128]{};
+        GetPrivateProfileStringW(L"Window",L"Placement",L"",text,static_cast<DWORD>(std::size(text)),SettingsPath().c_str());
+        const auto saved=window_placement::Parse(text);
+        if(!saved)return;
+        // Workspace to screen: the primary monitor's work area may not start at
+        // its corner (a taskbar on the top or the left).
+        MONITORINFO primary{sizeof(primary)};
+        GetMonitorInfoW(MonitorFromPoint(POINT{0,0},MONITOR_DEFAULTTOPRIMARY),&primary);
+        window_placement::Saved screen=*saved;
+        OffsetRect(&screen.normal,primary.rcWork.left-primary.rcMonitor.left,primary.rcWork.top-primary.rcMonitor.top);
+        const auto areas=MonitorWorkAreas();
+        const POINT minimum=MinimumPlayerWindowTrackSize(m_hwnd,ActiveWindowDpi(m_hwnd));
+        if(!window_placement::Usable(screen,areas,SIZE{minimum.x,minimum.y})){
+            LOG("Saved window placement "<<WideToUtf8(text)<<" is off the current screens; using the first-run size.");
+            return;
+        }
+        WINDOWPLACEMENT placement{sizeof(placement)};
+        placement.rcNormalPosition=saved->normal;
+        placement.showCmd=saved->maximized?SW_SHOWMAXIMIZED:SW_SHOWNORMAL;
+        SetWindowPlacement(m_hwnd,&placement);
+        LOG("Window placement restored: "<<WideToUtf8(text)<<".");
+    }
+
     void RegisterOverlayHotkeys(){
         // WM_HOTKEY is posted by Windows independently of the swapchain WndProc.
         // This remains usable while ReShade owns/captures normal mouse/keyboard input.
@@ -11283,6 +11334,7 @@ private:
         ClearTimelineHover();
         if(!m_fullscreen){
             m_savedStyle=GetWindowLongW(m_hwnd,GWL_STYLE);GetWindowRect(m_hwnd,&m_savedRect);
+            {WINDOWPLACEMENT before{sizeof(before)};if(GetWindowPlacement(m_hwnd,&before))m_placementBeforeFullscreen=before;}
             m_fullscreenMenu=GetMenu(m_hwnd);m_fullscreen=true;m_fullscreenControlsHidden=true;
             m_fullscreenKeyboardFocus=false;m_focusedToolbarAction=ToolbarAction::None;
             m_hoverAction=ToolbarAction::None;ResetHoverFades();m_pressedToolbarAction=ToolbarAction::None;
@@ -11347,7 +11399,7 @@ private:
             break;
         case WM_SETTINGCHANGE:ReadAnimationPreference();InvalidateRect(h,nullptr,FALSE);break;
         case WM_SHOWWINDOW:SyncActivityFeedback();break;
-        case WM_DESTROY:CancelExport();DrainStageExportMessages();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}StopModalTick();CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();CancelSourcePrefetch();CancelUpdateCheck();m_running=false;PostQuitMessage(0);return 0;
+        case WM_DESTROY:SaveWindowPlacement();CancelExport();DrainStageExportMessages();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}StopModalTick();CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();CancelSourcePrefetch();CancelUpdateCheck();m_running=false;PostQuitMessage(0);return 0;
         case WM_CLOSE:CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);CancelSourcePrefetch();CancelUpdateCheck();DestroyWindow(h);return 0;
         case WM_GETMINMAXINFO:{
             auto* info=reinterpret_cast<MINMAXINFO*>(l);
@@ -11619,7 +11671,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // moving on the last frame, so the frame it lands gets painted too.
     std::array<chrome_motion::Fade,static_cast<size_t>(ToolbarAction::None)+1> m_hoverFades{};uint32_t m_hoverAnimating=0;UINT_PTR m_hoverTimer=0;
     chrome_motion::Glow m_completeGlow;chrome_motion::CompletionLatch m_completionLatch;UINT_PTR m_glowTimer=0;
-    chrome_motion::Toast m_toast;std::wstring m_toastText;COLORREF m_toastMark=ui_palette::PrimaryBlue;UINT_PTR m_toastTimer=0;
+    chrome_motion::Toast m_toast;
+    std::optional<WINDOWPLACEMENT> m_placementBeforeFullscreen;std::wstring m_toastText;COLORREF m_toastMark=ui_palette::PrimaryBlue;UINT_PTR m_toastTimer=0;
     Clock::time_point m_liveSessionStartedAt{};
     // The sliders' hover (knob size) and the volume's value bubble, which
     // lingers slider::kBubbleLingerMs after a drag ends before it fades.

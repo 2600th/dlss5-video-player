@@ -1425,6 +1425,42 @@ struct PlayerAppTestAccess {
         app.m_loaded = loaded;
     }
 
+    // The placement is written on close and read back at start; one that no
+    // screen holds any more is ignored.
+    static void window_placement_is_saved_and_restored_onto_real_screens_test()
+    {
+        PlayerApp& app = fixture->app;
+        WINDOWPLACEMENT original{sizeof(original)};
+        REQUIRE(GetWindowPlacement(app.m_hwnd, &original));
+        const bool visible = IsWindowVisible(app.m_hwnd) != FALSE;
+        WINDOWPLACEMENT moved = original;
+        moved.showCmd = SW_SHOWNOACTIVATE;
+        moved.rcNormalPosition = RECT{120, 90, 120 + 1500, 90 + 900};
+        SetWindowPlacement(app.m_hwnd, &moved);
+        app.SaveWindowPlacement();
+        wchar_t text[128]{};
+        GetPrivateProfileStringW(L"Window", L"Placement", L"", text, 128, app.SettingsPath().c_str());
+        const auto saved = window_placement::Parse(text);
+        REQUIRE(saved.has_value());
+        CHECK(saved->normal.left == 120 && saved->normal.right == 1620);
+        // Somewhere else, then restored.
+        moved.rcNormalPosition = RECT{300, 300, 300 + 1500, 300 + 900};
+        SetWindowPlacement(app.m_hwnd, &moved);
+        app.RestoreWindowPlacement();
+        WINDOWPLACEMENT restored{sizeof(restored)};
+        GetWindowPlacement(app.m_hwnd, &restored);
+        CHECK_EQ(LONG{120}, restored.rcNormalPosition.left);
+        // Off every screen: left where it is.
+        WritePrivateProfileStringW(L"Window", L"Placement", L"-40000,-40000,-38000,-38800,0", app.SettingsPath().c_str());
+        app.RestoreWindowPlacement();
+        GetWindowPlacement(app.m_hwnd, &restored);
+        CHECK_EQ(LONG{120}, restored.rcNormalPosition.left);
+        WritePrivateProfileStringW(L"Window", L"Placement", nullptr, app.SettingsPath().c_str());
+        original.showCmd = SW_SHOWNOACTIVATE;
+        SetWindowPlacement(app.m_hwnd, &original);
+        if (!visible) ShowWindow(app.m_hwnd, SW_HIDE);
+    }
+
     static void keyboard_cheat_sheet_test()
     {
         PlayerApp& app = fixture->app;
@@ -2512,6 +2548,7 @@ struct PlayerAppTestAccess {
         UI_CASE(compare_mode_tips_say_why_a_mode_is_greyed_test),
         UI_CASE(toast_confirms_then_goes_with_its_timer_test),
         UI_CASE(dialog_heading_rule_clears_its_text_at_every_scale_test),
+        UI_CASE(window_placement_is_saved_and_restored_onto_real_screens_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
