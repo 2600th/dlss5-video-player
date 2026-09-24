@@ -1331,11 +1331,13 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         // is what leaves that gate out of the pass entirely on a device that gave no
         // backward field.
         const float cells=m_nvof.BackwardFlow()?1.0f/float(m_nvof.Grid()):0.0f;
-        // The eighth is the zero-motion test (see the shader), on for a Super Resolution
-        // session only: it is measured there, and every neural render at the source's
-        // size - each a cached render on disk - keeps the field it was made with.
+        // The eighth is the zero-motion test (see the shader): on for every Super
+        // Resolution session, and for a neural render at the source's size when its job
+        // asked (SetZeroMotionTest), because that render is cached under a key that
+        // says which field it was made with.
+        const bool zeroMotionTest=m_preserveSource||m_zeroMotionTest;
         const float resolve[8]={1.0f/32.0f,1.0f/32.0f,0.0f,0.0f,
-                                m_nvofMotionScaleX,m_nvofMotionScaleY,cells,m_preserveSource?1.0f:0.0f};
+                                m_nvofMotionScaleX,m_nvofMotionScaleY,cells,zeroMotionTest?1.0f:0.0f};
         cmd->SetGraphicsRoot32BitConstants(RootConstants,8,resolve,0);
         cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(NvofInputSRV+m_nvof.CurrentInput()));
         cmd->DrawInstanced(3,1,0,0);

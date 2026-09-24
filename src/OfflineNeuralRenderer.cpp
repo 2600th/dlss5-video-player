@@ -29,6 +29,7 @@
 #include "DLSSBackend.h"
 #include "FrameResample.h"
 #include "UpscalingPolicy.h"
+#include "NeuralMotionPolicy.h"
 
 namespace {
 
@@ -2014,6 +2015,10 @@ struct ProductionEvaluatorAdapter {
     // choices. Applied inside the guide stage, so the stage clock counts a file read
     // where it would have counted the estimator.
     guide_files::Sources guideFiles{};
+    // The flow resolve pass's zero-motion test for a carrier at the source's size
+    // (NeuralMotionPolicy.h), set before Initialize like the temporal choices. A root
+    // constant, so a reused device takes the new job's value with the guide settings.
+    bool zeroMotionTest{false};
     bool ApplyGuideFiles(const FrameIdentity& id,GuideFrame& guide){
         std::string error;
         if(guide_files::Apply(guideFiles,id.frameNumber,guide,&error))return true;
@@ -2022,7 +2027,7 @@ struct ProductionEvaluatorAdapter {
     }
     void ApplyGuideSettings(const GuideControls& controls){
         guides.SetControls(controls);guides.SetSceneCutSensitivity(temporal.sceneCuts);
-        if(renderer)renderer->SetTemporalStability(temporal.stability);
+        if(renderer){renderer->SetTemporalStability(temporal.stability);renderer->SetZeroMotionTest(zeroMotionTest);}
     }
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
@@ -2867,13 +2872,19 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     }
     state.evaluator.temporal=request.temporal;
     state.evaluator.guideFiles=request.guideFiles;
+    state.evaluator.zeroMotionTest=NeuralZeroMotionTest(request.guideFiles.zeroMotionTest);
+    // One line per job: two renders that differ only here are different pictures,
+    // and a log that does not say which one it made cannot tell them apart.
+    LOG("Flow zero-motion test at source size: "<<(state.evaluator.zeroMotionTest?"on":"off")
+        <<(request.guideFiles.zeroMotionTest?" (benchmark override)":""));
     if(request.guideFiles.Active()){
         const auto& files=request.guideFiles;
         LOG("Benchmark guide sources: motion="
             <<(files.motion==guide_files::MotionSource::File?"file:"+files.motionDirectory.string()
                :files.motion==guide_files::MotionSource::Cpu?std::string("cpu"):std::string("estimator"))
             <<" depth="<<(files.depthFromFile?"file:"+files.depthDirectory.string():std::string("estimator"))
-            <<" dump="<<(files.dumpDirectory.empty()?std::string("none"):files.dumpDirectory.string()));
+            <<" dump="<<(files.dumpDirectory.empty()?std::string("none"):files.dumpDirectory.string())
+            <<" zero-motion-test="<<(!files.zeroMotionTest?std::string("shipped"):*files.zeroMotionTest?std::string("on"):std::string("off")));
     }
     // Read before the reset, because the reset is allowed to drop the feature.
     const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();

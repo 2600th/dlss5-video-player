@@ -67,10 +67,16 @@ struct Sources {
     // Writes the guides each submitted frame was rendered with, in the layout
     // above, under <dump>/mv and <dump>/depth.
     std::filesystem::path dumpDirectory;
+    // `--zero-motion-test 0|1`: the flow resolve pass's zero-motion test forced off
+    // or on for a render at the source's size, whatever the build ships
+    // (NeuralMotionPolicy.h). It is what the A/B that decided that default renders
+    // its two arms with; a Super Resolution carrier keeps the test either way.
+    std::optional<bool> zeroMotionTest;
 
     bool Active() const
     {
-        return motion != MotionSource::Estimator || depthFromFile || !dumpDirectory.empty();
+        return motion != MotionSource::Estimator || depthFromFile || !dumpDirectory.empty() ||
+               zeroMotionTest.has_value();
     }
 };
 
@@ -116,10 +122,11 @@ inline std::optional<ParsedSpec> ParseSpec(std::wstring_view text)
 }
 
 // Takes the benchmark forms off a helper command line. `rewritten` receives every
-// argument with `--guide-dump <dir>` removed and the `--guides` value replaced by
-// its canonical form, so the shared parser validates the job exactly as it would
-// the player's. False for a malformed spec, a dump flag without a value, or
-// either one given twice. A line without them comes back unchanged with inactive
+// argument with `--guide-dump <dir>` and `--zero-motion-test 0|1` removed and the
+// `--guides` value replaced by its canonical form, so the shared parser validates
+// the job exactly as it would the player's. False for a malformed spec, a dump
+// flag without a value, a zero-motion value other than 0 or 1, or any of them
+// given twice. A line without them comes back unchanged with inactive
 // sources. The pair search starts at index 2, where the helper's key/value pairs
 // start; a trailing lone flag is left where it is.
 inline bool ExtractBenchmarkArguments(std::span<const std::wstring_view> arguments,
@@ -127,8 +134,19 @@ inline bool ExtractBenchmarkArguments(std::span<const std::wstring_view> argumen
 {
     rewritten.assign(arguments.begin(), arguments.end());
     sources = {};
-    bool sawGuides = false, sawDump = false;
+    bool sawGuides = false, sawDump = false, sawZeroMotion = false;
     for (size_t index = 2; index < rewritten.size(); ++index) {
+        if (rewritten[index] == L"--zero-motion-test") {
+            if (sawZeroMotion || index + 1 >= rewritten.size() ||
+                (rewritten[index + 1] != L"0" && rewritten[index + 1] != L"1")) return false;
+            sawZeroMotion = true;
+            const bool on = rewritten[index + 1] == L"1";
+            rewritten.erase(rewritten.begin() + static_cast<std::ptrdiff_t>(index),
+                            rewritten.begin() + static_cast<std::ptrdiff_t>(index + 2));
+            sources.zeroMotionTest = on;
+            --index;
+            continue;
+        }
         if (rewritten[index] == L"--guide-dump") {
             if (sawDump || index + 1 >= rewritten.size() || rewritten[index + 1].empty()) return false;
             sawDump = true;
@@ -145,8 +163,10 @@ inline bool ExtractBenchmarkArguments(std::span<const std::wstring_view> argumen
             const auto spec = ParseSpec(rewritten[index + 1]);
             if (!spec) return false;
             const std::filesystem::path dump = sources.dumpDirectory;
+            const std::optional<bool> zeroMotion = sources.zeroMotionTest;
             sources = spec->sources;
             sources.dumpDirectory = dump;
+            sources.zeroMotionTest = zeroMotion;
             const std::string canonical = CanonicalGuideControls(spec->controls);
             rewritten[index + 1].assign(canonical.begin(), canonical.end());
             ++index;

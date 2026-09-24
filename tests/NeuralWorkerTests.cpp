@@ -735,6 +735,29 @@ void benchmark_guide_sources_leave_the_shared_parser_canonical_test()
         CHECK(!extract(withGuides(bad), sources));
     CHECK(!extract(withGuides(L"mv=1,depth=1", {L"--guide-dump"}), sources));
     CHECK(!extract(withGuides(L"mv=1,depth=1", {L"--guide-dump", L"a", L"--guide-dump", L"b"}), sources));
+
+    // The zero-motion A/B's arm (NeuralMotionPolicy.h): off the line before the shared
+    // parser, which has no such key and would refuse the job, and kept whichever side
+    // of --guides it arrives on. Only 0 and 1, and only once.
+    CHECK(extract(withGuides(L"mv=1,depth=1", {L"--zero-motion-test", L"0"}), sources));
+    CHECK(sources.Active() && sources.zeroMotionTest == std::optional<bool>(false));
+    CHECK(sources.motion == guide_files::MotionSource::Estimator && sources.dumpDirectory.empty());
+    CHECK(std::ranges::find(rewritten, std::wstring(L"--zero-motion-test")) == rewritten.end());
+    {
+        std::vector<std::wstring_view> zeroView(rewritten.begin(), rewritten.end());
+        CHECK(neural_worker_detail::ParseWorkerArguments(zeroView).has_value());
+    }
+    {
+        auto first = withGuides(L"mv=cpu,depth=1");
+        first.insert(first.begin() + 2, {L"--zero-motion-test", L"1"});
+        CHECK(extract(first, sources));
+        CHECK(sources.zeroMotionTest == std::optional<bool>(true) && sources.motion == guide_files::MotionSource::Cpu);
+    }
+    CHECK(extract(withGuides(L"mv=1,depth=1"), sources) && !sources.zeroMotionTest.has_value());
+    for (const wchar_t* bad : {L"2", L"on", L""})
+        CHECK(!extract(withGuides(L"mv=1,depth=1", {L"--zero-motion-test", bad}), sources));
+    CHECK(!extract(withGuides(L"mv=1,depth=1", {L"--zero-motion-test"}), sources));
+    CHECK(!extract(withGuides(L"mv=1,depth=1", {L"--zero-motion-test", L"1", L"--zero-motion-test", L"1"}), sources));
 }
 
 // A dump of the estimator's grid, fed back as files, restores the grid bit for bit:

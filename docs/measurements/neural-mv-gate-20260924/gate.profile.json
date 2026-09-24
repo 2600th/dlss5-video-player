@@ -1,0 +1,101 @@
+{
+  "gate-off": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "worker_flags": [
+      "--zero-motion-test",
+      "0"
+    ],
+    "description": "the ten player keys, governor off; hardware flow as shipped before this change (no zero-motion test)"
+  },
+  "gate-on": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "worker_flags": [
+      "--zero-motion-test",
+      "1"
+    ],
+    "description": "the ten player keys, governor off; hardware flow through the zero-motion test"
+  },
+  "mv-zero": {
+    "guides": "mv=0,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    },
+    "description": "the ten player keys, governor off; motion guide off (all zero): the still clip's exact answer"
+  },
+  "shipped-gate-off": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "worker_flags": [
+      "--zero-motion-test",
+      "0"
+    ],
+    "description": "the ten player keys and the add-on's default governor, exactly what the player renders; no test"
+  },
+  "shipped-gate-on": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "worker_flags": [
+      "--zero-motion-test",
+      "1"
+    ],
+    "description": "the ten player keys and the add-on's default governor; zero-motion test on"
+  }
+}

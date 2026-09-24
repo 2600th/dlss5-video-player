@@ -359,6 +359,13 @@ public:
     void SetTemporalStability(TemporalStability level) { m_temporalStability = level; }
     TemporalStability ActiveTemporalStability() const { return m_temporalStability; }
 
+    // The flow resolve pass's zero-motion test (NvofResolveShader.h) for a session at
+    // the source's size. A Super Resolution session takes it whatever this says; the
+    // neural carrier asks for it per job (NeuralMotionPolicy.h). A root constant read
+    // per frame, so settable at any time; it changes the motion guide and therefore
+    // the neural output, which is why the caller keys the render by it.
+    void SetZeroMotionTest(bool on) { m_zeroMotionTest = on; }
+
     // Tearing is opt-in and belongs only to a renderer nobody watches. The offline
     // carrier presents into a hidden window purely so the neural add-on sees a present
     // per frame, and capping that at the display refresh would throttle an export that
@@ -901,6 +908,7 @@ private:
     bool m_allowTearing = false;
     bool m_recreateRequested = false;
     bool m_preserveSource = false;
+    bool m_zeroMotionTest = false;
     // True when a caller asked for the capture readback ring at Initialize.
     bool m_captureOutput=false;
     uint64_t m_framesPresented = 0;

@@ -79,6 +79,9 @@ must never reset.
 | `flash-exposure` | cuts | 3 s slow pan with a 4-frame flash and a sustained exposure step. Neither is a cut; both collapse the luma histogram |
 | `depth-pan` | depth | Near/far **landscape pan** from three layers at known depth and whole-pixel speed: fractal sky at 0.9 moving 3 px/frame, hills at 0.5 moving 9, roadside posts at 0.15 moving 24. True guides from `guidefiles.py truth`. No cut |
 | `depth-subject` | depth | Near/far **interior**: a fractal room at 0.85 drifting 1 px/frame behind a person-sized textured ellipse at 0.2 crossing 14 px/frame and bobbing ±18 px. True guides from `guidefiles.py truth`. No cut |
+| `still-hold` | still | NR-processed capture: one film frame of the demo (a revolver on a patterned bedspread, grain) **held for 60 frames**. Every pair is identical, so any motion a guide reports is invented; the clip the flow zero-motion test is judged on. No cut |
+| `pan-slow` | still | NR-processed capture: one demo frame (a city skyline) panned right at **exactly 0.5 px/frame** for 90 frames - a 1 px/frame crop of a 2x enlargement, area-reduced. True motion (-0.5, 0) everywhere. No cut |
+| `pan-slow-fractal` | still | The same 0.5 px/frame pan over a fractal still: detail at every scale, no noise. No cut |
 | `faces` | faces | **Not synthetic**: seconds 12-20 of `build-upscaling/runtime-comparison-20260907/fixtures/mafia-60s.mkv` (frontal/three-quarter faces, skin, hair). Skipped when the fixture is absent |
 | `real-film-cuts` | real | **NR-processed capture** (see below): 102 frames, four trailer shots cut at 20/47/70, grain and motion blur, a two-frame muzzle flash *inside* one shot that is deliberately unlabelled — then a static paused player frame from local 87, which is why the cut at 87 is the demo's scene boundary and not a film edit. 37 % of its consecutive pairs carry no motion (frozen tail plus 23.976→30 fps capture duplicates) |
 | `real-game-cuts` | real | **NR-processed capture**: 68 frames, one hard cut at 32 from a race exterior to a store interior, with the game's own static HUD over fast camera motion |
@@ -242,6 +245,7 @@ made from a file.
 | `mv=file:<dir>,depth=1` | `<dir>/NNNNNN.pfm` | built-in |
 | `mv=1,depth=file:<dir>` | built-in | `<dir>/NNNNNN.pfm` |
 | `--guide-dump <dir>` (worker flag) | writes what each frame was rendered with to `<dir>/mv` and `<dir>/depth` | |
+| `--zero-motion-test 0\|1` (worker flag) | the flow resolve pass's zero-motion test forced off or on for a render at source size, whatever the build ships (`src/NeuralMotionPolicy.h`); a Super Resolution carrier keeps it on | |
 
 Profiles may use `{clip}` and `{work}` in `guides` and `worker_flags`; `run.py`
 replaces them per run, so one profile names every clip's own directory

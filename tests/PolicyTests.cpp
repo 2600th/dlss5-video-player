@@ -70,6 +70,7 @@
 #include <d3dcompiler.h>
 #include <d3d12shader.h>
 #include "TemporalStabilityPolicy.h"
+#include "NeuralMotionPolicy.h"
 #include "TemporalStabilityShader.h"
 #ifdef small
 #undef small
@@ -5034,6 +5035,23 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
 // nothing - not the model's input, not the cache key, not the add-on's ini -
 // and each reduced rung is even-sized, restored to the source, and its own
 // cache entry.
+// The zero-motion test on the neural carrier (w5-mv): shipped on, and keyed. A
+// benchmark arm may force either side; nothing else can, and the key follows the
+// value a render was actually made with, so a render made without the test is never
+// served for one made with it - or the other way round.
+void neural_zero_motion_test_ships_on_and_is_a_cache_key_term_test()
+{
+    CHECK(kNeuralZeroMotionTest);
+    CHECK(NeuralZeroMotionTest(std::nullopt) == kNeuralZeroMotionTest);
+    CHECK(NeuralZeroMotionTest(false) == false);
+    CHECK(NeuralZeroMotionTest(true) == true);
+    CHECK(NeuralMotionIdentityTerm(false).empty());
+    CHECK(NeuralMotionIdentityTerm(true) == "|mv-zero-test-v1");
+    // The shipped key carries the term: a cache from a build without the test is a
+    // different picture on every held or near-still frame.
+    CHECK(!NeuralMotionIdentityTerm(NeuralZeroMotionTest(std::nullopt)).empty());
+}
+
 void processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test()
 {
     CHECK_EQ(uint32_t{100}, kDefaultProcessingScale);
@@ -12802,6 +12820,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(export_container_follows_the_chosen_extension_test),
     TEST_CASE(live_forecast_scales_by_the_processing_rung_test),
     TEST_CASE(render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test),
+    TEST_CASE(neural_zero_motion_test_ships_on_and_is_a_cache_key_term_test),
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
     TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),
     TEST_CASE(untagged_hd_video_decodes_as_bt709_and_only_it_test),

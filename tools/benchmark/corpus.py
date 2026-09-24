@@ -307,6 +307,54 @@ def build_real_game_motion(corpus: Path) -> dict:
                       "0.37-0.60 the confirmed cuts in the other real clips measure.")
 
 
+def build_still_hold(corpus: Path) -> dict:
+    first, count = 30, 60
+    # Decoded frame 30 of the demo held for two seconds: every pair is two identical
+    # frames, so any motion a guide reports is invented. It is the clip the flow
+    # engine's fixed field on identical frames was found on (the w4-sr still is frame
+    # 0 of the same capture) and the one the zero-motion test exists for.
+    graph = (f"select='eq(n\\,{first})',setpts=N/{FPS}/TB,{DEMO_SURFACE},scale={WIDTH}:{HEIGHT}:flags=lanczos,"
+             f"loop=loop={count - 1}:size=1:start=0,setpts=N/{FPS}/TB,format=yuv420p")
+    ffmpeg(["-i", demo(), "-vf", graph, "-frames:v", str(count), *ENCODE, "still-hold.mkv"], corpus)
+    return dict(name="still-hold", category="still", synthetic=False, cuts=[], text=[],
+                source=f"{DEMO_RELATIVE} frame {first}, held",
+                notes="NR-processed capture: one film frame (a revolver on a patterned bedspread, grain) held "
+                      "for 60 frames. Nothing moves; every pair is identical.")
+
+
+def slow_pan(still: str, frames: int) -> str:
+    """A 1920x1080 view sliding right by exactly 0.5 px per frame across `still`.
+
+    The window moves one pixel per frame across a 2x enlargement and is then
+    area-reduced by two, so the content moves half a source pixel per frame: the
+    sub-pixel speed the flow engine's own fixed field is the size of. The crop runs
+    on RGB because a 4:2:0 crop rounds its offset to even, which would move the
+    view one pixel every other frame and hold it in between.
+    """
+    return (f"{still},scale={2 * WIDTH + frames}:{2 * HEIGHT}:flags=lanczos,format=gbrp,loop=loop={frames - 1}:size=1:start=0,"
+            f"setpts=N/{FPS}/TB,crop={2 * WIDTH}:{2 * HEIGHT}:x='n':y=0,"
+            f"scale={WIDTH}:{HEIGHT}:flags=area,format=yuv420p")
+
+
+def build_pan_slow(corpus: Path) -> dict:
+    first, count = 506, 90
+    still = f"select='eq(n\\,{first})',setpts=N/{FPS}/TB,{DEMO_SURFACE},scale={WIDTH}:{HEIGHT}:flags=lanczos"
+    ffmpeg(["-i", demo(), "-vf", slow_pan(still, count), "-frames:v", str(count), *ENCODE, "pan-slow.mkv"], corpus)
+    return dict(name="pan-slow", category="still", synthetic=False, cuts=[], text=[],
+                source=f"{DEMO_RELATIVE} frame {first}, panned",
+                notes="NR-processed capture: one frame (a city skyline from a rooftop) panned right at exactly "
+                      "0.5 px per frame for 90 frames. True motion is (-0.5, 0) everywhere; no cut.")
+
+
+def build_pan_slow_fractal(corpus: Path) -> dict:
+    count = 90
+    graph = slow_pan(f"{STILL % (WIDTH, HEIGHT)},trim=end_frame=1", count)
+    ffmpeg(["-filter_complex", graph, "-frames:v", str(count), *ENCODE, "pan-slow-fractal.mkv"], corpus)
+    return dict(name="pan-slow-fractal", category="still", synthetic=True, cuts=[], text=[],
+                notes="A fractal still panned right at exactly 0.5 px per frame for 90 frames: detail at every "
+                      "scale, no noise. True motion is (-0.5, 0) everywhere; no cut.")
+
+
 def build_real_dissolve(corpus: Path) -> dict:
     # The demo capture contains no dissolve: across all 678 frames every transition is a
     # single-frame jump, so there is no real fade to label. This clip therefore has real
@@ -652,7 +700,9 @@ BUILDERS = {"text-subtitles": build_text, "fine-detail": build_detail,
             "orig-dissolve": build_orig_dissolve,
             "orig-film-motion-a": build_orig_film_motion_a,
             "orig-film-motion-b": build_orig_film_motion_b,
-            "depth-pan": build_depth_pan, "depth-subject": build_depth_subject}
+            "depth-pan": build_depth_pan, "depth-subject": build_depth_subject,
+            "still-hold": build_still_hold, "pan-slow": build_pan_slow,
+            "pan-slow-fractal": build_pan_slow_fractal}
 
 
 def main() -> int:
