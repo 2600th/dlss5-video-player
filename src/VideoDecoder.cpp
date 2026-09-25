@@ -5,6 +5,8 @@
 #include "MediaTools.h"
 #include "FrameRatePolicy.h"
 #include "VariableFrameRatePolicy.h"
+#include "DisplayOrientationPolicy.h"
+#include "MediaFoundationSamplePolicy.h"
 #include "HexText.h"
 #include "Log.h"
 #include <propvarutil.h>
@@ -415,7 +417,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     const std::wstring inputOptions=NetworkInputOptions(m_sourceKind,path);
     std::wstring args =
         L"-v error -select_streams v:0 "
-        L"-show_entries stream=width,height,codec_name,pix_fmt,color_space,color_range,color_primaries,color_transfer,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
+        L"-show_entries stream=width,height,codec_name,pix_fmt,color_space,color_range,color_primaries,color_transfer,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:stream_side_data=displaymatrix:format=duration,format_name "
         L"-of default=noprint_wrappers=1 " + inputOptions + L"-i " + Quote(path);
 
     std::string text;
@@ -551,6 +553,30 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
         }
     }
     else if (m_source.gif) m_source.fps = 100.0;
+    // A video's rotation is the stream's display matrix, printed by the probe
+    // above. StartFFmpeg turns ffmpeg's own autorotation off and applies this
+    // on every path (DisplayOrientationPolicy.h), so the geometry reported from
+    // here on is the upright one. A photo keeps the autorotation it relies on
+    // above and never reads this.
+    m_source.orientation = display_orientation::Orientation::Upright;
+    if (!m_source.stillImage) {
+        if (const auto matrix = display_orientation::ParseDisplayMatrix(text)) {
+            const auto orientation = display_orientation::FromDisplayMatrix(*matrix);
+            if (!orientation) {
+                LOG("ffprobe: the display matrix is not a quarter turn or a mirror; decoding the frames as stored.");
+            } else if (*orientation != display_orientation::Orientation::Upright) {
+                m_source.orientation = *orientation;
+                if (display_orientation::SwapsAxes(*orientation)) {
+                    std::swap(m_source.width, m_source.height);std::swap(m_source.nativeWidth, m_source.nativeHeight);
+                    m_source.stride = static_cast<int32_t>(m_source.width * 4u);
+                    if (displayAspect > 0.1) displayAspect = 1.0 / displayAspect;
+                    if (sampleAspect > 0.0) sampleAspect = 1.0 / sampleAspect;
+                }
+                LOG("ffprobe: stored " << width << "x" << height << " with a display matrix; standing it up with "
+                    << display_orientation::Name(*orientation) << " to " << m_source.width << "x" << m_source.height << ".");
+            }
+        }
+    }
     if (std::isfinite(displayAspect) && displayAspect > 0.1) m_source.displayAspect = displayAspect;
     else m_source.displayAspect = (double(m_source.width) * sampleAspect) / double(m_source.height);
 
@@ -712,11 +738,13 @@ constexpr unsigned kCudaUnavailable=1u,kD3d11Unavailable=2u;
 // unsupported codec never downgrades the ones the GPU does handle.
 class AccelerationMemo {
 public:
+    explicit AccelerationMemo(unsigned everyProfile=0u):everyProfile_(everyProfile){}
+
     unsigned Unavailable(const std::string& profile) const
     {
         std::scoped_lock lock(mutex_);
         const auto found=paths_.find(Key(profile));
-        return found==paths_.end()?0u:found->second;
+        return everyProfile_|(found==paths_.end()?0u:found->second);
     }
 
     void Remember(const std::string& profile,unsigned path)
@@ -740,6 +768,8 @@ private:
         return profile.empty()?std::string("unknown"):profile;
     }
 
+    // Paths written off for every codec before any open, for a memo made that way.
+    const unsigned everyProfile_;
     mutable std::mutex mutex_;
     std::map<std::string,unsigned> paths_;
 };
@@ -747,6 +777,11 @@ private:
 std::shared_ptr<AccelerationMemo> MakeAccelerationMemo()
 {
     return std::make_shared<AccelerationMemo>();
+}
+
+std::shared_ptr<AccelerationMemo> MakeSoftwareDecodeMemo()
+{
+    return std::make_shared<AccelerationMemo>(kCudaUnavailable|kD3d11Unavailable);
 }
 
 namespace {
@@ -877,6 +912,13 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     if (seekSeconds > 0.0)
         args << L"-ss " << std::fixed << std::setprecision(6) << seekSeconds << L" ";
     if (m_source.gif) args << L"-ignore_loop 1 ";
+    // A video is stood up by the filter below, on every path alike; ffmpeg's
+    // autorotation would do it on the software path only, and would also act
+    // on a matrix the probe never saw (one carried per frame), leaving the
+    // frames a different shape from the geometry the pipe is read at. A photo
+    // keeps it: its EXIF orientation reaches ffmpeg as frame side data, and
+    // the probe sized it for the rotated picture.
+    if (!m_source.stillImage) args << L"-noautorotate ";
     args << NetworkInputOptions(m_sourceKind,m_path) << L"-i " << Quote(m_path)
          << L" -map 0:v:0 -an -sn -dn ";
     // NV12 (the export's session layout, chosen in OpenFFmpeg) is already the
@@ -898,6 +940,14 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // curve lifts. Never NV12 (DecideSourceLayout), and never the untagged rule,
     // which is about a missing matrix on an SDR video.
     const hdr_policy::HdrSignal hdr = hdr_policy::SignalOf(m_source.color);
+    // The display matrix, applied first, on the frames as decoded: on the GPU
+    // for CUDA, after hwdownload for D3D11VA, and as ffmpeg's own autorotation
+    // filter on the software path. Every scale below is then to the upright
+    // geometry the probe reported.
+    const std::wstring cpuTurn = display_orientation::SoftwareFilter(m_source.orientation);
+    const std::wstring gpuTurn = display_orientation::CudaFilter(m_source.orientation);
+    const std::wstring cpuTurnThen = cpuTurn.empty() ? std::wstring() : cpuTurn + L",";
+    const std::wstring gpuTurnThen = gpuTurn.empty() ? std::wstring() : gpuTurn + L",";
     // Or kept HDR, as PQ in ten bits, when the presentation asked for it.
     const bool pq = hdr != hdr_policy::HdrSignal::Sdr && m_hdrPresentation && !nv12;
     // Or handed over as P010 for the decoder's own tone map (HdrToneMap.h), which
@@ -918,32 +968,34 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
                 matrixDeclared) + L",format=bgra";
         const std::wstring then = toneMap.empty() ? std::wstring() : L"," + toneMap;
         if (acceleration == FFmpegAcceleration::Cuda)
-            args << L"-vf scale_cuda=" << m_source.width << L":" << m_source.height
+            args << L"-vf " << gpuTurnThen << L"scale_cuda=" << m_source.width << L":" << m_source.height
                  << L":format=p010:interp_algo=bicubic:passthrough=0,hwdownload,format=p010le" << then << L" ";
         else if (acceleration == FFmpegAcceleration::D3D11Va)
-            args << L"-vf hwdownload,format=p010le,scale=" << m_source.width << L":" << m_source.height
+            args << L"-vf hwdownload,format=p010le," << cpuTurnThen << L"scale=" << m_source.width << L":" << m_source.height
                  << L":flags=bicubic" << (p010 ? L",format=p010le" : L"") << then << L" ";
         else if (m_source.nativeWidth && m_source.nativeHeight && (m_source.width != m_source.nativeWidth || m_source.height != m_source.nativeHeight))
-            args << L"-vf scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic"
+            args << L"-vf " << cpuTurnThen << L"scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic"
                  << (p010 ? L",format=p010le" : L"") << then << L" ";
         else
-            args << L"-vf " << (p010 ? L"format=p010le" : toneMap.c_str()) << L" ";
+            args << L"-vf " << cpuTurnThen << (p010 ? L"format=p010le" : toneMap.c_str()) << L" ";
     } else if (acceleration == FFmpegAcceleration::Cuda) {
-        args << L"-vf scale_cuda=" << m_source.width << L":" << m_source.height
+        args << L"-vf " << gpuTurnThen << L"scale_cuda=" << m_source.width << L":" << m_source.height
              << L":format=nv12:interp_algo=bicubic:passthrough=0,hwdownload,format=nv12";
         if (!nv12) args << bgraConversion;
         args << L" ";
     } else if (acceleration == FFmpegAcceleration::D3D11Va) {
-        args << L"-vf hwdownload,format=nv12,scale=" << m_source.width << L":" << m_source.height
+        args << L"-vf hwdownload,format=nv12," << cpuTurnThen << L"scale=" << m_source.width << L":" << m_source.height
              << L":flags=bicubic";
         if (!nv12) args << bgraConversion;
         args << L" ";
     } else if (m_source.nativeWidth && m_source.nativeHeight && (m_source.width != m_source.nativeWidth || m_source.height != m_source.nativeHeight)) {
-        args << L"-vf scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic";
+        args << L"-vf " << cpuTurnThen << L"scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic";
         if (bt709Untagged) args << bgraConversion;
         args << L" ";
     } else if (bt709Untagged) {
-        args << L"-vf " << (bgraConversion + 1) << L" ";
+        args << L"-vf " << cpuTurnThen << (bgraConversion + 1) << L" ";
+    } else if (!cpuTurn.empty()) {
+        args << L"-vf " << cpuTurn << L" ";
     }
     if (m_source.stillImage) args << L"-frames:v 1 ";
     if (m_source.gif && m_source.durationSec > seekSeconds)
@@ -1058,6 +1110,10 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
         // stays empty, which lands on the same refusal as any other undeclared
         // stream.
         m_source.color = known->color;
+        // Carried for the same reason: the original reopened as a known sibling
+        // must be stood up exactly as its probe said. A render or a segment was
+        // written upright by this process and carries Upright.
+        m_source.orientation = known->orientation;
         // Carried like the colour, and for the same reason: a known open of an
         // HDR source must tone map it exactly as the probed sibling did. A
         // caller that carried the transfer but no peak gets the default one.
@@ -1136,10 +1192,7 @@ void VideoDecoder::DecideSourceLayout() {
     }
     m_source.layout = (wantNv12 && evenGeometry && convertible && playbackConvertible)
         ? VideoPixelLayout::Nv12 : VideoPixelLayout::Bgra;
-    m_source.untaggedBt709 = UntaggedSourceDecodesAsBt709(
-        m_source.color, m_source.nativeWidth ? m_source.nativeWidth : m_source.width,
-        m_source.nativeHeight ? m_source.nativeHeight : m_source.height,
-        m_source.stillImage || m_source.gif);
+    m_source.untaggedBt709 = DecodesUntaggedAsBt709();
     if (m_source.untaggedBt709 && m_source.layout == VideoPixelLayout::Bgra)
         LOG("Source declares no colour matrix (" << m_source.colorTags
             << "); decoding it as BT.709, the reading for an HD video that states none.");
@@ -1671,8 +1724,27 @@ VideoReadResult VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         }
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return VideoReadResult::EndOfStream;
         if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
-            LOG("Media Foundation video media type changed; continuing.");
-            continue;
+            // The sample that carries this flag is already in the new type, so
+            // the type is read again before anything of it is. A new frame size
+            // ends the decode: every consumer was sized from the one this open
+            // reported. A new stride is simply taken.
+            ComPtr<IMFMediaType> changed;
+            UINT32 width = 0, height = 0;
+            if (FAILED(m_reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &changed)) ||
+                FAILED(MFGetAttributeSize(changed.Get(), MF_MT_FRAME_SIZE, &width, &height))) {
+                LOG("Media Foundation video media type changed and the new one could not be read.");
+                return VideoReadResult::Error;
+            }
+            if (!mf_sample::FollowsTypeChange(m_source.width, m_source.height, width, height)) {
+                LOG("Media Foundation video changed from " << m_source.width << "x" << m_source.height << " to "
+                    << width << "x" << height << " mid-stream; a decode is one geometry, so it ends here.");
+                return VideoReadResult::Error;
+            }
+            UINT32 strideU = 0;
+            m_source.stride = SUCCEEDED(changed->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideU))
+                ? static_cast<int32_t>(strideU) : static_cast<int32_t>(m_source.width * 4u);
+            LOG("Media Foundation video media type changed at the same " << width << "x" << height
+                << "; stride now " << m_source.stride << ".");
         }
         if (!sample) continue;
 
@@ -1683,26 +1755,29 @@ VideoReadResult VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         DWORD maxLen = 0, curLen = 0;
         if (FAILED(buffer->Lock(&data, &maxLen, &curLen))) continue;
 
-        const size_t dstStride = static_cast<size_t>(m_source.width) * 4u;
-        out.bgra.resize(dstStride * m_source.height);
-
-        int32_t stride = m_source.stride;
-        size_t absStride = static_cast<size_t>(std::abs(stride));
-        if (absStride * m_source.height > curLen) {
-            stride = static_cast<int32_t>(dstStride);
-            absStride = dstStride;
+        // Every byte the copy will read is accounted for before it reads one
+        // (MediaFoundationSamplePolicy.h): a buffer that holds less than the
+        // frame is a broken stream, not a picture to guess at.
+        const mf_sample::CopyPlan plan = mf_sample::PlanCopy(m_source.width, m_source.height, m_source.stride, curLen);
+        if (!plan.copy) {
+            buffer->Unlock();
+            LOG("Media Foundation sample holds " << curLen << " bytes, short of a " << m_source.width << "x"
+                << m_source.height << " frame at stride " << m_source.stride << "; refusing to read past it.");
+            return VideoReadResult::Error;
         }
 
-        const BYTE* firstRow = data;
-        if (stride < 0) firstRow = data + absStride * (m_source.height - 1);
+        const size_t dstStride = static_cast<size_t>(m_source.width) * 4u;
+        out.bgra.resize(dstStride * m_source.height);
+        const size_t absStride = static_cast<size_t>(std::abs(static_cast<int64_t>(plan.stride)));
+        const BYTE* firstRow = data + plan.firstRow;
 
         for (uint32_t y = 0; y < m_source.height; ++y) {
-            const BYTE* src = stride >= 0 ? firstRow + absStride * y : firstRow - absStride * y;
-            memcpy(out.bgra.data() + dstStride * y, src, std::min(dstStride, absStride));
+            const BYTE* src = plan.stride >= 0 ? firstRow + absStride * y : firstRow - absStride * y;
+            memcpy(out.bgra.data() + dstStride * y, src, plan.rowBytes);
             // `out` can arrive holding a recycled frame, and resize() keeps its
             // bytes: a row the sample does not fully cover is cleared rather
             // than left showing the previous picture.
-            if (absStride < dstStride) memset(out.bgra.data() + dstStride * y + absStride, 0, dstStride - absStride);
+            if (plan.rowBytes < dstStride) memset(out.bgra.data() + dstStride * y + plan.rowBytes, 0, dstStride - plan.rowBytes);
         }
         buffer->Unlock();
 

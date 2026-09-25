@@ -46,6 +46,8 @@
 #include "RenderCommandLine.h"
 #include "FrameResample.h"
 #include "UntaggedColorPolicy.h"
+#include "DisplayOrientationPolicy.h"
+#include "MediaFoundationSamplePolicy.h"
 #include "HdrPolicy.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
@@ -5723,6 +5725,137 @@ void untagged_hd_video_decodes_as_bt709_and_only_it_test()
     CHECK(std::string_view(UntaggedColorIdentityTerm(true)) == "|untagged-hd-bt709-v1");
 }
 
+// A stream's display matrix, read the way ffmpeg's autorotation reads it. The
+// matrices are the ones the bundled ffprobe printed for a clip stream-copied
+// with -display_rotation 90, -90, 180 and 90 plus -display_hflip; the filters
+// are the ones ffmpeg inserted for them (its verbose log names them), and a
+// clip decoded through each matched ffmpeg's autorotated output byte for byte.
+void display_matrix_stands_the_picture_up_as_ffmpeg_does_test()
+{
+    using namespace display_orientation;
+    const std::string_view probe =
+        "codec_name=h264\r\nwidth=320\r\nheight=176\r\nduration=1.000000\r\n"
+        "displaymatrix=\r\n"
+        "00000000:            0      -65536           0\r\n"
+        "00000001:        65536           0           0\r\n"
+        "00000002:            0           0  1073741824\r\n"
+        "\r\nformat_name=mov,mp4,m4a,3gp,3g2,mj2\r\n";
+    const auto quarter = ParseDisplayMatrix(probe);
+    CHECK(quarter.has_value());
+    if (quarter) {
+        CHECK((*quarter == Matrix{0, -65536, 0, 65536, 0, 0, 0, 0, 1073741824}));
+        CHECK(FromDisplayMatrix(*quarter) == Orientation::CounterClockwise);
+    }
+    // No matrix, a cut-off one and a mangled one decode as stored.
+    CHECK(!ParseDisplayMatrix("width=320\nheight=176\n").has_value());
+    CHECK(!ParseDisplayMatrix("displaymatrix=\n00000000: 0 -65536 0\n00000001: 65536 0 0\n").has_value());
+    CHECK(!ParseDisplayMatrix("displaymatrix=\n00000000: 0 -65536 0\n00000001: 65536 x 0\n00000002: 0 0 1073741824\n").has_value());
+    CHECK(!ParseDisplayMatrix("displaymatrix=\nrotation=90\n").has_value());
+
+    const int32_t one = 65536, w = 1073741824;
+    CHECK(FromDisplayMatrix({0, one, 0, -one, 0, 0, 0, 0, w}) == Orientation::Clockwise);        // -90 and 270
+    CHECK(FromDisplayMatrix({-one, 0, 0, 0, -one, 0, 0, 0, w}) == Orientation::HalfTurn);        // 180
+    CHECK(FromDisplayMatrix({0, -one, 0, -one, 0, 0, 0, 0, w}) == Orientation::ClockwiseFlip);   // 90 + hflip
+    CHECK(FromDisplayMatrix({0, one, 0, one, 0, 0, 0, 0, w}) == Orientation::CounterClockwiseFlip);
+    CHECK(FromDisplayMatrix({one, 0, 0, 0, one, 0, 0, 0, w}) == Orientation::Upright);
+    CHECK(FromDisplayMatrix({-one, 0, 0, 0, one, 0, 0, 0, w}) == Orientation::MirrorHorizontal);
+    CHECK(FromDisplayMatrix({one, 0, 0, 0, -one, 0, 0, 0, w}) == Orientation::MirrorVertical);
+    // A matrix with a scale in it still turns by its angle alone.
+    CHECK(FromDisplayMatrix({0, -2 * one, 0, 2 * one, 0, 0, 0, 0, w}) == Orientation::CounterClockwise);
+    // 45 degrees is not a turn a frame can be stood up by, and a zero matrix is no turn at all.
+    CHECK(!FromDisplayMatrix({46341, -46341, 0, 46341, 46341, 0, 0, 0, w}).has_value());
+    CHECK(!FromDisplayMatrix({0, 0, 0, 0, 0, 0, 0, 0, 0}).has_value());
+
+    CHECK(SwapsAxes(Orientation::Clockwise) && SwapsAxes(Orientation::CounterClockwise) &&
+          SwapsAxes(Orientation::ClockwiseFlip) && SwapsAxes(Orientation::CounterClockwiseFlip));
+    CHECK(!SwapsAxes(Orientation::Upright) && !SwapsAxes(Orientation::HalfTurn) &&
+          !SwapsAxes(Orientation::MirrorHorizontal) && !SwapsAxes(Orientation::MirrorVertical));
+    CHECK(SoftwareFilter(Orientation::Upright).empty() && CudaFilter(Orientation::Upright).empty());
+    CHECK(SoftwareFilter(Orientation::CounterClockwise) == L"transpose=cclock");
+    CHECK(SoftwareFilter(Orientation::ClockwiseFlip) == L"transpose=clock_flip");
+    CHECK(SoftwareFilter(Orientation::HalfTurn) == L"hflip,vflip");
+    CHECK(SoftwareFilter(Orientation::MirrorVertical) == L"vflip");
+    CHECK(CudaFilter(Orientation::Clockwise) == L"transpose_cuda=dir=clock");
+    CHECK(CudaFilter(Orientation::HalfTurn) == L"transpose_cuda=dir=reversal");
+    CHECK(CudaFilter(Orientation::MirrorHorizontal) == L"transpose_cuda=dir=hflip");
+    // Every turned source carries a key term, a half turn included, whose width
+    // and height alone would not move its key; an upright one carries none.
+    CHECK(IdentityTerm(Orientation::Upright).empty());
+    CHECK_EQ(std::string("|display-cclock-v1"), IdentityTerm(Orientation::CounterClockwise));
+    CHECK_EQ(std::string("|display-reversal-v1"), IdentityTerm(Orientation::HalfTurn));
+}
+
+// The Media Foundation copy reads only bytes the locked buffer holds. The
+// resolution-drop case is the one that used to walk 1080 rows of 7680 bytes
+// through a buffer holding a 1280x720 frame.
+void media_foundation_copy_never_reads_past_the_sample_test()
+{
+    using namespace mf_sample;
+    // Exact fit, top-down.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, 16, 48);
+        CHECK(plan.copy);
+        CHECK_EQ(int32_t{16}, plan.stride);
+        CHECK_EQ(size_t{0}, plan.firstRow);
+        CHECK_EQ(size_t{16}, plan.rowBytes);
+        CHECK(!PlanCopy(4, 3, 16, 47).copy);
+    }
+    // Padded rows: the last row needs only its pixels, not its padding.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, 20, 20 * 2 + 16);
+        CHECK(plan.copy);
+        CHECK_EQ(int32_t{20}, plan.stride);
+        CHECK_EQ(size_t{16}, plan.rowBytes);
+    }
+    // Bottom-up: the walk starts at the last row in the buffer and reads back
+    // to the first, so it reads exactly as far as a top-down walk.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, -16, 48);
+        CHECK(plan.copy);
+        CHECK_EQ(int32_t{-16}, plan.stride);
+        CHECK_EQ(size_t{32}, plan.firstRow);
+        CHECK_EQ(size_t{16}, plan.rowBytes);
+        CHECK(!PlanCopy(4, 3, -16, 47).copy);
+    }
+    // A declared stride the buffer cannot hold falls back to packed rows, as it
+    // always did - and only when the packed rows fit.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, 32, 48);
+        CHECK(plan.copy);
+        CHECK_EQ(int32_t{16}, plan.stride);
+        CHECK_EQ(size_t{0}, plan.firstRow);
+        const CopyPlan bottomUp = PlanCopy(4, 3, -32, 48);
+        CHECK(bottomUp.copy);
+        CHECK_EQ(int32_t{16}, bottomUp.stride);
+        CHECK(!PlanCopy(4, 3, 32, 47).copy);
+        CHECK(!PlanCopy(4, 3, -32, 47).copy);
+    }
+    // A stride narrower than a row copies what the row holds; the caller
+    // clears the rest of the row.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, 8, 24);
+        CHECK(plan.copy);
+        CHECK_EQ(size_t{8}, plan.rowBytes);
+    }
+    // No stride stated reads packed rows.
+    CHECK(PlanCopy(4, 3, 0, 48).copy);
+    CHECK(!PlanCopy(4, 3, 0, 47).copy);
+    // The resolution drop: opened at 1920x1080, handed a 1280x720 frame.
+    CHECK(!PlanCopy(1920, 1080, 7680, size_t{1280} * 720 * 4).copy);
+    CHECK(!PlanCopy(1920, 1080, -7680, size_t{1280} * 720 * 4).copy);
+    CHECK(!PlanCopy(1920, 1080, 5120, size_t{1280} * 720 * 4).copy);
+    CHECK(PlanCopy(1920, 1080, 7680, size_t{1920} * 1080 * 4).copy);
+    // Nothing to copy, and a stride with no positive twin.
+    CHECK(!PlanCopy(0, 1080, 7680, size_t{1} << 30).copy);
+    CHECK(!PlanCopy(1920, 0, 7680, size_t{1} << 30).copy);
+    CHECK(PlanCopy(4, 3, INT32_MIN, 48).copy);
+    CHECK_EQ(int32_t{16}, PlanCopy(4, 3, INT32_MIN, 48).stride);
+    // A type change is followed at the same size and ends the decode at another.
+    CHECK(FollowsTypeChange(1920, 1080, 1920, 1080));
+    CHECK(!FollowsTypeChange(1920, 1080, 1280, 720));
+    CHECK(!FollowsTypeChange(1920, 1080, 1080, 1920));
+}
+
 // An HDR source is tone mapped to SDR for a peak fixed per source from its static
 // metadata, never measured per frame, and that peak is part of the render's key.
 void hdr_sources_tone_map_for_a_static_peak_test()
@@ -8453,6 +8586,104 @@ void video_decoder_tone_maps_hdr_sources_to_sdr_test()
     }
 }
 
+// A portrait phone clip is stored landscape with a display matrix. The probe
+// that reads the geometry reads the matrix too, the geometry the decoder
+// reports is the upright one, and every path it can take stands the frames up
+// itself with ffmpeg's autorotation turned off - on the GPU for CUDA, after the
+// download for D3D11VA, on the CPU otherwise. The fake child writes frames of
+// the upright shape, so a decoder that still expected the stored one would
+// never assemble a frame from them.
+void video_decoder_stands_turned_video_up_on_every_path_test()
+{
+    MediaFixture fixture;
+    const auto lines=[](const std::filesystem::path& marker){
+        std::vector<std::string> commands;std::istringstream in(read_binary_file(marker));
+        for(std::string line;std::getline(in,line);)if(!line.empty())commands.push_back(line);
+        return commands;
+    };
+    {
+        const auto marker=fixture.directory/L"turned-args.txt";
+        ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ARGS_MARKER",marker.wstring());
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(L"turned_quarter",MediaSourceKind::LocalFile));
+        // Stored 4x2 at 2:1, shown 2x4 at 1:2.
+        CHECK_EQ(uint32_t{2},decoder->Width());
+        CHECK_EQ(uint32_t{4},decoder->Height());
+        CHECK_EQ(uint32_t{2},decoder->NativeWidth());
+        CHECK(std::abs(decoder->DisplayAspectRatio()-0.5)<1e-9);
+        CHECK(decoder->DisplayOrientation()==display_orientation::Orientation::CounterClockwise);
+        CHECK_EQ(std::string("|display-cclock-v1"),decoder->OrientationIdentityTerm());
+        const VideoFrame frame=read_one_frame(*decoder);
+        CHECK_EQ(FrameBytes(decoder->PixelLayout(),2,4),frame.bgra.size());
+        const std::string command=first_decode_command(marker);
+        CHECK(command.find("-noautorotate")!=std::string::npos);
+        CHECK(command.find("-noautorotate")<command.find(" -i "));
+        CHECK(command.find("-vf transpose_cuda=dir=cclock,scale_cuda=2:4:")!=std::string::npos);
+
+        // Reopened as a known sibling - cached playback's original - it is
+        // stood up exactly the same way, without a probe.
+        const VideoDecoder::KnownMedia media=decoder->Media();
+        CHECK(media.orientation==display_orientation::Orientation::CounterClockwise);
+        CHECK_EQ(uint32_t{2},media.width);
+        const auto knownMarker=fixture.directory/L"turned-known-args.txt";
+        ScopedEnvironmentVariable knownVariable(L"DLSS_VIDEO_TEST_ARGS_MARKER",knownMarker.wstring());
+        auto known=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(known->OpenKnown(L"turned_quarter",media,MediaSourceKind::LocalFile));
+        CHECK_EQ(std::string("|display-cclock-v1"),known->OrientationIdentityTerm());
+        CHECK_EQ(FrameBytes(known->PixelLayout(),2,4),read_one_frame(*known).bgra.size());
+        CHECK(first_decode_command(knownMarker).find("-vf transpose_cuda=dir=cclock,scale_cuda=2:4:")!=std::string::npos);
+    }
+    {
+        // Both hardware paths refused: each child the decoder falls back through
+        // turns the picture in its own place, and the frames it finally reads
+        // are the upright shape.
+        const auto marker=fixture.directory/L"turned-fallback-args.txt";
+        ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ARGS_MARKER",marker.wstring());
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->Open(L"turned_fallback",MediaSourceKind::LocalFile));
+        CHECK_EQ(FrameBytes(VideoPixelLayout::Bgra,2,4),read_one_frame(*decoder).bgra.size());
+        const auto commands=lines(marker);
+        CHECK_EQ(size_t{3},commands.size());
+        if(commands.size()==3){
+            for(const auto& command:commands)CHECK(command.find("-noautorotate")!=std::string::npos);
+            CHECK(commands[0].find("-hwaccel cuda")!=std::string::npos);
+            CHECK(commands[0].find("transpose_cuda=dir=cclock,scale_cuda=2:4:")!=std::string::npos);
+            CHECK(commands[1].find("-hwaccel d3d11va")!=std::string::npos);
+            CHECK(commands[1].find("-vf hwdownload,format=nv12,transpose=cclock,scale=2:4:")!=std::string::npos);
+            CHECK(commands[2].find("-hwaccel")==std::string::npos);
+            CHECK(commands[2].find("-vf transpose=cclock ")!=std::string::npos);
+        }
+    }
+    {
+        // A half turn keeps the frame's shape, so only the key term tells its
+        // renders from the upside-down ones the CUDA path used to make.
+        const auto marker=fixture.directory/L"turned-half-args.txt";
+        ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ARGS_MARKER",marker.wstring());
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(L"turned_half",MediaSourceKind::LocalFile));
+        CHECK_EQ(uint32_t{4},decoder->Width());
+        CHECK_EQ(uint32_t{2},decoder->Height());
+        CHECK(decoder->DisplayOrientation()==display_orientation::Orientation::HalfTurn);
+        CHECK_EQ(std::string("|display-reversal-v1"),decoder->OrientationIdentityTerm());
+        read_one_frame(*decoder);
+        CHECK(first_decode_command(marker).find("-vf transpose_cuda=dir=reversal,scale_cuda=4:2:")!=std::string::npos);
+    }
+    {
+        // Upright: no turn and no key term, and ffmpeg is still told not to
+        // turn anything the probe did not see.
+        const auto marker=fixture.directory/L"upright-args.txt";
+        ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ARGS_MARKER",marker.wstring());
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(L"nv12geom",MediaSourceKind::LocalFile));
+        CHECK(decoder->DisplayOrientation()==display_orientation::Orientation::Upright);
+        CHECK(decoder->OrientationIdentityTerm().empty());
+        read_one_frame(*decoder);
+        const std::string command=first_decode_command(marker);
+        CHECK(command.find("transpose")==std::string::npos);
+        CHECK(command.find("-noautorotate")!=std::string::npos);
+    }
+}
+
 // An HDR display asks for the original as PQ. Only the presentation ever asks,
 // only an HDR source answers, and a running child keeps what it was started with
 // until a seek, which then cannot be served by that child.
@@ -10563,6 +10794,24 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         if(all.find(L"partialend")!=std::wstring::npos){
             std::cout<<geometry(2,2,"1:1","0.067")<<std::flush;return 0;
         }
+        // Stored 4x2 with a display matrix, printed the way ffprobe prints it and only
+        // when -show_entries asked for it in the same invocation as the geometry.
+        // turned_quarter and turned_fallback are the -display_rotation 90 matrix,
+        // turned_half the 180 one.
+        if(all.find(L"turned_")!=std::wstring::npos){
+            std::cout<<geometry(4,2,"2:1")<<color("bt709","tv","bt709","bt709");
+            if(all.find(L"stream_side_data=displaymatrix")!=std::wstring::npos){
+                std::cout<<"displaymatrix=\n";
+                if(all.find(L"turned_half")!=std::wstring::npos)
+                    std::cout<<"00000000:       -65536           0           0\n"
+                               "00000001:            0      -65536           0\n";
+                else
+                    std::cout<<"00000000:            0      -65536           0\n"
+                               "00000001:        65536           0           0\n";
+                std::cout<<"00000002:            0           0  1073741824\n\n";
+            }
+            std::cout<<std::flush;return 0;
+        }
         // Even geometry AND a declared colour description the GPU conversion implements:
         // OpenSequential can pick NV12 here.
         if(all.find(L"nv12geom")!=std::wstring::npos){
@@ -10641,6 +10890,15 @@ int run_fake_media_child(int argc,wchar_t* argv[])
     const auto rawFrameBytes=[nv12Requested,p010Requested](size_t w,size_t h){
         return nv12Requested?w*h*3u/2u:p010Requested?w*h*3u:w*h*4u;
     };
+    // Frames of the upright shape: 2x4 for the quarter turns, 4x2 for the half
+    // turn. turned_fallback refuses both hardware paths, as a codec neither
+    // decodes would.
+    if(all.find(L"turned_")!=std::wstring::npos){
+        if(all.find(L"turned_fallback")!=std::wstring::npos&&all.find(L"-hwaccel")!=std::wstring::npos)return 7;
+        const bool half=all.find(L"turned_half")!=std::wstring::npos;
+        const std::vector<char> frame(half?rawFrameBytes(4,2):rawFrameBytes(2,4),'t');
+        std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();return 0;
+    }
     if(all.find(L"nv12geom")!=std::wstring::npos){
         const std::vector<char> frame(rawFrameBytes(4,2),'n');
         std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();return 0;
@@ -14636,6 +14894,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test),
     TEST_CASE(video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test),
     TEST_CASE(video_decoder_tone_maps_hdr_sources_to_sdr_test),
+    TEST_CASE(video_decoder_stands_turned_video_up_on_every_path_test),
     TEST_CASE(video_decoder_decodes_hdr_originals_as_pq_on_request_test),
     TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),
     TEST_CASE(source_nv12_conversion_constants_are_the_shipped_coefficients_test),
@@ -14748,6 +15007,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
     TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),
     TEST_CASE(untagged_hd_video_decodes_as_bt709_and_only_it_test),
+    TEST_CASE(display_matrix_stands_the_picture_up_as_ffmpeg_does_test),
+    TEST_CASE(media_foundation_copy_never_reads_past_the_sample_test),
     TEST_CASE(hdr_tone_map_integer_path_follows_the_curve_test),
     TEST_CASE(hdr_sources_tone_map_for_a_static_peak_test),
     TEST_CASE(one_step_of_the_frame_grid_is_always_work_test),

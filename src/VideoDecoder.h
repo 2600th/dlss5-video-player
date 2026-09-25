@@ -10,6 +10,7 @@
 #include "PixelLayout.h"
 #include "UntaggedColorPolicy.h"
 #include "HdrPolicy.h"
+#include "DisplayOrientationPolicy.h"
 #include "HdrToneMapGpu.h"
 #include <atomic>
 #include <chrono>
@@ -31,6 +32,10 @@ class AccelerationMemo;
 // A memo of its own, for a caller that must neither inherit the process-wide
 // memory nor publish into it.
 std::shared_ptr<AccelerationMemo> MakeAccelerationMemo();
+// A memo that has written off both hardware paths for every codec already, so
+// a decoder given it starts on the CPU and stays there. For a caller that has
+// to hold the software path's own pixels, whatever GPU the machine has.
+std::shared_ptr<AccelerationMemo> MakeSoftwareDecodeMemo();
 
 // PixelLayout.h: BGRA is 4 bytes/pixel; NV12 is 3/2 - 11.1 MB BGRA -> 4.2 MB NV12 per
 // 2578x1080 frame. OpenSequential (the neural export's source) selects Nv12 when the
@@ -171,13 +176,17 @@ public:
         // open of an HDR source converts it exactly as the probed one did. Zero
         // for SDR and for a caller that never probed.
         double hdrPeakNits{};
+        // How the sibling's probe said to stand its picture up
+        // (DisplayOrientationPolicy.h); width and height above are already the
+        // upright geometry. Upright for anything this process wrote.
+        display_orientation::Orientation orientation{display_orientation::Orientation::Upright};
         bool Valid() const { return width != 0 && height != 0 && fps > 0.0; }
     };
     bool OpenKnown(const std::wstring& path, const KnownMedia& media,
                    MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
                    std::stop_token stop = {}, bool preferNv12 = false);
     // What a sibling file of the one this decoder has open can be opened with.
-    KnownMedia Media() const { return {m_source.width, m_source.height, m_source.fps, m_source.durationSec, m_source.hardwareProfile, m_source.color, m_source.hdrPeakNits}; }
+    KnownMedia Media() const { return {m_source.width, m_source.height, m_source.fps, m_source.durationSec, m_source.hardwareProfile, m_source.color, m_source.hdrPeakNits, m_source.orientation}; }
     // Geometry, frame rate and duration only: runs the probe and starts no
     // decoder. The caller that just needs to describe a file was paying for a
     // full ffmpeg child it closed two lines later. preferNv12 settles
@@ -309,10 +318,22 @@ public:
     // Whether the running child emits PQ frames.
     bool DecodingPq() const { return m_ffmpegPq; }
     bool DecodesUntaggedAsBt709() const {
-        return UntaggedSourceDecodesAsBt709(m_source.color,
-            m_source.nativeWidth ? m_source.nativeWidth : m_source.width,
-            m_source.nativeHeight ? m_source.nativeHeight : m_source.height,
+        const auto [width, height] = StoredGeometry();
+        return UntaggedSourceDecodesAsBt709(m_source.color, width, height,
             m_source.stillImage || m_source.gif);
+    }
+    // How the stream's display matrix stands the picture up. Width() and
+    // Height() are already the upright geometry; this says what was done to
+    // get there. Upright for a photo, whose EXIF turn ffmpeg applies itself.
+    display_orientation::Orientation DisplayOrientation() const { return m_source.orientation; }
+    // What a render keyed on the decoded pixels adds for this source; empty for
+    // an upright one. Known after any open, OpenMetadata included.
+    std::string OrientationIdentityTerm() const { return display_orientation::IdentityTerm(m_source.orientation); }
+    // Whether the running child decodes and converts on the GPU through CUDA,
+    // rather than D3D11VA or the CPU - for a test that has to know which of
+    // the three produced the frames it just checked.
+    bool DecodingOnCuda() const {
+        return m_backend == Backend::FFmpeg && m_ffmpegProcess && m_ffmpegAcceleration == FFmpegAcceleration::Cuda;
     }
 
 private:
@@ -354,6 +375,10 @@ private:
         // Tone-map peak for a PQ/HLG source (HdrPolicy.h), from the probe's
         // one read of its static metadata; 0 for SDR.
         double hdrPeakNits = 0.0;
+        // The display matrix the probe read (or a KnownMedia carried), applied
+        // by StartFFmpeg's filter. width/height and nativeWidth/nativeHeight are
+        // the upright geometry already; StoredGeometry() undoes a quarter turn.
+        display_orientation::Orientation orientation = display_orientation::Orientation::Upright;
         // An HD video that declared no matrix, decoded as BT.709 rather than
         // ffmpeg's BT.601 default (UntaggedColorPolicy.h). Set with the layout.
         bool untaggedBt709{};
@@ -382,6 +407,15 @@ private:
         VideoPixelLayout layout = VideoPixelLayout::Bgra;
     };
     Source m_source;
+    // The native geometry as coded, before a quarter turn stood it up. The
+    // untagged-matrix rule reads this one: players judge SD against HD on the
+    // stored picture, and a portrait 640x480 phone clip is SD whichever way up
+    // it is shown.
+    std::pair<uint32_t, uint32_t> StoredGeometry() const {
+        const uint32_t width = m_source.nativeWidth ? m_source.nativeWidth : m_source.width;
+        const uint32_t height = m_source.nativeHeight ? m_source.nativeHeight : m_source.height;
+        return display_orientation::SwapsAxes(m_source.orientation) ? std::pair{height, width} : std::pair{width, height};
+    }
     enum class Backend { None, FFmpeg, MediaFoundation };
     enum class FFmpegAcceleration { Cuda, D3D11Va, Software };
     // A restart clears every decoded frame; a seek that keeps its child must

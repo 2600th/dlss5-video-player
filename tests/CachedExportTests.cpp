@@ -1385,6 +1385,73 @@ void UntaggedVideoDecodesWithTheMatrixItsSizeImpliesTest(const std::filesystem::
     }
 }
 
+// A phone's portrait clip is stored landscape with a display matrix. The
+// matrix is written here the way a phone writes it - onto a stream-copied
+// file, so the stored frames are the upright clip's frames exactly - and the
+// decoder must report the upright geometry and hand over the upright pixels.
+// The reference is the stored clip put through the named filter by ffmpeg,
+// independently of the decoder's own choice of filter. This is the software
+// path, pinned by a memo that has written the GPU paths off: its pixels are
+// ffmpeg's own, byte for byte, whatever GPU the machine has.
+//
+// Before the fix the 90-degree clip reported 64x48 and read the 48x64 frames
+// ffmpeg's autorotation emitted at the wrong stride - a sheared picture.
+void TurnedVideoDecodesUprightTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto log = fixture.path / L"turned.log";
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    const auto stored = fixture.path / L"stored.mp4";
+    constexpr uint32_t width = 64, height = 48;
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-y", L"-f", L"lavfi", L"-i",
+        L"testsrc2=s=64x48:r=10:d=0.5", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", stored.wstring()}, log));
+    struct Case {
+        const wchar_t* name;
+        std::vector<std::wstring> tag;  // input options that write the matrix
+        const wchar_t* filter;          // what stands the stored frames up
+        bool swaps;
+    };
+    const Case cases[] = {
+        {L"rotate90", {L"-display_rotation", L"90"}, L"transpose=cclock", true},
+        {L"rotate270", {L"-display_rotation", L"-90"}, L"transpose=clock", true},
+        {L"rotate180", {L"-display_rotation", L"180"}, L"hflip,vflip", false},
+        {L"rotate90-mirrored", {L"-display_rotation", L"90", L"-display_hflip"}, L"transpose=clock_flip", true},
+    };
+    for (const Case& clip : cases) {
+        const auto turned = fixture.path / (std::wstring(clip.name) + L".mp4");
+        std::vector<std::wstring> tag{L"-v", L"error", L"-nostdin", L"-y"};
+        tag.insert(tag.end(), clip.tag.begin(), clip.tag.end());
+        tag.insert(tag.end(), {L"-i", stored.wstring(), L"-c", L"copy", turned.wstring()});
+        CHECK(RunTool(ffmpeg, tag, log));
+        const auto reference = fixture.path / (std::wstring(clip.name) + L".bgra");
+        CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-y", L"-i", stored.wstring(), L"-vf", clip.filter,
+            L"-f", L"rawvideo", L"-pix_fmt", L"bgra", reference.wstring()}, log));
+        const std::string expected = Read(reference);
+
+        VideoDecoder::Settings settings;
+        settings.helperDirectory = helpers.wstring();
+        settings.accelerationMemo = MakeSoftwareDecodeMemo();
+        VideoDecoder decoder(std::move(settings));
+        CHECK(decoder.Open(turned.wstring()));
+        const uint32_t shownWidth = clip.swaps ? height : width, shownHeight = clip.swaps ? width : height;
+        CHECK_EQ(shownWidth, decoder.Width());
+        CHECK_EQ(shownHeight, decoder.Height());
+        CHECK(std::abs(decoder.DisplayAspectRatio() - double(shownWidth) / double(shownHeight)) < 0.001);
+        CHECK(decoder.DisplayOrientation() != display_orientation::Orientation::Upright);
+        CHECK(!decoder.OrientationIdentityTerm().empty());
+        CHECK(decoder.PixelLayout() == PixelLayout::Bgra);
+        std::string decoded;
+        VideoFrame frame;
+        while (decoder.ReadNext(frame)) decoded.append(reinterpret_cast<const char*>(frame.bgra.data()), frame.bgra.size());
+        CHECK(!decoder.DecodingOnCuda());
+        CHECK_EQ(size_t{5} * width * height * 4u, decoded.size());
+        CHECK_EQ(expected.size(), decoded.size());
+        const bool same = decoded == expected;
+        if (!same) std::wcerr << L"  " << clip.name << L" decoded pixels differ from " << clip.filter << L'\n';
+        CHECK(same);
+    }
+}
+
 // Cached playback builds its own decoders: nothing injects the two sources,
 // so this is the one place the decoder-backed frame source pairs real files.
 // A red original and a blue render, lossless, so a pair is checked by its
@@ -2000,6 +2067,7 @@ int wmain(int argc, wchar_t** argv)
     SynchronizedPlaybackPairsRealMediaTest(helpers);
     LivePlaybackSwitchesOntoTheJoinedRunTest(helpers);
     UntaggedVideoDecodesWithTheMatrixItsSizeImpliesTest(helpers);
+    TurnedVideoDecodesUprightTest(helpers);
     SubtitlesDrawOnATransparentCanvasTest(helpers);
     BitmapSubtitlesAreScaledOntoTheCanvasTest(helpers);
     SavedExportKeepsWhatEachContainerHoldsTest(helpers);

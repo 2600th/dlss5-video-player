@@ -22,6 +22,7 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <stop_token>
 #include <string>
@@ -418,6 +419,99 @@ int NvencDirectIdentity(const fs::path& helpers, const fs::path& root, uint32_t 
     std::wcout << L"Evidence: " << root.wstring() << std::endl;
     return ok ? 0 : 1;
 }
+
+std::string ReadBytes(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+// A stored-landscape clip with a display matrix, decoded on the CUDA path: the
+// matrix is applied by transpose_cuda before the frames leave the GPU. Before
+// the fix that path ignored the matrix entirely and emitted the stored,
+// sideways picture. Measured on the bundled 9.0.1, NVDEC plus transpose_cuda
+// is byte for byte ffmpeg's CPU decode plus the CPU filter, so each layout is
+// held to exact equality with a reference the CPU made: NV12 as the export's
+// sequential open decodes it, and BGRA as playback does.
+int TurnedDecode(const fs::path& helpers, const fs::path& root)
+{
+    std::wofstream report(root / L"results.txt");
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    const auto stored = root / L"stored.mp4";
+    constexpr uint32_t width = 320, height = 176, frames = 10;
+    // Declared BT.709 limited, which is what lets the sequential open take NV12.
+    if (!Generate(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi", L"-i",
+            L"testsrc2=s=320x176:r=10:d=1", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p",
+            L"-colorspace", L"bt709", L"-color_primaries", L"bt709", L"-color_trc", L"bt709",
+            L"-color_range", L"tv", stored.wstring()}, root / L"stored-generation.log")) {
+        std::wcerr << L"FAIL: fixture generation failed\n";
+        return 2;
+    }
+    struct Case {
+        const wchar_t* name;
+        std::vector<std::wstring> tag;
+        const wchar_t* filter;
+        bool swaps;
+    };
+    const Case cases[] = {
+        {L"rotate90", {L"-display_rotation", L"90"}, L"transpose=cclock", true},
+        {L"rotate270", {L"-display_rotation", L"-90"}, L"transpose=clock", true},
+        {L"rotate180", {L"-display_rotation", L"180"}, L"hflip,vflip", false},
+        {L"rotate90-mirrored", {L"-display_rotation", L"90", L"-display_hflip"}, L"transpose=clock_flip", true},
+    };
+    bool ok = true;
+    for (const Case& clip : cases) {
+        const auto turned = root / (std::wstring(clip.name) + L".mp4");
+        std::vector<std::wstring> tag{L"-v", L"error", L"-nostdin", L"-n"};
+        tag.insert(tag.end(), clip.tag.begin(), clip.tag.end());
+        tag.insert(tag.end(), {L"-i", stored.wstring(), L"-c", L"copy", turned.wstring()});
+        if (!Check(Generate(ffmpeg, tag, root / (std::wstring(clip.name) + L"-generation.log")),
+                   std::wstring(clip.name) + L": the display matrix could not be written", report)) { ok = false; continue; }
+        const uint32_t shownWidth = clip.swaps ? height : width, shownHeight = clip.swaps ? width : height;
+        for (const bool sequential : {true, false}) {
+            const std::wstring layout = sequential ? L"nv12" : L"bgra";
+            const auto reference = root / (std::wstring(clip.name) + L"." + layout);
+            // BGRA goes through NV12 first, as the CUDA chain's does: the
+            // conversion under test is the turn, not yuv420p against nv12.
+            const std::wstring filter = sequential ? std::wstring(clip.filter) : std::wstring(clip.filter) + L",format=nv12,format=bgra";
+            if (!Check(Generate(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-i", stored.wstring(), L"-vf", filter,
+                    L"-f", L"rawvideo", L"-pix_fmt", layout, reference.wstring()},
+                    root / (std::wstring(clip.name) + L"-" + layout + L"-reference.log")),
+                    std::wstring(clip.name) + L": the reference could not be made", report)) { ok = false; continue; }
+            const std::string expected = ReadBytes(reference);
+            VideoDecoder decoder;
+            const bool opened = sequential ? decoder.OpenSequential(turned.wstring()) : decoder.Open(turned.wstring());
+            if (!Check(opened, std::wstring(clip.name) + L": the decoder could not open it", report)) { ok = false; continue; }
+            bool fine = Check(decoder.Width() == shownWidth && decoder.Height() == shownHeight,
+                std::format(L"{} {}: decoder reports {}x{}, upright is {}x{}", clip.name, layout,
+                            decoder.Width(), decoder.Height(), shownWidth, shownHeight), report);
+            fine = Check(decoder.PixelLayout() == (sequential ? PixelLayout::Nv12 : PixelLayout::Bgra),
+                std::wstring(clip.name) + L" " + layout + L": unexpected layout", report) && fine;
+            std::string decoded;
+            VideoFrame frame;
+            while (decoder.ReadNext(frame)) decoded.append(reinterpret_cast<const char*>(frame.bgra.data()), frame.bgra.size());
+            fine = Check(decoder.DecodingOnCuda(), std::wstring(clip.name) + L" " + layout +
+                L": the frames did not come from the CUDA path", report) && fine;
+            const size_t frameBytes = FrameBytes(decoder.PixelLayout(), shownWidth, shownHeight);
+            fine = Check(decoded.size() == frames * frameBytes && expected.size() == decoded.size(),
+                std::format(L"{} {}: {} decoded bytes, {} expected", clip.name, layout, decoded.size(), expected.size()),
+                report) && fine;
+            size_t differing = 0;
+            for (size_t index = 0; index < std::min(decoded.size(), expected.size()); ++index)
+                differing += decoded[index] != expected[index];
+            fine = Check(differing == 0 && decoded.size() == expected.size(),
+                std::format(L"{} {}: {} bytes differ from {}", clip.name, layout, differing, clip.filter), report) && fine;
+            report << clip.name << L" " << layout << L": " << decoder.Width() << L'x' << decoder.Height()
+                   << L" cuda=" << decoder.DecodingOnCuda() << L" differing_bytes=" << differing
+                   << L" " << (fine ? L"PASS" : L"FAIL") << std::endl;
+            std::wcout << clip.name << L" " << layout << L": " << (fine ? L"PASS" : L"FAIL") << L'\n';
+            ok = fine && ok;
+        }
+    }
+    report << L"overall=" << (ok ? L"PASS" : L"FAIL") << std::endl;
+    std::wcout << L"Evidence: " << root.wstring() << std::endl;
+    return ok ? 0 : 1;
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -442,6 +536,22 @@ int wmain(int argc, wchar_t** argv)
             return 2;
         }
         return NvencDirectIdentity(helpers, root, width, height, frames, fps, preset);
+    }
+    // MediaGpuSmoke --turned-decode <ffmpeg-directory> <output-directory>
+    if (argc == 4 && std::wstring_view(argv[1]) == L"--turned-decode") {
+        const auto helpers = fs::absolute(argv[2]);
+        const auto root = fs::absolute(argv[3]) /
+            std::format(L"{:%Y%m%d-%H%M%S}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+        if (!fs::is_regular_file(helpers / L"ffmpeg.exe") || !fs::is_regular_file(helpers / L"ffprobe.exe") ||
+            !fs::create_directories(root)) {
+            std::wcerr << L"ffmpeg.exe and ffprobe.exe must exist and the run directory must be new.\n";
+            return 2;
+        }
+        // Decoders look for FFmpeg beside this executable and then on PATH.
+        std::wstring path(32768, L'\0');
+        path.resize(GetEnvironmentVariableW(L"PATH", path.data(), static_cast<DWORD>(path.size())));
+        SetEnvironmentVariableW(L"PATH", (helpers.wstring() + L';' + path).c_str());
+        return TurnedDecode(helpers, root);
     }
     if (argc != 4) {
         std::wcerr << L"Usage: MediaGpuSmoke <ffmpeg-directory> <NeuralWorker.exe> <output-directory>\n";

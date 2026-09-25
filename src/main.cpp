@@ -2446,7 +2446,12 @@ private:
         // An HDR source reaches the model tone mapped to SDR now
         // (HdrPolicy.h), for a peak read from its metadata; its
         // renders carry both, and every SDR key stays as it was.
-        toneMapTerm_=metadata.ToneMapIdentityTerm();metadata.Close();
+        toneMapTerm_=metadata.ToneMapIdentityTerm();
+        // A source with a display matrix reaches the model stood up now
+        // (DisplayOrientationPolicy.h). A quarter turn moves the key through
+        // its width and height; a half turn or a mirror keeps both, so every
+        // turned source names its turn, and every upright key stays as it was.
+        orientationTerm_=metadata.OrientationIdentityTerm();metadata.Close();
         if(!width_||!height_||!std::isfinite(fps_)||fps_<=0.0||!std::isfinite(duration_)||duration_<=0.0){completion_->result.detail=L"The source metadata is incomplete.";return false;}progressWidth_=width_;progressHeight_=height_;
         NeuralRenderProgress checking{};checking.phase=NeuralRenderPhase::CheckingCache;PostProgress(checking);
         const int64_t sourceDuration100ns=static_cast<int64_t>(std::llround(duration_*10000000.0));
@@ -2509,7 +2514,7 @@ private:
             <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{})
             <<(modelStore.trustedRewrites?" trustedRewrites="+std::to_string(modelStore.trustedRewrites):std::string{})
             <<(modelStore.reads>1?" reads="+std::to_string(modelStore.reads)+" waited="+std::to_string(modelStore.waited.count())+"ms on "+WideToUtf8(modelStore.youngestFile):std::string{}));
-        identity_=NeuralCacheIdentity{*sourceDigest_,width_,height_,DLSS_VIDEO_PLAYER_VERSION,GpuGenerationPathName(in_.gpu),*runtimeDigest_,NeuralRenderPipelineIdentity(in_.gpuSourceConversion,KeyedNvencPreset(in_.nvencPreset,in_.cacheQuality),KeyedGpuColorConversion(in_.gpuColorConversion,in_.cacheQuality))+ProcessingScaleIdentityTerm(in_.processingScale)+UntaggedColorIdentityTerm(untaggedBt709_)+toneMapTerm_+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({in_.captureDither,in_.cacheQuality,in_.sourceDeband,in_.suppliedExposure}),false,*settingsDigest_,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(in_.driverVersion),modelStore.digest};renderKey_=BuildNeuralCacheKey(identity_);completion_->renderKey=renderKey_;completion_->range=range;completion_->settings=settings;completion_->guides=guides;completion_->temporal=temporal;
+        identity_=NeuralCacheIdentity{*sourceDigest_,width_,height_,DLSS_VIDEO_PLAYER_VERSION,GpuGenerationPathName(in_.gpu),*runtimeDigest_,NeuralRenderPipelineIdentity(in_.gpuSourceConversion,KeyedNvencPreset(in_.nvencPreset,in_.cacheQuality),KeyedGpuColorConversion(in_.gpuColorConversion,in_.cacheQuality))+ProcessingScaleIdentityTerm(in_.processingScale)+UntaggedColorIdentityTerm(untaggedBt709_)+toneMapTerm_+orientationTerm_+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({in_.captureDither,in_.cacheQuality,in_.sourceDeband,in_.suppliedExposure}),false,*settingsDigest_,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(in_.driverVersion),modelStore.digest};renderKey_=BuildNeuralCacheKey(identity_);completion_->renderKey=renderKey_;completion_->range=range;completion_->settings=settings;completion_->guides=guides;completion_->temporal=temporal;
         LOG("Checking neural cache key="<<renderKey_<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
         if(const auto cached=cache_.LookupRender(renderKey_,stop_)){
             // LookupRender already verifies the full payload hash and
@@ -2791,6 +2796,7 @@ private:
     double fps_{},duration_{};
     bool untaggedBt709_{};
     std::string toneMapTerm_;
+    std::string orientationTerm_;
     int64_t frameDurationTolerance_{},expectedDuration100ns_{};
     // PrepareRuntime
     std::filesystem::path runtimeDirectory_;
