@@ -561,6 +561,10 @@ if(BUILD_TESTING)
     # real renders through feature 18, one per rung the direct path serves.
     add_test(NAME NvencDirectIdentitySmoke COMMAND MediaGpuSmoke --nvenc-direct-identity
         "${FFMPEG_STAGED_DIR}" "${CMAKE_BINARY_DIR}/nvenc-direct-identity")
+    # A clip stored landscape with a display matrix, stood up by transpose_cuda on
+    # the CUDA decode path and held byte for byte to ffmpeg's CPU turn.
+    add_test(NAME TurnedDecodeGpuSmoke COMMAND MediaGpuSmoke --turned-decode
+        "${FFMPEG_STAGED_DIR}" "${CMAKE_BINARY_DIR}/turned-decode")
     add_test(NAME NeuralDirectEncodeSmoke COMMAND NeuralRangeRenderSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/neural-direct-encode"
         --direct-encode-identity)
@@ -718,7 +722,7 @@ if(BUILD_TESTING)
     set_tests_properties(UpscalingGpuSmoke UpscalingSrQualitySmoke DebugViewGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
         FrameGenerationSmoke FrameGenerationSmokeTextured FrameGenerationSmokeSceneCut
         FrameGenerationSmokeStreamSource NeuralRangeRenderSmoke NvencDirectIdentitySmoke NeuralDirectEncodeSmoke
-        PROPERTIES LABELS gpu SKIP_RETURN_CODE 125)
+        TurnedDecodeGpuSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125)
     # Seconds on an RTX 5090 - the trigger is the preroll, not the pixel count,
     # so this stays at 640x360. The ceiling is for a slower card, not for a
     # hang; a hang is what the timeout is meant to catch.
@@ -826,6 +830,8 @@ if(BUILD_TESTING)
         PROPERTIES TIMEOUT 300)
     set_tests_properties(NeuralWorkerTests PolicyTests NeuralPrerenderTests PROPERTIES TIMEOUT 600)
     set_tests_properties(NeuralPreflightSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 300)
+    # Eight decodes of a one-second 320x176 clip.
+    set_tests_properties(TurnedDecodeGpuSmoke PROPERTIES TIMEOUT 300)
     # Seven renders of a 3.5 s clip, two of them at 1440p. Measured at 96 s.
     set_tests_properties(ExportMatrixSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 900)
     # FrameGenerationSmoke decodes, generates and encodes a whole clip, so it
