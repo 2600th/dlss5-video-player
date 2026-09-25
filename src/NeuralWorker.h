@@ -313,19 +313,25 @@ std::vector<std::wstring> BuildResidentArguments(HANDLE metadata, HANDLE command
                                                  resident_helper::IdleVramPolicy idleVramPolicy);
 std::optional<WorkerArguments> ParseWorkerArguments(std::span<const std::wstring_view> arguments);
 
+// Which terminal message a metadata stream must end with: a job's Result or a
+// probe's Preflight receipt. The parent always knows which question it asked,
+// so the other answer - however well-formed - is malformed rather than taken.
+enum class MetadataStream { Job, Preflight };
+
 // Outcome of running one metadata byte stream through the parent's decoder.
 // Exposed so the accept/reject rules can be exercised without a live helper:
 // the pipe reader inside RunNeuralWorker is this same decoder fed from a pipe.
 struct MetadataStreamOutcome {
     bool malformed{};
-    bool complete{};                    // a valid result terminated the stream
+    bool complete{};                    // the expected terminal message ended the stream
     size_t progressUpdates{};
     size_t restarts{};                  // sequences that began again at index 0
     std::vector<NeuralRenderSegment> segments;
     NeuralColdStartTimeline timeline;  // empty unless the helper reported one
     TemporalMetrics metrics;           // unmeasured unless the helper reported them
 };
-MetadataStreamOutcome DecodeMetadataStream(std::span<const std::byte> bytes);
+MetadataStreamOutcome DecodeMetadataStream(std::span<const std::byte> bytes,
+                                           MetadataStream expecting = MetadataStream::Job);
 
 // How many bytes one pass of the parent's metadata drain will absorb before
 // handing control back.
