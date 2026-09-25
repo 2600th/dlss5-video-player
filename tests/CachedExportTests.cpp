@@ -24,6 +24,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -130,8 +131,9 @@ void ExportArgumentTests()
     // cuts the source's streams first and hands this command the cut, so a
     // range changes nothing here, in any of its shapes.
     const std::filesystem::path neural = L"C:/cache/neural.mkv", source = L"C:/media/source.mkv", staging = L"C:/out/.stage.tmp";
+    const std::vector<MediaStreamInfo> streams{{0, "video", "h264"}, {1, "audio", "aac"}, {2, "subtitle", "subrip"}};
     for (const auto* extension : {L"clip.mkv", L"clip.mp4"}) {
-        const auto whole = BuildCachedExportArguments({neural, source, extension}, staging, false);
+        const auto whole = BuildCachedExportArguments({neural, source, extension}, staging, streams, false);
         CHECK_EQ(whole.size(), IndexOf(whole, L"-ss"));
         CHECK_EQ(whole.size(), IndexOf(whole, L"-t"));
         CHECK_EQ(staging.wstring(), whole.back());
@@ -141,16 +143,86 @@ void ExportArgumentTests()
         CHECK_EQ(neural.wstring(), whole[neuralInput + 1]);
         CHECK_EQ(source.wstring(), whole[sourceInput + 1]);
         for (const auto [start, duration] : {std::pair{12.5, 3.25}, std::pair{2.0, 0.0}, std::pair{0.0, 1.5}})
-            CHECK(BuildCachedExportArguments({neural, source, extension, start, duration}, staging, false) == whole);
+            CHECK(BuildCachedExportArguments({neural, source, extension, start, duration}, staging, streams, false) == whole);
     }
     // GIF and still exports read the neural video only; nothing to trim.
     for (const auto* extension : {L"clip.gif", L"clip.png", L"clip.jpg"}) {
-        const auto ranged = BuildCachedExportArguments({neural, source, extension, 12.5, 3.25}, staging, false);
+        const auto ranged = BuildCachedExportArguments({neural, source, extension, 12.5, 3.25}, staging, streams, false);
         CHECK_EQ(ranged.size(), IndexOf(ranged, L"-ss"));
         CHECK_EQ(ranged.size(), IndexOf(ranged, L"-t"));
         CHECK_EQ(std::ptrdiff_t{1}, std::count(ranged.begin(), ranged.end(), L"-i"));
         CHECK_EQ(ranged.size(), IndexOf(ranged, source.wstring()));
     }
+}
+
+// P0.16, without FFmpeg. "Save converted video" mapped `1:a?`, `1:s?` and, for
+// MKV, `1:t?`, then stream-copied into MKV - which has no mapping for MP4
+// timed text - or encoded every subtitle to mov_text for MP4, which no picture
+// subtitle can become. Now every source stream is mapped by its own index and
+// carried exactly as ExportStreamActionFor says, with codec options on output
+// indices that skip what was left out. SavedExportKeepsWhatEachContainerHoldsTest
+// runs the same on real files, PGS included (built by hand: FFmpeg has no PGS
+// encoder).
+void SavedExportStreamArgumentTests()
+{
+    const std::vector<MediaStreamInfo> streams{
+        {0, "video", "h264"}, {1, "audio", "aac"}, {2, "subtitle", "hdmv_pgs_subtitle"},
+        {3, "subtitle", "mov_text"}, {4, "audio", "pcm_s16le"}, {5, "subtitle", "subrip"},
+        {6, "subtitle", "dvd_subtitle"}, {7, "subtitle", "dvb_subtitle"}, {8, "attachment", "ttf"},
+        {9, "data", "bin_data"}};
+    const std::filesystem::path neural = L"C:/cache/neural.mkv", source = L"C:/media/source.mkv",
+                                staging = L"C:/out/.stage.tmp";
+    const auto at = [](const std::vector<std::wstring>& arguments, std::wstring_view option) {
+        const size_t index = IndexOf(arguments, option);
+        return index + 1 < arguments.size() ? arguments[index + 1] : std::wstring{};
+    };
+    for (const auto [name, container] : {std::pair{L"C:/out/clip.mkv", ExportContainer::Matroska},
+                                         std::pair{L"C:/out/clip.mp4", ExportContainer::Mp4}}) {
+        const auto arguments = BuildCachedExportArguments({neural, source, name}, staging, streams, false);
+        for (const auto* blind : {L"1:a?", L"1:s?", L"1:t?", L"-c", L"-c:a", L"-c:s"})
+            CHECK_EQ(arguments.size(), IndexOf(arguments, blind));
+        const bool mp4 = container == ExportContainer::Mp4;
+        uint32_t output = 1;
+        for (const MediaStreamInfo& stream : streams) {
+            const size_t mapped = IndexOf(arguments, L"1:" + std::to_wstring(stream.index));
+            const ExportStreamAction action = ExportStreamActionFor(container, stream.type, stream.codec);
+            if (action == ExportStreamAction::Drop) { CHECK_EQ(arguments.size(), mapped); continue; }
+            CHECK(mapped < IndexOf(arguments, L"-map_metadata"));
+            CHECK_EQ(std::wstring(L"-map"), arguments[mapped - 1]);
+            const std::wstring specifier = std::to_wstring(output++);
+            // MP4 audio is AAC at 192k whatever it was, as "Save converted video" has always written it.
+            const std::wstring codec = mp4 && stream.type == "audio" ? L"aac"
+                : action == ExportStreamAction::ToMovText ? L"mov_text"
+                : action == ExportStreamAction::ToSubrip ? L"srt" : L"copy";
+            CHECK_EQ(codec, at(arguments, L"-c:" + specifier));
+            if (codec == L"aac") CHECK_EQ(std::wstring(L"192k"), at(arguments, L"-b:" + specifier));
+        }
+        CHECK_EQ(arguments.size(), IndexOf(arguments, L"-c:" + std::to_wstring(output)));
+        CHECK_EQ(std::wstring(mp4 ? L"libx264" : L"copy"), at(arguments, L"-c:v"));
+        CHECK_EQ(std::wstring(mp4 ? L"mp4" : L"matroska"), at(arguments, L"-f"));
+        CHECK_EQ(std::wstring(L"1"), at(arguments, L"-map_metadata"));
+        CHECK_EQ(std::wstring(L"1"), at(arguments, L"-map_chapters"));
+        CHECK_EQ(staging.wstring(), arguments.back());
+    }
+    // The same decisions spelled out, so a policy change cannot pass unseen.
+    const auto mkv = BuildCachedExportArguments({neural, source, L"C:/out/clip.mkv"}, staging, streams, false);
+    for (const auto* kept : {L"1:1", L"1:2", L"1:3", L"1:4", L"1:5", L"1:6", L"1:7", L"1:8"})
+        CHECK(IndexOf(mkv, kept) < mkv.size());
+    CHECK_EQ(mkv.size(), IndexOf(mkv, L"1:9"));
+    CHECK_EQ(std::wstring(L"srt"), at(mkv, L"-c:3"));            // mov_text
+    const auto mp4 = BuildCachedExportArguments({neural, source, L"C:/out/clip.mp4"}, staging, streams, false);
+    for (const auto* left : {L"1:0", L"1:2", L"1:6", L"1:7", L"1:8", L"1:9"}) CHECK_EQ(mp4.size(), IndexOf(mp4, left));
+    CHECK_EQ(std::wstring(L"aac"), at(mp4, L"-c:1"));             // aac, encoded as always
+    CHECK_EQ(std::wstring(L"copy"), at(mp4, L"-c:2"));            // mov_text
+    CHECK_EQ(std::wstring(L"aac"), at(mp4, L"-c:3"));             // pcm_s16le
+    CHECK_EQ(std::wstring(L"mov_text"), at(mp4, L"-c:4"));        // subrip
+    CHECK_EQ(mp4.size(), IndexOf(mp4, L"-c:5"));
+    // One mechanism: an MKV of the render is the stage export's MKV, argument for argument.
+    CHECK(mkv == BuildStageExportMuxArguments({neural, source, L"C:/out/clip.mkv"}, staging, "hevc", streams));
+    // Nothing beside the video still makes a valid command.
+    const auto bare = BuildCachedExportArguments({neural, source, L"C:/out/clip.mp4"}, staging, {}, false);
+    CHECK_EQ(std::ptrdiff_t{1}, std::count(bare.begin(), bare.end(), L"-map"));
+    CHECK_EQ(std::wstring(L"0:v:0"), at(bare, L"-map"));
 }
 
 void RangeExportTests(const std::filesystem::path& helpers)
@@ -382,18 +454,20 @@ void ExportTests(const std::filesystem::path& helpers)
     CHECK(!failed.detail.empty());
     CHECK_EQ(filesWithInvalid, Files(fixture.path));
 
-    // MP4 timed-text subtitles cannot be stream-copied into MKV. Fail visibly
-    // rather than dropping that track or silently converting it.
+    // MP4 timed text has no Matroska mapping, so a stream copy of it failed the
+    // whole export ("Subtitle codec mov_text is not supported"). It becomes
+    // SubRip, as the stage export's last step makes it (ExportStreamActionFor).
     const auto timedTextSource = fixture.path / L"timed-text.mp4";
     CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-i", source.wstring(),
         L"-map", L"0:v:0", L"-map", L"0:s:0", L"-c:v", L"libx264", L"-c:s", L"mov_text",
         timedTextSource.wstring()}, log));
+    const auto timedTextOutput = fixture.path / L"timed-text.mkv";
+    const auto timedText = exporter.Run({cached, timedTextSource, timedTextOutput}, {});
+    if (!timedText.ok) std::wcerr << timedText.detail << '\n';
+    CHECK(timedText.ok);
+    if (timedText.ok) CHECK_EQ(size_t{1}, Count(Probe(helpers, timedTextOutput, log, {L"-select_streams", L"s",
+        L"-show_entries", L"stream=codec_name", L"-of", L"default=noprint_wrappers=1"}), "codec_name=subrip"));
     const auto filesWithTimedText = Files(fixture.path);
-    const auto unsupported = exporter.Run({cached, timedTextSource, fixture.path / L"unsupported.mkv"}, {});
-    CHECK(!unsupported.ok);
-    CHECK_EQ(MaterializeError::ProcessFailed, unsupported.error);
-    CHECK(!unsupported.detail.empty());
-    CHECK_EQ(filesWithTimedText, Files(fixture.path));
 
     CHECK_EQ(MaterializeError::HelperMissing, CachedVideoExporter(fixture.path).Run(
         {cached, source, fixture.path / L"missing-helper.mkv"}, {}).error);
@@ -804,7 +878,7 @@ void StageExportArgumentTests()
     // Pictures are the cached export's own encode, from the video alone.
     for (const auto* name : {L"C:/out/clip.gif", L"C:/out/clip.png", L"C:/out/clip.jpg"}) {
         const auto picture = BuildStageExportMuxArguments({video, source, name}, staging, "hevc", streams);
-        CHECK(picture == BuildCachedExportArguments({video, source, name}, staging, false));
+        CHECK(picture == BuildCachedExportArguments({video, source, name}, staging, streams, false));
     }
     CHECK(BuildStageExportMuxArguments({video, source, L"C:/out/clip.avi"}, staging, "hevc", streams).empty());
 
@@ -872,7 +946,7 @@ void StageExportArgumentTests()
     CHECK_EQ(mkv.size(), IndexOf(mkv, L"-itsoffset"));
     CachedExportRequest saved{video, staging, L"C:/out/clip.mp4"};
     saved.sourceStartSeconds = 0.024;
-    const auto savedMux = BuildCachedExportArguments(saved, L"C:/out/.mux.tmp", false);
+    const auto savedMux = BuildCachedExportArguments(saved, L"C:/out/.mux.tmp", streams, false);
     CHECK_EQ(std::wstring(L"0.024"), at(savedMux, L"-itsoffset"));
     CHECK(IndexOf(savedMux, L"-itsoffset") < IndexOf(savedMux, staging.wstring()));
     CHECK(BuildStageExportTrimArguments(rangedRequest, staging, {{0, "video", "h264"}}).empty());
@@ -1750,6 +1824,109 @@ void BitmapSubtitlesAreScaledOntoTheCanvasTest(const std::filesystem::path& help
     overlay.Hide();
 }
 
+// P0.16. "Save converted video" and the frame-generation mux used to map every
+// subtitle blindly and then either stream-copy it into MKV or encode it to
+// mov_text for MP4, so a Blu-ray or DVD rip - picture subtitles - could not be
+// saved as MP4 at all. Every stream now goes through ExportStreamActionFor, the
+// policy the stage export's last step keeps: what each container carries is
+// exactly what that policy says, converted where it says so, and nothing it
+// leaves out can fail the export.
+void SavedExportKeepsWhatEachContainerHoldsTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    const auto log = fixture.path / L"tool.log";
+    const auto sup = fixture.path / L"boxes.sup";
+    Write(sup, PgsShow(1.0, 200, 300, 240, 30, 0) + PgsClear(2.0, 200, 300, 240, 30, 1) +
+                   PgsShow(4.0, 100, 40, 100, 50, 2) + PgsClear(5.5, 100, 40, 100, 50, 3));
+    const auto srt = fixture.path / L"captions.srt";
+    Write(srt, "1\n00:00:01,000 --> 00:00:02,000\nHello\n");
+    const auto font = fixture.path / L"font.ttf";
+    Write(font, "a font the subtitles would use");
+    // A disc rip's shape: PGS as it is, the same pictures as DVD subtitles
+    // (FFmpeg encodes those from any picture track, never from text), SubRip
+    // beside them and a font attachment.
+    const auto source = fixture.path / L"disc.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n",
+        L"-f", L"lavfi", L"-i", L"color=red:s=64x48:r=5:d=6",
+        L"-f", L"lavfi", L"-i", L"sine=frequency=440:duration=6",
+        L"-i", sup.wstring(), L"-i", sup.wstring(), L"-i", srt.wstring(),
+        L"-map", L"0:v", L"-map", L"1:a", L"-map", L"2:s", L"-map", L"3:s", L"-map", L"4:s",
+        L"-c:v", L"ffv1", L"-c:a", L"pcm_s16le", L"-c:s:0", L"copy", L"-c:s:1", L"dvdsub", L"-c:s:2", L"srt",
+        L"-attach", font.wstring(), L"-metadata:s:t", L"mimetype=application/x-truetype-font",
+        source.wstring()}, log));
+    const auto render = fixture.path / L"render.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"color=blue:s=64x48:r=5:d=6", L"-c:v", L"ffv1", render.wstring()}, log));
+    // The render of [1 s, 2 s), for the ranged export.
+    const auto rangeRender = fixture.path / L"range-render.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"color=blue:s=64x48:r=5:d=1", L"-c:v", L"ffv1", rangeRender.wstring()}, log));
+    if (!std::filesystem::exists(source) || !std::filesystem::exists(render) || !std::filesystem::exists(rangeRender)) return;
+    const auto sourceStreams = ListMediaStreams(helpers, source, {});
+    REQUIRE(sourceStreams.has_value());
+    using Stream = std::pair<std::string, std::string>;
+    const std::multiset<Stream> listed = [&] {
+        std::multiset<Stream> streams;
+        for (const MediaStreamInfo& stream : *sourceStreams) streams.insert({stream.type, stream.codec});
+        return streams;
+    }();
+    CHECK((listed == std::multiset<Stream>{{"video", "ffv1"}, {"audio", "pcm_s16le"},
+        {"subtitle", "hdmv_pgs_subtitle"}, {"subtitle", "dvd_subtitle"}, {"subtitle", "subrip"}, {"attachment", "ttf"}}));
+
+    // What the policy says each container carries, as FFprobe names it.
+    const auto expected = [&](ExportContainer container) {
+        std::multiset<Stream> kept;
+        for (const MediaStreamInfo& stream : *sourceStreams) {
+            switch (ExportStreamActionFor(container, stream.type, stream.codec)) {
+            case ExportStreamAction::Drop: break;
+            case ExportStreamAction::EncodeAac: kept.insert({stream.type, "aac"}); break;
+            case ExportStreamAction::ToMovText: kept.insert({stream.type, "mov_text"}); break;
+            case ExportStreamAction::ToSubrip: kept.insert({stream.type, "subrip"}); break;
+            case ExportStreamAction::Copy: kept.insert({stream.type, stream.codec}); break;
+            }
+        }
+        return kept;
+    };
+    const auto carried = [&](const std::filesystem::path& output) {
+        std::multiset<Stream> streams;
+        const auto written = ListMediaStreams(helpers, output, {});
+        CHECK(written.has_value());
+        if (written)
+            for (const MediaStreamInfo& stream : *written)
+                if (stream.type != "video") streams.insert({stream.type, stream.codec});
+        return streams;
+    };
+    const std::multiset<Stream> mkv = expected(ExportContainer::Matroska), mp4 = expected(ExportContainer::Mp4);
+    // Spelled out once, so the policy cannot drift into agreeing with a broken export.
+    CHECK((mkv == std::multiset<Stream>{{"audio", "pcm_s16le"}, {"subtitle", "hdmv_pgs_subtitle"},
+        {"subtitle", "dvd_subtitle"}, {"subtitle", "subrip"}, {"attachment", "ttf"}}));
+    CHECK((mp4 == std::multiset<Stream>{{"audio", "aac"}, {"subtitle", "mov_text"}}));
+
+    CachedVideoExporter exporter(helpers);
+    for (const auto& [name, rangeStart, rangeDuration] : {std::tuple{L"saved.mkv", 0.0, 0.0},
+            std::tuple{L"saved.mp4", 0.0, 0.0}, std::tuple{L"ranged.mkv", 1.0, 1.0}, std::tuple{L"ranged.mp4", 1.0, 1.0}}) {
+        const auto output = fixture.path / name;
+        std::wcerr << L"  " << name << L'\n';
+        const auto result = exporter.Run({rangeStart > 0.0 ? rangeRender : render, source, output,
+                                          rangeStart, rangeDuration}, {});
+        if (!result.ok) std::wcerr << result.detail << '\n';
+        CHECK(result.ok);
+        if (!result.ok) continue;
+        const bool isMp4 = output.extension() == L".mp4";
+        CHECK((carried(output) == (isMp4 ? mp4 : mkv)));
+        // What was left out is said, as the stage export says it.
+        CHECK_EQ(isMp4, !result.detail.empty());
+    }
+    // The frame-generation pass's mux is the same export.
+    for (const auto* name : {L"generated.mkv", L"generated.mp4"}) {
+        const auto output = fixture.path / name;
+        CHECK_EQ(EncodeError::None, MuxVideoWithSourceStreams(helpers, render, source, output, {}));
+        if (std::filesystem::exists(output))
+            CHECK((carried(output) == (output.extension() == L".mp4" ? mp4 : mkv)));
+    }
+}
+
 // A text track inside a video: found with its language and default flag, the
 // same-named file beside it found too, and the track drawn after it is copied
 // out of the video once.
@@ -1811,6 +1988,7 @@ int wmain(int argc, wchar_t** argv)
     MaterializationPreservesFullVideoTest(helpers);
     MaterializationRejectsShortVideoWithLongAudioTest(helpers);
     ExportArgumentTests();
+    SavedExportStreamArgumentTests();
     StageExportArgumentTests();
     ExportTests(helpers);
     StageExportContainerTests(helpers);
@@ -1824,6 +2002,7 @@ int wmain(int argc, wchar_t** argv)
     UntaggedVideoDecodesWithTheMatrixItsSizeImpliesTest(helpers);
     SubtitlesDrawOnATransparentCanvasTest(helpers);
     BitmapSubtitlesAreScaledOntoTheCanvasTest(helpers);
+    SavedExportKeepsWhatEachContainerHoldsTest(helpers);
     EmbeddedSubtitleTracksAreListedAndDrawnTest(helpers);
     QualityLadderRoundTripTest(helpers);
     if (test_support::failure_count != 0) return 1;

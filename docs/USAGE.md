@@ -935,22 +935,22 @@ PNG is the default for photos, GIF for animation, and MKV for video. PNG and
 JPEG export the first processed frame. GIF exports animation with a generated
 palette at 50 fps and loops continuously; delays are rounded to 20 ms so common
 viewers do not slow down very short frame delays. MP4 transcodes video to H.264,
-audio to AAC, and compatible text subtitles to MP4 text. MP4 pads odd dimensions
-by at most one pixel for codec compatibility; photo exports retain source size.
-GIFs and photos have no audio or subtitle tracks.
+audio to AAC, and text subtitles to MP4 text; picture subtitles (PGS, DVD, DVB)
+and font attachments, which MP4 has no place for, are left out. MP4 pads odd
+dimensions by at most one pixel for codec compatibility; photo exports retain
+source size. GIFs and photos have no audio or subtitle tracks.
 
 MKV stream-copies the cached neural video and available source audio tracks,
-compatible subtitle tracks, font attachments, metadata and chapters. Subtitles
-remain separate; they are not enhanced or burned into the image, and the
-subtitles the player shows (see "Subtitles") never reach an export.
+compatible subtitle tracks, font attachments, metadata and chapters, turning
+MP4 timed text into SubRip. Subtitles remain separate; they are not enhanced or
+burned into the image, and the subtitles the player shows (see "Subtitles")
+never reach an export.
 
 The output uses the cached video, even when the original view is selected.
 Playback image adjustments and runtime upscaling are not baked in. At the
 default Standard quality the cache is 8-bit, and no container can recover
 precision it lost.
 
-MKV must support every selected codec. Incompatible subtitles such as mov_text
-produce an explicit error instead of being silently discarded or converted.
 Failure or cancellation removes the exporter-owned temporary output and leaves
 the inputs and any existing destination intact.
 
