@@ -4,7 +4,8 @@ _Verified against 0.26.0 (c81ccd8) on 2026-09-25._
 
 The player launches its package-local `ffmpeg.exe`, `ffprobe.exe`,
 `yt-dlp.exe`, and `deno.exe` helpers without a command shell. Playback falls
-back to an FFmpeg on `PATH` when the package has none; rendering and export
+back to an FFmpeg in an absolute `PATH` directory when the package has none,
+never the current directory or a relative `PATH` entry; rendering and export
 never do. YouTube support is limited to validated public HTTPS video URLs.
 Besides YouTube, the player contacts only `api.github.com` for the update check
 and `i.ytimg.com` for trailer thumbnails, both over HTTPS; `[Updates] Enabled=0`
