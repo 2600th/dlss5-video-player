@@ -14,6 +14,7 @@ for images that have since been replaced are in the git history of this file.
 | `current/player-start.jpg` | The start screen at 150% on a fresh profile: the capability check and the seven game trailers with their YouTube thumbnails | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/compare-wipe.jpg` | 007 First Light paused on frame 1122 in Wipe, the divider down the face, with the compare bar | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/compare-difference.jpg` | The same frame in Difference (x4, brightness only): where the model changed the picture | 24 Sep 2026, `dced888` + `f2ae230` |
+| `current/photo-wipe.jpg` | A *Mafia: The Old Country* trailer frame saved as a PNG and opened as a photo, in Wipe, the divider down the man's nose | 25 Sep 2026, 0.26.0 |
 | `current/compare-2x2-toast.jpg` | The same frame in 2 x 2 (original, DLSS 5, Difference, DLSS 5 at Mix 50%), with the toast that confirms **Save comparison image** | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/saved-comparison-2x2.png` | The file that save wrote: the player's own PNG of the 2 x 2 view with its provenance footer, as saved | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/subtitles.jpg` | A test subtitle file drawn over the DLSS 5 frame | 24 Sep 2026, `dced888` + `f2ae230` |
@@ -21,6 +22,37 @@ for images that have since been replaced are in the git history of this file.
 | `current/neural-settings.jpg` | The Neural settings dialog at its defaults | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/recent-videos.jpg` | The File menu (Game trailers, Recent videos, Save comparison image) over the Mafia: The Old Country trailer, paused on a neural frame with the compare bar. The history submenu is closed, which keeps local paths out of frame. From the earlier round, at 175%, before the sliders were redrawn | 24 Sep 2026, v0.25.0+ |
 | `2026-09-03/face-comparison.png` | The Witcher IV, frame 3375, source beside render. Kept because the 2 September verification report shows it | 3 Sep 2026, v0.13.0 |
+
+## 25 September 2026 image
+
+**What it is.** `photo-wipe.jpg` shows the player's photo path: one frame of a
+trailer, written out as a PNG and opened with the player the way you would open
+a game screenshot. The frame is 864 (0:28.8) of *Mafia: The Old Country -
+Family Takes Sacrifice* (Mafia Game), the official upload in the player's
+trailer list, from a copy the player had cached (2560x1440, 30 fps, SHA-256
+`68d791b6b674a88f34a42b830b59e9dfa12cfaed7d3cd6f6c52a62765fea24fc`). ffmpeg
+decoded that frame to `mafia-the-old-country.png` (SHA-256
+`c75f7df5d3ae1f4c06d8b21100aeb69698de4cec3ac1dd29e9a94349cecf8c81`). It was
+picked from four candidate frames rendered the same way, as the one where the
+change was plainest.
+
+**Hardware, runtime and settings.** RTX 4080 SUPER, driver 610.47
+(`32.0.16.1047`), runtime lock `310.8.SF-v2`. The player is 0.26.0: the build
+tree's player source is the release's (`a4a3411`), on a fresh profile, so the
+neural settings are at their defaults (digest `96bf471a…`, the same as the
+comparison stills). The render is cache entry `36fc8c03597e3080…`, one frame,
+verified.
+
+**Timing.** `DLSSVideoPlayer.exe --render <png> --out <png>` took 7.1 to 8.1 s
+per 2560x1440 frame, launch to exit, across the four candidates.
+
+**Capture.** Opened in the player on the 3840x2160 display at its own 175%
+scaling, the window set to 2240x1204. Neural rendering, then Wipe, were sent as
+`WM_COMMAND`, and the divider was placed by a left-button press posted to the
+picture at 30.5% of its width. The window was captured by handle with
+`tools/verification/capture-window.ps1`, then area-downscaled once to
+1902x1023, the size of the 150% captures beside it, and saved as JPEG at quality
+95 with no chroma subsampling. Nothing else was changed.
 
 ## 22 September 2026 images
 
