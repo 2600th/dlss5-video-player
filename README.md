@@ -103,12 +103,12 @@ the whole video. Press `D` at the start to get one.
   runtime and settings still match, at Standard, High (10-bit) or Lossless
   quality. **Advanced > Render report** shows the flicker, grain and colour
   shift a render added.
-- **Exports.** PNG, JPEG, GIF, MP4 or MKV; MKV keeps the source audio,
-  subtitles and chapters without re-encoding. **Export with DLSS stages**
-  (`Ctrl+S`) combines Super Resolution, neural rendering and frame generation
-  in NVIDIA's order, and `DLSSVideoPlayer.exe --render` does the same from the
-  command line. **DLSS > Generate frames** writes a copy at 2x to 5x the frame
-  rate.
+- **Works on screenshots and GIFs.** A photo renders once and stays on its
+  frame; an animated GIF renders frame by frame, keeping its timing. See
+  [Screenshots and GIFs too](#screenshots-and-gifs-too).
+- **Saves the result as a file.** MP4 or MKV for a video, GIF for an
+  animation, PNG or JPEG for a photo, from the player or the command line. See
+  [Save the result](#save-the-result).
 - **Tunes the model.** Change a neural setting (`Ctrl+N`) while paused and that
   frame re-renders. **DLSS > Processing scale** runs the model at 75% or 50% of
   the source, for speed. DLSS Super Resolution can upscale playback to 1080p,
@@ -117,6 +117,46 @@ the whole video. Press `D` at the start to get one.
   Windows media controls with taskbar thumbnail buttons.
 - **Comes with test material.** Seven official game trailers, chosen for faces,
   skin and light, under **File > Game trailers** and on the start screen.
+
+## Screenshots and GIFs too
+
+![A Mafia: The Old Country trailer frame saved as a PNG and opened in the player as a photo, in Wipe: the original left of a divider down the man's nose, the DLSS 5 render right of it](docs/screenshots/current/photo-wipe.jpg)
+
+Open a PNG, JPEG, BMP, TIFF or static WebP and press `D`. It renders once, the
+compare views work as they do on a video, and it saves back as a PNG or JPEG
+at full size. Above, a *Mafia: The Old Country* trailer frame saved as a
+2560x1440 PNG, at default settings: the game's smooth orange skin comes back
+with texture, a truer tone and light that falls across the face. From the
+command line it took 8 seconds on an RTX 4080 SUPER. Animated GIFs render
+frame by frame and keep their timing.
+
+## Save the result
+
+Everything you can watch rendered, you can keep as a file.
+
+| Source | Saved as |
+| --- | --- |
+| Video, local or YouTube | MKV (default) or MP4. MKV keeps the source audio, subtitles and chapters without re-encoding them. |
+| Animated GIF | GIF (default), MP4 or MKV |
+| Photo: PNG, JPEG, BMP, TIFF or static WebP | PNG (default) or JPEG, at the source size |
+
+Two ways under **DLSS > Convert & export**, and one from the command line:
+
+- **Save converted video** writes the render you already have, without
+  rendering again. It needs a render of the whole video, or of the clip you
+  marked and converted with `Ctrl+R`.
+- **Export with DLSS stages** (`Ctrl+S`) renders a new file with any of Super
+  Resolution, neural rendering and frame generation (2x to 5x the frame rate),
+  in NVIDIA's order.
+- **From the command line**, the same export without opening the player. This
+  writes `clip-dlss.mkv` beside the input:
+
+  ```bat
+  start /wait "" DLSSVideoPlayer.exe --render clip.mp4
+  ```
+
+  `--out`, `--stages`, `--range` and the rest are in the
+  [usage guide](docs/USAGE.md#from-the-command-line).
 
 ## What's new in 0.26.0
 
