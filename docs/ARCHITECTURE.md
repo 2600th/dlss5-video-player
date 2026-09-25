@@ -816,7 +816,8 @@ startup rather than at the first render.
 `CachedVideoExporter` stream-copies the validated neural video and source audio,
 compatible subtitles, attachments, metadata and chapters into a new MKV. It also
 encodes PNG/JPEG single frames, palette GIFs at 50 fps, and H.264/AAC MP4 with
-compatible text subtitles. An owned,
+compatible text subtitles. Each source stream is kept, converted or left out as
+`ExportStreamActionFor` says, as in the stage export. An owned,
 cancellable FFmpeg process writes a unique sibling stage, published without
 overwriting an existing destination. Export has no render or subtitle-composition
 pass. Range renders trim the exported source audio, subtitles and chapters to
@@ -1177,7 +1178,10 @@ export without frame generation used to be silent, and frame generation now
 runs with `carryStreams=false` rather than muxing streams the last step would
 discard. `ExportStreamActionFor` decides per stream what each container can
 hold, and the step reads the audio count back off the staged file before it
-publishes it.
+publishes it. "Save converted video" and the frame-generation mux map the
+source's streams through the same code (`AppendSourceStreams`); a blind
+`-map 1:s?` there failed every MKV of MP4 timed text and every MP4 of picture
+subtitles.
 
 The order is fixed and the dialog exposes no way to change it. It is NVIDIA's:
 DLSS 5 neural rendering runs on the fully upscaled frame, and Streamline hands

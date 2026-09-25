@@ -46,6 +46,52 @@ ExportFormat ExportFormatFor(const std::filesystem::path& output)
 
 bool ValidRangeSeconds(double value) { return std::isfinite(value) && value >= 0.0; }
 
+// The source's streams beside the video, for every export that carries them:
+// "Save converted video", the frame-generation mux it serves, and the stage
+// export's last step. Each stream of input 1 that `container` keeps is mapped
+// by its own index, in file order, and its codec is named by OUTPUT index,
+// which is known only once each stream has been kept or left out; the video is
+// output 0. ExportStreamActionFor is the one judge of what is kept, so a track
+// the container cannot hold is converted or left out instead of failing an
+// export that may have spent an hour on the GPU - a blind `-map 1:s?` failed
+// every MKV of an MP4's timed text and every MP4 of a disc's picture
+// subtitles. `encodeAudio` encodes every kept audio stream to AAC where the
+// policy would copy it, which is what "Save converted video" gives MP4.
+void AppendSourceStreams(ExportContainer container, const std::vector<MediaStreamInfo>& sourceStreams,
+                         bool encodeAudio, std::vector<std::wstring>& arguments, std::vector<std::wstring>& codecs)
+{
+    uint32_t outputIndex = 1;
+    for (const MediaStreamInfo& stream : sourceStreams) {
+        ExportStreamAction action = ExportStreamActionFor(container, stream.type, stream.codec);
+        if (action == ExportStreamAction::Drop) continue;
+        if (encodeAudio && stream.type == "audio") action = ExportStreamAction::EncodeAac;
+        arguments.insert(arguments.end(), {L"-map", L"1:" + std::to_wstring(stream.index)});
+        const std::wstring specifier = std::to_wstring(outputIndex++);
+        switch (action) {
+        case ExportStreamAction::EncodeAac:
+            codecs.insert(codecs.end(), {L"-c:" + specifier, L"aac", L"-b:" + specifier, L"192k"});
+            break;
+        case ExportStreamAction::ToMovText: codecs.insert(codecs.end(), {L"-c:" + specifier, L"mov_text"}); break;
+        case ExportStreamAction::ToSubrip: codecs.insert(codecs.end(), {L"-c:" + specifier, L"srt"}); break;
+        default: codecs.insert(codecs.end(), {L"-c:" + specifier, L"copy"}); break;
+        }
+    }
+}
+
+// What an export says about the subtitles AppendSourceStreams left out, or
+// nothing when it kept them all. A track that is not there is reported, never
+// silent.
+std::wstring LeftOutSubtitlesNote(ExportContainer container, const std::vector<MediaStreamInfo>& sourceStreams)
+{
+    uint32_t leftOut = 0;
+    for (const MediaStreamInfo& stream : sourceStreams)
+        if (stream.type == "subtitle" &&
+            ExportStreamActionFor(container, stream.type, stream.codec) == ExportStreamAction::Drop)
+            ++leftOut;
+    if (!leftOut) return {};
+    return std::to_wstring(leftOut) + L" subtitle stream(s) this container cannot hold were left out.";
+}
+
 // Wall-clock budget for a child that works through `mediaSeconds` of media at
 // no worse than `slowdown` times real time, over a floor that covers spawn,
 // probe and short media. A child still running past it is wedged, not slow, so
@@ -696,6 +742,7 @@ CachedVideoMp4Path CachedVideoMp4PathFor(std::string_view codecName, std::string
 
 std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& request,
                                                      const std::filesystem::path& staging,
+                                                     const std::vector<MediaStreamInfo>& sourceStreams,
                                                      bool oddDimensions,
                                                      CachedVideoMp4Path mp4Path,
                                                      std::string_view tenBitPixelFormat)
@@ -715,10 +762,13 @@ std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& 
         // A cut keeps its own timeline (CachedExportRequest::sourceStartSeconds).
         if (request.sourceStartSeconds > 0.0)
             arguments.insert(arguments.end(), {L"-itsoffset", FrameRateText(request.sourceStartSeconds)});
-        arguments.insert(arguments.end(), {L"-i", request.sourceMedia.wstring(),
-            L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?",
-            L"-map_metadata", L"1", L"-map_chapters", L"1"});
-        if (format.mkv) arguments.insert(arguments.end(), {L"-map", L"1:t?", L"-c", L"copy", L"-f", L"matroska"});
+        arguments.insert(arguments.end(), {L"-i", request.sourceMedia.wstring(), L"-map", L"0:v:0"});
+        // MP4 audio is AAC at 192k whatever it was, as it always has been here.
+        std::vector<std::wstring> codecs;
+        AppendSourceStreams(format.mkv ? ExportContainer::Matroska : ExportContainer::Mp4, sourceStreams,
+                            format.mp4, arguments, codecs);
+        arguments.insert(arguments.end(), {L"-map_metadata", L"1", L"-map_chapters", L"1"});
+        if (format.mkv) arguments.insert(arguments.end(), {L"-c:v", L"copy"});
         else if (mp4Path == CachedVideoMp4Path::CopyHevc) {
             // The High rung's 10-bit HEVC as it was written. hvc1 is the sample entry
             // players look for; ffmpeg's default for a copied stream, hev1, is not.
@@ -737,8 +787,9 @@ std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& 
             if (oddDimensions) arguments.insert(arguments.end(), {L"-pix_fmt", L"yuv444p"});
             else arguments.insert(arguments.end(), {L"-vf", L"pad=ceil(iw/2)*2:ceil(ih/2)*2", L"-pix_fmt", L"yuv420p"});
         }
-        if (format.mp4)
-            arguments.insert(arguments.end(), {L"-c:a", L"aac", L"-b:a", L"192k", L"-c:s", L"mov_text", L"-movflags", L"+faststart", L"-f", L"mp4"});
+        arguments.insert(arguments.end(), codecs.begin(), codecs.end());
+        if (format.mp4) arguments.insert(arguments.end(), {L"-movflags", L"+faststart", L"-f", L"mp4"});
+        else arguments.insert(arguments.end(), {L"-f", L"matroska"});
     } else if (format.gif) {
         arguments.insert(arguments.end(), {L"-filter_complex",
             // Two-centisecond frames avoid the short-delay clamping performed
@@ -985,6 +1036,20 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
     CachedExportRequest resolved = request;
     resolved.neuralVideo = neuralVideo;
     resolved.sourceMedia = sourceMedia;
+    // Every stream of the source is listed, whole or ranged, so each is
+    // carried as the container can hold it (AppendSourceStreams). What is left
+    // out is said of the source's own subtitles, before a range cut can set
+    // aside any that Matroska cannot hold either.
+    std::vector<MediaStreamInfo> streams;
+    std::wstring note;
+    if (format.mkv || format.mp4) {
+        auto listed = ListMediaStreams(helperDirectory_, sourceMedia, stop);
+        if (stop.stop_requested()) return cancelled();
+        if (!listed)
+            return {false, MaterializeError::ProcessFailed, L"The original source's streams could not be listed."};
+        streams = std::move(*listed);
+        note = LeftOutSubtitlesNote(format.mkv ? ExportContainer::Matroska : ExportContainer::Mp4, streams);
+    }
     // A range is cut out of the source's own streams first, as the stage
     // export's last step does, and the encode below reads that cut with no
     // trim of its own. The output -ss 0 this used to trim with applied to the
@@ -993,25 +1058,21 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
     // over an empty video track.
     ExportStagingFile trimmed;
     if ((format.mkv || format.mp4) && (request.rangeStartSeconds > 0.0 || request.rangeDurationSeconds > 0.0)) {
-        auto streams = ListMediaStreams(helperDirectory_, sourceMedia, stop);
-        if (stop.stop_requested()) return cancelled();
-        if (!streams)
-            return {false, MaterializeError::ProcessFailed, L"The original source's streams could not be listed."};
         std::filesystem::path streamSource;
         double streamSourceStart = 0.0;
         const MaterializeResult cut = CutSourceStreamsToRange(helperDirectory_, ffmpeg,
             {neuralVideo, sourceMedia, output, request.rangeStartSeconds, request.rangeDurationSeconds},
-            double(neuralMetadata.duration100ns) / 10000000.0, trimmed, streamSource, streamSourceStart, *streams, stop);
+            double(neuralMetadata.duration100ns) / 10000000.0, trimmed, streamSource, streamSourceStart, streams, stop);
         if (cut.error == MaterializeError::Cancelled) return cancelled();
         if (!cut.ok) return cut;
         resolved.sourceMedia = streamSource;
         resolved.sourceStartSeconds = streamSourceStart;
         resolved.rangeStartSeconds = resolved.rangeDurationSeconds = 0.0;
     }
-    const auto arguments = BuildCachedExportArguments(resolved, staging.path, oddDimensions, mp4Path,
+    const auto arguments = BuildCachedExportArguments(resolved, staging.path, streams, oddDimensions, mp4Path,
                                                       neuralMetadata.pixelFormat);
-    // Attachments (such as subtitle fonts) travel with the source subtitles.
-    // Unsupported codecs fail the entire export; no subtitle is burned in.
+    // Attachments (such as subtitle fonts) travel with the source subtitles
+    // into MKV. No subtitle is burned in.
     // A software encode of a 4K render runs at a small fraction of real time;
     // sixty times the media plus an hour is an encoder that hung, not one that
     // is busy.
@@ -1035,7 +1096,7 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         return {false, MaterializeError::ProcessFailed,
             L"The completed export could not be saved. Check folder access and choose a filename that does not already exist."};
     staging.path.clear();
-    return {true, MaterializeError::None, {}};
+    return {true, MaterializeError::None, std::move(note)};
 }
 
 struct RawVideoEncoder::Impl {
@@ -1556,7 +1617,7 @@ std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxReque
     // A picture is encoded from the video alone, exactly as "Save converted
     // video" encodes one, so the two cannot drift apart.
     if (*container != ExportContainer::Matroska && *container != ExportContainer::Mp4)
-        return BuildCachedExportArguments({request.video, request.streamSource, request.output}, staging, false);
+        return BuildCachedExportArguments({request.video, request.streamSource, request.output}, staging, {}, false);
 
     std::vector<std::wstring> arguments{
         // -y applies only to the exclusively reserved staging file.
@@ -1573,27 +1634,11 @@ std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxReque
     if (request.streamSourceStartSeconds > 0.0)
         arguments.insert(arguments.end(), {L"-itsoffset", FrameRateText(request.streamSourceStartSeconds)});
     arguments.insert(arguments.end(), {L"-i", request.streamSource.wstring(), L"-map", L"0:v:0"});
-    // Codec options address OUTPUT stream indices, which are known only once
-    // each source stream has been kept or left out; the video is output 0.
     std::vector<std::wstring> codecs{L"-c:v", L"copy"};
     if (const std::wstring tag = ExportVideoTag(*container, videoCodec); !tag.empty())
         codecs.insert(codecs.end(), {L"-tag:v", tag});
-    uint32_t outputIndex = 1;
-    for (const MediaStreamInfo& stream : sourceStreams) {
-        const ExportStreamAction action = ExportStreamActionFor(*container, stream.type, stream.codec);
-        if (action == ExportStreamAction::Drop) continue;
-        arguments.insert(arguments.end(), {L"-map", L"1:" + std::to_wstring(stream.index)});
-        const std::wstring specifier = std::to_wstring(outputIndex++);
-        switch (action) {
-        case ExportStreamAction::EncodeAac:
-            // The rate "Save converted video" gives MP4 audio.
-            codecs.insert(codecs.end(), {L"-c:" + specifier, L"aac", L"-b:" + specifier, L"192k"});
-            break;
-        case ExportStreamAction::ToMovText: codecs.insert(codecs.end(), {L"-c:" + specifier, L"mov_text"}); break;
-        case ExportStreamAction::ToSubrip: codecs.insert(codecs.end(), {L"-c:" + specifier, L"srt"}); break;
-        default: codecs.insert(codecs.end(), {L"-c:" + specifier, L"copy"}); break;
-        }
-    }
+    // Audio MP4 can hold as it stands is copied, as the policy says.
+    AppendSourceStreams(*container, sourceStreams, false, arguments, codecs);
     arguments.insert(arguments.end(), {L"-map_metadata", L"1", L"-map_chapters", L"1"});
     arguments.insert(arguments.end(), codecs.begin(), codecs.end());
     if (*container == ExportContainer::Mp4)
@@ -1708,6 +1753,7 @@ MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
         return {false, MaterializeError::ProcessFailed, L"The rendered video could not be inspected."};
     std::string videoCodec;
     std::vector<MediaStreamInfo> sourceStreams;
+    std::wstring note;
     if (*container == ExportContainer::Matroska || *container == ExportContainer::Mp4) {
         const auto videoStreams = ListMediaStreams(helperDirectory, resolved.video, stop);
         const auto listed = ListMediaStreams(helperDirectory, resolved.streamSource, stop);
@@ -1717,6 +1763,9 @@ MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
         for (const MediaStreamInfo& stream : *videoStreams)
             if (stream.type == "video") { videoCodec = stream.codec; break; }
         sourceStreams = *listed;
+        // Of the source's own subtitles, before a range cut can set aside any
+        // that Matroska cannot hold either.
+        note = LeftOutSubtitlesNote(*container, sourceStreams);
     }
 
     // A range is cut out of the source's streams on their own first, so the
@@ -1760,14 +1809,12 @@ MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
     // Read back off the file before it is published, never inferred from the
     // arguments - the same rule the frame-generation pass keeps, and for the
     // same reason: an export that plays silent looks finished.
-    std::wstring note;
     if (*container == ExportContainer::Matroska || *container == ExportContainer::Mp4) {
-        uint32_t audioKept = 0, subtitlesInSource = 0, subtitlesKept = 0;
-        for (const MediaStreamInfo& stream : sourceStreams) {
-            const bool kept = ExportStreamActionFor(*container, stream.type, stream.codec) != ExportStreamAction::Drop;
-            if (stream.type == "audio" && kept) ++audioKept;
-            if (stream.type == "subtitle") { ++subtitlesInSource; if (kept) ++subtitlesKept; }
-        }
+        uint32_t audioKept = 0;
+        for (const MediaStreamInfo& stream : sourceStreams)
+            if (stream.type == "audio" &&
+                ExportStreamActionFor(*container, stream.type, stream.codec) != ExportStreamAction::Drop)
+                ++audioKept;
         // Every frame the passes rendered, too: a cut that drops a copied
         // video's packets still leaves its track header behind, so a file
         // with a video stream and no picture reads as a video until played.
@@ -1786,9 +1833,6 @@ MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
             return {false, MaterializeError::ProcessFailed,
                 L"The export carries " + std::to_wstring(carried.audioStreams) + L" of the source's " +
                 std::to_wstring(audioKept) + L" audio streams, so it would not play the source's sound."};
-        if (subtitlesKept < subtitlesInSource)
-            note = std::to_wstring(subtitlesInSource - subtitlesKept) +
-                   L" subtitle stream(s) this container cannot hold were left out.";
     }
     if (!MoveFileExW(staging.path.c_str(), resolved.output.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         return {false, MaterializeError::ProcessFailed,

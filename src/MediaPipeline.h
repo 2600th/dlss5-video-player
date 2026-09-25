@@ -293,14 +293,21 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
 enum class CachedVideoMp4Path { Reencode8Bit, CopyHevc, CopyH264, Lossless10Bit };
 CachedVideoMp4Path CachedVideoMp4PathFor(std::string_view codecName, std::string_view pixelFormat);
 
+struct MediaStreamInfo;
+
 // FFmpeg arguments for CachedVideoExporter. The container follows the
 // extension of request.output; the encoded file is written to `staging`.
 // Never a trim: the range fields are ignored, and a ranged export passes the
 // already cut streams as request.sourceMedia.
+// `sourceStreams` is what request.sourceMedia was listed to carry
+// (ListMediaStreams); MKV and MP4 carry each stream as ExportStreamActionFor
+// says, as the stage export does, and every MP4 audio track becomes AAC.
+// GIF, PNG and JPEG do not read it.
 // oddDimensions selects the 4:4:4 MP4 path; only MP4 exports inspect it, and
 // so does `mp4Path` (CachedVideoMp4PathFor), whose default is the 8-bit path.
 std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& request,
                                                      const std::filesystem::path& staging,
+                                                     const std::vector<MediaStreamInfo>& sourceStreams,
                                                      bool oddDimensions,
                                                      CachedVideoMp4Path mp4Path = CachedVideoMp4Path::Reencode8Bit,
                                                      std::string_view tenBitPixelFormat = {});
