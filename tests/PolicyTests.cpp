@@ -13688,6 +13688,115 @@ void media_tools_are_found_the_same_way_by_every_caller_test()
     fs::remove_all(root, error);
 }
 
+// P0.11: the PATH fallback never runs a tool from the current directory. It
+// used SearchPathW with no path, which looks in the current directory before
+// PATH, and the core package ships no FFmpeg - so opening a video from a
+// folder that also held a planted ffprobe.exe ran it. Only fully qualified
+// PATH entries are walked now; a relative, drive-relative or root-relative
+// entry would resolve against the current directory or drive the same way.
+void media_tools_never_run_a_tool_from_the_current_directory_test()
+{
+    namespace fs = std::filesystem;
+    using media_tools::FindOnPathIn;
+    using media_tools::IsFullyQualifiedDirectory;
+    CHECK(IsFullyQualifiedDirectory(L"C:\\Tools"));
+    CHECK(IsFullyQualifiedDirectory(L"c:/tools"));
+    CHECK(IsFullyQualifiedDirectory(L"C:\\"));
+    CHECK(IsFullyQualifiedDirectory(L"\\\\server\\share\\bin"));
+    CHECK(IsFullyQualifiedDirectory(L"\\\\?\\C:\\Tools"));
+    CHECK(!IsFullyQualifiedDirectory(L""));
+    CHECK(!IsFullyQualifiedDirectory(L"."));
+    CHECK(!IsFullyQualifiedDirectory(L".\\bin"));
+    CHECK(!IsFullyQualifiedDirectory(L"..\\bin"));
+    CHECK(!IsFullyQualifiedDirectory(L"bin"));
+    CHECK(!IsFullyQualifiedDirectory(L"C:"));
+    CHECK(!IsFullyQualifiedDirectory(L"C:bin"));
+    CHECK(!IsFullyQualifiedDirectory(L"\\bin"));
+    CHECK(!IsFullyQualifiedDirectory(L"/bin"));
+    CHECK(!IsFullyQualifiedDirectory(L"\\\\\\bin"));
+    CHECK(!IsFullyQualifiedDirectory(L" C:\\Tools"));
+
+    // Every place the walk asks about, so a test can see it never asked about
+    // anything a relative entry would name.
+    std::vector<fs::path> asked;
+    const auto findIn = [&](std::wstring_view pathVariable, std::initializer_list<fs::path> present) {
+        asked.clear();
+        return FindOnPathIn(pathVariable, L"ffprobe.exe", [&](const fs::path& candidate) {
+            asked.push_back(candidate);
+            return std::find(present.begin(), present.end(), candidate) != present.end();
+        });
+    };
+    const fs::path first = L"C:\\First\\ffprobe.exe";
+    const fs::path second = L"D:\\Second\\ffprobe.exe";
+    const fs::path quoted = L"C:\\Program Files; Tools\\ffprobe.exe";
+    CHECK(findIn(L"", {first}).empty());
+    CHECK(asked.empty());
+    CHECK(findIn(L";;", {first}).empty());
+    CHECK(asked.empty());
+    CHECK(findIn(L".;bin;.\\bin;C:First;\\First;\"\";\".\"", {L".\\ffprobe.exe", L"bin\\ffprobe.exe",
+                                                              L"C:First\\ffprobe.exe", L"\\First\\ffprobe.exe"})
+              .empty());
+    CHECK(asked.empty());
+    // The first fully qualified match wins, and a miss moves on to the next.
+    CHECK_EQ(first, findIn(L"bin;C:\\First;D:\\Second", {first, second}));
+    CHECK_EQ(size_t{1}, asked.size());
+    CHECK_EQ(second, findIn(L"C:\\Empty\\;.;D:\\Second\\", {first, second}));
+    CHECK_EQ(size_t{2}, asked.size());
+    // Quotes are dropped and protect the semicolons inside them.
+    CHECK_EQ(quoted, findIn(L"\"C:\\Program Files; Tools\";D:\\Second", {quoted, second}));
+    CHECK_EQ(second, findIn(L"\"C:\\First\";D:\\Second", {second}));
+    CHECK_EQ(size_t{2}, asked.size());
+    // An unclosed quote runs to the end of PATH as one entry, which names no
+    // directory, rather than guessing where it was meant to stop.
+    CHECK(findIn(L"\"C:\\Missing;D:\\Second", {second}).empty());
+    CHECK_EQ(size_t{1}, asked.size());
+
+    const fs::path root = test_support::FixtureTempRoot() /
+        (L"PolicyTests-MediaToolsCwd-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code error;
+    fs::remove_all(root, error);
+    const std::wstring tool = L"dlss5-media-tools-planted.exe";
+    const auto plant = [&](const fs::path& directory) {
+        fs::create_directories(directory, error);
+        std::ofstream(directory / tool, std::ios::binary) << "tool";
+        return directory / tool;
+    };
+    using media_tools::Fallback;
+    using media_tools::FindToolIn;
+    const fs::path app = root / L"app";
+    fs::create_directories(app, error);
+    const fs::path downloads = root / L"downloads";
+    plant(downloads);
+    plant(downloads / L"sub");
+    const fs::path onPath = plant(root / L"on-path");
+
+    std::wstring savedPath(32768, L'\0');
+    savedPath.resize(GetEnvironmentVariableW(L"PATH", savedPath.data(), static_cast<DWORD>(savedPath.size())));
+    const fs::path savedDirectory = fs::current_path(error);
+    fs::current_path(downloads, error);
+    REQUIRE(!error);
+
+    // The folder a video was opened from holds the tool, and PATH names it
+    // only in forms that resolve against the current directory or drive.
+    const std::wstring relativeEntries = std::wstring(L".;sub;.\\sub;") + downloads.root_name().wstring() +
+        L"sub;" + (downloads.root_directory() / downloads.relative_path()).wstring();
+    REQUIRE(SetEnvironmentVariableW(L"PATH", relativeEntries.c_str()) != FALSE);
+    CHECK(FindToolIn({}, app, tool, Fallback::SearchPath).empty());
+    REQUIRE(SetEnvironmentVariableW(L"PATH", nullptr) != FALSE);
+    CHECK(FindToolIn({}, app, tool, Fallback::SearchPath).empty());
+    REQUIRE(SetEnvironmentVariableW(L"PATH", L"") != FALSE);
+    CHECK(FindToolIn({}, app, tool, Fallback::SearchPath).empty());
+
+    // A fully qualified entry after them still finds its copy, quoted or not.
+    REQUIRE(SetEnvironmentVariableW(L"PATH", (relativeEntries + L";\"" + onPath.parent_path().wstring() + L'"').c_str()) != FALSE);
+    CHECK_EQ(onPath, FindToolIn({}, app, tool, Fallback::SearchPath));
+
+    fs::current_path(savedDirectory, error);
+    CHECK(!error);
+    CHECK(SetEnvironmentVariableW(L"PATH", savedPath.c_str()) != FALSE);
+    fs::remove_all(root, error);
+}
+
 // P1.16: one pair of UTF-8 converters, named for what they do with text that
 // is not well formed. The lossy pair keeps the rest of a message; the strict
 // pair refuses what it could not store faithfully.
@@ -14784,6 +14893,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(hex_text_is_zero_padded_to_the_width_of_its_type_test),
     TEST_CASE(atomic_file_replace_publishes_whole_files_and_cleans_up_only_its_own_test),
     TEST_CASE(media_tools_are_found_the_same_way_by_every_caller_test),
+    TEST_CASE(media_tools_never_run_a_tool_from_the_current_directory_test),
     TEST_CASE(utf8_text_lossy_keeps_the_message_and_strict_refuses_it_test),
     TEST_CASE(seek_clamp_stays_on_a_decodable_frame_and_inside_a_finished_range_test),
     TEST_CASE(render_pace_median_outvotes_a_contended_sample_and_round_trips_test),
