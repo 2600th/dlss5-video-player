@@ -285,11 +285,17 @@ private:
     std::thread reader_;
 };
 
+using neural_worker_detail::MetadataStream;
+
 class MetadataReader {
 public:
-    MetadataReader(OfflineNeuralRenderer::ProgressCallback progress, NeuralSegmentSink segments,
-                   NeuralColdStartCallback timeline = {})
-        : progress_(std::move(progress)), segments_(std::move(segments)),
+    // `expecting` is which terminal message ends this stream, and it is not a
+    // default: the parent always knows which question it asked, and a reader
+    // that took either answer let a resident job stop on a preflight receipt
+    // and then read its result out of an empty slot.
+    MetadataReader(MetadataStream expecting, OfflineNeuralRenderer::ProgressCallback progress,
+                   NeuralSegmentSink segments, NeuralColdStartCallback timeline = {})
+        : expecting_(expecting), progress_(std::move(progress)), segments_(std::move(segments)),
           timeline_reported_(std::move(timeline)) {}
 
     // Bounded by kMetadataDrainByteBudget. This is the first statement of
@@ -329,11 +335,20 @@ public:
         return Consume();
     }
 
-    bool Complete() const { return !malformed_ && bytes_.empty() && result_.has_value(); }
-    bool PreflightComplete() const { return !malformed_ && bytes_.empty() && preflight_.has_value(); }
+    // The terminal message this stream expects arrived, whole, and nothing
+    // trails it. The decoder refuses the other kind outright, so only one of
+    // the two slots below can ever be filled.
+    bool Complete() const
+    {
+        const bool terminal = expecting_ == MetadataStream::Job ? result_.has_value() : preflight_.has_value();
+        return !malformed_ && bytes_.empty() && terminal;
+    }
     bool Malformed() const { return malformed_; }
-    const NeuralRenderResult& Result() const { return *result_; }
-    const PreflightPayload& Preflight() const { return *preflight_; }
+    // Handed out as the optionals they are, never dereferenced here: an empty
+    // one is what an incomplete or refused stream leaves, and the caller that
+    // asks has to say what that means.
+    const std::optional<NeuralRenderResult>& Result() const { return result_; }
+    const std::optional<PreflightPayload>& Preflight() const { return preflight_; }
     // Empty until the helper reports its share of the cold-start timeline.
     const NeuralColdStartTimeline& Timeline() const { return timeline_; }
     // The job's temporal metrics, when the helper measured any.
@@ -390,13 +405,19 @@ private:
                     if (progress_) progress_(*progress);
                     break;
                 }
+                // Each terminal kind only where it was asked for. A well-formed
+                // receipt is still the wrong answer to a job, and a result the
+                // wrong answer to a probe: a helper that sends either is not
+                // doing what this parent told it to do.
                 case WireKind::Result: {
+                    if (expecting_ != MetadataStream::Job) { malformed_ = true; return false; }
                     auto result = DecodeResult(payload);
                     if (!result) { malformed_ = true; return false; }
                     result_ = std::move(result);
                     break;
                 }
                 case WireKind::Preflight: {
+                    if (expecting_ != MetadataStream::Preflight) { malformed_ = true; return false; }
                     auto preflight = DecodePreflight(payload);
                     if (!preflight) { malformed_ = true; return false; }
                     preflight_ = std::move(preflight);
@@ -465,6 +486,7 @@ private:
         return true;
     }
 
+    MetadataStream expecting_;
     OfflineNeuralRenderer::ProgressCallback progress_;
     NeuralSegmentSink segments_;
     NeuralColdStartCallback timeline_reported_;
@@ -746,7 +768,7 @@ PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_
         // Judged from the reader rather than from the process, because a helper
         // that writes its result and exits in the same breath is judged below
         // on what it said, not on the fact that it went.
-        if (resident && (reader.Complete() || reader.PreflightComplete())) break;
+        if (resident && reader.Complete()) break;
         if (stop.stop_requested() && !outcome.cancelled) {
             outcome.cancelled = true;
             // A single-shot helper is killed by the caller. A resident one is
@@ -778,7 +800,7 @@ PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_
     // the pipe into the queue.
     if (outcome.exited) helper.metadata->WaitForEnd(1000);
     reader.ReadAvailable(*helper.metadata);
-    outcome.completed = reader.Complete() || reader.PreflightComplete();
+    outcome.completed = reader.Complete();
     return outcome;
 }
 
@@ -866,12 +888,23 @@ std::optional<NeuralRenderResult> RefuseUnrunnableJob(const std::filesystem::pat
     return std::nullopt;
 }
 
-// The result a job gets when the helper reported one. Shared so a resident job
-// and a single-shot job cannot disagree about whose result they accepted.
+// The result a job gets from what its reader collected. Shared so a resident
+// job and a single-shot job cannot disagree about whose result they accepted,
+// or about a stream that never finished: that is refused here, where the
+// result is read, rather than trusted to every caller to have checked first.
 NeuralRenderResult AcceptResult(const MetadataReader& reader, const NeuralRenderRequest& request)
 {
     const uint64_t jobId = request.jobId;
-    NeuralRenderResult result = reader.Result();
+    const std::optional<NeuralRenderResult>& reported = reader.Result();
+    if (!reader.Complete() || !reported) {
+        NeuralRenderResult incomplete;
+        incomplete.jobId = jobId;
+        incomplete.failure = NeuralRenderFailure::Protocol;
+        incomplete.detail = reader.Malformed() ? L"The isolated neural helper returned malformed metadata." :
+                                                 L"The isolated neural helper returned incomplete metadata.";
+        return incomplete;
+    }
+    NeuralRenderResult result = *reported;
     // A finished render that answers a different question than the job asked:
     // Super Resolution-only frames for a neural job would be published as
     // neural, and neural frames for a Super Resolution-only job are the
@@ -965,12 +998,7 @@ NeuralRenderResult RunHelperOnce(const std::filesystem::path& executable,
                         L" before producing a result.";
         return result;
     }
-    if (!reader.Complete()) {
-        result.failure = NeuralRenderFailure::Protocol;
-        result.detail = reader.Malformed() ? L"The isolated neural helper returned malformed metadata." :
-                                             L"The isolated neural helper returned incomplete metadata.";
-        return result;
-    }
+    // An incomplete or malformed stream is refused inside AcceptResult.
     return AcceptResult(reader, request);
 }
 
@@ -982,7 +1010,7 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
                                           const std::function<void()>& processCreated,
                                           const NeuralColdStartCallback& helperTimeline)
 {
-    MetadataReader reader(progress, segments, helperTimeline);
+    MetadataReader reader(MetadataStream::Job, progress, segments, helperTimeline);
     bool restartRequested = false;
     NeuralRenderResult result = RunHelperOnce(executable, request, stop,
         configurationRestarted, reader, processCreated, restartRequested);
@@ -1764,7 +1792,7 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
         // Per job, because a resident helper reports a timeline per job: the
         // first one measures a process starting, every later one measures only
         // the phase it actually paid for.
-        MetadataReader reader(hooks.progress, hooks.segments, hooks.helperTimeline);
+        MetadataReader reader(MetadataStream::Job, hooks.progress, hooks.segments, hooks.helperTimeline);
         // The reader outlives every judgement below, so a timeline or a VRAM
         // sample that arrived before a crash, a cancel or a rejected result is
         // still reported: the breakdown of a run that failed is the whole
@@ -1886,13 +1914,13 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
 }
 
 neural_worker_detail::MetadataStreamOutcome neural_worker_detail::DecodeMetadataStream(
-    std::span<const std::byte> bytes)
+    std::span<const std::byte> bytes, MetadataStream expecting)
 {
     MetadataStreamOutcome outcome;
     NeuralSegmentSink sink;
     sink.onSegment = [&](const NeuralRenderSegment& segment) { outcome.segments.push_back(segment); };
     sink.onRestart = [&] { ++outcome.restarts; outcome.segments.clear(); };
-    MetadataReader reader([&](const NeuralRenderProgress&) { ++outcome.progressUpdates; }, sink);
+    MetadataReader reader(expecting, [&](const NeuralRenderProgress&) { ++outcome.progressUpdates; }, sink);
     // Deliberately fragmented: the pipe delivers arbitrary chunks and a message
     // header can straddle two reads.
     constexpr size_t chunkBytes = 7;
@@ -1963,7 +1991,7 @@ neural_worker_detail::MetadataDrainPass neural_worker_detail::DrainMetadataPipeO
         if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr) || !available) break;
         Sleep(1);
     }
-    MetadataReader reader({}, {});
+    MetadataReader reader(MetadataStream::Job, {}, {});
     const bool ok = reader.ReadAvailable(metadata, &pass.budgetSpent, &pass.bytesRead);
     pass.malformed = !ok || reader.Malformed();
     return pass;
@@ -1983,7 +2011,7 @@ NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable
             result.detail = L"Neural preflight was cancelled.";
             return result;
         }
-        MetadataReader reader({}, {});
+        MetadataReader reader(MetadataStream::Preflight, {}, {});
         const LaunchOutcome launch = LaunchHelper(executable,
             [&](HANDLE metadata, HANDLE) { return neural_worker_detail::BuildPreflightArguments(metadata, restarted); },
             nullptr, reader, stop, {});
@@ -1999,13 +2027,14 @@ NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable
             result.detail = L"The neural preflight helper exited with code " + std::to_wstring(launch.exitCode) + L".";
             return result;
         }
-        if (!reader.PreflightComplete()) {
+        const std::optional<PreflightPayload>& receipt = reader.Preflight();
+        if (!reader.Complete() || !receipt) {
             result.detail = reader.Malformed() ? L"The neural preflight helper returned malformed metadata." :
                                                  L"The neural preflight helper returned no receipt.";
             return result;
         }
-        result.ok = reader.Preflight().ok;
-        result.json = reader.Preflight().json;
+        result.ok = receipt->ok;
+        result.json = receipt->json;
         if (!result.ok) {
             const ReceiptDiagnosis diagnosis = ScanReceiptDiagnosis(result.json);
             result.cause = diagnosis.cause;

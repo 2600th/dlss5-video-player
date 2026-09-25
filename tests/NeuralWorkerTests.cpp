@@ -265,6 +265,13 @@ struct FakeResidentRunner {
              RecordFailureInjectionAttempt(L"crash-once") == 1)) {
             KillThisHelper();
         }
+        if (source == L"resident-preflight-answer-source.mkv") {
+            // A well-formed preflight receipt where the job's result belongs:
+            // the answer to a question this job never asked.
+            const auto bytes = EncodePreflight(PreflightPayload{true, "{\"ok\":true,\"gpu\":\"fake\"}"});
+            return Write(WireKind::Preflight, bytes.data(), static_cast<uint32_t>(bytes.size()))
+                ? resident_worker::JobOutcome::Completed : resident_worker::JobOutcome::WriteFailed;
+        }
         const WireMemory parked =
             EncodeMemory(MemorySample{MemoryStage::PostJob, policy, true, kParkedMiB});
         if (!Write(WireKind::Memory, &parked, sizeof(parked)))
@@ -311,6 +318,10 @@ int RunFakeWorker(int argc, wchar_t** argv)
                            "Update to 616.64 or newer, then try again.\"}}";
         } else if (shape == L"bare") {
             payload.json = "{\"schema\":2,\"ok\":false}";
+        } else if (shape == L"result") {
+            // A render's result where the receipt belongs.
+            const auto bytes = EncodeResult(ValidFakeResult(0));
+            return WriteMessage(handle, WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 15;
         } else {
             payload.ok = !parsed->configurationRestarted;
             payload.json = parsed->configurationRestarted ? "{\"ok\":false,\"restarted\":true}" : "{\"ok\":true,\"gpu\":\"fake\"}";
@@ -412,6 +423,10 @@ int RunFakeWorker(int argc, wchar_t** argv)
         failed.detail = L"fake device removal";
         const auto bytes = EncodeResult(failed);
         return WriteMessage(handle, WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 14;
+    }
+    if (source == L"preflight-answer-source.mkv") {
+        const auto bytes = EncodePreflight(PreflightPayload{true, "{\"ok\":true,\"gpu\":\"fake\"}"});
+        return WriteMessage(handle, WireKind::Preflight, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 14;
     }
     if (source == L"wrong-job-source.mkv") {
         NeuralRenderResult failed;
@@ -2022,6 +2037,52 @@ void metadata_reader_accepts_segments_before_the_result_test()
     CHECK(neural_worker_detail::DecodeMetadataStream(broken).malformed);
 }
 
+// P0.14, at the decoder: a job's stream ends with a Result and a probe's with a
+// Preflight receipt, and each refuses the other's however well-formed it is -
+// either verdict, reserved bytes zero, a JSON body. The reader used to take
+// both in any stream, which is what let a resident job stop on a receipt.
+void a_stream_ends_only_with_the_terminal_message_it_expects_test()
+{
+    using neural_worker_detail::DecodeMetadataStream;
+    using neural_worker_detail::MetadataStream;
+    for (const bool verdict : {false, true}) {
+        const auto receipt = EncodePreflight(
+            PreflightPayload{verdict, verdict ? "{\"ok\":true,\"gpu\":\"fake\"}" : "{\"ok\":false,\"gpu\":\"fake\"}"});
+        CHECK(DecodePreflight(receipt).has_value());
+        std::vector<std::byte> answered;
+        AppendMessage(answered, WireKind::Preflight, receipt);
+        const auto job = DecodeMetadataStream(answered);
+        CHECK(job.malformed);
+        CHECK(!job.complete);
+        CHECK(DecodeMetadataStream(answered, MetadataStream::Job).malformed);
+        const auto probe = DecodeMetadataStream(answered, MetadataStream::Preflight);
+        CHECK(!probe.malformed);
+        CHECK(probe.complete);
+    }
+
+    const auto resultPayload = EncodeResult(ValidFakeResult(4242));
+    std::vector<std::byte> rendered;
+    AppendMessage(rendered, WireKind::Result, resultPayload);
+    const auto job = DecodeMetadataStream(rendered, MetadataStream::Job);
+    CHECK(!job.malformed);
+    CHECK(job.complete);
+    const auto probe = DecodeMetadataStream(rendered, MetadataStream::Preflight);
+    CHECK(probe.malformed);
+    CHECK(!probe.complete);
+
+    // Ready describes the process, not the question, so either stream takes it
+    // on either side of its terminal message.
+    std::vector<std::byte> announcedJob;
+    AppendMessage(announcedJob, WireKind::Result, resultPayload);
+    AppendMessage(announcedJob, WireKind::Ready, {});
+    CHECK(DecodeMetadataStream(announcedJob).complete);
+    std::vector<std::byte> announcedProbe;
+    AppendMessage(announcedProbe, WireKind::Ready, {});
+    AppendMessage(announcedProbe, WireKind::Preflight,
+                  EncodePreflight(PreflightPayload{true, "{\"ok\":true}"}));
+    CHECK(DecodeMetadataStream(announcedProbe, MetadataStream::Preflight).complete);
+}
+
 void running_helper_publishes_segments_before_its_result_test()
 {
     NeuralRenderRequest request = TestRequest(L"segment-source.mkv");
@@ -2902,6 +2963,44 @@ void recovery_probe_refusal_fails_closed_instead_of_relaunching_test()
     ResetFailureInjection(L"crash-once");
 }
 
+// P0.14: a terminal message of the wrong kind, through the real pump and the
+// real acceptance on every path that reads one. A resident job answered with a
+// preflight receipt used to stop the pump as "completed" and then copy the
+// job's result out of an empty optional; a single-shot job and a probe read
+// the stray frame as a silence. All three are a helper saying something this
+// parent did not ask, which is malformed, and none of them is accepted.
+void a_terminal_message_of_the_wrong_kind_is_malformed_on_every_path_test()
+{
+    NeuralJobHooks hooks;
+    ResidentNeuralHelper helper;
+    const NeuralRenderResult resident = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-preflight-answer-source.mkv", 13), hooks);
+    CHECK(!resident.ok);
+    CHECK(!resident.cancelled);
+    CHECK(resident.failure == NeuralRenderFailure::Protocol);
+    CHECK_EQ(uint64_t{13}, resident.jobId);
+    CHECK(resident.detail == L"The isolated neural helper returned malformed metadata.");
+    // Nothing that helper says afterwards can be trusted, so it is not kept.
+    CHECK(!helper.Resident());
+    helper.Release();
+
+    const NeuralRenderResult single = RunNeuralWorker(CurrentExecutable(),
+        ResidentRequest(L"preflight-answer-source.mkv", 14));
+    CHECK(!single.ok);
+    CHECK(single.failure == NeuralRenderFailure::Protocol);
+    CHECK_EQ(uint64_t{14}, single.jobId);
+    CHECK(single.detail == L"The isolated neural helper returned malformed metadata.");
+
+    CHECK(SetEnvironmentVariableW(L"DLSSVIDEOPLAYER_FAKE_PREFLIGHT", L"result") != FALSE);
+    const NeuralPreflightResult probe = RunNeuralPreflight(CurrentExecutable());
+    CHECK(SetEnvironmentVariableW(L"DLSSVIDEOPLAYER_FAKE_PREFLIGHT", nullptr) != FALSE);
+    CHECK(!probe.ok);
+    CHECK(!probe.cancelled);
+    CHECK(probe.json.empty());
+    CHECK(probe.detail == L"The neural preflight helper returned malformed metadata.");
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -2946,6 +3045,7 @@ int wmain(int argc, wchar_t** argv)
     protocol_rejects_inconsistent_results_test();
     segment_messages_round_trip_and_reject_malformed_test();
     metadata_reader_accepts_segments_before_the_result_test();
+    a_stream_ends_only_with_the_terminal_message_it_expects_test();
     running_helper_publishes_segments_before_its_result_test();
     configuration_retry_is_sequential_and_bounded_test();
     helper_cold_start_timeline_reaches_the_parent_test();
@@ -2965,5 +3065,6 @@ int wmain(int argc, wchar_t** argv)
     killed_resident_helper_restarts_once_and_completes_the_job_test();
     second_kill_fails_closed_with_a_reason_and_leaves_no_orphan_test();
     recovery_probe_refusal_fails_closed_instead_of_relaunching_test();
+    a_terminal_message_of_the_wrong_kind_is_malformed_on_every_path_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

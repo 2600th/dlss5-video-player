@@ -1160,6 +1160,17 @@ neural after the upscale - so the model then runs on the upscaled frame with no
 further plumbing. The second pass is frame generation over the file the first
 one wrote. `ExportStageCount` is what the progress panel divides by.
 
+A neural pass is refused on exactly what refuses a live render, in the same
+words and before its settings are written: a file that drifted from the runtime
+lock, or a module the lock does not name (`StageExportRuntimeRefusal`, built on
+the two checks `NeuralJobRun` uses). Until 2026-09-25 the export checked neither, so
+a runtime the live path refused still produced a file presented as neural. Under
+the runtime lease, and whatever the pass, the player's idle resident helper is
+released before the export's helper starts: it holds the device, its feature-18
+workset and the proxy's `ReShade.log`, and a second helper beside it cost VRAM
+and moved the evidence to `ReShade.log1`. `--render` runs in a process of its
+own and has none to release.
+
 Every pass writes Matroska, so the last step is not a rename: `MuxStageExport`
 writes the container the chosen name's extension asks for
 (`ExportContainerFor`), stream-copying the video into MKV or MP4 (`hvc1` for
