@@ -71,6 +71,39 @@
                                                              }
                                                          ]
                                         },
+                 "photo-wipe":  {
+                                    "source":  "docs/screenshots/current/photo-wipe.jpg",
+                                    "variants":  [
+                                                     {
+                                                         "width":  960,
+                                                         "format":  "avif",
+                                                         "file":  "photo-wipe-960.avif",
+                                                         "bytes":  18093,
+                                                         "psnrAgainstSource":  40.38
+                                                     },
+                                                     {
+                                                         "width":  960,
+                                                         "format":  "webp",
+                                                         "file":  "photo-wipe-960.webp",
+                                                         "bytes":  30522,
+                                                         "psnrAgainstSource":  37.33
+                                                     },
+                                                     {
+                                                         "width":  1440,
+                                                         "format":  "avif",
+                                                         "file":  "photo-wipe-1440.avif",
+                                                         "bytes":  32108,
+                                                         "psnrAgainstSource":  41.73
+                                                     },
+                                                     {
+                                                         "width":  1440,
+                                                         "format":  "webp",
+                                                         "file":  "photo-wipe-1440.webp",
+                                                         "bytes":  52162,
+                                                         "psnrAgainstSource":  37.25
+                                                     }
+                                                 ]
+                                },
                  "saved-comparison-2x2":  {
                                               "source":  "docs/screenshots/current/saved-comparison-2x2.png",
                                               "variants":  [

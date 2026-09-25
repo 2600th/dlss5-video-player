@@ -86,6 +86,7 @@ $compositeWidth = 1460
 $singles = @(
     @{ Name = 'compare-wipe'; File = 'compare-wipe.jpg'; Native = 1902 }
     @{ Name = 'compare-difference'; File = 'compare-difference.jpg'; Native = 1902 }
+    @{ Name = 'photo-wipe'; File = 'photo-wipe.jpg'; Native = 1902 }
     @{ Name = 'saved-comparison-2x2'; File = 'saved-comparison-2x2.png'; Native = 1266 }
     @{ Name = 'neural-strength'; File = 'neural-strength.jpg'; Native = 1902 }
     @{ Name = 'neural-settings'; File = 'neural-settings.jpg'; Native = 1324 }

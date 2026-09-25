@@ -84,6 +84,7 @@
       "screenshot": [
         "{{SITE_URL}}media/compare-wipe.jpg",
         "{{SITE_URL}}media/compare-difference.jpg",
+        "{{SITE_URL}}media/photo-wipe.jpg",
         "{{SITE_URL}}media/neural-playback.jpg",
         "{{SITE_URL}}media/neural-strength.jpg"
       ],
@@ -94,6 +95,7 @@
         "DLSS 5 neural rendering while the video plays",
         "The original and the render compared on the same frame: split, wipe, side by side, 2x2, Difference and a loupe",
         "Seek anywhere, rendered or not",
+        "Game screenshots and photos (PNG, JPEG, BMP, TIFF, WebP) and animated GIFs, as well as video",
         "HDR10 and HLG tone mapping, and subtitles drawn after the render",
         "A constant-quality render cache, reused while the source, runtime and settings match",
         "Export to PNG, JPEG, GIF, MP4 or MKV, from the player or the --render command line",
@@ -135,6 +137,11 @@
           "@type": "Question",
           "name": "Does it upscale video too?",
           "acceptedAnswer": { "@type": "Answer", "text": "It can, with DLSS Super Resolution, but that is off by default because on video it does not beat a plain scaler: on six clips upscaled from 960×540 to 1080p, bicubic scored higher every time. It is built for rendered games, not decoded footage, so turn it on for its look, not for detail. Neural rendering itself keeps the source resolution." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does it work on screenshots and photos?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. Open a PNG, JPEG, BMP, TIFF or static WebP and press D: it renders once and stays on that frame, with the same compare views as a video, and saves as a PNG or JPEG at its own size. From the command line, --render turned a 2560×1440 game screenshot into a PNG in about 8 seconds on an RTX 4080 SUPER. Animated GIFs render frame by frame and keep their timing. The model is built for rendered games, and game screenshots are what it has been tried on; camera RAW and animated WebP are not supported." }
         },
         {
           "@type": "Question",
@@ -232,9 +239,10 @@
   <div class="hero__type">
     <h1 class="hero__headline">See what DLSS&nbsp;5 does to your videos.</h1>
     <p class="hero__lede">
-      A free, open-source Windows player that runs your videos through
-      NVIDIA's DLSS&nbsp;5 neural renderer on your own RTX card while you
-      watch, and keeps the original one key away, on the same frame.
+      A free, open-source Windows player that runs your videos, photos and
+      GIFs through NVIDIA's DLSS&nbsp;5 neural renderer on your own RTX card
+      while you watch, keeps the original one key away, on the same frame,
+      and saves the result as a file.
     </p>
     <div class="hero__actions">
       <a class="button button--primary" href="{{PRIMARY_URL}}" data-download="hero">
@@ -515,6 +523,51 @@
       <figcaption>Recent videos reopens a film with its render already attached</figcaption>
     </figure>
   </article>
+
+  <article class="beat beat--flip" id="photos">
+    <div class="beat__text">
+      <h3 class="beat__title">Screenshots and GIFs, too</h3>
+      <p>
+        Open a PNG, JPEG, BMP, TIFF or WebP and press <kbd>D</kbd>. The same
+        model renders it, the same compare views show what changed, and it
+        saves back as a PNG or JPEG at full size. Here the game&rsquo;s
+        smooth orange skin comes back with texture, a truer tone and light
+        that falls across the face. Animated GIFs render frame by frame and keep their timing.
+      </p>
+    </div>
+    <figure class="beat__figure">
+      <picture>
+        <source type="image/avif" srcset="assets/screens/photo-wipe-960.avif 960w, assets/screens/photo-wipe-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <source type="image/webp" srcset="assets/screens/photo-wipe-960.webp 960w, assets/screens/photo-wipe-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <img src="media/photo-wipe.jpg" width="1902" height="1023" loading="lazy" decoding="async"
+             alt="A frame of the Mafia: The Old Country trailer, saved as a PNG and opened in the player as a photo, in Wipe: the original left of a divider down the man's nose, the DLSS 5 render right of it.">
+      </picture>
+      <figcaption>A still, saved as a PNG and opened as a photo<span class="beat__tick">Mafia: The Old Country, trailer frame 864 · Wipe · default settings</span></figcaption>
+    </figure>
+  </article>
+</section>
+
+<!-- ============================== export ============================ -->
+<section class="section" id="export">
+  <div class="section__head">
+    <h2 class="section__title">Keep it as a file</h2>
+    <p class="section__note">
+      A video, a photo or an animated GIF: whatever you watch rendered, you
+      can save. <strong>Save converted video</strong> writes the render you
+      already have without rendering again; <strong>Export with DLSS
+      stages</strong> (<kbd>Ctrl</kbd>+<kbd>S</kbd>) renders a new file. Both
+      are under <strong>DLSS &gt; Convert &amp; export</strong>.
+    </p>
+  </div>
+
+  <div class="readout">
+    <p class="readout__row"><span class="readout__k">Video</span><span class="readout__v readout__v--prose">MKV or MP4, of the whole video or a marked clip. MKV keeps the source audio, subtitles and chapters without re-encoding them.</span></p>
+    <p class="readout__row"><span class="readout__k">GIF</span><span class="readout__v readout__v--prose">An animated GIF renders frame by frame with its own timing, and saves as GIF, MP4 or MKV.</span></p>
+    <p class="readout__row"><span class="readout__k">Photo</span><span class="readout__v readout__v--prose">PNG, JPEG, BMP, TIFF or static WebP in; PNG or JPEG out, at the source size. The 2560×1440 screenshot <a href="#photos">above</a> took <span class="data">8&nbsp;s</span> from the command line on an RTX 4080 SUPER.</span></p>
+    <p class="readout__row"><span class="readout__k">Stages</span><span class="readout__v readout__v--prose">Super Resolution, neural rendering and frame generation at 2× to 5× the frame rate, any combination, in one file and in NVIDIA&rsquo;s order.</span></p>
+    <p class="readout__row"><span class="readout__k">Scripted</span><span class="readout__v readout__v--prose"><code>DLSSVideoPlayer.exe --render clip.mp4</code> writes <code>clip-dlss.mkv</code> without opening the player; the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md#from-the-command-line" rel="noopener">usage guide</a> has the options. <span class="new" title="In main, after v0.25.0; the next release carries it">New</span></span></p>
+    <p class="readout__row"><span class="readout__k">Left out</span><span class="readout__v readout__v--prose">Subtitles travel as tracks and are never burned in. Image adjustments and playback upscaling are not baked in; the stages export is how a larger size goes into the file.</span></p>
+  </div>
 </section>
 
 <!-- ============================ features ============================ -->
@@ -769,6 +822,19 @@
         960×540 to 1080p, bicubic scored higher every time. It is built for
         rendered games, not decoded footage, so turn it on for its look, not
         for detail. Neural rendering itself keeps the source resolution.
+      </p>
+    </details>
+    <details class="faq__item" id="faq-photos">
+      <summary>Does it work on screenshots and photos?</summary>
+      <p>
+        Yes. Open a PNG, JPEG, BMP, TIFF or static WebP and press
+        <kbd>D</kbd>: it renders once and stays on that frame, with the same
+        compare views as a video, and saves as a PNG or JPEG at its own size.
+        From the command line, <code>--render</code> turned a 2560×1440 game
+        screenshot into a PNG in about 8&nbsp;seconds on an RTX 4080 SUPER.
+        Animated GIFs render frame by frame and keep their timing. The model
+        is built for rendered games, and game screenshots are what it has been
+        tried on; camera RAW and animated WebP are not supported.
       </p>
     </details>
     <details class="faq__item" id="faq-export">

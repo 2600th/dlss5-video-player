@@ -304,6 +304,7 @@ $sitemapImages = @(
     'media/ac-shadows-low-key-limit.png'
     'media/compare-wipe.jpg'
     'media/compare-difference.jpg'
+    'media/photo-wipe.jpg'
     'media/neural-playback.jpg'
 ) | ForEach-Object { "    <image:image><image:loc>$siteUrl$_</image:loc></image:image>" }
 Write-TextFile -Path (Join-Path $OutputPath 'sitemap.xml') -Text @"
@@ -345,6 +346,7 @@ $mediaFiles = @(
     'docs/screenshots/current/neural-strength.jpg'
     'docs/screenshots/current/compare-wipe.jpg'
     'docs/screenshots/current/compare-difference.jpg'
+    'docs/screenshots/current/photo-wipe.jpg'
     'docs/screenshots/current/saved-comparison-2x2.png'
     'docs/screenshots/current/neural-settings.jpg'
     'docs/screenshots/current/subtitles.jpg'
