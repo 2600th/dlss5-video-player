@@ -25,7 +25,8 @@ signature. `nvngx_dlss.dll` is pinned byte for byte in
 `nvngx_dlssg.dll` is not in that lock because the helper never loads it - the
 player creates the Frame Generation feature - and `tools/verify_package.ps1`
 holds the packaged copy to the pinned SDK's own bytes instead. NVIDIA files are not
-relicensed by this project.
+relicensed by this project. Both packages include the SDK's licence as
+`THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt`.
 
 ## NVIDIA RTX Video SDK (optional)
 
@@ -68,6 +69,9 @@ DLSS/DLAA create before building feature 18.
 
 The matching package includes the exact NVIDIA-signed Streamline 2.13 files in
 the runtime lock. NVIDIA files remain subject to NVIDIA's applicable terms.
+Streamline's MIT licence is included as
+`THIRD_PARTY_LICENSES/nvidia-streamline-MIT.txt`, taken from the repository's
+main branch because upstream publishes no v2.13.0 tag.
 
 ## NVIDIA Optical Flow SDK
 
@@ -78,7 +82,7 @@ headers are vendored in `external/nvof`. NVIDIA licenses each of them under MIT
 in its own copyright block, explicitly scoped - "this copyright notice applies
 to this header file only" - which is the same grant FFmpeg relies on to ship
 `nv-codec-headers`. Both notices are reproduced in
-`THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt`.
+`THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt`, which both packages include.
 
 Nothing else from the SDK is included. Its samples, helper classes and binaries
 are covered by NVIDIA's separate licence agreement, and `nvofapi64.dll` is a
@@ -96,7 +100,7 @@ is the file FFmpeg itself builds `hevc_nvenc` against. NVIDIA licenses it under
 MIT in its own copyright block, scoped to that file; the notice, the pinned tag
 and the file's SHA-256
 (`8776fddcb8febc6aec4d73989b1f21831eb30306bc583da55b4bf0c14a1dc228`) are in
-`THIRD_PARTY_LICENSES/nvidia-video-codec-MIT.txt`.
+`THIRD_PARTY_LICENSES/nvidia-video-codec-MIT.txt`, which both packages include.
 
 Nothing else from the Video Codec SDK is included and no NVIDIA import library is
 linked. `nvEncodeAPI64.dll` is a driver component, loaded from the system
@@ -107,11 +111,16 @@ redistributed here.
 
 Source and license: https://github.com/crosire/reshade
 
-The packaged `dxgi.dll` is ReShade 6.8.0 and is unsigned.
+The packaged `dxgi.dll` is ReShade 6.8.0 and is unsigned. Its BSD-3-Clause
+licence, from tag v6.8.0, is included as
+`THIRD_PARTY_LICENSES/reshade-BSD-3-Clause.txt`.
 
 ## RenoDX
 
 Source and license information: https://github.com/clshortfuse/renodx
+
+RenoDX is MIT-licensed; its licence is included as
+`THIRD_PARTY_LICENSES/renodx-MIT.txt`.
 
 The selected `renodx-dlss5.addon64` 6.5.3 asset comes from the
 `RankFTW/rhi-repo` release mirror. It is unsigned and enabled by default on
@@ -126,8 +135,12 @@ included in `THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt`.
 
 Source and licensing: https://ffmpeg.org/legal.html
 
-The package uses FFmpeg 9.0.1 Essentials from gyan.dev. Its reported build
-configuration enables GPLv3 components; see `THIRD_PARTY_LICENSES/ffmpeg.txt`.
+The package uses FFmpeg 9.0.1 Essentials from gyan.dev, built with
+`--enable-gpl --enable-version3`, so `ffmpeg.exe` and `ffprobe.exe` are under
+GPLv3. The licence text is `THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt`, the
+archive's own `LICENSE`. `THIRD_PARTY_LICENSES/ffmpeg.txt` names the exact
+build and where the source of FFmpeg and of each GPL, LGPL or MPL library it
+links statically can be obtained.
 
 ## yt-dlp
 

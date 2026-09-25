@@ -44,6 +44,7 @@ function Get-ExpectedPackageFiles {
             'PUBLIC_RELEASE_NOTICE.txt', 'THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt',
             'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
             'THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt',
+            'THIRD_PARTY_LICENSES/nvidia-video-codec-MIT.txt',
             'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
             'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
             'docs/TROUBLESHOOTING.md', 'PACKAGE_MANIFEST.txt',
@@ -64,9 +65,15 @@ function Get-ExpectedPackageFiles {
             'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
             'THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt',
             'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
+            'THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt',
             'THIRD_PARTY_LICENSES/experimental-runtime.txt',
+            'THIRD_PARTY_LICENSES/reshade-BSD-3-Clause.txt',
+            'THIRD_PARTY_LICENSES/renodx-MIT.txt',
+            'THIRD_PARTY_LICENSES/nvidia-streamline-MIT.txt',
+            'THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt',
             'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
             'THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt',
+            'THIRD_PARTY_LICENSES/nvidia-video-codec-MIT.txt',
             'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
             'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
             'docs/TROUBLESHOOTING.md',
@@ -209,6 +216,27 @@ function Assert-PinnedLineEndings {
         if ($Text.Contains("`r")) { throw "Packaged Markdown must use LF line endings: $RelativePath" }
     }
     elseif ($Text -cmatch '(?<!\r)\n|\r(?!\n)') { throw "Packaged text must use CRLF line endings: $RelativePath" }
+}
+
+# GPLv3 section 4 requires the licence text itself to travel with ffmpeg.exe and
+# ffprobe.exe. The packaged copy is the LICENSE file from the pinned FFmpeg
+# archive (tools/fetch_ffmpeg_helpers.ps1), whose SHA-256 is below; the
+# repository pins it to CRLF like every packaged .txt, so it is compared with
+# its line endings folded back to that file's LF. An edited, truncated or
+# re-flowed text fails here in both modes.
+$ffmpegLicenseLfSha256 = '8CEB4B9EE5ADEDDE47B31E975C1D90C73AD27B6B165A1DCD80C7C545EB65B903'
+function Assert-FfmpegLicenseText {
+    param([string]$Root)
+    $relative = 'THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt'
+    $bytes = [IO.File]::ReadAllBytes((Join-Path $Root $relative))
+    $latin1 = [Text.Encoding]::GetEncoding(28591)
+    $lf = $latin1.GetBytes($latin1.GetString($bytes).Replace("`r`n", "`n"))
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { $hash = [BitConverter]::ToString($sha256.ComputeHash($lf)).Replace('-', '') }
+    finally { $sha256.Dispose() }
+    if ($hash -cne $ffmpegLicenseLfSha256) {
+        throw "$relative is not the GPL text shipped with the pinned FFmpeg build (LF SHA-256 $hash)."
+    }
 }
 
 function Assert-ReleaseExecutableIdentity {
@@ -395,6 +423,7 @@ function Assert-Stage {
         }
     }
 
+    if (-not $PublicCore) { Assert-FfmpegLicenseText -Root $resolvedRoot }
     Assert-LockedFiles -Root $resolvedRoot
 
     $manifestPath = Join-Path $resolvedRoot 'PACKAGE_MANIFEST.txt'

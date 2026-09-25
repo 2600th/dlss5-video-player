@@ -6,9 +6,15 @@ property of their respective owners under their applicable licenses. This
 statement does not change those licenses or grant additional permissions.
 
 NVIDIA DLSS / NGX: https://github.com/NVIDIA/DLSS
+    License: NVIDIA-DLSS-SDK.txt
 NVIDIA Streamline: https://github.com/NVIDIA-RTX/Streamline
+    License: nvidia-streamline-MIT.txt
 ReShade: https://github.com/crosire/reshade
+    License: reshade-BSD-3-Clause.txt
 RenoDX: https://github.com/clshortfuse/renodx
+    License: renodx-MIT.txt
+
+Each named license file is in this folder, beside this notice.
 
 The NVIDIA, ReShade, RenoDX, Streamline, and modified neural-rendering files are
 not relicensed by DLSS Video Player. The neural DLL is modified and reports
