@@ -1,0 +1,51 @@
+NVIDIA Streamline 2.13.0.0 - neural-runtime/sl.*.dll
+
+The complete package ships eight NVIDIA-signed Streamline 2.13.0.0 modules in
+neural-runtime/, unmodified and pinned by SHA-256 in
+packaging/runtime-lock.json: sl.common.dll, sl.dlss.dll, sl.dlss_g.dll,
+sl.dlss_nr.dll, sl.interposer.dll, sl.nis.dll, sl.pcl.dll and sl.reflex.dll.
+Streamline's source and terms are published at
+https://github.com/NVIDIA-RTX/Streamline.
+
+The notice below is reproduced unmodified from license.txt on that
+repository's main branch. Upstream publishes no v2.13.0 tag, so the text of
+the licence as it stood for the 2.13.0.0 build could not be taken from a tag;
+the MIT grant below is the one the repository carries. Its second block names
+sl_nvperf.h and sl_nvperf.dll, which are covered by the NVIDIA Nsight Perf SDK
+License instead; neither is shipped in this package.
+
+----------------------------------------------------------------------------
+
+/*
+* Copyright (c) 2023 NVIDIA CORPORATION. All rights reserved
+*
+* Permission is hereby granted, free of charge, to any person obtaining a copy
+* of this software and associated documentation files (the "Software"), to deal
+* in the Software without restriction, including without limitation the rights
+* to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+* copies of the Software, and to permit persons to whom the Software is
+* furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in all
+* copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+* SOFTWARE.
+*/
+
+/*
+*  NSight Perf SDK License, Version 2023.3
+*  Please see the file included in this package
+*  "NVIDIA Nsight Perf SDK License (28Sept2022).pdf" for licensing details
+*  of the NSight Perf SDK.
+*  NSight Perf SDK ver 2023.3 can be downloaded from here:
+*  https://developer.nvidia.com/gameworksdownload#?dn=nsight-perf-sdk-2023-3
+*  The Streamline files covered by the NSight Perf SDK License are:
+*  sl_nvperf.h
+*  sl_nvperf.dll
+*/

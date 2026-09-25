@@ -1,11 +1,22 @@
 FFmpeg 9.0.1 Essentials build notice
 
-Source: https://ffmpeg.org/
-Windows build source: https://www.gyan.dev/ffmpeg/builds/
-License information: https://ffmpeg.org/legal.html
+What is shipped
+---------------
+The complete package ships ffmpeg.exe and ffprobe.exe unmodified from the
+64-bit static Windows build "9.0.1-essentials_build-www.gyan.dev" by Gyan
+Doshi (https://www.gyan.dev/ffmpeg/builds/), archive
+ffmpeg-9.0.1-essentials_build.zip with SHA-256
+FEC81AE03971D9DD4BE3EBE02E263BD2EC1D789483F931BDBA5F5715E65DA2E9, as
+downloaded from
+https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip
+by tools/fetch_ffmpeg_helpers.ps1. Each executable is pinned by SHA-256 in
+packaging/tool-lock.json. DLSS Video Player runs them as separate processes
+and does not link them.
 
-The packaged binaries report an --enable-gpl --enable-version3 configuration
-and the following license notice:
+License
+-------
+The build is configured with --enable-gpl --enable-version3, and the packaged
+binaries report the following license notice:
 
 ffmpeg is free software; you can redistribute it and/or modify it under the
 terms of the GNU General Public License as published by the Free Software
@@ -16,4 +27,64 @@ ffmpeg is distributed in the hope that it will be useful, but WITHOUT ANY
 WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
 PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
-GNU GPL version 3: https://www.gnu.org/licenses/gpl-3.0.txt
+The complete text of the GNU General Public License version 3 is in
+ffmpeg-GPL-3.0.txt beside this file. It is the LICENSE file from the archive
+above, unchanged apart from line endings. License information from the FFmpeg
+project: https://ffmpeg.org/legal.html
+
+Corresponding Source
+--------------------
+The source code is not included in this package. It can be obtained from the
+places below. The FFmpeg commit and every version are the ones the build's own
+README.txt (in the archive above, beside that LICENSE) records; the addresses
+are each project's upstream. A version of the form vX-N-gHASH is a
+git-describe name: commit HASH, N commits after tag vX.
+
+FFmpeg itself, commit bf1b838f2a (named "Source Code" in README.txt):
+    https://github.com/FFmpeg/FFmpeg/commit/bf1b838f2a
+    also https://git.ffmpeg.org/ffmpeg.git
+
+The build's configuration - every enabled library, component and option - is
+listed in README.txt inside the archive above.
+
+The build links these libraries statically. Each is published under the GNU
+GPL, the GNU LGPL or the Mozilla Public License 2.0, all of which require its
+source to be available to recipients of the binary:
+
+    x264 0.165.3223 (GPL-2.0-or-later)
+        https://code.videolan.org/videolan/x264
+    x265 4.3-6-g9ddc216 (GPL-2.0-or-later)
+        https://bitbucket.org/multicoreware/x265_git
+    Xvid 1.3.7 (GPL-2.0-or-later)
+        https://downloads.xvid.com/downloads/xvidcore-1.3.7.tar.gz
+    vid.stab v1.1.2-105-gc7a720a (GPL-2.0-or-later)
+        https://github.com/georgmartius/vid.stab
+    Rubber Band v4.0.0 (GPL-2.0-or-later)
+        https://github.com/breakfastquay/rubberband
+    LAME 3.100 (LGPL-2.0-or-later)
+        https://sourceforge.net/projects/lame/files/lame/3.100/
+    GNU FriBidi v1.0.16-5-g069a7e3 (LGPL-2.1-or-later)
+        https://github.com/fribidi/fribidi
+    cairo 1.18.5 (LGPL-2.1 or MPL-1.1)
+        https://gitlab.freedesktop.org/cairo/cairo
+    GNU MP 6.3.0 (LGPL-3.0-or-later or GPL-2.0-or-later)
+        https://gmplib.org/download/gmp/
+    GnuTLS 3.8.13 (LGPL-2.1-or-later)
+        https://gitlab.com/gnutls/gnutls
+    Game_Music_Emu 0.6.6 (LGPL-2.1-or-later)
+        https://github.com/libgme/game-music-emu
+    GNU libiconv 1.19 (LGPL-2.1-or-later)
+        https://ftp.gnu.org/gnu/libiconv/
+    libssh 0.12.0 (LGPL-2.1)
+        https://git.libssh.org/projects/libssh.git
+    OpenAL Soft 1.25.2 (LGPL-2.0-or-later)
+        https://github.com/kcat/openal-soft
+    SRT v1.5.6-2-gfcae571 (MPL-2.0)
+        https://github.com/Haivision/srt
+    ZeroMQ 4.3.5 (MPL-2.0)
+        https://github.com/zeromq/libzmq
+
+README.txt lists every other external library of the build with its version.
+Those are under permissive licenses (BSD, MIT, ISC, Apache-2.0, zlib and
+similar). README.txt gives no version for bzlib, lzma or zlib, nor for the
+libraries GnuTLS itself is built on.

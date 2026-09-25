@@ -221,6 +221,7 @@ if ($PublicCore) {
         @('THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt', (Join-Path $repositoryRoot 'external\DLSS\LICENSE.txt'), 'NormalizeText'),
         @('THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\dlss5-feeder-MIT.txt')),
         @('THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\nvidia-optical-flow-MIT.txt')),
+        @('THIRD_PARTY_LICENSES/nvidia-video-codec-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\nvidia-video-codec-MIT.txt')),
         # Rewritten from the npm tarball (LF) by fetch_ui_assets.ps1, which CI
         # runs before packaging, so the .gitattributes pin does not reach it.
         @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE'), 'NormalizeText'),
@@ -268,9 +269,22 @@ else {
         @('THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\yt-dlp-2026.08.19.txt')),
         @('THIRD_PARTY_LICENSES/deno-2.9.5.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\deno-2.9.5.txt')),
         @('THIRD_PARTY_LICENSES/ffmpeg.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\ffmpeg.txt')),
+        # The licence ffmpeg.exe and ffprobe.exe are conveyed under (GPLv3
+        # section 4). Copied as committed, never through Copy-NormalizedText:
+        # the checkout is already CRLF, and verify_package.ps1 holds the text
+        # to the archive's own LICENSE by hash.
+        @('THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\ffmpeg-GPL-3.0.txt')),
         @('THIRD_PARTY_LICENSES/experimental-runtime.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\experimental-runtime.txt')),
+        # The binaries under neural-runtime/. BSD-3-Clause and MIT both require
+        # the notice itself to accompany a binary copy; a URL is not the notice.
+        @('THIRD_PARTY_LICENSES/reshade-BSD-3-Clause.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\reshade-BSD-3-Clause.txt')),
+        @('THIRD_PARTY_LICENSES/renodx-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\renodx-MIT.txt')),
+        @('THIRD_PARTY_LICENSES/nvidia-streamline-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\nvidia-streamline-MIT.txt')),
+        # This variant links NGX and ships the SDK's snippets too, like the core.
+        @('THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt', (Join-Path $repositoryRoot 'external\DLSS\LICENSE.txt'), 'NormalizeText'),
         @('THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\dlss5-feeder-MIT.txt')),
         @('THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\nvidia-optical-flow-MIT.txt')),
+        @('THIRD_PARTY_LICENSES/nvidia-video-codec-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\nvidia-video-codec-MIT.txt')),
         @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE'), 'NormalizeText'),
         @('docs/ARCHITECTURE.md', (Join-Path $repositoryRoot 'docs\ARCHITECTURE.md')),
         @('docs/BUILDING.md', (Join-Path $repositoryRoot 'docs\BUILDING.md')),
