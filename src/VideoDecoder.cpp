@@ -5,6 +5,7 @@
 #include "MediaTools.h"
 #include "FrameRatePolicy.h"
 #include "VariableFrameRatePolicy.h"
+#include "MediaFoundationSamplePolicy.h"
 #include "HexText.h"
 #include "Log.h"
 #include <propvarutil.h>
@@ -1671,8 +1672,27 @@ VideoReadResult VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         }
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return VideoReadResult::EndOfStream;
         if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
-            LOG("Media Foundation video media type changed; continuing.");
-            continue;
+            // The sample that carries this flag is already in the new type, so
+            // the type is read again before anything of it is. A new frame size
+            // ends the decode: every consumer was sized from the one this open
+            // reported. A new stride is simply taken.
+            ComPtr<IMFMediaType> changed;
+            UINT32 width = 0, height = 0;
+            if (FAILED(m_reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &changed)) ||
+                FAILED(MFGetAttributeSize(changed.Get(), MF_MT_FRAME_SIZE, &width, &height))) {
+                LOG("Media Foundation video media type changed and the new one could not be read.");
+                return VideoReadResult::Error;
+            }
+            if (!mf_sample::FollowsTypeChange(m_source.width, m_source.height, width, height)) {
+                LOG("Media Foundation video changed from " << m_source.width << "x" << m_source.height << " to "
+                    << width << "x" << height << " mid-stream; a decode is one geometry, so it ends here.");
+                return VideoReadResult::Error;
+            }
+            UINT32 strideU = 0;
+            m_source.stride = SUCCEEDED(changed->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideU))
+                ? static_cast<int32_t>(strideU) : static_cast<int32_t>(m_source.width * 4u);
+            LOG("Media Foundation video media type changed at the same " << width << "x" << height
+                << "; stride now " << m_source.stride << ".");
         }
         if (!sample) continue;
 
@@ -1683,26 +1703,29 @@ VideoReadResult VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         DWORD maxLen = 0, curLen = 0;
         if (FAILED(buffer->Lock(&data, &maxLen, &curLen))) continue;
 
-        const size_t dstStride = static_cast<size_t>(m_source.width) * 4u;
-        out.bgra.resize(dstStride * m_source.height);
-
-        int32_t stride = m_source.stride;
-        size_t absStride = static_cast<size_t>(std::abs(stride));
-        if (absStride * m_source.height > curLen) {
-            stride = static_cast<int32_t>(dstStride);
-            absStride = dstStride;
+        // Every byte the copy will read is accounted for before it reads one
+        // (MediaFoundationSamplePolicy.h): a buffer that holds less than the
+        // frame is a broken stream, not a picture to guess at.
+        const mf_sample::CopyPlan plan = mf_sample::PlanCopy(m_source.width, m_source.height, m_source.stride, curLen);
+        if (!plan.copy) {
+            buffer->Unlock();
+            LOG("Media Foundation sample holds " << curLen << " bytes, short of a " << m_source.width << "x"
+                << m_source.height << " frame at stride " << m_source.stride << "; refusing to read past it.");
+            return VideoReadResult::Error;
         }
 
-        const BYTE* firstRow = data;
-        if (stride < 0) firstRow = data + absStride * (m_source.height - 1);
+        const size_t dstStride = static_cast<size_t>(m_source.width) * 4u;
+        out.bgra.resize(dstStride * m_source.height);
+        const size_t absStride = static_cast<size_t>(std::abs(static_cast<int64_t>(plan.stride)));
+        const BYTE* firstRow = data + plan.firstRow;
 
         for (uint32_t y = 0; y < m_source.height; ++y) {
-            const BYTE* src = stride >= 0 ? firstRow + absStride * y : firstRow - absStride * y;
-            memcpy(out.bgra.data() + dstStride * y, src, std::min(dstStride, absStride));
+            const BYTE* src = plan.stride >= 0 ? firstRow + absStride * y : firstRow - absStride * y;
+            memcpy(out.bgra.data() + dstStride * y, src, plan.rowBytes);
             // `out` can arrive holding a recycled frame, and resize() keeps its
             // bytes: a row the sample does not fully cover is cleared rather
             // than left showing the previous picture.
-            if (absStride < dstStride) memset(out.bgra.data() + dstStride * y + absStride, 0, dstStride - absStride);
+            if (plan.rowBytes < dstStride) memset(out.bgra.data() + dstStride * y + plan.rowBytes, 0, dstStride - plan.rowBytes);
         }
         buffer->Unlock();
 

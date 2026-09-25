@@ -46,6 +46,7 @@
 #include "RenderCommandLine.h"
 #include "FrameResample.h"
 #include "UntaggedColorPolicy.h"
+#include "MediaFoundationSamplePolicy.h"
 #include "HdrPolicy.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
@@ -5721,6 +5722,77 @@ void untagged_hd_video_decodes_as_bt709_and_only_it_test()
     CHECK(!UntaggedSourceDecodesAsBt709(none, 1920, 1080, true));   // photo or GIF
     CHECK(std::string_view(UntaggedColorIdentityTerm(false)).empty());
     CHECK(std::string_view(UntaggedColorIdentityTerm(true)) == "|untagged-hd-bt709-v1");
+}
+
+// The Media Foundation copy reads only bytes the locked buffer holds. The
+// resolution-drop case is the one that used to walk 1080 rows of 7680 bytes
+// through a buffer holding a 1280x720 frame.
+void media_foundation_copy_never_reads_past_the_sample_test()
+{
+    using namespace mf_sample;
+    // Exact fit, top-down.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, 16, 48);
+        CHECK(plan.copy);
+        CHECK_EQ(int32_t{16}, plan.stride);
+        CHECK_EQ(size_t{0}, plan.firstRow);
+        CHECK_EQ(size_t{16}, plan.rowBytes);
+        CHECK(!PlanCopy(4, 3, 16, 47).copy);
+    }
+    // Padded rows: the last row needs only its pixels, not its padding.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, 20, 20 * 2 + 16);
+        CHECK(plan.copy);
+        CHECK_EQ(int32_t{20}, plan.stride);
+        CHECK_EQ(size_t{16}, plan.rowBytes);
+    }
+    // Bottom-up: the walk starts at the last row in the buffer and reads back
+    // to the first, so it reads exactly as far as a top-down walk.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, -16, 48);
+        CHECK(plan.copy);
+        CHECK_EQ(int32_t{-16}, plan.stride);
+        CHECK_EQ(size_t{32}, plan.firstRow);
+        CHECK_EQ(size_t{16}, plan.rowBytes);
+        CHECK(!PlanCopy(4, 3, -16, 47).copy);
+    }
+    // A declared stride the buffer cannot hold falls back to packed rows, as it
+    // always did - and only when the packed rows fit.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, 32, 48);
+        CHECK(plan.copy);
+        CHECK_EQ(int32_t{16}, plan.stride);
+        CHECK_EQ(size_t{0}, plan.firstRow);
+        const CopyPlan bottomUp = PlanCopy(4, 3, -32, 48);
+        CHECK(bottomUp.copy);
+        CHECK_EQ(int32_t{16}, bottomUp.stride);
+        CHECK(!PlanCopy(4, 3, 32, 47).copy);
+        CHECK(!PlanCopy(4, 3, -32, 47).copy);
+    }
+    // A stride narrower than a row copies what the row holds; the caller
+    // clears the rest of the row.
+    {
+        const CopyPlan plan = PlanCopy(4, 3, 8, 24);
+        CHECK(plan.copy);
+        CHECK_EQ(size_t{8}, plan.rowBytes);
+    }
+    // No stride stated reads packed rows.
+    CHECK(PlanCopy(4, 3, 0, 48).copy);
+    CHECK(!PlanCopy(4, 3, 0, 47).copy);
+    // The resolution drop: opened at 1920x1080, handed a 1280x720 frame.
+    CHECK(!PlanCopy(1920, 1080, 7680, size_t{1280} * 720 * 4).copy);
+    CHECK(!PlanCopy(1920, 1080, -7680, size_t{1280} * 720 * 4).copy);
+    CHECK(!PlanCopy(1920, 1080, 5120, size_t{1280} * 720 * 4).copy);
+    CHECK(PlanCopy(1920, 1080, 7680, size_t{1920} * 1080 * 4).copy);
+    // Nothing to copy, and a stride with no positive twin.
+    CHECK(!PlanCopy(0, 1080, 7680, size_t{1} << 30).copy);
+    CHECK(!PlanCopy(1920, 0, 7680, size_t{1} << 30).copy);
+    CHECK(PlanCopy(4, 3, INT32_MIN, 48).copy);
+    CHECK_EQ(int32_t{16}, PlanCopy(4, 3, INT32_MIN, 48).stride);
+    // A type change is followed at the same size and ends the decode at another.
+    CHECK(FollowsTypeChange(1920, 1080, 1920, 1080));
+    CHECK(!FollowsTypeChange(1920, 1080, 1280, 720));
+    CHECK(!FollowsTypeChange(1920, 1080, 1080, 1920));
 }
 
 // An HDR source is tone mapped to SDR for a peak fixed per source from its static
@@ -14639,6 +14711,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
     TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),
     TEST_CASE(untagged_hd_video_decodes_as_bt709_and_only_it_test),
+    TEST_CASE(media_foundation_copy_never_reads_past_the_sample_test),
     TEST_CASE(hdr_tone_map_integer_path_follows_the_curve_test),
     TEST_CASE(hdr_sources_tone_map_for_a_static_peak_test),
     TEST_CASE(one_step_of_the_frame_grid_is_always_work_test),
