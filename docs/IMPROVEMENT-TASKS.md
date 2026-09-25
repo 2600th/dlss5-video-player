@@ -8,7 +8,7 @@ lands, delete it from this file in the same change.
 
 **IDs are never reused.** Source comments cite them (`P2.8`, `P3.7`), so a
 new task takes the next free number in its tier even when lower numbers are
-free. Next free: **P0.19, P1.34, P2.43, P3.14**.
+free. Next free: **P0.19, P1.35, P2.43, P3.14**.
 
 Sources: three code audits (neural helper/cache/runtime; decode, playback,
 audio and export; app shell, build, CI and release) and two web surveys of the
@@ -57,14 +57,7 @@ skips** on an RTX 4080 SUPER, 175 s; `site/test.ps1` 31 pass.
 | ID | Task | Effort | Impact | |
 | --- | --- | :---: | --- | :---: |
 | **P0** | **Fix before the next release** | | | |
-| [P0.11](#p011) | Tool lookup can run `ffprobe`/`ffmpeg` from the current directory | S | Pipeline, Release | ✅ |
-| [P0.12](#p012) | Rotated (portrait phone) video plays and exports sideways | S-M | Player, Pipeline | 🧪 |
-| [P0.13](#p013) | Media Foundation decode over-reads when resolution changes | S | Player | ✅ |
-| [P0.14](#p014) | A Preflight frame in a resident job reads an empty result | S | Pipeline | ✅ |
-| [P0.15](#p015) | Stage export and `--render` skip the runtime lock | S-M | Pipeline | ✅ |
-| [P0.16](#p016) | Whole-file export fails on common subtitle codecs | S | Pipeline | ✅ |
-| [P0.17](#p017) | Shipped zips miss required license texts | S | Release | ✅ |
-| [P0.18](#p018) | VC++ runtime is not shipped or documented | S | Release | ✅ |
+| | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
 | [P1.24](#p124) | A retiring resident helper accepts a job, which then fails | M | Pipeline | 🔍 |
 | [P1.25](#p125) | Audio that starts after the video plays early | S | Player | 🧪 |
@@ -76,6 +69,7 @@ skips** on an RTX 4080 SUPER, 175 s; `site/test.ps1` 31 pass.
 | [P1.31](#p131) | GPU and audio tests never run in CI | M | Release | 🧪 |
 | [P1.32](#p132) | Refresh `RELATED_PROJECTS.md` | S | Docs | |
 | [P1.33](#p133) | Small hardening and doc drift (checklist) | S | All | 🔍 |
+| [P1.34](#p134) | FFmpeg source availability and bundled-library notices | S-M | Release | |
 | **P2** | **High-value features** | | | |
 | | _Comparison and review_ | | | |
 | [P2.27](#p227) | Save a comparison clip | S-M | Player, Pipeline | |
@@ -113,156 +107,7 @@ skips** on an RTX 4080 SUPER, 175 s; `site/test.ps1` 31 pass.
 
 # P0 — Fix before the next release
 
-<a id="p011"></a>
-### P0.11 · Tool lookup can run `ffprobe`/`ffmpeg` from the current directory
-
-`S` · **Pipeline, Release** · ✅ · _security_
-
-- **Problem.** With no packaged copy, the lookup falls back to
-  `SearchPathW(nullptr, ...)`, which searches the **current directory before
-  PATH**. The core zip ships no FFmpeg, so every open takes this path. Opening
-  a video from a folder that also holds a planted `ffprobe.exe` (an extracted
-  download, a share, or a shell there) runs it. There is no signature or
-  handle check, unlike yt-dlp.
-- **Where.** `MediaTools.h:54-61`. Callers: `VideoDecoder.cpp:213, 288`,
-  `AudioPlayer.cpp:33`, `SubtitleOverlay.cpp:98, 103`.
-- **Fix.** Walk `%PATH%` yourself, absolute entries only, never the current
-  directory (`SetSearchPathMode` alone still leaves it in the order). Or drop
-  the fallback outside the development layout. Correct `SECURITY.md:6-7`,
-  which says only "falls back to an FFmpeg on PATH".
-- **Test.** A planted tool in the current directory is not found.
-
-<a id="p012"></a>
-### P0.12 · Rotated (portrait phone) video plays and exports sideways
-
-`S-M` · **Player, Pipeline** · 🧪 · _reproduced on FFmpeg 9.0.1; the second
-research pass flagged it independently_
-
-- **Problem.** Geometry is the coded `width,height`; rotation is read only
-  for stills. The CUDA path outputs the unrotated picture (sideways, md5
-  identical to the unrotated clip); the software path autorotates into the
-  probed size and shows a sheared picture. The sideways render is what gets
-  cached and exported, with no rotation tag.
-- **Where.** `VideoDecoder.cpp:446, 454` (probe), `:530-552` (stills only),
-  `:921, 932` (`scale_cuda`).
-- **Fix.** Probe `stream_side_data=rotation`. Pass `-noautorotate` and apply
-  `transpose`/`transpose_cuda` with swapped geometry (check the bundled FFmpeg
-  has `transpose_cuda`), or swap width and height as the still branch does.
-  Rotation becomes a cache-key term. NeuralScreen v2.1.4 fixed the same bug.
-- **Test.** A `rotation=90` fixture through both decode paths and export.
-
-<a id="p013"></a>
-### P0.13 · Media Foundation decode over-reads when resolution changes
-
-`S` · **Player** · ✅ · _memory safety_
-
-- **Problem.** `MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED` is logged and
-  skipped; size and stride are never re-read. The stride fallback never
-  checks `dstStride * height <= curLen`, so a smaller frame is copied past
-  its end (crash or stray heap bytes). Reached whenever FFmpeg is absent (the
-  core zip) or fails to open the file.
-- **Where.** `VideoDecoder.cpp:1673-1701`.
-- **Fix.** On a type change re-query `MF_MT_FRAME_SIZE` and
-  `MF_MT_DEFAULT_STRIDE` and treat a size change as an error. Always require
-  `absStride * height <= curLen` before copying.
-- **Test.** A Media Foundation stream that changes resolution mid-file.
-
-<a id="p014"></a>
-### P0.14 · A Preflight frame in a resident job reads an empty result
-
-`S` · **Pipeline** · ✅ · _helper trust boundary_
-
-- **Problem.** The metadata reader accepts `WireKind::Preflight` in any mode.
-  In resident mode the pump stops, and sets `completed`, on
-  `PreflightComplete()`; `AcceptResult` then copies `*result_` out of an
-  empty `std::optional` (UB, likely a crash). Only a corrupted or hostile
-  helper sends this, but that is exactly the boundary the decoders defend.
-  The single-shot path is safe.
-- **Where.** `NeuralWorker.cpp:399-404` (accepts), `:749` and `:781` (stop
-  and `completed`), `:1841-1842` → `:873` → `:335` (deref).
-- **Fix.** Give the reader a mode (job or preflight) and treat the other
-  terminal kind as malformed. For jobs, `completed` is `reader.Complete()`
-  alone.
-- **Test.** A job answered with one well-formed Preflight frame is
-  `Malformed`, not accepted. `DecodeMetadataStream` never reaches
-  `AcceptResult` today.
-
-<a id="p015"></a>
-### P0.15 · Stage export and `--render` skip the runtime lock
-
-`S-M` · **Pipeline** · ✅ · _breaks the documented "mismatch is refused"_
-
-- **Problem.** `RunStageExport` takes the lease and calls `RunNeuralWorker`
-  without `VerifyRuntimeLock`, `RuntimeLockSatisfied` or
-  `FindUnlockedRuntimeModules`. A drifted runtime that live rendering refuses
-  still produces an export presented as neural. It also leaves an idle
-  resident helper holding its device and feature-18 workset, so two sessions
-  share one GPU (VRAM risk), and the export's proxy log rotates to
-  `ReShade.log1` (the evidence reader may pick the wrong log: plausible).
-- **Where.** `main.cpp:1775-1795`. The live path does it at `:2411-2420`,
-  `:2510-2514` and releases the helper at `:2542-2547`.
-- **Fix.** The same lock and module checks before the export's
-  `RunNeuralWorker`; release the resident helper first (a callback through
-  `StageExportJob`).
-- **Test.** `--render` against a tampered lock is refused.
-
-<a id="p016"></a>
-### P0.16 · Whole-file export fails on common subtitle codecs
-
-`S` · **Pipeline** · ✅
-
-- **Problem.** "Save converted video" maps `1:s?` blindly. MKV uses
-  `-c copy`, which fails on MP4/MOV timed text (`mov_text`, reproduced). MP4
-  uses `-c:s mov_text`, which cannot encode PGS or DVD bitmap subtitles, so
-  any Blu-ray, DVD or DVB rip fails. The frame-generation mux shares the path.
-  The ranged and stage exports already filter with `ExportStreamActionFor`.
-- **Where.** `MediaPipeline.cpp:718-721, 740-741, 1410`.
-- **Fix.** Build the mapping from `ListMediaStreams` plus
-  `ExportStreamActionFor`, as `BuildStageExportMuxArguments` does.
-- **Test.** `CachedExportTests`: PGS to MP4 and `mov_text` to MKV.
-
-<a id="p017"></a>
-### P0.17 · Shipped zips miss required license texts
-
-`S` · **Release** · ✅ DLSS SDK · 🔍 the rest
-
-- **Problem.**
-  - **Complete zip, DLSS SDK:** ships `nvngx_dlss.dll`/`nvngx_dlssg.dll` but
-    not `THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt` (the core zip has it). The
-    only top-level license is MIT, which sits badly with DLSS SDK license
-    §1.e/§2.c.
-  - **Both zips, NVENC header:** `nvEncodeAPI.h` is compiled in, but
-    `nvidia-video-codec-MIT.txt` is not shipped, though `THIRD_PARTY.md:96-99`
-    points to it.
-  - **Complete zip, FFmpeg (GPLv3):** only a URL to the license. No GPL text
-    (§4) and no Corresponding Source or written offer for the exact 9.0.1
-    essentials build (§6).
-  - **Complete zip, ReShade (BSD-3) and RenoDX (MIT):** repository URLs only;
-    both require the notice text.
-- **Where.** `tools/package_release.ps1:221` (core) vs `:239-285` (complete);
-  allowlists `tools/verify_package.ps1:41-76`;
-  `THIRD_PARTY_LICENSES/ffmpeg.txt:18-19`, `experimental-runtime.txt`.
-- **Fix.** Add the files to both packager lists and allowlists. Ship the
-  GPLv3 text plus a source archive or a pinned source link.
-- **Test.** `verify_package.ps1` requires each notice for each shipped binary.
-
-<a id="p018"></a>
-### P0.18 · VC++ runtime is not shipped or documented
-
-`S` · **Release** · ✅ dynamic CRT, no docs · 🔍 old-redist crash plausible
-
-- **Problem.** Built with the DLL CRT on toolset 14.44; the exes import
-  `MSVCP140.dll`, `MSVCP140_ATOMIC_WAIT.dll` and `VCRUNTIME140(_1).dll`.
-  Neither zip carries them and no doc mentions the redistributable. A clean
-  machine will not start, before any log exists. A pre-14.40 system redist can
-  crash in `std::mutex::lock` (the constexpr-mutex change) on the first log
-  line. CI runners always have the newest redist, so CI cannot see it.
-- **Where.** `CMakeLists.txt:25`, `CMakePresets.json:11`,
-  `tools/verify_package.ps1:41-76`.
-- **Fix.** Link the CRT statically (`MultiThreaded`) for the two shipped exes,
-  or document the requirement in README "First run" and check at startup.
-  Consider `_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR`.
-- **Test.** Run both packages in Windows Sandbox.
+Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 
 ---
 
@@ -461,6 +306,46 @@ research pass flagged it independently_
 - [ ] The release workflow does not run the ASan/analyze `quality` job.
 - [ ] `SECURITY.md:23` still says "RTX 40 compatibility modification"; the
       locked runtime is the universal SF-v2 build.
+- [ ] "Save converted video" returns a note when it leaves subtitles out of
+      an MP4, but the success dialog never shows it (the stage export only
+      logs its note).
+- [ ] Whole-file MP4 export still re-encodes every audio track to AAC 192k;
+      the stage export copies audio MP4 can hold (`AppendSourceStreams`,
+      `encodeAudio`). One argument to align them.
+- [ ] `docs/USAGE.md` lists `--render` refusals as the dialog's "plus a busy
+      neural runtime or a missing one"; a drifted runtime or a stray module
+      now refuses too (exit code 3).
+- [ ] A Super Resolution-only stage export is not pre-checked against the
+      runtime lock (the helper still refuses stray modules at startup).
+- [ ] The Media Foundation packed-row fallback walks a negative-stride
+      (bottom-up) frame top-down (`MediaFoundationSamplePolicy.h`); no fixture
+      proves which is right.
+- [ ] Nothing tests that the export dialog wires `releaseResidentHelper`;
+      the ordering is tested through `RunStageExport` only.
+
+---
+
+<a id="p134"></a>
+### P1.34 · FFmpeg source availability and bundled-library notices
+
+`S-M` · **Release** · _left over from P0.17_
+
+**Blocker:** a licensing decision only the owner can make.
+
+- **Problem.** The complete zip now ships the GPLv3 text and
+  `THIRD_PARTY_LICENSES/ffmpeg.txt` points at the FFmpeg commit and each
+  statically linked library's upstream. GPLv3 §6(d) still leaves the
+  distributor responsible for the source staying available, and the build
+  scripts are part of it; gyan.dev's archive carries only its README, which
+  gives no x264 commit and no versions for zlib, bzip2, lzma or GnuTLS's
+  dependencies. Permissive libraries inside `ffmpeg.exe` (aom, vpx, opus,
+  webp, ...) also need their notices shipped.
+- **Options.** Host the exact source archives and build scripts beside the
+  complete zip; make a §6(b) written offer; or drop FFmpeg from the complete
+  zip.
+- **Fix.** Whichever is chosen, collect the permissive notices into
+  `THIRD_PARTY_LICENSES/` and add them to both packager lists and
+  allowlists.
 
 ---
 
@@ -866,7 +751,8 @@ these, and do not suggest them again.**
 - **No reachable command injection:** no `cmd.exe`, `system()` or `_popen`.
   `lpApplicationName` is always a handle-verified absolute path. yt-dlp runs
   with `--no-config --no-plugin-dirs`, and URLs are allowlisted and filtered.
-  (Which `ffprobe` gets resolved is a separate gap: P0.11.)
+  Playback's FFmpeg fallback walks only absolute `PATH` entries, never the
+  current directory.
 - **Helper TOCTOU is closed:** `FILE_FLAG_OPEN_REPARSE_POINT`, canonicalised
   through the same handle, which stays open with `FILE_SHARE_READ` across the
   whole resolve.
