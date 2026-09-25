@@ -2650,6 +2650,91 @@ struct PlayerAppTestAccess {
         std::filesystem::remove(avi);
     }
 
+    // P0.15: a stage export's neural pass is refused on exactly what refuses a
+    // live render - a runtime that drifted from the lock, or a module the lock
+    // does not name - before its settings are written or a helper is started.
+    // It used to take the lease, rewrite ReShade.ini and run the helper, so a
+    // runtime the live path refuses still produced an export called neural.
+    // And whatever the pass, a player's idle resident helper is released before
+    // the export's own helper starts in the same runtime directory.
+    static void stage_export_refuses_the_runtime_a_live_render_refuses_test()
+    {
+        const auto root = std::filesystem::temp_directory_path() /
+                          (L"StageExportRuntime-" + std::to_wstring(GetCurrentProcessId()));
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        const auto runtime = root / L"neural-runtime";
+        REQUIRE(std::filesystem::create_directories(runtime));
+        const auto write = [](const std::filesystem::path& path, std::string_view bytes) {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        };
+        const auto read = [](const std::filesystem::path& path) {
+            std::ifstream in(path, std::ios::binary);
+            return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+        };
+        constexpr std::string_view ini = "[GENERAL]\nPresetPath=.\\ReShadePreset.ini\n";
+        write(runtime / L"ReShade.ini", ini);
+
+        StageExportJob job;
+        job.plan.valid = true;
+        job.plan.workerStage = true;
+        job.plan.requireNeural = true;
+        job.plan.outputWidth = 64;
+        job.plan.outputHeight = 48;
+        job.source = root / L"source.mkv";
+        job.destination = root / L"export.mkv";
+        job.scratch = root;
+        job.helpers = root;
+        job.sourceWidth = 64;
+        job.sourceHeight = 48;
+        job.fps = 30.0;
+        job.duration = 1.0;
+        std::vector<std::string> events;
+        job.releaseResidentHelper = [&] { events.emplace_back("release"); };
+        const auto progress = [&](const StageExportUpdate& update) {
+            if (update.passKey) events.emplace_back("pass");
+        };
+
+        // Nothing here verifies against the embedded lock: every file it names
+        // is missing, which the live path refuses in these words.
+        const StageExportOutcome drifted = RunStageExport(job, {}, progress);
+        CHECK(drifted.status == StageExportStatus::Refused);
+        CHECK(drifted.detail.starts_with(L"The neural runtime does not match the locked stack: "));
+        CHECK(events.empty());
+        CHECK(read(runtime / L"ReShade.ini") == ini);
+
+        // The module half, against a lock this directory satisfies.
+        constexpr std::string_view locked = "locked module bytes";
+        write(runtime / L"dxgi.dll", locked);
+        RuntimeLock lock;
+        lock.schemaVersion = 1;
+        lock.entries = {RuntimeLockEntry{L"dxgi.dll", locked.size(), Sha256Bytes(locked).value_or(std::string{}), L""}};
+        CHECK(StageExportRuntimeRefusal(runtime, lock, {}).empty());
+        write(runtime / L"Stray.addon64", "x");
+        CHECK(StageExportRuntimeRefusal(runtime, lock, {}) ==
+              runtime_modules::UnlockedModulesRefusal({L"Stray.addon64"}));
+        // The lock is judged first, as the live path judges it.
+        write(runtime / L"dxgi.dll", "a different build");
+        CHECK(StageExportRuntimeRefusal(runtime, lock, {}).starts_with(
+            L"The neural runtime does not match the locked stack: dxgi.dll"));
+        std::filesystem::remove(runtime / L"Stray.addon64", ignored);
+
+        // A Super Resolution-only pass is not held to the neural lock, but it
+        // still runs a helper in this runtime: the resident one is released
+        // first, exactly once, before the pass begins. The helper itself is
+        // absent here, which is where this export ends.
+        job.plan.requireNeural = false;
+        job.plan.outputWidth = 128;
+        job.plan.outputHeight = 96;
+        const StageExportOutcome upscaled = RunStageExport(job, {}, progress);
+        CHECK(upscaled.status == StageExportStatus::Failed);
+        CHECK(upscaled.detail == L"The isolated neural helper executable is unavailable.");
+        CHECK((events == std::vector<std::string>{"release", "pass"}));
+
+        std::filesystem::remove_all(root, ignored);
+    }
+
     static constexpr ::test_support::TestCase kGpuCases[] = {
         UI_CASE(network_prepared_pair_agrees_on_nv12_test),
         UI_CASE(network_prepared_falls_back_to_bgra_off_bt709_test),
@@ -2712,6 +2797,7 @@ struct PlayerAppTestAccess {
         UI_CASE(playback_frames_are_shared_not_copied_test),
         UI_CASE(paused_frame_presents_on_invalidation_test),
         UI_CASE(neural_job_steps_run_in_order_without_a_runtime_test),
+        UI_CASE(stage_export_refuses_the_runtime_a_live_render_refuses_test),
         UI_CASE(window_and_menu_teardown_test),
         UI_CASE(fullscreen_lifecycle_test),
     };

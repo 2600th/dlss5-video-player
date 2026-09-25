@@ -1670,6 +1670,36 @@ static std::vector<NeuralAddonOverride> RenderAddonOverrides(const std::filesyst
     return overrides;
 }
 
+// ---- What refuses a neural pass before a helper is asked for one --------
+//
+// Shared by the live render (NeuralJobRun) and the stage export, in the words
+// the live path has always used, so a runtime one of them refuses is never
+// rendered with by the other. The export used to check neither: it wrote the
+// settings and ran the helper against whatever the directory held, and a
+// drifted runtime the live path refused still produced a file called neural.
+
+// Empty when every locked file matches.
+static std::wstring RuntimeLockRefusal(std::span<const RuntimeLockCheck> checks){
+    if(RuntimeLockSatisfied(checks))return {};
+    return L"The neural runtime does not match the locked stack: "+DescribeRuntimeLockDrift(checks);
+}
+
+// Empty when the directory holds no module the lock does not name, and when it
+// cannot be listed: the helper refuses that itself, with its own reason.
+static std::wstring UnlockedRuntimeModulesRefusal(const std::filesystem::path& runtimeDirectory,const RuntimeLock& lock){
+    const auto unlocked=FindUnlockedRuntimeModules(runtimeDirectory,lock);
+    return unlocked?runtime_modules::UnlockedModulesRefusal(*unlocked):std::wstring{};
+}
+
+// Both, the lock first, which is the order a live render meets them in. Empty
+// when neither refuses. A cancelled check leaves hashes unverified and so
+// reads as drift; the caller asks its stop token before believing it.
+static std::wstring StageExportRuntimeRefusal(const std::filesystem::path& runtimeDirectory,const RuntimeLock& lock,std::stop_token stop){
+    const auto checks=VerifyRuntimeLock(runtimeDirectory,lock,stop);
+    if(std::wstring refusal=RuntimeLockRefusal(checks);!refusal.empty())return refusal;
+    return UnlockedRuntimeModulesRefusal(runtimeDirectory,lock);
+}
+
 // ---- Export with DLSS stages, the passes themselves --------------------
 //
 // Shared by the dialog and by `--render`, so a script gets the file the dialog
@@ -1712,6 +1742,10 @@ struct StageExportJob {
     EncoderQuality quality{EncoderQuality::Standard};
     bool sourceDeband{false};
     bool suppliedExposure{false};
+    // Ends the player's idle resident helper before this export's helper
+    // starts in the same runtime directory. Empty for `--render`, which runs in
+    // a process of its own and has none.
+    std::function<void()> releaseResidentHelper;
 };
 
 // `passKey` null is the end of the passes, when the finished file is moved
@@ -1773,12 +1807,32 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
             ?(plan.outputWidth!=job.sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
             :L"export.progress.pass_sr";
         const auto runtimeDirectory=job.helpers/L"neural-runtime";
+        // A neural pass is refused on what refuses a live render, before
+        // anything is written: a file that drifted from the lock, or a module
+        // the lock does not name beside feature 18. A Super Resolution-only
+        // pass is not presented as neural, and the helper still refuses a
+        // stray module at its own startup.
+        if(plan.requireNeural){
+            const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,EmbeddedRuntimeLock(),stop);
+            if(stop.stop_requested())return {StageExportStatus::Cancelled,{}};
+            if(!refusal.empty()){
+                LOG("Stage export refused before the helper: "<<WideToUtf8(refusal));
+                return {StageExportStatus::Refused,refusal};
+            }
+        }
         // One writer at a time, exactly as a live render: the settings written
         // below and the helper's proxy log are shared per runtime directory, and
         // `--render` can run beside a player that is rendering.
         NeuralRuntimeLease runtimeLease(runtimeDirectory);
         if(!runtimeLease.Held())
             return {StageExportStatus::Refused,L"Another neural render is using the experimental runtime. Wait for it to finish, then try again."};
+        // An idle resident helper from an earlier live job still holds the
+        // device, its feature-18 workset and the runtime's ReShade.log. A
+        // second helper beside it risks the VRAM a small card does not have,
+        // and moves the proxy's log to ReShade.log1 where the evidence reader
+        // may not look. It goes first, as it does before a preflight probe -
+        // under the lease, which every job thread that uses it also holds.
+        if(job.releaseResidentHelper)job.releaseResidentHelper();
         // The add-on state the job needs, with the neural settings when it runs
         // the model. The helper checks the same state itself and relaunches when
         // it had to change it; writing it here first saves that relaunch.
@@ -2417,7 +2471,7 @@ private:
         // press can be pinned on the step that took the time.
         LOG("Neural runtime identified: digest "<<std::chrono::duration_cast<std::chrono::milliseconds>(lockStarted-runtimeStarted).count()
             <<" ms, lock check "<<std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-lockStarted).count()<<" ms.");
-        if(!RuntimeLockSatisfied(lockChecks_)){const std::wstring drift=DescribeRuntimeLockDrift(lockChecks_);LOG("Neural runtime lock drift; render refused: "<<WideToUtf8(drift));completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"The neural runtime does not match the locked stack: "+drift;return false;}
+        if(std::wstring refusal=RuntimeLockRefusal(lockChecks_);!refusal.empty()){LOG("Neural runtime lock drift; render refused: "<<WideToUtf8(DescribeRuntimeLockDrift(lockChecks_)));completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=std::move(refusal);return false;}
         // One writer at a time: the settings written below and the
         // helper's proxy log are shared per runtime directory, so a
         // second player instance must not interleave with this job.
@@ -2507,8 +2561,8 @@ private:
         // listed again on every attempt, so removing the file is all
         // it takes. A directory that cannot be listed is left to the
         // helper, which refuses it with its own reason.
-        if(const auto unlocked=FindUnlockedRuntimeModules(runtimeDirectory_,EmbeddedRuntimeLock());unlocked&&!unlocked->empty()){
-            completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=runtime_modules::UnlockedModulesRefusal(*unlocked);
+        if(std::wstring refusal=UnlockedRuntimeModulesRefusal(runtimeDirectory_,EmbeddedRuntimeLock());!refusal.empty()){
+            completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=std::move(refusal);
             LOG("Neural render refused before the helper: "<<WideToUtf8(completion_->result.detail));
             return false;
         }
@@ -6683,6 +6737,11 @@ private:
         job.upscalingHistory=m_upscalingHistory;
         job.captureDither=m_captureDither;job.quality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
         job.holdDuplicates=m_frameGenHoldDuplicates;
+        // Called on the export thread, which is safe for a helper that is not
+        // thread-safe: RunStageExport calls it only while holding the runtime
+        // lease, and a neural job only touches the helper while holding it too.
+        // The export thread is joined before this player is destroyed.
+        job.releaseResidentHelper=[this]{m_residentHelper.Release();};
         HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{
             m_exportWorker=std::jthread([=](std::stop_token stop){
