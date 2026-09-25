@@ -22,7 +22,18 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+# The C and C++ runtimes are linked statically (/MT, /MTd for Debug). With the
+# DLL runtime both shipped executables imported MSVCP140, MSVCP140_ATOMIC_WAIT
+# and VCRUNTIME140(_1), which no package carried and no document asked for: a
+# clean machine could not start the player at all, before it had written a log,
+# and a Visual C++ Redistributable older than 14.40 crashes in
+# std::mutex::lock at the first log line (the constexpr mutex constructor of
+# MSVC 17.10). CI runners always have the newest one, so no test could see it.
+# Every module the executables talk to - NGX, NVENC, NVOF, ReShade, Streamline
+# - is its own image behind a C API that passes no CRT object across, so a
+# private runtime per image is safe. ShippedRuntimeImports below fails if
+# either shipped executable imports a runtime DLL again.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # A single-config generator with no CMAKE_BUILD_TYPE compiles with no /O2, no
 # /Ob2 and no NDEBUG - asserts live, every inline call real - and
@@ -75,12 +86,14 @@ if(NOT EXISTS "${DLSS_SDK}/include/nvsdk_ngx.h")
 endif()
 
 set(DLSS_LIB_DIR "${DLSS_SDK}/lib/Windows_x86_64/x64")
-# NGX ships one import library per CRT: nvsdk_ngx_d.lib is built against the release
-# CRT and nvsdk_ngx_d_dbg.lib against the debug CRT at _ITERATOR_DEBUG_LEVEL 2, which
-# is what CMAKE_MSVC_RUNTIME_LIBRARY above gives a Debug build. Linking the release
-# one there fails with LNK2038 on every NGX target, so the choice is made once here
-# and every target that names NGX links this variable.
-set(DLSS_NGX_LIBRARY "$<IF:$<CONFIG:Debug>,nvsdk_ngx_d_dbg,nvsdk_ngx_d>")
+# NGX ships one library per CRT: the _s pair is built against the static runtime
+# that CMAKE_MSVC_RUNTIME_LIBRARY above selects, the _d pair against the DLL one,
+# and each pair has a _dbg build against the debug CRT at _ITERATOR_DEBUG_LEVEL 2,
+# which is what a Debug build here compiles with. Linking a library of the other
+# CRT fails with LNK2038 (RuntimeLibrary or _ITERATOR_DEBUG_LEVEL mismatch) or
+# pulls a second CRT in under LNK4098, so the choice is made once here and every
+# target that names NGX links this variable.
+set(DLSS_NGX_LIBRARY "$<IF:$<CONFIG:Debug>,nvsdk_ngx_s_dbg,nvsdk_ngx_s>")
 set(DLSS_RUNTIME_REL "${DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
 set(DLSS_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlss.dll")
 # The Frame Generation snippet from the same pinned SDK. NGX refuses feature 15
@@ -766,6 +779,27 @@ if(BUILD_TESTING)
     add_executable(ReleaseApiCompileTests tests/ReleaseApiCompileTests.cpp)
     target_link_libraries(ReleaseApiCompileTests PRIVATE dlss_video_player_common)
     add_test(NAME ReleaseApiCompileTests COMMAND ReleaseApiCompileTests)
+
+    # The two executables that ship link the runtime statically (see
+    # CMAKE_MSVC_RUNTIME_LIBRARY at the top), because no package carries the
+    # Visual C++ Redistributable. This reads their import tables with the
+    # toolset's own dumpbin and fails on any C or C++ runtime DLL, which is the
+    # one place a flag change, an import library of the other CRT or a new
+    # dependency would show before a user's machine did. Not under ASan, whose
+    # instrumented executables load the sanitizer runtime by design and are
+    # never shipped.
+    if(NOT DLSS_VIDEO_PLAYER_ASAN)
+        get_filename_component(msvc_tool_directory "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        find_program(DLSS_VIDEO_PLAYER_DUMPBIN dumpbin.exe HINTS "${msvc_tool_directory}" NO_DEFAULT_PATH)
+        if(NOT DLSS_VIDEO_PLAYER_DUMPBIN)
+            message(FATAL_ERROR "dumpbin.exe is not beside ${CMAKE_CXX_COMPILER}; ShippedRuntimeImports needs it.")
+        endif()
+        add_test(NAME ShippedRuntimeImports COMMAND "${CMAKE_COMMAND}"
+            "-DDUMPBIN=${DLSS_VIDEO_PLAYER_DUMPBIN}"
+            "-DBINARIES=$<TARGET_FILE:DLSSVideoPlayer>|$<TARGET_FILE:NeuralWorker>"
+            -P "${CMAKE_SOURCE_DIR}/tests/ShippedRuntimeImports.cmake")
+        set_tests_properties(ShippedRuntimeImports PROPERTIES TIMEOUT 60)
+    endif()
 
     dlss_video_player_test(NeuralPrerenderTests tests/NeuralPrerenderTests.cpp tests/TestSupport.h)
     # The job's stage logging has always run here, and Log opens

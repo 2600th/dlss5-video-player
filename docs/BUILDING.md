@@ -83,11 +83,12 @@ Launch `build-upscaling/Release/DLSSVideoPlayer.exe`. Its neural worker is built
 as `build-upscaling/Release/neural-runtime/NeuralWorker.exe`. Without the
 experimental runtime, a source build uses the native playback path.
 
-The thirteen portable suites cover recent history, settings/cache integrity,
+The fourteen portable suites cover recent history, settings/cache integrity,
 real-media export and cached comparison playback through the real decoders,
 runtime lock and worker protocols, runtime, upscaling and export policy, range selection,
 frame identity, update checks, the release API surface, prerender, playback and
-native UI regressions. Every test carries a time limit, and the real-media suite
+native UI regressions, and that neither shipped executable imports a Visual C++
+runtime DLL. Every test carries a time limit, and the real-media suite
 reports itself skipped rather than failed when FFmpeg is not staged.
 
 Sixteen more are registered under the `gpu` label and need an RTX card with the
@@ -286,7 +287,10 @@ experimental package is assembled locally, attached to the draft as
 the release published. A publish that failed can be re-run for the same tag
 from the Actions tab (`workflow_dispatch` with the tag as input).
 
-The two shipped executables are linked with `/DEBUG` and `/Brepro`: each has
+The two shipped executables link the C and C++ runtimes statically (`/MT`), so
+a package needs no Visual C++ Redistributable; `ShippedRuntimeImports` fails
+the build's tests if either imports a runtime DLL again. They are linked with
+`/DEBUG` and `/Brepro`: each has
 a PDB beside it in the build tree, for the minidumps the player and the worker
 write, and a clean rebuild from the same checkout path with the same toolset
 gives the same bytes. The PDBs are never packaged. CI keeps them as the
