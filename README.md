@@ -31,12 +31,12 @@ unscaled. [Four more, including one where the model makes the picture worse](doc
 
 ## Download
 
-**v0.26.0** (2026-09-25): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.26.0)
+**v0.26.1** (2026-09-25): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.26.1)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.26.0-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 327 MB |
-| `DLSSVideoPlayer-v0.26.0-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 35 MB |
+| `dlss5-video-player-v0.26.1-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 327 MB |
+| `DLSSVideoPlayer-v0.26.1-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
 
 Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run: it
 has no runtime.
@@ -47,8 +47,8 @@ The checksum shows the file arrived intact; the attestation shows this
 repository built it.
 
 ```sh
-sha256sum -c DLSSVideoPlayer-v0.26.0-core-win64.zip.sha256
-gh attestation verify DLSSVideoPlayer-v0.26.0-core-win64.zip --repo 2600th/dlss5-video-player
+sha256sum -c DLSSVideoPlayer-v0.26.1-core-win64.zip.sha256
+gh attestation verify DLSSVideoPlayer-v0.26.1-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
 Only the core zip has an attestation. CI can't fetch the neural runtime, so the
@@ -158,25 +158,19 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   `--out`, `--stages`, `--range` and the rest are in the
   [usage guide](docs/USAGE.md#from-the-command-line).
 
-## What's new in 0.26.0
+## What's new in 0.26.1
 
-**0.26.0** (2026-09-25). Compare views, NVIDIA's own upscaler to compare
-against, subtitles and HDR, and renders kept at the quality you choose.
+**0.26.1** (2026-09-25). Fixes from a full audit of 0.26.0.
 
-- **See what the model changed.** A compare bar with Split, Wipe, Difference,
-  Side by side and 2 × 2, a Mix slider, zoom to 8x, a loupe, a mask, and
-  **Save comparison image**.
-- **RTX VSR beside DLSS 5.** NVIDIA's own video upscaler as a view of its own
-  and in the 2 × 2 (complete download only).
-- **Subtitles and HDR.** Text and picture subtitles drawn over the render, and
-  HDR10/HLG sources tone mapped for the model.
-- **Render quality you choose.** Standard, High (10-bit) or Lossless, a render
-  report, a processing scale, and `--render` for the command line.
-- **Faster and steadier.** The first render starts in about half the time, and
-  live sessions drop far fewer frames.
-- **A start screen** with seven game trailers, a GPU check and recent videos.
+- **Portrait phone videos** play, render and export upright.
+- **Exports keep the subtitles** each format can hold instead of failing.
+- **Starts on any PC**, with no Visual C++ Redistributable to install.
+- **Safer:** FFmpeg is never run from the video's own folder, and exports refuse
+  a runtime that does not match the lock, as live rendering does.
 
-Earlier releases are in [CHANGELOG.md](CHANGELOG.md).
+Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.26.0 added the compare
+views, RTX VSR beside DLSS 5, subtitles, HDR, the render quality ladder and
+`--render`.
 
 ## Controls
 
@@ -255,7 +249,7 @@ not what every source will gain.
 - **Driver 610.47 or newer.** Older drivers refuse neural rendering on any card,
   and the player tells you up front. See
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
-- **Tested GPUs.** An RTX 4080 SUPER (on 0.26.0) and an RTX 5090 (on 0.20.0).
+- **Tested GPUs.** An RTX 4080 SUPER (on 0.26.1) and an RTX 5090 (on 0.20.0).
   RTX 20 and 30 series cards lack native FP8 and should be several times
   slower; nobody has tested one yet.
 - **Depth is estimated from the picture**, and so is motion on cards without

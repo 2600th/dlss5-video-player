@@ -7,6 +7,43 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## 0.26.1 - 2026-09-25
+
+Fixes from a full audit of 0.26.0. Renders of videos turned 180 degrees or
+mirrored are made again once; every other render is reused.
+
+### Fixed
+
+- **Portrait and rotated videos play, render and export upright.** A phone
+  clip filmed upright came out sideways, or sheared on the software decoder,
+  and the sideways render was what got cached and exported.
+- **Save converted video no longer fails on subtitles.** MP4 timed text becomes
+  SubRip in an MKV; picture subtitles (Blu-ray, DVD, DVB) and fonts are left out
+  of an MP4, and the export says how many. Frame generation's output had the
+  same failure.
+- **The player starts without the Visual C++ Redistributable**, and can no
+  longer crash at startup on a machine with an old one: the runtime is now
+  built into both executables.
+- **Export with DLSS stages and `--render` refuse a runtime that does not match
+  the lock**, or holds a module the lock does not name, as a live render always
+  has, and close the idle render helper before starting their own.
+- **A file whose resolution changes partway through** can no longer make the
+  fallback decoder read past its frame buffer.
+
+### Security
+
+- **FFmpeg is never run from the folder a video was opened from.** The core
+  download ships without FFmpeg and looks for one on `PATH`; it now looks only
+  in absolute `PATH` folders, never the current directory.
+- **A render helper that answers with the wrong kind of message is refused**
+  rather than read, which could crash the player.
+
+### Packages
+
+- The complete download now carries the full licence texts it needs: FFmpeg's
+  GPLv3, ReShade, RenoDX, Streamline, the DLSS SDK and the NVENC header. Both
+  downloads carry the NVENC notice.
+
 ## 0.26.0 - 2026-09-25
 
 Renders made before this release are not reused: the cache key changed with the

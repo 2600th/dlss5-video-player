@@ -1,6 +1,6 @@
 # Architecture
 
-_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
+_Verified against 0.26.1 (d9c7b51) on 2026-09-25._
 
 ## High-level pipeline
 
@@ -832,6 +832,10 @@ Each encoder attempt captures its first source frame until a fresh runtime
 receipt arrives, retaining only the latest pixels. This is bounded to 120 captures
 and does not extend the exported timeline; unchanged or failed runtime evidence
 still rejects the render. JPEG EXIF rotation is included in decoded dimensions.
+A video's display matrix is read by the probe and applied as one explicit
+turn on every decode path, with ffmpeg's autorotation off
+(`DisplayOrientationPolicy.h`), so the geometry, the render and its cache key
+are the upright picture.
 Automatic cache selection probes `<exe>/cache/v1` before the LocalAppData fallback.
 
 `SynchronizedPlayback` opens the original and neural files together, validates

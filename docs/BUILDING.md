@@ -1,6 +1,6 @@
 # Building and testing
 
-_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
+_Verified against 0.26.1 (d9c7b51) on 2026-09-25._
 
 Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
 C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the
@@ -91,9 +91,9 @@ native UI regressions, and that neither shipped executable imports a Visual C++
 runtime DLL. Every test carries a time limit, and the real-media suite
 reports itself skipped rather than failed when FFmpeg is not staged.
 
-Sixteen more are registered under the `gpu` label and need an RTX card with the
+Seventeen more are registered under the `gpu` label and need an RTX card with the
 neural runtime staged beside the executable: `UpscalingGpuSmoke`,
-`UpscalingSrQualitySmoke`, `DebugViewGpuSmoke`, `MediaGpuSmoke`,
+`UpscalingSrQualitySmoke`, `DebugViewGpuSmoke`, `MediaGpuSmoke`, `TurnedDecodeGpuSmoke`,
 `NvencDirectIdentitySmoke`, `NeuralRangeRenderSmoke`, `NeuralDirectEncodeSmoke`,
 `NeuralPreflightSmoke`, `ExportMatrixSmoke`, `DlssgProbeSmoke`,
 `DlssgEvaluateSmoke`, the four `FrameGenerationSmoke` registrations and

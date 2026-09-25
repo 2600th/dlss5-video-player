@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-_Verified against 0.26.0 (c81ccd8) on 2026-09-25._
+_Verified against 0.26.1 (d9c7b51) on 2026-09-25._
 
 The interface is English-only. It does not load external language packs;
 legacy language settings in the INI are ignored.
@@ -906,7 +906,8 @@ DLSSVideoPlayer.exe --render <input> [--stages sr,nr,fg] [--height 1080|1440|216
 It prints the plan, a progress line per pass at most once a second, and a final
 `done:`, `refused:`, `failed:` or `cancelled` line. The exit code says which:
 0 done, 2 bad arguments, 3 refused (the reason is printed - the same refusals
-the dialog names, plus a busy neural runtime or a missing one), 4 failed, 5
+the dialog names, plus a busy neural runtime, a missing one, or one that does
+not match the lock or holds a module it does not name), 4 failed, 5
 cancelled with Ctrl+C.
 
 The player is a Windows program rather than a console one, so `cmd.exe` does

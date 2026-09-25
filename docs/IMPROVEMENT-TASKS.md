@@ -312,9 +312,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 - [ ] Whole-file MP4 export still re-encodes every audio track to AAC 192k;
       the stage export copies audio MP4 can hold (`AppendSourceStreams`,
       `encodeAudio`). One argument to align them.
-- [ ] `docs/USAGE.md` lists `--render` refusals as the dialog's "plus a busy
-      neural runtime or a missing one"; a drifted runtime or a stray module
-      now refuses too (exit code 3).
 - [ ] A Super Resolution-only stage export is not pre-checked against the
       runtime lock (the helper still refuses stray modules at startup).
 - [ ] The Media Foundation packed-row fallback walks a negative-stride
