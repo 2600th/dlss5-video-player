@@ -286,22 +286,29 @@ parameters; it was deleted after measurement showed neural rendering and the
 upscaler both ignore it (see `docs/BENCHMARK.md`).
 
 The criterion is validated rather than asserted. `tools/benchmark/cutmirror.py`
-mirrors the cut path in `TemporalGuides.cpp` - the analysis grid, the stratified
-cell luma, the global search with its distance penalty and its refusal to prefer
-a marginal shift, the histogram intersection, `ClassifySceneCut` and the 0.3 s
-weak-arm debounce - and `tools/benchmark/cutlab.py` replays it over a corpus
-whose cuts are labelled in the manifest, so the thresholds can be swept without a
-GPU. Measured 2026-09-14 over nine clips and 1212 consecutive pairs, the shipped
-0.30 / 0.10 / 0.85 criterion finds every cut in `cuts-motion` and takes one reset
-too many on it, misses cuts between shots that share a luma histogram, and takes
-a flash for a cut. The scale-free alternative - compare the winner against the
-zero-displacement cost `EstimateFlow` already discards and decide on the fraction
-of cells whose match failed - was implemented in the mirror and swept beside the
-shipped shape; the two reach indistinguishable best operating points, so the
-thresholds stand and the fraction lives in the harness as the measurement that
-justified leaving them alone. The consequence when changing the generator:
-`AnalysisGrid`, `DownsampleLuma`, `ClassifySceneCut` and `MinFramesBetweenCuts`
-have a second reader, and it is Python.
+mirrors the cut path - the analysis grid, the stratified cell luma, the global
+search with its distance penalty and its refusal to prefer a marginal shift and
+the histogram intersection from `TemporalGuides.cpp`, the thresholds and the
+0.3 s weak-arm debounce from `SceneCut.h` - and `tools/benchmark/cutlab.py`
+replays it over a corpus whose hard cuts `corpus.py` labels in the manifest, so
+the thresholds can be swept without a GPU. The harness is deliberately not a
+second implementation of what it scores: `analyze.py` takes its grid and cut
+logic from the same mirror, so its temporal sigma, false-motion rate, cell flip
+rate and cut precision/recall describe the field the guide generator actually
+solves on, and a threshold swept in Python transfers to the runtime without a
+second calibration. On the 22 frame-verified cuts in the corpus's real footage
+the shipped 0.30 / 0.10 / 0.85 criterion finds every one, with no false positive
+and no over-reset; its errors are on the synthetic clips, where it misses cuts
+between shots that share a luma histogram, takes a flash for a cut and takes one
+reset too many on `cuts-motion`. The scale-free alternative - compare the winner
+against the zero-displacement cost `EstimateFlow` already discards and decide on
+the fraction of cells whose match failed - was implemented in the mirror and
+swept beside the shipped shape. It scores better on the pooled corpus only
+through the synthetic half and misses two of the 22 real cuts, so the criterion
+stands and the fraction lives in the harness as the measurement that justified
+leaving it alone (`docs/BENCHMARK.md`). The consequence when changing the
+generator: `AnalysisGrid`, `DownsampleLuma`, `ClassifySceneCut` and
+`MinFramesBetweenCuts` have a second reader, and it is Python.
 
 Those thresholds are the **Default** rung of the **Scene cuts** setting
 (`scene_cut::Sensitivity` in `SceneCut.h`). **More sensitive** lowers the strong
@@ -477,25 +484,14 @@ the renderer's retained state, so a resident helper keeps the device, the NGX
 instance and the feature-18 workset across jobs - see *The helper is resident*
 below. An injected set is per-call and never builds one, which is also why an
 injected run reports no residency.
-Both sets compile in every build. `OFFLINE_NEURAL_RENDERER_TESTING` used to cut
-the production half out of this translation unit, and it was a link-closure tool
-rather than a testing policy: when it arrived `NeuralPrerenderTests` compiled
-three sources and linked `bcrypt shell32`, so the production adapters' references
-to `D3D12Renderer`, `DLSSBackend`, `TemporalGuides`, `OpticalFlowNvof` and `Log`
-had nowhere to resolve. Removing the macro means paying that closure instead: the
-test target compiles those four sources plus `RuntimePolicy`, links `DLSS_LIB_DIR`
-and the player's full library set, and takes the NVOF helper. That is a slower
-test build which now depends on the DLSS libraries being staged.
-
-Two things pay for it. A change to `D3D12Renderer`, `VideoDecoder` or
-`DLSSBackend` that breaks the job's use of them now breaks the test build too,
-which the `#else` hid by compiling no production adapter anywhere. And residency
-becomes assertable at all: under the macro `Retained` had no members,
-`ReusableForAnotherJob` returned a constant `true`, and both footprint calls
-reported zero, so no test could observe a resident helper. What the macro did
-guarantee, and the runtime choice does not, is that production code could not run
-inside a test binary; the Protocol failure above is what replaces it. Injecting
-fakes still does not exercise the production adapters.
+Both sets compile in every build, because every test links the same object
+libraries the player ships (`CMakeLists.txt`). That is what makes a change to
+`D3D12Renderer`, `VideoDecoder` or `DLSSBackend` that breaks the job's use of
+them break the test build too, and what makes residency assertable: a test sees
+the real `Retained`, `ReusableForAnotherJob` and footprint calls. Nothing in the
+build stops production code running inside a test binary; the Protocol failure
+above is what does. Injecting fakes still does not exercise the production
+adapters.
 
 Before every render the player verifies the staged runtime against the
 embedded `packaging/runtime-lock.json` (size, SHA-256, file version) and
@@ -577,27 +573,20 @@ and in one log line, and a phase that did not happen is absent rather than zero 
 a cache hit, a single-file job and a refused request each report less than a
 segmented render, and that difference is information. The helper's five phases
 reach that line because the reader raises them the moment the helper reports
-them, not when the job returns: the job returns seconds after the attach, so a
-line written at first picture used to carry five dashes while the receipt for
-the same render carried all five numbers. A session that never started a helper
-says so - `helper=none(cache-hit)` - because five dashes beside a real total
-read as a broken instrument rather than as a render that never happened.
+them, not when the job returns, which is seconds after the attach. A session
+that never started a helper says so - `helper=none(cache-hit)` - because five
+dashes beside a real total read as a broken instrument rather than as a render
+that never happened.
 
-Measured on an RTX 4080 SUPER, the helper side is 2.1-2.6 s, of which NGX init
-and feature arm are 95 %. From a driven player session the whole toggle costs
-**8.39-9.18 s on the first toggle with the preflight verdict and the cache
-cleared** and **4.88-5.16 s on every later one** over ten sessions; the 3.8 s
-difference is the feature-18 preflight probe, a second helper process whose
-verdict is cached per runtime identity. Of the warm 5 s, `neuralInit` plus
-`featureArm` is 2.10 s and per-process, so that is what a resident helper
-removes. `firstOutput` and the attach are not removable that way, which put the
-estimated floor near 2.9 s - arithmetic on measured phases, and reuse later beat
-it by also shortening `firstOutput`. See
+Measured on an RTX 4080 SUPER, NGX init and feature arm are 95 % of a fresh
+helper's side and are paid per process, which is what a resident helper removes; the feature-18
+preflight probe is a second helper process whose verdict is cached per runtime
+identity, so only the first toggle pays it. See
 `docs/VERIFICATION-2026-09-14-RTX4080.md` and `docs/VERIFICATION-matrix.md`.
 
 **The helper is resident, and the protocol runs both ways to make that possible.**
-Until v6 the metadata pipe was one-way and a job could only arrive as argv, so a
-process served exactly one render. v6 adds a command channel - `Hello`, `Job`,
+A metadata pipe that only runs outward, with the job arriving as argv, lets a
+process serve exactly one render. v6 adds a command channel - `Hello`, `Job`,
 `Cancel`, `Shutdown`, answered by a new outbound `Ready` - on a second inherited
 pipe passed as `--command-handle`. A `Job` carries the argument vector the helper
 already accepted on its command line, so `ParseWorkerArguments` remains the single
@@ -629,8 +618,7 @@ deliberately preserves the tally because it is evidence about a whole job, so th
 generator is replaced rather than reset - a posted readback copy still holding a
 capture slot, and `D3D12Renderer`'s peak-VRAM high-water mark, which was a running
 maximum with no reset because nothing had ever needed one. A reused job reports no
-`neuralInit` and no `featureArm` in its timeline, because it did not pay them, and
-a session answered from the cache without any helper says `helper=none(cache-hit)`.
+`neuralInit` and no `featureArm` in its timeline, because it did not pay them.
 
 **Measured, and it pays.** The acceptance criterion is a warm toggle under 3 s in
 a driven player session. A reused helper puts a neural frame on screen in
@@ -638,8 +626,8 @@ a driven player session. A reused helper puts a neural frame on screen in
 `plan=reuse`, against 5.23-5.41 s for the first toggle in the same process. The
 reused job's timeline carries no `helperStart`, `runtimeReady`, `neuralInit` or
 `featureArm` - 2.19 s it did not pay because no process started - leaving
-`firstOutput` at 1.06 s and the attach at 1.29 s, which are exactly the two the
-arithmetic said residency cannot remove. Residency is reached only when the
+`firstOutput` at 1.06 s and the attach at 1.29 s, which no process reuse can
+remove. Residency is reached only when the
 second job's range is not already covered by the first one's published entry; a
 toggle inside that coverage is answered from the cache in about 0.8 s with no
 helper job at all, which is correct and is not this measurement. See
@@ -658,31 +646,27 @@ destructures all thirteen, so a fourteenth field cannot be added to
 `NeuralCacheIdentity` without the compiler objecting; this list is checkable
 against that one.
 
-**The identity covers the driver and the weights, as of 2026-09-14.** It did not,
-and the gap was a correctness defect rather than a performance rider: `gpuPath` is
-a generation label, so every Ada card on every driver shared one value, and the
-lookup's validity check tests the same terms - so a render produced on
-32.0.16.1047 was served *and* validated on any later driver. The gap was wider
-than the missing version string. `runtimeDigest` hashes staged files, but every
-run resolves its models out of the driver store (`NGXGetPathUsingQAI` →
+**The identity covers the driver and the weights**, as a matter of correctness
+rather than performance. `gpuPath` is a generation label that every Ada card on
+every driver shares, and the lookup's validity check tests the same terms, so
+without a driver term a render would be served *and* validated on any later
+driver. `runtimeDigest` hashes staged files, but every run resolves its models
+out of the driver store (`NGXGetPathUsingQAI` →
 `...\DriverStore\FileRepository\nv_dispsi.inf_...`) and
-`%ProgramData%\NVIDIA\NGX\models`, neither of which was in that set and both of
-which a driver update or a model refresh can replace with the digest unchanged.
+`%ProgramData%\NVIDIA\NGX\models`, which are outside that set and which a driver
+update or a model refresh can replace with the digest unchanged.
 
-Two terms close it. `driverVersion` enters the key directly, so a render cannot
+Two terms cover that. `driverVersion` enters the key directly, so a render cannot
 cross a driver change. `modelStoreDigest` covers the resolved model-path
 contents, so it cannot cross a model refresh on one driver either. It covers
 only the features the pass evaluates: the ProgramData walk skips the feature
 directories and selector sections of frame generation, ray reconstruction and
 the other features the pass never loads (`OutsideNeuralPass`), and a file small
 enough to hash is identified by its content alone, so a refresh of unrelated
-weights or an in-place rewrite of an unchanged config no longer moves every
-key. When a root
-cannot be enumerated the digest falls back to the driver version alone, and
-`ResolveNeuralModelStore` records which of the two it got in the preflight
-receipt rather than degrading silently. The manifest schema moved 4 → 5 in the
-same change, which retires every entry written under the old identity through the
-schema gate rather than incidentally through a missing field.
+weights or an in-place rewrite of an unchanged config does not move every key.
+When a root cannot be enumerated the digest falls back to the driver version
+alone, and `ResolveNeuralModelStore` records which of the two it got in the
+preflight receipt rather than degrading silently.
 
 **A read of the store is trusted only once it has been quiet.** NGX rewrites
 `config/versions/<n>/files` (the server config, the mapping and the deny list)
@@ -730,11 +714,11 @@ from 17.9-21.9 s to 7.9-9.0 s.
 twelve vendor modules plus `NeuralWorker.exe` - and it is the set a preflight
 failure quotes. `LockPinnedRuntimeFileNames()` is the twelve that
 `packaging/runtime-lock.json` pins and `VerifyRuntimeLock` checks; the worker is
-never pinned, because every build of the player changes it. The worker joined the
-hashed set because rebuilding it with different guide or cut logic used to leave
-`runtimeDigest` unchanged, so only an `applicationVersion` bump retired the
-entries it produced, and between bumps a stale hit masked exactly the change a
-developer was trying to see. `-DropRenderCache` in the session harness remains
+never pinned, because every build of the player changes it. The worker is in the
+hashed set because otherwise rebuilding it with different guide or cut logic
+leaves `runtimeDigest` unchanged, so only an `applicationVersion` bump retires the
+entries it produced, and between bumps a stale hit masks exactly the change a
+developer is trying to see. `-DropRenderCache` in the session harness remains
 the way to force the issue during a live session.
 
 The settings snapshot is saved beside the video and its hash is checked on reuse.
@@ -749,11 +733,9 @@ captured is refused at render time and its entry is never reusable - plus the
 NGX-only inline interception contract armed before frame capture, a feature-18
 success checkpoint that advances after the captured sequence, and no feature-18
 failure, skip, or pass-through marker in the stabilized job log segment.
-Sequential offline decoding requests CUDA, the same as playback. It used
-software FFmpeg, on the reasoning that it would otherwise compete with the
-D3D12 neural and NVENC workloads; decode and encode are separate engines and
-the GPU sits idle during export, so that was burning CPU time for nothing.
-The existing CUDA to D3D11VA to software fallback downgrades per codec. Cache
+Sequential offline decoding requests CUDA, the same as playback: decode and
+encode are separate engines from the D3D12 neural and NVENC workloads, so
+software decoding would spend CPU time without relieving the GPU. The existing CUDA to D3D11VA to software fallback downgrades per codec. Cache
 hits retain full content-hash verification and use header-only metadata probes;
 the one exception is a payload this process published itself, whose promotion
 digest is reused while the file's size, write and change times and file id
@@ -803,8 +785,7 @@ The cache root is resolved through a temporary delete-on-close file before bucke
 creation, so inherited Windows package redirection cannot split the ownership root
 from newly written children. Descendant and reparse-point checks remain in force.
 
-A refused staging directory is no longer an unexplained `nullopt`. The manager
-keeps the cause, the filesystem error and the directory it attempted; the
+A refused staging directory carries its reason. The manager keeps the cause, the filesystem error and the directory it attempted; the
 constructor's verdict survives on an invalid manager because no attempt can get
 past it, and each refusal writes one log line with the path, the cause, the error
 number and whether the ownership check rejected it. The player reads that record
@@ -894,23 +875,19 @@ algebra over those regions: `MergeSpans`, `UncoveredSpans`, `NextRenderTarget`
 (the hole under the playhead, else the nearest ahead, else the earliest behind),
 `SpanContaining` and `CoveredFraction`. `live_session::ShouldRetarget` decides
 when to move a running job, and it compares regions rather than endpoints -
-a frame-snap residual of five ticks between a hole's start and a job's range
-once read as different work and relaunched the helper on every tick.
-
-What replaced what: the session used to render one forward run from the playhead
-and "rebase" on a seek out of it, which stopped the session and deleted every
-rendered segment the new playhead was not inside. Retargeting keeps them. The
-index's `Finished()` flag is gone with it: whether a session has more to do is a
-question about coverage against its range, and one job ending answers only for
-its own hole.
+compared by endpoint, a frame-snap residual of five ticks between a hole's start
+and a job's range reads as different work and relaunches the helper on every
+tick. A seek out of the rendered region retargets the job and keeps every
+segment already rendered. Whether a session has more to do is a question about
+coverage against its range; one job ending answers only for its own hole.
 
 Both the coverage test and the lookup that picks a segment run on frame numbers,
 which are exact on the CFR grid, because a seeked FFmpeg source stamps its
 timestamps a few ticks below it. The index also closes the sub-frame hole each
 seam would otherwise carry: a segment's exclusive end is rebuilt from an integer
 frame duration, so at 30000/1001-style rates it lands a couple of ticks under
-the next segment's own first pts, and a playhead inside that hole used to be
-reported as a producer contract break.
+the next segment's own first pts, and a playhead inside that hole would read as
+a producer contract break.
 
 Entering a segment part-way is a seek inside that file, and the frames it hands
 back afterwards can be behind the playhead - one measured session answered a
@@ -920,8 +897,7 @@ disagreement stays the hard identity failure it is meant to catch. A file that
 ends inside its own declared window is entered the same way, from a successor
 that legitimately begins after the playhead.
 
-Sizing follows measurement rather than preference, and the measurements moved a
-long way during the work described below. `playback_timing::ForecastLiveRender`
+Sizing follows measurement rather than preference. `playback_timing::ForecastLiveRender`
 is seeded with **12.50 ms per 1080p frame, 16.60 ms at 1440p and 28.07 ms at
 4K**, measured on an RTX 5090 from the spacing of segment arrivals so job
 startup is excluded. Fitting those three points gives **7.35 ms of fixed cost
@@ -930,33 +906,31 @@ fixed part is the guide pass, the DLSS evaluate and the capture's fence wait,
 the proportional part is the readback and the pixel work.
 
 Those constants are only the seed for a machine that has never run a session.
-0.17.0's pipelined capture and parallel guides moved the same GPU and the same
-clips to **8.4 ms at 1080p, 15.4 at 1440p and 42.0 at 4K** (medians; see the
-[0.17.0 RTX 5090 record](VERIFICATION-2026-09-10-RTX5090.md)), which no longer
-fit one line: 1080p and 1440p came down 29% and 10% while the 4K figure did not
-move, because that clip is a 6.3 Mbit/s re-encode whose decode and encode, not
-the neural pass, set the pace. The player therefore keeps the last five measured
-paces per source geometry per GPU and predicts from their median, falling back
-to the seed only until the first session has measured the machine itself. The
-median is what makes the record survive one bad sample: contention inflates a
-measurement and never deflates it, so a single session measured under load used
-to persist as the machine's pace and make the forecast refuse work the card does
-comfortably. Five samples and a median let the measurements outvote the outlier,
-and the minimum is deliberately not used - this forecast exists to refuse
-sessions that cannot keep up, so erasing slow evidence is the wrong failure.
+The real pace moves with the build, the runtime and the source's decode path, not
+with geometry alone: 0.26.2 on the current runtime measures **6.75, 9.90 and
+22.57 ms** at 1080p, 1440p and 4K on the same GPU and clips, and the 4K figure
+holds only because an untagged HD source decodes to NV12 - through the CPU's
+BGRA pipe the same clip rendered at 30.9 ms and dropped hundreds of frames a
+session (see the [0.26.2 RTX 5090 record](VERIFICATION-2026-09-26-RTX5090.md)).
+The player therefore keeps the last five measured paces per source geometry per
+GPU and predicts from their median, falling back to the seed only until the
+first session has measured the machine itself. The median is what makes the
+record survive one bad sample: contention inflates a measurement and never
+deflates it, so a single session measured under load would otherwise persist as
+the machine's pace and make the forecast refuse work the card does comfortably.
+Five samples and a median let the measurements outvote the outlier, and the
+minimum is deliberately not used - this forecast exists to refuse sessions that
+cannot keep up, so erasing slow evidence is the wrong failure.
 
 A session contributes the pace of the job that measured the most frames
-(`NeuralSegmentIndex::MeasuredPace`), not of the last job to start. A session
+(`NeuralSegmentIndex::MeasuredPace`), not of the last job to start: a session
 opened mid-video renders to the end and then fills the head behind the
-playhead, and that short last job used to replace the long one, fall under the
-120-frame floor and record nothing at all. With that fixed, and untagged HD
-sources decoded to NV12 rather than through a BGRA pipe, 0.26.2 on the current
-runtime measured **6.75, 9.90 and 22.57 ms** at 1080p, 1440p and 4K on the same
-GPU and clips (see the [0.26.2 RTX 5090 record](VERIFICATION-2026-09-26-RTX5090.md)).
+playhead, and that short last job would otherwise replace the long one, fall
+under the 120-frame floor and record nothing at all.
 
-The paces are also kept per processing-scale rung. They used to be filed under
-the source geometry whatever rung rendered them, so the first 50% session was
-forecast at the 100% pace and its own measurement then pulled the 100% forecast
+The paces are also kept per processing-scale rung, because a pace filed under
+the source geometry whatever rung rendered it forecasts the first 50% session
+at the 100% pace, and that session's measurement then pulls the 100% forecast
 toward a pace 100% never reaches. `live_session::ForecastAtProcessingScale`
 reads a rung's own profile when it has one and otherwise scales the 100%
 forecast by `ProcessingScaleCostFactor`: only the model follows the reduced
@@ -983,13 +957,13 @@ decided.
 
 Inside a live session the rate holds up: on a 40 s native 4K30 source the median
 over nine segment intervals was **1.165x real time** against the forecast's
-1.188x, so the player's own decoding and presenting costs about 2%. A heavier
-file at the same geometry is a different answer - the 4K re-encode above runs at
-0.78x and buffers continuously - so the forecast asks before starting whatever
-it expects to fall behind, and buffering remains the release valve rather than
-an edge case. That 0.78x case, and a frame-generated source at 119.88 fps which
-measures 0.814x, are what the grown cushion is for: neither can be made to keep
-up, only to stop and start less often.
+1.188x, so the player's own decoding and presenting costs about 2%. A source the
+card renders below real time - a heavier file at the same geometry, or a
+frame-generated one at 119.88 fps, measured at 0.814x real time on an RTX 5090 -
+is a different answer, so the forecast asks before starting whatever it expects
+to fall behind, and buffering remains the release valve rather than an edge
+case. Such a source cannot be made to keep up,
+only to stop and start less often, and that is what the grown cushion is for.
 
 A settings change while the player is paused runs the same machinery for one
 frame (`NeuralJobKind::Preview`): the frame is rendered, decoded and presented
@@ -1005,12 +979,12 @@ native 1:1 resolution while preserving a real NGX feature creation/evaluation
 sequence for the optional interception layer in `neural-runtime/NeuralWorker.exe`.
 The main player does not load that proxy. Its independent runtime SR toggle
 defaults off, selects a supported NGX input range without resizing the source,
-and targets a 1920x1080, 2560x1440 or 3840x2160 bounding box. Which box is
-chosen is a display decision, not a stored preference: Auto takes the largest
-rung the monitor's current mode can scan out, because a rung above the panel is
-scaled away at present time while the evaluate is charged per output pixel. The
-source only decides whether that rung is an upscale at all, which is the same
-`grows` guard as before. It validates a candidate
+and targets a 1920x1080, 2560x1440 or 3840x2160 bounding box. Auto, the default,
+makes the box a display decision rather than a stored preference: it takes the
+largest rung the monitor's current mode can scan out, because a rung above the
+panel is scaled away at present time while the evaluate is charged per output
+pixel. With Auto off the stored rung is used. The source only decides whether
+the rung is an upscale at all (the `grows` guard). It validates a candidate
 renderer on a separate child window before swapping; failure preserves playback.
 No path samples with jitter. A decoded frame is already a fixed sample grid, so a
 sub-pixel offset cannot reveal new detail; it only convolves the frame with a
@@ -1019,7 +993,8 @@ offset at all. `Jitter_Offset_X/Y` are pinned to zero for every evaluation.
 These controls do not alter the offline DLAA carrier or cache identity.
 
 RTX Video Super Resolution (NGX feature 16, `VsrEngine.h`) is compiled only
-with `-DRTX_VIDEO_SDK`. It joins the NGX session `DLSSBackend` opened on the
+against the RTX Video SDK: `-DRTX_VIDEO_SDK`, or the SDK staged in
+`external/rtx-video-sdk`. It joins the NGX session `DLSSBackend` opened on the
 device rather than opening its own, and runs on the decoded original for the
 **RTX VSR** compare view only, so it never reaches the capture, the cache or an
 export.
@@ -1124,12 +1099,12 @@ will read before the conversion starts. A partial render is not an
 interchangeable input: converting it would hand back a file shorter than the
 source it claims to be.
 
-Cache misses invoke a hidden, job-owned helper through a versioned metadata pipe.
-Only paths and progress/results cross processes; encoded videos remain in the
-existing cache. The helper enters DXGI on its main thread before Media Foundation
-and decoder startup, then maintains a hidden window/message pump during rendering.
-The cache manager still checks hashes, geometry, timeline and feature-18 evidence
-before promotion. Closing/cancelling the job terminates the helper process tree.
+The render itself runs in the job-owned helper described under *Offline neural
+job and cache*. Only paths and progress/results cross processes, and the helper
+enters DXGI on its main thread before Media Foundation and decoder startup, then
+keeps a hidden window and message pump while it renders. Cancelling kills a
+single-shot helper; a resident one is sent `Cancel` and stays, and is killed
+only if it has not answered within `kResidentCancelGrace` (2 s).
 
 The source tree directly implements native DLSS Super Resolution, not an
 official public DLSS 5 API. It intentionally leaves the raw NGX symbols visible
@@ -1165,9 +1140,8 @@ Super Resolution and the neural pass together: `NeuralRenderRequest` takes a
 source size and an output size separately, and a larger output makes the
 carrier DLSS Super Resolution from the source size (`SuperResolutionCarrier`,
 the renderer's preserve-source mode, the same feature the player's playback
-upscaling creates). Until 2026-09-23 it stayed DLAA at the output size over a
-source the renderer had already resampled to it, which is a bilinear upscale
-that DLSS then anti-aliased. A rung the runtime cannot reach from the source
+upscaling creates), not DLAA at the output size over a source already resampled
+to it, which would be a bilinear upscale that DLSS then anti-aliases. A rung the runtime cannot reach from the source
 fails the job by name rather than being encoded at a size nobody asked for.
 RenoDX's `NRPreUpscale` defaults to 0 -
 neural after the upscale - so the model then runs on the upscaled frame with no
@@ -1177,12 +1151,12 @@ one wrote. `ExportStageCount` is what the progress panel divides by.
 A neural pass is refused on exactly what refuses a live render, in the same
 words and before its settings are written: a file that drifted from the runtime
 lock, or a module the lock does not name (`StageExportRuntimeRefusal`, built on
-the two checks `NeuralJobRun` uses). Until 2026-09-25 the export checked neither, so
-a runtime the live path refused still produced a file presented as neural. Under
-the runtime lease, and whatever the pass, the player's idle resident helper is
-released before the export's helper starts: it holds the device, its feature-18
-workset and the proxy's `ReShade.log`, and a second helper beside it cost VRAM
-and moved the evidence to `ReShade.log1`. `--render` runs in a process of its
+the two checks `NeuralJobRun` uses), so a runtime the live path refuses cannot
+produce a file presented as neural. Under the runtime lease, and whatever the
+pass, the player's idle resident helper is released before the export's helper
+starts: it holds the device, its feature-18 workset and the proxy's
+`ReShade.log`, and a second helper beside it costs VRAM and moves the evidence
+to `ReShade.log1`. `--render` runs in a process of its
 own and has none to release.
 
 Every pass writes Matroska, so the last step is not a rename: `MuxStageExport`
@@ -1191,20 +1165,17 @@ writes the container the chosen name's extension asks for
 HEVC in MP4, `+faststart`) and encoding GIF, PNG or JPEG exactly as "Save
 converted video" does. It stages beside the output and replaces it only once
 the file is complete. `ExportContainerChoices` is what the dialog and `--render`
-offer for a video, an animation and a photo; the rename it replaced wrote
-Matroska under an `.mp4` name. The same step carries the original's audio,
+offer for a video, an animation and a photo. The same step carries the original's audio,
 subtitles and chapters, trimmed to a range, onto every combination. The range
 is cut out of the source's own streams into a staging file first
 (`CutSourceStreamsToRange`, shared with "Save converted video"), and the mux
 never trims: an output `-ss` on a stream-copied render with B-frames drops every
-frame of it. The worker's carrier is video-only, so an
-export without frame generation used to be silent, and frame generation now
-runs with `carryStreams=false` rather than muxing streams the last step would
-discard. `ExportStreamActionFor` decides per stream what each container can
+frame of it. The worker's carrier is video-only, and frame generation runs with
+`carryStreams=false` rather than muxing streams the last step would discard. `ExportStreamActionFor` decides per stream what each container can
 hold, and the step reads the audio count back off the staged file before it
 publishes it. "Save converted video" and the frame-generation mux map the
-source's streams through the same code (`AppendSourceStreams`); a blind
-`-map 1:s?` there failed every MKV of MP4 timed text and every MP4 of picture
+source's streams through the same code (`AppendSourceStreams`), because a blind
+`-map 1:s?` fails every MKV of MP4 timed text and every MP4 of picture
 subtitles.
 
 The order is fixed and the dialog exposes no way to change it. It is NVIDIA's:
@@ -1214,27 +1185,30 @@ the neural pass earlier because doing so is faster, which makes early the
 deviation rather than the reference - and an export has no frame budget to
 defend, so it takes the reference order.
 
-Super Resolution alone is a carrier-only job. It used to be refused: the
-helper enabled the add-on for every job, so an upscale-only and an
-upscale-plus-neural export of one clip came back byte-identical at 9,548,373
-bytes each. Now `requireNeural=false` reaches `ConfigureNeuralAddon` in the
-helper, which writes the add-on disabled and takes the same
-configuration-changed exit a repair does, so the parent relaunches it once per
-flip (ReShade reads the INI when its proxy loads). The job still primes until
+Super Resolution alone is a carrier-only job, and it runs with the add-on
+disabled, because an enabled add-on runs the neural pass whatever the job asked
+for. ReShade reads the INI when its proxy loads, so the state has to be right
+before the helper starts: the stage export writes it through
+`ConfigureNeuralAddon` - disabled for `requireNeural=false`, enabled with the
+neural settings otherwise - before it launches the helper. The helper checks the
+same state itself and, if it had to change it, takes the configuration-changed
+exit a repair does so the parent relaunches it; with the state written first,
+that is only a fallback. The job still primes until
 the NGX carrier exists, then skips the feature-18 arming check, the receipt gate
 and the four verdicts after capture. It is held to the opposite claim instead:
 a session log that shows feature 18 evaluating fails the job. The result says
-what ran rather than leaving the fields blank: `neural=false` in the wire
-result's first formerly reserved byte, `verifiedNeuralFrames=0`,
-`feature18ArmedBeforeCapture=false`. The parent refuses a result whose `neural`
+what ran rather than leaving the fields blank: the wire result's
+`superResolutionOnly` byte is 1, which decodes to `neural=false`, with
+`verifiedNeuralFrames=0` and `feature18ArmedBeforeCapture=false`. The parent refuses a result whose `neural`
 does not match what the job asked for. A resident helper keeps its add-on
 loaded, so it refuses carrier-only jobs and they run single-shot.
 
 `ExportMatrixSmoke` renders all seven combinations through a 3.5 s 720p30 clip
-and checks geometry, frame count and bytes. It earned that last check twice: the
-output size was once plumbed through the request, the IPC, the encoder and the
-byte accounting but not into the renderer's feature create, and a comparison of
-geometry alone stayed green through both that and the upscale-only defect above.
+and checks geometry, frame count and bytes. Geometry alone stays green when a
+stage silently does nothing: an output size plumbed through the request, the
+IPC, the encoder and the byte accounting but not into the renderer's feature
+create passes it, and so does an upscale-only export that still ran the neural
+pass.
 
 ## Final image adjustments
 
@@ -1269,8 +1243,8 @@ build named; the full entries are in `CHANGELOG.md` at tag
   Guide 310.6.0 limits re-creation to display-resolution, RTX and buffer-format
   changes (S3.2) and requires that no command list referencing the feature is
   in flight when it is released (S5.5). A re-hook is now explicit and happens
-  before capture starts. 0.16.0 had already made the renderer drain the queue
-  before releasing any feature.
+  before capture starts, and the renderer drains the queue before releasing any
+  feature.
 - **The preflight probe renders its whole 120-frame budget** (0.25.0). RenoDX
   6.x installs a compute-state shadow on the first NGX evaluate and injects
   only after that shadow has seen a command-list Reset ("injection admitted
@@ -1395,27 +1369,12 @@ inert on 4.70, moves 68-89 % of bytes on 6.5.3 and is back in the dialog
 
 ## Remaining work
 
-The shipped cache/settings/history/export work is described in [Usage](USAGE.md).
-Runtime preflight, the benchmark, the guide ablation, frame identity, stall
-recovery, range preview, comparison controls and confidence-aware optical flow
-are implemented; the measured guide ablation lives in [Benchmark](BENCHMARK.md).
-Buffered viewing shipped as the active session, and protection masks were
-measured and abandoned because the NGX mask inputs are inert on both features.
-HDR sources are tone mapped to SDR on decode and an HDR display shows their
-original in HDR (`HdrPolicy.h`); what remains is an HDR cache and export and
-the rest of GPU-resident processing. Open tasks are in
-[IMPROVEMENT-TASKS.md](IMPROVEMENT-TASKS.md).
-
-The harness under `tools/benchmark/` is deliberately not a second implementation
-of what it scores. Its cell grid, cell luma, scene-cut thresholds and cut
-debounce are read off `src/TemporalGuides.cpp`, so per-pixel temporal sigma, the
-false-motion rate, the cell flip rate and cut precision/recall describe the field
-the guide generator actually solves on, and a threshold swept in Python transfers
-to the runtime without a second calibration. The manifest's hard-cut indices are
-the ground truth for the cut score, which is why `corpus.py` records them. The
-consequence when changing the generator: `AnalysisGrid`, `DownsampleLuma`,
-`ClassifySceneCut` and `MinFramesBetweenCuts` have a second reader, and it is
-`analyze.py`.
+Open tasks are in [IMPROVEMENT-TASKS.md](IMPROVEMENT-TASKS.md). HDR sources are
+tone mapped to SDR on decode and an HDR display shows their original in HDR
+(`HdrPolicy.h`); what remains there is an HDR cache and export and the rest of
+GPU-resident processing. Protection masks handed to NGX were measured and
+abandoned because the NGX mask inputs are inert on both features (see
+[Benchmark](BENCHMARK.md)).
 
 Durable mid-job resume is deliberately a from-zero relaunch: a validated
 segment checkpoint would have to carry the temporal neural state at the
