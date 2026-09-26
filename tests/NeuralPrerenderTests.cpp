@@ -1286,8 +1286,26 @@ void staging_sweep_reaps_invalid_and_orphaned_entries_but_not_live_ones_test()
         std::filesystem::last_write_time(
             aged, std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 4));
 
+    // A sweep stops at its 100 ms budget and leaves the rest to the next one, on
+    // purpose: it runs at startup. Five removals take about 9 ms, but one delete
+    // that something else briefly holds - a scanner opening the fresh
+    // neural.mkv - stalled a sweep to 150 ms on the RTX 5090 machine and left
+    // one entry for the next, which this test used to read as an entry the sweep
+    // would not reap. What is asserted is what the sweeps reap, so later sweeps
+    // finish the job, as they would on the next start.
+    const auto sweepWhile = [](NeuralCacheManager& sweeper, const auto& pending) {
+        size_t removed = 0;
+        for (int pass = 0; pass < 50 && pending(); ++pass) removed += sweeper.SweepStaging();
+        return removed;
+    };
+
     NeuralCacheManager manager(cacheRoot);
     CHECK(manager.Valid());
+    sweepWhile(manager, [&] {
+        for (const auto& gone : {invalidOwn, invalidExistingOwn, invalidCacheDead, orphanRender, orphanSource})
+            if (std::filesystem::exists(gone)) return true;
+        return false;
+    });
     for (const auto& gone : {invalidOwn, invalidExistingOwn, invalidCacheDead, orphanRender, orphanSource})
         CHECK(!std::filesystem::exists(gone));
     for (const auto& kept : {liveRender, liveSource, foreign})
@@ -1306,10 +1324,13 @@ void staging_sweep_reaps_invalid_and_orphaned_entries_but_not_live_ones_test()
     WriteBytes(*parked / L"neural.mkv", "partial");
     CHECK(manager.MarkInvalid(*parked));
     CHECK(!std::filesystem::exists(*parked));
-    CHECK_EQ(size_t{1}, manager.SweepStaging());
-    size_t entries = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(staging)) { (void)entry; ++entries; }
-    CHECK_EQ(size_t{3}, entries);
+    const auto stagingEntries = [&] {
+        size_t entries = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(staging)) { (void)entry; ++entries; }
+        return entries;
+    };
+    CHECK_EQ(size_t{1}, sweepWhile(manager, [&] { return stagingEntries() > 3; }));
+    CHECK_EQ(size_t{3}, stagingEntries());
 }
 
 // A process that is certainly alive and certainly not this one: a suspended
