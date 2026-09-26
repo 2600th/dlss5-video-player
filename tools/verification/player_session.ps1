@@ -630,8 +630,10 @@ $P = @{
     Startup       = 'Isolated neural helper available.*GPU=(?<gpu>.*) driver=(?<driver>\S*) generation=(?<generation>\S+)'
     # src/D3D12Renderer.cpp:83 - the player's own render device, so the clip is open and the renderer is up.
     Device        = 'D3D12 device adapter "(?<adapter>[^"]*)" luid=(?<luid>\S+)'
-    # src/main.cpp:3006 and :3004 - the toggle was accepted and a session exists.
-    SessionStart  = '^Active neural session (started at (?<from>[0-9.eE+-]+) s through (?<to>[0-9.eE+-]+) s|replaying )'
+    # src/main.cpp StartLiveNeuralSession, "starting at" and "replaying" - the
+    # toggle was accepted and a session exists. `from` is the playhead the key
+    # was pressed at; the bracket is the whole range the session covers.
+    SessionStart  = '^Active neural session (starting at (?<from>[0-9.eE+-]+) s over \[(?<rangeFrom>[0-9.eE+-]+),(?<to>[0-9.eE+-]+)\) s|replaying )'
     # src/main.cpp:2926 - a session with no pace prior for this GPU says so first.
     PaceUnknown   = '^Active neural session pace is unmeasured on this GPU'
     # src/main.cpp:4183, :4179, :2960, :2983 - every way the toggle can be declined.
@@ -665,9 +667,10 @@ $P = @{
     # src/main.cpp:3619 - the receipt summary, written when receipt.json is.
     Receipt       = '^Neural render receipt: (?<summary>.+)$'
     # src/main.cpp:3058 - the published cache entry; receipt.json is its sibling.
-    CacheEntry    = '^Active neural session rendered (?<frames>\d+) frames and published its cache entry; save=(?<save>\d+) entry=(?<entry>.+)$'
-    # src/main.cpp:1524 via RecordLiveRenderPace, needs >= 120 rendered frames.
-    Pace          = '^Measured neural render pace: (?<width>\d+)x(?<height>\d+) at (?<ms>[0-9.eE+-]+) ms/frame over (?<frames>\d+) frames \((?<scale>[0-9.eE+-]+)x the reference GPU\); (?<geometries>\d+) geometries known'
+    CacheEntry    = '^Active neural session rendered (?<frames>\d+) frames and published its cache entry; save=(?<save>\d+)(?: wholeRange=(?<whole>\d+))? entry=(?<entry>.+)$'
+    # src/main.cpp via RecordLiveRenderPace, needs >= 120 rendered frames. The
+    # processing-scale rung is written since 0.26.0 and optional here.
+    Pace          = '^Measured neural render pace: (?<width>\d+)x(?<height>\d+) at (?:(?<processing>\d+)% processing scale, )?(?<ms>[0-9.eE+-]+) ms/frame over (?<frames>\d+) frames \((?<scale>[0-9.eE+-]+)x the reference GPU\); (?<geometries>\d+) geometries known'
     # src/main.cpp:3046 - the session is down. Logged after the pace line, so
     # seeing this without a pace line is proof the pace was never measured.
     Stopped       = '^Active neural session stopped at (?<at>[0-9.eE+-]+) s; presented=(?<presented>\d+) dropped=(?<dropped>\d+)'
