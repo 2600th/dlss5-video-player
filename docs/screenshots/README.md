@@ -8,8 +8,6 @@ for images that have since been replaced are in the git history of this file.
 
 | File | What it shows | Made |
 | --- | --- | --- |
-| `current/gta6-lucia-original.jpg`, `gta6-lucia-neural.jpg` | GTA VI Trailer 2, source frame 1940 and the same frame of the v0.25.0 render (Intensity, Local tone and Local structure 2.0), whole (2560x1440). The site hero and link card are cut from these | 22 Sep 2026, v0.25.0 |
-| `current/matrix-neural.jpg`, `matrix-original.jpg` | The player paused on Trinity at 1:28, neural view on, then off | 22 Sep 2026, v0.25.0 |
 | `current/neural-playback.jpg`, `original-comparison.jpg` | The player paused on GTA VI at 1:04, neural view on, then off | 22 Sep 2026, v0.25.0 |
 | `current/player-start.jpg` | The start screen at 150% on a fresh profile: the capability check and the seven game trailers with their YouTube thumbnails | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/compare-wipe.jpg` | 007 First Light paused on frame 1122 in Wipe, the divider down the face, with the compare bar | 24 Sep 2026, `dced888` + `f2ae230` |
@@ -82,12 +80,6 @@ A render starts at its range's first frame, so source frame *n* is render frame
 *n* − 60 for The Matrix and *n* − 54 for GTA VI. A picture check confirmed both
 offsets: each pair differs least at that offset.
 
-**Face comparisons.** The two unscaled face figures that used to sit here
-(`face-comparison.png`, The Matrix, and `face-comparison-gta6.png`) were
-replaced on 24 September 2026 by the comparison stills in
-[`docs/media/stills/`](../media/stills/), each with its own provenance record;
-see [docs/media/README.md](../media/README.md#comparison-stills).
-
 **Player captures.** Each pair is one paused frame in a live session, with only
 the view switched:
 
@@ -118,9 +110,7 @@ layout and could show a striped picture), applied before any of these shots. Eve
 these captures (the machine's own setting is 100%; it was put back
 afterwards). Each is the window's visible frame, 1902x1023, captured by handle
 with `tools/verification/capture-window.ps1` and cut to DWM's extended frame
-bounds. The tool now asks for per-monitor DPI awareness: before that, a window
-on a monitor scaled unlike the primary (175% here) came back 2240x1204 with the
-player in its top-left corner. `neural-strength.jpg` is two such captures, the
+bounds. `neural-strength.jpg` is two such captures, the
 player and the Image adjustments window placed at its real on-screen offset
 from it (599, 152). Saved once as JPEG at quality 95 with no chroma
 subsampling. `neural-settings.jpg` is the dialog's own capture: the player
@@ -148,35 +138,33 @@ own hashing.
 
 **Not retaken.** `recent-videos.jpg` needs an open menu, which a posted message
 did not open; real input would have taken the pointer and focus from the person
-using the machine. It is from the earlier round and has no playback artifact
-(checked). The GTA VI and Matrix pairs and the full GTA VI frames are v0.25.0
-captures the site still uses.
+using the machine. It is from the earlier round (below) and has no playback
+artifact (checked). The 22 September images were not retaken either; the README
+and the site still use their GTA VI pair (`neural-playback.jpg`,
+`original-comparison.jpg`).
 
-## 24 September 2026 images, first round
+## 24 September 2026 image, first round
 
-`recent-videos.jpg` is still from this round; the `neural-strength.jpg` and
-`player-start.jpg` described here have since been replaced (above).
+`recent-videos.jpg` is the one image left from this round.
 
 **Hardware and runtime.** The 22 September machine and runtime (RTX 4080
 SUPER, driver 610.47, RenoDX 6.5.3, DLSS-NR 310.8.0), at 175% display scaling.
 The build is the w3-ui branch after v0.25.0: Common Controls 6, dark popup
-menus, the compare bar and the start screen as they ship next.
+menus, the compare bar and the start screen as they shipped next.
 
 **Source.** *Mafia: The Old Country - Family Takes Sacrifice* (Mafia Game), the
 official upload in the player's trailer list, 2560x1440 at 30 fps, opened as a
 local copy of the player's cached source. Neural rendering was turned on at
-0:00, the video played and was paused at 0:21 (the menu) and 0:41 (the
-adjustments window), both inside the rendered range with the neural view on.
-Default neural settings.
+0:00, the video played and was paused at 0:21, inside the rendered range with
+the neural view on. Default neural settings.
 
-**Captures.** Every window was captured by handle with `PrintWindow` and cut to
+**Capture.** Every window was captured by handle with `PrintWindow` and cut to
 its visible frame (DWM's extended frame bounds), as
 `tools/verification/capture-window.ps1` does, because the workstation was
 locked and the screen itself could not be read. A popup is its own window, so
-`recent-videos.jpg` and `neural-strength.jpg` are each two such captures - the
-player, and the open File menu or the adjustments window - with the second
-placed at its real on-screen offset from the first. Nothing else is added or
-changed. Saved once as JPEG at quality 95 with no chroma subsampling.
+the image is two such captures - the player and the open File menu - with the
+menu placed at its real on-screen offset from the player. Nothing else is added
+or changed. Saved once as JPEG at quality 95 with no chroma subsampling.
 
 **One correction.** Those captures drew into a GDI+ bitmap's HDC, and GDI+ turns
 every pixel of exactly RGB(13,11,12) in that HDC into (0,0,0) with alpha 0. The
@@ -186,34 +174,21 @@ trousers that the player never drew. The window capture was the same, except for
 those pixels. `recent-videos.jpg` was rebuilt from it with them set back to
 (13,11,12): a pixel with alpha 0 inside a `PrintWindow` capture can only be that
 colour. Everywhere else it matches the first JPEG to a mean of 0.01 levels.
-`neural-strength.jpg` had no such pixel. `capture-window.ps1` now captures into
-a GDI bitmap of its own, and `-SelfTest` checks that colour.
 
-**Size.** 1493x932 (`recent-videos.jpg`, `player-start.jpg`) and 1493x1100
-(`neural-strength.jpg`). The older shots were 1442x932 at 100%; at 175% the
-player's minimum width is 1493 visible pixels, and the adjustments window
-(933 pixels tall at that scale) needed a taller player to sit over.
+**Size.** 1493x932: at 175% the player's minimum width is 1493 visible pixels.
 
-## Earlier images
+## 3 September 2026 image
 
-**12 September 2026** (the previous `neural-strength.jpg`, in this file's
-history). v0.21.0 on an RTX 5090, driver 616.64, RenoDX 4.7. The frame is
-*The Godfather 50th Anniversary Trailer* (Paramount Pictures) paused at
-73.98 s, from a live session that verified 2,875 of 2,875 frames. The window's
-visible frame (1442x932), JPEG quality 95, no chroma subsampling.
-
-**3 September 2026** (`2026-09-03/face-comparison.png`, and the previous
-`recent-videos.jpg` and `player-start.jpg`). v0.13.0 on an RTX 5090, full
-1442x932 windows captured with FFmpeg. The face comparison uses *The Witcher IV* Cinematic
-Reveal Trailer (CD PROJEKT RED), 1920x1080 at 30000/1001 fps, zero-based frame
-3375 (112.6 s). Both 700x880 crops are at x=670, y=0 from the source and its
-fully verified render (10,868 of 10,868 frames).
+`2026-09-03/face-comparison.png`, v0.13.0 on an RTX 5090, uses *The Witcher
+IV* Cinematic Reveal Trailer (CD PROJEKT RED), 1920x1080 at 30000/1001 fps,
+zero-based frame 3375 (112.6 s). Both 700x880 crops are at x=670, y=0 from the
+source and its fully verified render (10,868 of 10,868 frames).
 
 ## Rights
 
 These images document the software. They are not an image-quality benchmark,
 an official NVIDIA integration, or an endorsement by anyone shown. Footage
 belongs to its owners: The Matrix to Warner Bros., Grand Theft Auto VI to
-Rockstar Games, The Godfather to Paramount Pictures, The Witcher IV to CD
+Rockstar Games, 007 First Light to IO Interactive, The Witcher IV to CD
 PROJEKT RED and Mafia: The Old Country to 2K and Hangar 13. NVIDIA components belong to NVIDIA. The source-code licence
 doesn't relicense any of it.

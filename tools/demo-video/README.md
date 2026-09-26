@@ -21,8 +21,9 @@ footage came from is in [docs/media/README.md](../../docs/media/README.md).
   recently used renders whenever the drive has less than 20 GB free.
 - A folder of player window captures, taken with
   `tools/verification/capture-window.ps1`'s method: `difference.png`,
-  `side-by-side.png` and `loupe.png` (the 007 frame 1122 in those views), and
-  `band-000.png` to `band-049.png`, captures 200 ms apart of a live render
+  `side-by-side.png` and `loupe.png` (the 007 frame 1122 in those views),
+  `saved-2x2.png` (the PNG **Save comparison image** wrote for the 2 x 2 view),
+  and `band-000.png` to `band-049.png`, captures 200 ms apart of a live render
   filling the timeline. [docs/screenshots/README.md](../../docs/screenshots/README.md)
   says how they were taken.
 

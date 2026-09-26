@@ -33,18 +33,17 @@ There are two kinds of picture, and nothing else:
 
 - **The split scenes** (0:00 and 0:04). Left of the divider is the source,
   decoded; right is the same frame of the render the player saved to its cache
-  for that source. Both halves have the same frame and the same crop, and
-  zooms apply to both equally. The render starts at the source's first frame
-  (a whole-video render), so source frame *n* is render frame *n*;
-  `prepare-inputs.py` checks that by picture and stops if a pair is closest at
-  any other offset.
+  for that source, with the same crop and the same zoom. The render is a
+  whole-video render, so source frame *n* is render frame *n*, checked by
+  picture.
 - **The player scenes** (0:06.8 onwards). Window captures of the player itself,
-  at 150% scaling, taken by handle with the method of
-  `tools/verification/capture-window.ps1`. They are cropped to the title bar,
-  the picture and the compare bar, scaled and pushed in; the status row is
-  cropped off. The Difference, Side by side and loupe captures are the ones
-  described in [screenshot provenance](../screenshots/README.md) (frame 1122,
-  after the `f2ae230` playback fix).
+  at 150% scaling, cropped (the status row is left out), scaled and pushed in.
+  The Difference, Side by side and loupe captures are the ones described in
+  [screenshot provenance](../screenshots/README.md) (frame 1122, after the
+  `f2ae230` playback fix).
+
+How the inputs are prepared, checked and composed is in
+[the rebuild instructions](../../tools/demo-video/README.md#how-it-fits-together).
 
 The render band scene is a 16-second clip of the GTA VI source (0:14 to 0:30),
 cut by stream copy so it is the same encode, opened in the player as a local
@@ -71,12 +70,6 @@ default settings (settings digest `96bf471a…` in the cache manifest) on an RTX
 `dced888`. The source files' SHA-256 and the renders' cache keys are in the
 [stills' provenance records](stills/). The player scenes and the band clip were
 captured the same day with `f2ae230` applied.
-
-The previous cut (22 September, *The Matrix* and GTA VI at Intensity, Local
-tone and Local structure 2.0 on v0.25.0) is in this file's git history. The one
-before it (12 September) is kept unchanged at
-[`tools/benchmark/fixtures/demo-capture-20260912.mp4`](../../tools/benchmark/fixtures/README.md),
-because the benchmark corpus is cut from it.
 
 ## Social
 
@@ -120,13 +113,13 @@ has flaws in the good figures: in the GTA VI one the sweater's left edge breaks
 into blotches, and in the Resident Evil one the background above the hair picks
 up a smudge.
 
-**How they were made.** Each trailer was opened from **File > Game trailers**
-in a fresh profile at the player's YouTube **Auto** quality (2560x1440, the
-highest bitrate at that height), and rendered whole with **DLSS > Convert &
-export > Convert whole video to neural video** at default settings: Intensity,
-Local tone, Local structure and Color strength 1.0, Skin structure Off, one
-pass. Every render verified all of its
-frames. The source and render were then copied out of the cache, and each figure
+**How they were made.** Each trailer was fetched at the player's YouTube
+**Auto** quality (2560x1440, the highest bitrate at that height) and rendered
+whole in a fresh profile, the way
+[the demo's sources are](../../tools/demo-video/README.md#you-need), at default
+settings: Intensity, Local tone, Local structure and Color strength 1.0, Skin
+structure Off, one pass. Every render verified all of its frames. The source and
+render were then copied out of the cache, and each figure
 was made with
 [`tools/demo-video/make-face-comparison.py`](../../tools/demo-video/make-face-comparison.py),
 which checks by picture that the render frame is the source frame (it must
@@ -153,8 +146,8 @@ Renders: RTX 4080 SUPER, driver 610.47 (`32.0.16.1047`), runtime lock
 
 ## Rights
 
-This is an unofficial RenoDX/ReShade experiment, not an NVIDIA product. *The
-Matrix* footage is © Warner Bros., *Grand Theft Auto VI* © Rockstar Games,
+This is an unofficial RenoDX/ReShade experiment, not an NVIDIA product. *Grand
+Theft Auto VI* footage is © Rockstar Games,
 *007 First Light* © IO Interactive, *Resident Evil Requiem* © Capcom and
 *Assassin's Creed Shadows* © Ubisoft. They're used to document the software,
 and the source-code licence doesn't relicense them. Only the finished video,

@@ -2,9 +2,9 @@
 
 Renders every row of ``KNOBS`` through ``run.py``'s own worker driver and compares
 each output to the reference, decoded to rgb24, byte for byte. The reference writes
-exactly the ten keys the player writes (``NeuralAddonOverridesFor`` over a default
-``NeuralSettings``, src/NeuralSettings.cpp) plus ``NRNormGovernor=0`` - see
-REFERENCE_EXTRA for why; every other row differs from it in one key or one guide, and
+exactly the eleven keys the player writes (``NeuralAddonOverridesFor`` over a default
+``NeuralSettings``, src/NeuralSettings.cpp) with ``NRNormGovernor`` at 0 instead of
+the player's 1 - see REFERENCE_EXTRA for why; every other row differs from it in one key or one guide, and
 the reference is rendered twice so a zero is a measured zero rather than an assumed
 one.
 

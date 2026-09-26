@@ -7,23 +7,9 @@ neural time / FPS / VRAM / flicker / OCR / face consistency / colour shift /
 determinism, blind one-pass versus two-pass comparison, and an ablation of
 every guide and control. The scripts under
 [`tools/benchmark/`](../tools/benchmark/README.md) implement that against the
-isolated `NeuralWorker.exe`; this page is the operator's summary.
-
-## Run it
-
-```
-python tools/benchmark/corpus.py                                     # once; ~2 min
-python tools/benchmark/cutlab.py --sweep                             # scores the cut criterion itself
-python tools/benchmark/run.py --profiles baseline mv-off --repeats 3 # renders
-python tools/benchmark/analyze.py                                    # metrics + report.md
-python tools/benchmark/blind.py                                      # A/B pairs (needs a two-pass run)
-```
-
-Outputs live under `build-upscaling/benchmark-corpus/` and
-`build-upscaling/benchmark-work/` (both inside the gitignored build tree):
-runs in `runs/<clip>__<profile>__<repeat>/`, the report in
-`analysis/report.md`, blind pairs in `blind/pairs/` with a sealed
-`blind/key.json`.
+isolated `NeuralWorker.exe`. This page is what they found; how to run them -
+requirements, commands, flags, profiles, metric definitions, output layout and
+caveats - is in [`tools/benchmark/README.md`](../tools/benchmark/README.md).
 
 Every measurement on this page was taken against RenoDX 4.70 and DLSS-NR
 310.8.0, except the settings table at the end, which was re-measured on the pinned
@@ -31,13 +17,7 @@ RenoDX 6.5.3 on 2026-09-24. The rest are the last known state rather than the
 current one; the pages below say per section which of them a rerun would be
 expected to move.
 
-Prerequisites: Python 3.12 with `tools/benchmark/requirements.txt`,
-`external/ffmpeg/bin`, a built `build-upscaling/Release/neural-runtime/`
-(worker plus RenoDX/ReShade runtime), an NVIDIA GPU. Copy `Release/neural-runtime`
-to `build-upscaling/benchmark-work/runtime-snapshot/` first when a build may
-run concurrently; the runner prefers the snapshot.
-
-### The corpus, and where it stops being synthetic
+## The corpus, and where it stops being synthetic
 
 `corpus.py` carries three kinds of builder, and `manifest.json` - not this page -
 is the count that is true for a given checkout. Synthetic clips (seeded FFmpeg
@@ -47,12 +27,11 @@ everywhere. Camera-original clips are downloaded by video id through
 source is absent, as `faces` - which needs an external fixture - always has.
 The `"category": "real"`, `"synthetic": false` clips are cut from this
 repository's own demo capture,
-`tools/benchmark/fixtures/demo-capture-20260912.mp4` (1920×1080, 30 fps, h264, 22.6 s, tracked in
-git). Until 22 September 2026 that file was `docs/media/neural-comparison-demo.mp4`; the
-README demonstration was then replaced, and the capture moved here byte-identical (git
-blob `dc9527b7`, SHA-256 `ac46f10a…`), so reports that name the old path mean this file. They exist because every quality conclusion here used to rest on mandelbrot
-zooms and cellular automata, and because they need no fixture to fetch and add
-nothing to redistribute that the tree does not already carry.
+[`tools/benchmark/fixtures/demo-capture-20260912.mp4`](../tools/benchmark/fixtures/README.md)
+(1920×1080, 30 fps, h264, 22.6 s, tracked in git). They exist so that no quality
+conclusion rests on fractal zooms and cellular automata alone, and because they need
+no fixture to fetch and add nothing to redistribute that the tree does not already
+carry.
 
 | clip | frames | labelled | what it is |
 |---|---:|---|---|
@@ -89,9 +68,10 @@ the gate and depth comparisons rest on. What it does not support is the phrase "
 footage": say **NR-processed captures**. In particular the `intensity-0` control
 measures the carrier against a source that already carries NR relighting, so the
 "share attributable to the neural pass" it computes is a share of a second pass over
-a first one. The camera-original sources - 2560×1440 downloads named in
-`docs/media/README.md` - are not in the repository and the `faces` fixture is not on
-this machine, so nothing here closes that gap.
+a first one. The nine `orig-*` clips close that gap: they are cut straight from the
+publishers' releases, fetched by `tools/benchmark/fetch_camera_original.ps1`, so
+nothing in them has been through the player (see the
+[corpus reference](../tools/benchmark/README.md#corpus)).
 
 **One clip is 37 % motionless, for two separate reasons.** `real-film-cuts` ends
 where the capture pauses before its magnify/wipe demonstration: source frames
@@ -108,9 +88,10 @@ four - it affects both trees identically, so the A/B stays valid, but the *level
 not comparable across clips.
 
 No split-screen, divider or UI chrome is inside any measured clip, and that was
-settled from the composition rather than inferred: `tools/demo-video/src/index.tsx`
-puts uninterrupted playback in frames 0-101 and 438-581 and the paused compare
-scenes in 102-269 and 270-437, at 30 fps. `real-film-cuts` stops at 116, one frame
+settled from the composition rather than inferred: the capture's composition
+(`tools/demo-video/src/index.tsx` at `0f00ac0`; the file has since been rewritten
+for the current video) puts uninterrupted playback in frames 0-101 and 438-581 and
+the paused compare scenes in 102-269 and 270-437, at 30 fps. `real-film-cuts` stops at 116, one frame
 before the magnification (116→117 jumps by 25.0); both game ranges sit wholly inside
 the second playback scene, checked by eye at frames 450 and 540. The overlay chips,
 headings and progress bar all fall outside `crop=1362:766:502:126`.
@@ -128,39 +109,33 @@ number computed afterwards, which is why "the detector said so" is not accepted 
 transition in it is a single-frame jump. `real-dissolve` therefore has real material
 and a synthesised transition, and says so in its `notes` — the fade is in `soft_cuts`,
 never in `cuts`, because no single frame of a dissolve is the one where history stops
-being valid. Real grain, real motion blur and a camera that occludes are now in the
-corpus; a real dissolve still is not.
+being valid. The real cross-dissolve is `orig-dissolve`, and `orig-film-fade` is a real
+fade to black.
 
 ## What is measured
 
-| Group | Metric | Source |
-|---|---|---|
-| Runtime | preflight receipt: GPU, driver, ReShade/RenoDX/DLSS-NR versions, locked module hashes, Feature 18 creation/evaluation, RenoDX active settings | `--neural-preflight` probe, once per profile |
-| Speed | end-to-end fps (frames / wall), processing fps (Rendering-phase progress records), neural GPU ms p50/p95/max, guide ms, capture ms | worker result over the metadata pipe (protocol v6) |
-| Memory | worker peak local VRAM (receipt) and NVML whole-GPU used/util/power/temperature at 2 Hz | `result.json`, `gpu.csv` |
-| Determinism | sha256 of the rgb24 per-frame MD5 sequence across repeats | `frames.md5` |
-| Temporal | added flicker = mean |ΔY| between consecutive output frames minus the same for the source, cut frames excluded; added per-pixel temporal σ and its p99 over the same shots | `analyze.py` |
-| Motion field | false-motion rate and cell flip rate on the guide generator's own analysis grid | `analyze.py` |
-| Cuts | precision/recall/F1 of the generator's cut test against the manifest's hard-cut indices at ±1 frame, source and output | `analyze.py`, `manifest.json` |
-| Colour | mean CIE76 ΔE in CIELAB and per-channel RGB shift vs source | `analyze.py` |
-| Fidelity | PSNR and SSIM vs the lossless source | `analyze.py` |
-| Text | rapidocr character-level ratio against the manifest's ground-truth strings, output and source side by side | text clip |
-| Faces | Haar-box crops; resnet18 cosine of output crop vs source crop and frame-to-frame drift | faces clip |
-| Two-pass | metric deltas vs `baseline`; `blind.py` sealed A/B stills and excerpts, each clipped to the shot it starts in (`--seconds` is a cap, not a length) | `report.md`, `blind/` |
-
-Ablation profiles (`run.py --ablation`) change one factor each: motion
-vectors, depth, RenoDX automatic mask, local structure, local
-tone, intensity (control), presets 1-3, styles natural/cinematic, two-pass.
-Every profile uses the same corpus, the same worker priming/preroll and the same
-runtime files, so differences attribute to the changed factor.
+Every run is scored for speed, memory, determinism, temporal stability (added
+flicker, per-pixel temporal σ, false-motion rate, cell flip rate), cut
+precision/recall, colour, fidelity, OCR and face similarity. The definitions are in
+the harness README's [metrics table](../tools/benchmark/README.md#metrics-analyzepy),
+and what each number cannot tell you is under its
+[caveats](../tools/benchmark/README.md#caveats). The temporal metrics and the cut test
+mirror `src/TemporalGuides.cpp` - the same analysis grid, cell luma, thresholds and
+0.3 s weak-arm debounce - so a threshold swept here transfers to the runtime
+unchanged. Ablation profiles (`run.py --ablation`) change one factor each, and every
+profile uses the same corpus, worker priming and runtime files, so a difference
+attributes to the changed factor.
 
 **`baseline` is not the shipped configuration, and art-knob ablations must be read
-against the shipped one.** `baseline` writes no `NR*` key at all, so the add-on
-applies its own defaults - and its automatic mask defaults OFF, while the player
-writes `NRAutoMask=1` on every render (`src/main.cpp`, from `NeuralSettings{}`).
+against the shipped one.** `baseline` writes only the managed keys every profile
+carries (`EnableHooks`, `NeuralUplift`, `NRFollowInputRes`, `NRResolutionScale`,
+`ConfigVersion`) and none of the art keys, so the add-on applies its own defaults -
+and its automatic mask defaults OFF, while the player writes `NRAutoMask=1` on every
+render (`NeuralAddonOverridesFor` in `src/NeuralSettings.cpp`, from `NeuralSettings{}`).
 Measured 2026-09-14 on four clips, both repeats, bit-identical by output digest:
-writing all eight keys with the mask off reproduces `baseline` exactly, and
-writing the single key `NRAutoMask=1` reproduces the shipped state exactly. So the
+writing all eight keys the player wrote then, with the mask off, reproduces
+`baseline` exactly, and writing the single key `NRAutoMask=1` reproduces the shipped
+state exactly. So the
 `automask-off` ablation row is a no-op against `baseline`, and every absolute
 `baseline` number in this document - including the reference run below - describes
 a configuration the player never ships. Relative guide comparisons are structurally
@@ -171,10 +146,12 @@ motion shifting by at most 0.00108 between the two states.
 
 The sign can invert on the difference: `structure-0` improves delta-E by 2.46 on
 `cuts-similar` measured against `baseline` and worsens it by 2.94 measured against
-the shipped state. Run art-knob ablations from
-`docs/measurements/art-defaults-20260914/shipped-state.profile.json`, which writes
-all eight keys and varies one. `NRAutoMask` is also the only one of the eight whose
-explicit write changes a pixel; the other seven at shipped values are bit-identical
+the shipped state. Run art-knob ablations from the shipped state:
+`tools/benchmark/knobs.py` holds it (`SHIPPED`, the eleven keys the player writes
+today, including `NRNormGovernor=1`) and varies one key per row;
+`docs/measurements/art-defaults-20260914/shipped-state.profile.json` is the eight-key
+state that 2026-09-14 measurement used. On it `NRAutoMask` was the only key whose
+explicit write changed a pixel; the other seven at shipped values were bit-identical
 to writing nothing, which proves only that the add-on agrees with us about them.
 
 **Synthetic clips inflate an effect's magnitude, and can point the wrong way on its
@@ -199,79 +176,9 @@ unsound for **sizing** an effect, and unsound for tuning a threshold on pooled
 numbers. That is why the synthetic and real cut tables here are never pooled, and it
 is the argument against retuning the 0.30 / 0.10 / 0.85 criterion on a pooled set.
 
-The depth A/B is `run.py --profiles depth-constant depth-proxy`. Both are names for
-guide strings the matrix already carries — a disabled depth guide *is* the constant
-0.75 field — so they resolve to `depth-off` and `baseline` and share their run
-directories instead of rendering the same configuration twice. The third profile the
-roadmap names, `depth-of`, is refused by name: `--guides` expresses exactly
-`mv=0|1,depth=0|1`, so there is no way to ask the worker for depth derived from the
-NVOFA structure, and no flag was invented to pretend otherwise.
-
-### The temporal metrics
-
-These exist to make the motion-vector and depth claims falsifiable, so each one is
-defined by the script rather than by prose. All of them mirror
-`src/TemporalGuides.cpp`: the cell grid is `AnalysisGrid` (width/10 cells clamped to
-96–160 below 45 fps, width/14 clamped to 96–128 above it, so 160×90 cells of 12×12
-source pixels for the 30-fps 1080p corpus), a cell's value is `DownsampleLuma`'s four
-stratified samples in normalized Rec.709 luma, and the cut thresholds and the 0.3 s
-weak-arm debounce are the generator's own. A threshold swept here therefore transfers
-to the runtime unchanged.
-
-- **Per-pixel temporal σ** (`temporal_sigma_source/output/added`, 8-bit luma levels).
-  The temporal standard deviation of each pixel's luma inside a shot — the frames
-  between two manifest cuts, because across a cut a pixel's spread is the edit and not
-  the pass — meaned over pixels and then frame-weighted over the shots; `added` is
-  output minus source, and the p99 of the same map is reported beside it. Shots shorter
-  than 3 frames are dropped rather than reported as suspiciously low σ. This is the
-  number the "2.23 → 1.41" claim refers to. What moves it is localized shimmer that a
-  frame-global mean hides: jitter, breathing fine detail, a guide flickering on and off.
-  A pass that only shifts the picture's level does not move it at all.
-- **False-motion rate** (`motion_field.false_motion_rate`, fraction of cells).
-  Staticness comes from the source itself: a cell is static across a consecutive pair
-  when its cell luma changed by at most 2/255 — two 8-bit levels — and the rate is the
-  fraction of those cells whose output changed by more than the same tolerance. That is
-  motion the pass invented rather than carried. The carrier sets a floor, since an NVENC
-  re-encode of a still region is not bit-exact; `intensity-0` measures that floor for
-  the clip, and the rate is only meaningful against it.
-- **Cell flip rate** (`motion_field.flip_rate_source/output/added`, fraction of cells).
-  The fraction of cells whose moving/static verdict changes between one consecutive pair
-  and the next, on the same grid and the same tolerance, source and output side by side.
-  It is the instability of the motion field rather than of the pixels: a threshold only
-  becomes visible once it oscillates, and a field that drops and re-acquires the same
-  vector on alternate frames scores badly here while the pixel metrics look calm.
-- **Cut precision/recall/F1** (`cuts.source`, `cuts.output`). The generator's own test
-  run over each file's cell grids and matched to the manifest's hard-cut indices, at
-  most one detection per cut within ±1 frame. The source column is a threshold check
-  and is the same for every profile of a clip; the output column is what a consumer of
-  the rendered file would detect. `cuts.*_evidence` records every firing frame with its
-  residual, its histogram overlap, the arm that fired and whether the debounce withheld
-  it. A cut-free clip has no recall to report and its detection count is its
-  false-positive count. A clip may also carry `soft_cuts` spans — a dissolve, where no
-  single frame is the right one — inside which the first reset is neither a hit nor a
-  false positive and a second one still is.
-
-`--sample-every` strides ΔE/PSNR/SSIM/OCR/faces alone. Every metric above sees every
-consecutive frame pair whatever the stride is, and all of them are withheld whole —
-`null` fields plus a `temporal_withheld` reason in `metrics.json` and a section in
-`report.md` — when the output frame count does not match the source, because frame *i*
-of one file is then not frame *i* of the other.
-
-## Reading the numbers
-
-- The worker's carrier is NVENC HEVC (software H.264 fallback). PSNR/SSIM/ΔE
-  therefore include encoder loss; `intensity-0` isolates that loss.
-- `peak_local_vram_mib` (worker, `IDXGIAdapter3` local budget) and NVML
-  `total_used_mib` (device-wide, every process) are not comparable; report both.
-- Bit-identical output between `baseline` and a guide ablation (same
-  `output_digest` in `metrics.json`) means that guide has no effect on the
-  active consumer for that clip; the worker reports the guide controls it
-  applied in the receipt. Worker builds without timing instrumentation
-  report the ms/VRAM fields as `0`.
-- OCR and face scores are engine-limited: compare the output figure with the
-  source figure produced by the same engine.
-- Pass 2 of a two-pass profile renders the lossy pass-1 file, so two-pass
-  deltas mix the model's second application with one extra encode.
+The depth A/B at the shipped state is in
+[`docs/measurements/depth-ab-20260914/REPORT.md`](measurements/depth-ab-20260914/REPORT.md);
+the profiles that run it are in the harness README.
 
 ## Reference run (2026-09-08, RTX 5090, driver 32.0.16.1664 / 616.64, ReShade 6.8.0.2155, RenoDX 4.7, DLSS-NR 310.8.0, worker 0.14.1 protocol v2)
 
@@ -294,13 +201,11 @@ sequence so byte-identical outputs are visible directly.
 | text-subtitles | mask-off | 1 | 4d412db9 | 13.4 | 15.69 | 31.24 | 3.26 / 3.80 | 6.4 | 6.7 | 1041 | +0.078 | 2.44 | 29.49 | 0.9875 |
 | text-subtitles | two-pass | 0 | 8b82158f | 27.4 | 15.35 | 31.37 | – | – | – | – | +0.172 | 3.07 | 26.73 | 0.9772 |
 
-Observations (P0-3 guide proof). **The table above predates the guide, capture,
-segment, decode and mask work described below, it predates v0.20.0's hardware optical
-flow, and it predates every temporal metric this page documents; its rates, its
-`mv-off` comparison and its absent σ / false-motion / flip / cut columns are all
-historical.** Rerun it before quoting a number from it: `analyze.py` produces those
-columns now, so the rerun is one command and the comparison it then allows is the
-whole reason the staleness matters.
+**This run is historical.** It predates hardware optical flow, the rewritten flow
+estimator and every temporal metric on this page, so rerun it before quoting a rate or
+the `mv-off` comparison from it. It stays for two reasons: it is the evidence for the
+decisions below, and its neural GPU time (3.26-3.27 ms p50 at 1080p) is the lowest
+healthy median that `src/NeuralRenderTypes.h` sets its DLAA-only floor against.
 
 - Rerenders are bit-identical across repeats (framemd5 sequence digests match).
   On RenoDX 6.5.3 that holds only with `NRNormGovernor` 0 or 1: the add-on's
@@ -317,35 +222,9 @@ whole reason the staleness matters.
   versus preset K** is pixel-identical too, so the preset hints are inert for
   this feature as well; and on the **DLSS-SR upscaling path** — a different NGX
   feature — mask on versus off is 0 differing bytes over 24 frames at 1440p
-  while motion vectors on versus off differ in 6.85 % of bytes at 43.1 dB. Two
-  of the three parameter names were never SuperSampling inputs at all: they
-  belong to Ray Reconstruction. The guide was deleted.
-  (That SR reading predates hardware optical flow. From 0.20.0 the resolve pass
-  wrote the motion texture whenever the engine came up, and it did not read the
-  guide switch, so `mv=0` stopped changing anything on that path until the switch
-  was wired into the pass - see the CHANGELOG. Re-measured after that fix on an
-  RTX 4080 SUPER, 12 frames at 1440p: 5.9 % of bytes.)
-- `mv-off` beating `baseline` in this table was real, and it was the motivation
-  for rewriting the flow estimator. The vectors were coarse (160×90 grid, 12 px
-  steps) and 60.8 % of cells on `cuts-motion` carried a vector that did not
-  reduce the warp residual. With acceptance by evidence margin, a banded reverse
-  check and a confidence-weighted vector median, that false-motion rate is 3.7 %,
-  temporal stability on the static text clip is 0.3292 against `mv-off`'s 0.3342
-  and the old 0.4101, and PSNR-Y recovers +0.297 dB on `cuts-motion`. Motion
-  vectors now help; re-measure this table to see it.
-- Depth changes the output but only within 0.02 dB, and an incidental finding
-  during the flow work is that changing the flow field does not change the
-  render at all through the depth channel — the proxy is dominated by its
-  vertical ramp. Depth is the next guide worth questioning.
-- The cut detector does **not** fire exactly on the clip's hard cuts, and the sentence
-  that used to stand here was wrong twice over: `cuts-motion` has **four** hard cuts
-  (frames 45/90/135/180), not five, and `resets` = 6 is one first-frame reset plus
-  **five** accepted cuts — an over-reset at frame 91, one frame after the frame-90 cut.
-  Measured with `cutlab.py`, below.
-- Per-frame cost has changed substantially since these runs: the neural pass is
-  still ~3.3 ms GPU per 1080p frame, but guide generation is 3.1 ms (was 6.4),
-  capture is 5.7 ms (was 6.7), and steady-state throughput is 12.50 ms/frame at
-  1080p, 16.60 at 1440p and 28.07 at 4K. See `docs/ARCHITECTURE.md`.
+  while motion vectors on versus off differ in 5.9 % of bytes (RTX 4080 SUPER,
+  12 frames at 1440p). Two of the three parameter names were never SuperSampling
+  inputs at all: they belong to Ray Reconstruction. The guide was deleted.
 - The second pass at `NRIntensity=0.75` adds flicker (+0.094), ΔE (+0.63)
   and costs 2.8 dB PSNR and 11 OCR points on small text; face crops keep a
   0.952 mean cosine to the source with frame-to-frame drift equal to the
@@ -358,11 +237,6 @@ neural pass. It replays `cutmirror` — the shared Python mirror of
 `src/TemporalGuides.cpp` that `analyze.py` also uses — over the corpus's cell grids
 and matches every accepted history reset against the manifest.
 
-```
-python tools/benchmark/corpus.py --corpus <dir>          # 13 clips, ~2 min
-python tools/benchmark/cutlab.py --corpus <dir> --sweep  # 1212 pairs, ~30 s cached
-```
-
 The labelled set grew for this: five clips exist only to be got right. `cuts-similar`
 hard-cuts between four mirrorings of one fractal still, so the shots share a luma
 histogram by construction and only correspondence can see the cut; `pan-fast` travels
@@ -372,7 +246,7 @@ are not; `flash-exposure` has a four-frame flash and a sustained exposure step, 
 the scene never changes.
 
 **What the shipped 0.30 / 0.10 / 0.85 criterion does** (the nine synthetic clips, 1212
-consecutive pairs, 7 labelled hard cuts — the four `real` clips were added later and
+consecutive pairs, 7 labelled hard cuts at the shipped 0.3 s window — the real clips
 are scored separately below):
 
 | clip | truth | accepted resets | missed | false positives |
@@ -392,49 +266,21 @@ Pooled precision 0.571, recall 0.571, F1 0.571. Three findings:
   residual 0.185–0.213 with overlap 0.88–0.98: under the 0.30 strong arm and over the
   0.85 histogram gate, so neither arm fires.
 - **A flash is indistinguishable from a cut.** Residual 0.25 with overlap 0.44 is
-  exactly the weak arm's shape. The 0.6 s debounce catches the frame that ends the
+  exactly the weak arm's shape. The debounce catches the frame that ends the
   flash (34) but not the one that starts it (30), nor the exposure step at 60.
 
 **Roadmap survey item 3, the scale-free candidate.** A cell's match failed when its
 winning displacement cost exceeds `ratio` × its standing-still cost — the
 no-prediction baseline `EstimateFlow` computes and discards — among cells whose
 standing-still cost clears `floor`; the decision is the *fraction* of failed cells
-(x265 `scenecut-bias`, mvtools `thSCD2`) rather than a mean residual. Implemented in
-`cutmirror.FailedFractionCriterion`, swept over 1350 points against the residual
-family's 198:
+(x265 `scenecut-bias`, mvtools `thSCD2`) rather than a mean residual. It is
+implemented in `cutmirror.FailedFractionCriterion` and `cutlab.py --sweep` ranks it
+beside the residual family.
 
-| family | best F1 | points with no missed cut and no over-reset | fewest false positives there | clips still wrong |
-|---|---:|---:|---:|---|
-| residual (shipped shape) | 0.875 | 2 | 2 | flash-exposure |
-| failed fraction | 0.875 | 89 | 2 | flash-exposure |
-
-**On the nine synthetic clips at the 0.6 s window the candidate was not better, so
-nothing in `src/` changed.** Both families reached the identical best operating point
-— every labelled cut found, no over-reset, and the same two false positives on the
-same clip — so the extra per-cell state a fraction needs in `EstimateFlow` would have
-bought nothing. Neither score even orders that set correctly: the weakest true cut is
-0.1853 residual against a 0.3739 non-cut, and 0.5661 failed fraction against a 0.7297
-non-cut. Both families were carried by the two-arm split and the debounce, not by the
-score.
-
-**That conclusion no longer holds on the corpus as it stands, and it is recorded here
-rather than acted on.** Re-scored 2026-09-14 over all thirteen clips at the shipped
-0.3 s window, the failed-fraction family strictly dominates: **P 0.857 / R 1.000 /
-F1 0.923** (12 true, 2 false, none missed) against the shipped residual criterion's
-**0.750 / 0.750 / 0.750** (9 true, 3 false, 3 missed). It suppresses the
-`cuts-motion` frame-91 over-reset - under that criterion 91 is a *weak*-arm fire, so
-the debounce reaches it - and it catches all three `cuts-similar` cuts the residual
-arm misses entirely. Its only remaining errors are `flash-exposure`'s two, which both
-families share.
-
-**Settled 2026-09-14 on a corpus with more real boundaries, and the answer is that
-the criterion stays.** The corpus grew from thirteen clips to twenty: seven
-camera-original clips carrying 17 frame-verified hard cuts joined the four
-NR-processed captures, which is what this paragraph asked for. (Two further
-camera-original clips, `orig-film-motion-a` and `orig-film-motion-b`, landed after
-this sweep, so `corpus.py --check` now verifies nine.) Re-swept over all
-twenty at the shipped window, the aggregate still favours the candidate - F1 0.931
-against 0.897 - and split by provenance it inverts:
+**Swept 2026-09-14, the answer is that the criterion stays.** Over twenty clips - the
+nine synthetic, the four NR-processed captures and seven camera-original clips
+carrying 17 frame-verified hard cuts - at the shipped window, the aggregate favours
+the candidate - F1 0.931 against 0.897 - and split by provenance it inverts:
 
 | criterion | camera-original (7 clips, 17 cuts) | NR-capture (4 clips, 5 cuts) | synthetic (9 clips, 7 cuts) |
 |---|---|---|---|
@@ -444,12 +290,12 @@ against 0.897 - and split by provenance it inverts:
 On all 22 real labelled cuts the shipped criterion is perfect and the candidate
 misses two of them; the candidate's aggregate advantage comes entirely from the
 synthetic half. That is this document's own rule about pooled numbers, arriving as
-a worked example on the very question that produced it, so the expired conclusion
-is retired rather than acted on. For completeness, with no missed cut and no
-over-reset the residual family reaches exactly one operating point (5 false
-positives; best F1 anywhere 0.949) and the failed-fraction family reaches ten
-(fewest 2 false positives; best F1 anywhere 0.967) - it is the better family on
-the pooled set and the worse one on real footage. Full tables:
+a worked example on the very question that produced it, so nothing in `src/` uses
+the candidate. With no missed cut and no over-reset the residual family reaches
+exactly one operating point (5 false positives; best F1 anywhere 0.949) and the
+failed-fraction family reaches ten (fewest 2 false positives; best F1 anywhere
+0.967) - it is the better family on the pooled set and the worse one on real
+footage. Full tables:
 [camera-original report](measurements/camera-original-20260914/REPORT.md).
 
 The shipped thresholds were left alone for the same reason. The residual sweep's best
@@ -463,31 +309,18 @@ either.
 
 ### The same criterion on real footage (2026-09-14, CPU only)
 
-The four `real` clips were added afterwards and scored separately, five labelled hard
-cuts over 312 frames. Both rows below were measured at the **0.6 s** weak-arm window
-that shipped at the time; the window is now **0.3 s**, and the re-measurement follows.
-
-| criterion | P | R | F1 | false pos | missed |
-|---|---:|---:|---:|---:|---:|
-| residual (shipped shape), 0.6 s window | 1.000 | 0.800 | 0.889 | 0 | 1 |
-| failed fraction, 0.6 s window | 1.000 | 0.800 | 0.889 | 0 | 1 |
-
-| clip | truth | accepted resets | missed | false positives |
-|---|---|---|---:|---|
-| `real-film-cuts` | 20, 47, 70, 87 | 20, 47, 70 (**87 suppressed**) | 1 | – |
-| `real-game-cuts` | 32 | 32 | 0 | – |
-| `real-game-motion`, `real-dissolve` | none / soft 15–37 | none | 0 | – |
-
-**Re-measured at the 0.3 s window, which is what ships now.** `real-film-cuts` takes
-all four: 20 residual 0.3363, 47 residual 0.3114, 70 histogram 0.2504, 87 histogram
-0.2711 — accepted. Residual and overlap are bit-identical to the 0.6 s run and only
-frame 87's verdict changed, so the attribution is exact. The real four become
-**P 1.000 / R 1.000 / F1 1.000**, five of five with no false positive. The synthetic
-nine are **unchanged at 0.571/0.571/0.571**, so the shorter window costs the synthetic
-set nothing and buys the one real cut. `flash-exposure` keeps its frame-34 suppression
-(4 frames after 30, inside 9 as it was inside 18) and its two false positives at 30
-and 60; `cuts-motion` is unchanged because frame 91 fires the strong arm, which is
-never debounced at any window length.
+The four `real` clips, five labelled hard cuts over 312 frames, at the shipped 0.3 s
+window: `real-film-cuts` takes all four - 20 residual 0.3363, 47 residual 0.3114, 70
+histogram 0.2504, 87 histogram 0.2711 - and `real-game-cuts` takes its cut at 32;
+`real-game-motion` and `real-dissolve` (soft cut 15–37) reset nowhere. That is
+**P 1.000 / R 1.000 / F1 1.000**, five of five with no false positive. At the 0.6 s
+window that shipped before, frame 87 was suppressed and recall was 0.800; residual and
+overlap are bit-identical between the two runs and only frame 87's verdict changed, so
+the attribution is exact. The synthetic nine are **unchanged at 0.571/0.571/0.571**,
+so the shorter window costs the synthetic set nothing and buys the one real cut.
+`flash-exposure` keeps its frame-34 suppression (4 frames after 30, inside 9 as it was
+inside 18) and its two false positives at 30 and 60; `cuts-motion` is unchanged
+because frame 91 fires the strong arm, which is never debounced at any window length.
 
 Two findings the synthetic set could not produce:
 
@@ -526,31 +359,27 @@ Two findings the synthetic set could not produce:
   the "at most one" tolerance. The two false positives in the synthetic table are both
   `flash-exposure`, a deliberately adversarial clip.
 
-What is still missing is a real dissolve — the demo capture contains none, every
-transition in it is a single-frame jump — and a shot-boundary set large enough that a
-three-parameter grid search is not fitting twelve positives. The gate A/B these clips
+What is still missing is a shot-boundary set much larger than the 29 labelled hard
+cuts a three-parameter grid search is fitted to here. The gate A/B these clips
 were built for is in
 [`docs/measurements/gate-real-footage-20260914/REPORT.md`](measurements/gate-real-footage-20260914/REPORT.md).
 
 ## What the harness measures now, and what it still cannot
 
-The four numbers this project used to quote from ad-hoc runs are scripted: false-motion
-rate, per-pixel temporal σ with its p99, cell flip rate, and cut precision/recall
-against the manifest's ground truth. `analyze.py` computes all four inside the single
-streaming pass it already made over each run, and `report.md` carries them per
-clip/profile, as deltas against `baseline` for every profile whose guide string
-differs, and as a per-run cut table. The 60.8 % → 3.7 % false-motion figure and the
-2.23 → 1.41 σ figure quoted above and elsewhere in these docs predate that script and
-were measured differently; they stand as history until a rerun replaces them with the
-script's own numbers.
+`analyze.py` computes false-motion rate, per-pixel temporal σ with its p99, cell flip
+rate and cut precision/recall against the manifest's ground truth inside the single
+streaming pass it makes over each run, and `report.md` carries them per clip/profile,
+as deltas against `baseline` for every profile whose guide string differs, and as a
+per-run cut table.
 
 What still cannot be decided by measurement here: the NVOFA cost gate has no published
 scale, so calibrating it wants the forward/backward agreement mask rather than another
 invented threshold; `IsHDR` on the linear FP16 input is an A/B nobody has run on the
 neural pass (Super Resolution's is in `docs/measurements/sr-quality-20260924/`, the
-supplied exposure's in `docs/measurements/exposure-ab-20260923/`); and depth is now answerable as
-`depth-constant` versus `depth-proxy` but the OF-structure candidate has no argument
-behind it to run. The VSR literature's warp-error metric remains the shape to copy for
+supplied exposure's in `docs/measurements/exposure-ab-20260923/`); and depth is answerable as
+`depth-constant` versus `depth-proxy`, but depth from the NVOFA structure has no
+estimator in the worker, so it would have to be computed offline and run as
+`depth=file:`. The VSR literature's warp-error metric remains the shape to copy for
 a stronger false-motion number than a luma tolerance can give: the flow rejection
 thresholds were chosen by warping the previous frame's full-resolution pixels and
 scoring the residual, which works just as well pointed at DLSS output.
@@ -564,14 +393,13 @@ for byte. That is how the mask question was settled for DLSS-SR.
 ## Which neural settings change the image (2026-09-24, RenoDX 6.5.3)
 
 Re-measured on the pinned runtime (ReShade 6.8.0.2155, RenoDX 6.5.3, DLSS-NR 310.8.0,
-RTX 4080 SUPER) with `tools/benchmark/knobs.py`, which replaced the 4.70 method of
-pairing the player's single-frame previews: every row renders a whole clip through the
-worker at the player's shipped state - the ten keys it writes - changed in exactly one
-key or one guide, and is compared with the reference as decoded rgb24 bytes over every
-frame. Two clips: `real-film-cuts` (102 frames, faces on 12 of 21 sampled frames) and
-`real-game-cuts` (68 frames, a static game HUD). The reference also writes
-`NRNormGovernor=0` and was rendered twice to 0 differing bytes; why is the next
-subsection. Full table, face shares and method:
+RTX 4080 SUPER) with `tools/benchmark/knobs.py`: every row renders a whole clip through
+the worker at the player's shipped state - the keys `NeuralAddonOverridesFor` writes,
+with `NRNormGovernor` at 0 - changed in exactly one key or one guide, and is compared
+with the reference as decoded rgb24 bytes over every frame. Two clips:
+`real-film-cuts` (102 frames, faces on 12 of 21 sampled frames) and `real-game-cuts`
+(68 frames, a static game HUD). The reference was rendered twice to 0 differing bytes;
+why it writes governor 0 is the next subsection. Full table, face shares and method:
 [knobs-653 report](measurements/knobs-653-20260924/REPORT.md).
 
 | control | change | bytes differing (film / game) | mean abs delta (film / game) |
@@ -597,28 +425,23 @@ subsection. Full table, face shares and method:
 | **Global tone** (`NRGlobalTone`, not written by the player) | 1.00 → 0.00, 0.30, 1.05, 2.00 | **0 % / 0 %** | 0 / 0 |
 | **UI correction** (`NRUICorrection`, not written by the player) | 0 → 1 | **0 % / 0 %** | 0 / 0 |
 
-What moved since 4.70, and what the UI does about it:
+What the table decides in the UI:
 
-- **Color strength now changes the image**: 0.20 moves more of the picture than
-  Intensity at 0.40. On 4.70 it was 0 bytes on every pair, which is why the dialog hid
-  it. It is back in the dialog as a 0.00-1.00 slider (default 1.00, unchanged); it
-  was never out of `NeuralSettings`, the INI or the render identity, so no cache
-  entry changes meaning.
-- **The render preset is still inert**, now on a third runtime, and stays hidden.
+- **Color strength changes the image**: 0.20 moves more of the picture than
+  Intensity at 0.40, so the dialog shows it as a 0.00-1.00 slider (default 1.00).
+- **The render preset is inert**, on a third runtime now, and stays hidden.
 - **Skin structure only has a range of 0.00 to 0.99.** Every negative value and
   exactly +1.00 render the shipped picture, byte for byte; 0.00, 0.25, 0.50 and 0.99
   each change it, and by less as they rise. So the shipped −1.00 means *off*, half of
   the dialog's −1..+1 slider is inert, and the add-on's own overlay text ("negative
   smooths, positive enhances, 0 = neutral") does not describe what the runtime does.
-  The dialog's slider now offers exactly that: **Off** at its left end, then 0.00 to
-  0.99, greyed out with "Mask off" while Automatic mask is off. Off is still
-  written as −1.00, so the default render and its cache key are unchanged, and a
-  value an older build saved loads as what it rendered as (a negative value or +1.00
-  as Off).
+  The dialog's slider offers exactly that: **Off** at its left end, then 0.00 to
+  0.99, greyed out with "Mask off" while Automatic mask is off. Off is written as
+  −1.00, and a saved negative value or +1.00 loads as Off, which is what it renders
+  as.
 - **Skin structure needs the automatic mask**: with `NRAutoMask=0` its value changes
   nothing, which matches the add-on's description of the mask ("so the
-  Character/Skin Structure response applies to them"). The mask's own tooltip said it
-  "chooses regions to leave untouched"; it now says what the add-on and this table say.
+  Character/Skin Structure response applies to them"), and the mask's tooltip says so.
 - **Neither gives face protection**. The change a skin value makes lands on
   Haar-detected face boxes 2.1× as densely as their area, against 1.8× for Intensity
   and 1.9× for Color strength on the same frames: skin is barely more face-local than
@@ -627,13 +450,13 @@ What moved since 4.70, and what the UI does about it:
 - **Global tone and UI correction are inert** on this path at every value tried, so
   the player does not write them and the dialog does not show them.
   `NRUICorrection` is read as an integer (0.5 is stored back as 0).
-- **Chained history works.** A first pass of this measurement said it did nothing;
-  that was a harness bug, below.
+- **Chained history changes the image**, once the harness writes `ConfigVersion`
+  (below).
 
 ### Two harness corrections this table depends on
 
 **The normalization governor.** The add-on's `NRNormGovernor` (0 off, 1 slew, 2
-stable; the player did not write it then, so 2 shipped) settles its brightness divisor at
+stable; the add-on's default is 2) settles its brightness divisor at
 rates per second. On the two synthetic near/far clips a repeat of one configuration
 at the default is not byte-identical: 12.5 % of bytes from frame 69 of `depth-pan`
 and 26 % from frame 37 of `depth-subject`, mean |Δ| 0.41-0.46, worst frame 0.9-2.2
@@ -646,35 +469,20 @@ flicker trade this table could not decide. `docs/measurements/governor-20260924`
 did: off brings frame-to-frame pumping back (2.7-6× the governed mean-luma jitter on
 three clips), stable's repeats differ on five of nine clips including real footage
 with lighting changes (50.7 % of bytes), and slew (1) is reproducible in every render
-and damps as stable does - so the player now writes `NRNormGovernor=1`.
+and damps as stable does - so the player writes `NRNormGovernor=1`.
 
-**Schema migration.** `run.py` wrote 4.70's `NREnableUpscaling=0` and no
-`ConfigVersion`, so 6.5.3 read every fresh profile as config schema v0 and migrated
-it on load ("inherited NRCodecMode/NRChainedHistory defaults adopted", a `.bak`
-beside the add-on) - which set `NRChainedHistory` back to 1 and made a chained-off
-profile render the chained picture. `run.py` now writes the player's own managed keys
-plus `ConfigVersion=6`, the stamp the add-on writes on first load and so the state of
-every player runtime after its first launch. At the defaults this changes no pixel
-(identical digests with and without the migration on three clips).
+**Schema migration.** A `[RenoDX.DLSS5]` section without `ConfigVersion` is read by
+6.5.3 as config schema v0 and migrated on load ("inherited
+NRCodecMode/NRChainedHistory defaults adopted", a `.bak` beside the add-on), which sets
+`NRChainedHistory` back to 1 and makes a chained-off profile render the chained
+picture. So `run.py` writes the player's own managed keys plus `ConfigVersion=6`, the
+stamp the add-on writes on first load and so the state of every player runtime after
+its first launch; at the defaults this changes no pixel (identical digests with and
+without the migration on three clips). The player writes `ConfigVersion=6` into a
+section it creates (`src/ReShadeConfig.cpp`), because `packaging/ReShade.ini` carries
+no `[RenoDX.DLSS5]` section; a preflight on a fresh runtime logs no migration and
+leaves no `.bak`.
 
-The same migration could reach the player once: `packaging/ReShade.ini` carries no
-`[RenoDX.DLSS5]` section, so the first launch's section had no `ConfigVersion` and a
-chained-off setting in `DLSSVideoPlayer.ini` was rendered chained on that first
-launch only. The player now writes `ConfigVersion=6` into a section it creates
-(`src/ReShadeConfig.cpp`); a preflight on a fresh runtime logs no migration and leaves
-no `.bak`.
-
-Cost of a change is unchanged in kind: settings and guides are part of the render
-identity, so every distinct combination renders from scratch (16 cold 1080p
-single-frame previews took a median of **10.6 s** each on 4.70, and repeats came back
-from cache in **1.03 s**). Changing the render preset therefore still costs a full
-re-render and produces byte-identical output.
-
-### The 4.70 table it replaces (2026-09-09)
-
-Measured through the player's paused previews, one frame per pair: Intensity 84.75 %,
-Local tone 66.45 %, Local structure 53.41 %, Style 2 → 0 49.31 %, motion guide
-39.79 %, depth guide 37.92 %, Skin structure +1.00 → −0.40 36.50 %, Automatic mask
-36.08 %, and **Color strength 0 %** and **render preset 0 %** on every pair. The skin
-pair would measure 0 % on 6.5.3, where both of its values are off: the runtime
-changed, not the method.
+Settings and guides are part of the render identity, so every distinct combination
+renders from scratch: changing an inert control such as the render preset still costs
+a full re-render and produces byte-identical output.
