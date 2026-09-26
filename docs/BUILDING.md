@@ -1,6 +1,6 @@
 # Building and testing
 
-_Verified against 0.26.1 on 2026-09-26, RTX 5090 ([record](VERIFICATION-2026-09-26-RTX5090.md))._
+_Verified against 0.26.2 (b965b53) on 2026-09-26._
 
 Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
 C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the

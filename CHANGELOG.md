@@ -7,7 +7,7 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Unreleased
+## 0.26.2 - 2026-09-26
 
 Fixes from re-measuring an RTX 5090 on 0.26.1
 ([record](docs/VERIFICATION-2026-09-26-RTX5090.md)). Renders are reused, except

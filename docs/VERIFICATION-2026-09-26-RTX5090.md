@@ -9,7 +9,7 @@ since had measured it.
 The quoted paces were stale. On 0.26.1 with the fixes below, the same three
 geometries cost **6.75, 9.90 and 22.57 ms/frame**, and all three now keep up
 with 30 fps playback, 4K included. Getting there found five defects, all fixed
-here.
+here and released in 0.26.2.
 
 ## Environment
 

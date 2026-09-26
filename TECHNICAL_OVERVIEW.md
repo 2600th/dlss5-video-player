@@ -1,6 +1,6 @@
 # DLSS 5 Video Player — technical overview
 
-_Verified against 0.26.1 (d9c7b51) on 2026-09-25._
+_Verified against 0.26.2 (b965b53) on 2026-09-26._
 
 The player renders a whole video while you watch it, keeps every rendered
 region seekable, reuses the validated result, and compares it with the original

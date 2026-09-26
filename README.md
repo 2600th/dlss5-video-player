@@ -31,12 +31,12 @@ unscaled. [Four more, including one where the model makes the picture worse](doc
 
 ## Download
 
-**v0.26.1** (2026-09-25): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.26.1)
+**v0.26.2** (2026-09-26): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.26.2)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.26.1-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 327 MB |
-| `DLSSVideoPlayer-v0.26.1-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
+| `dlss5-video-player-v0.26.2-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 327 MB |
+| `DLSSVideoPlayer-v0.26.2-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
 
 Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run: it
 has no runtime.
@@ -47,8 +47,8 @@ The checksum shows the file arrived intact; the attestation shows this
 repository built it.
 
 ```sh
-sha256sum -c DLSSVideoPlayer-v0.26.1-core-win64.zip.sha256
-gh attestation verify DLSSVideoPlayer-v0.26.1-core-win64.zip --repo 2600th/dlss5-video-player
+sha256sum -c DLSSVideoPlayer-v0.26.2-core-win64.zip.sha256
+gh attestation verify DLSSVideoPlayer-v0.26.2-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
 Only the core zip has an attestation. CI can't fetch the neural runtime, so the
@@ -158,19 +158,23 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   `--out`, `--stages`, `--range` and the rest are in the
   [usage guide](docs/USAGE.md#from-the-command-line).
 
-## What's new in 0.26.1
+## What's new in 0.26.2
 
-**0.26.1** (2026-09-25). Fixes from a full audit of 0.26.0.
+**0.26.2** (2026-09-26). Fixes from re-measuring an RTX 5090.
 
-- **Portrait phone videos** play, render and export upright.
-- **Exports keep the subtitles** each format can hold instead of failing.
-- **Starts on any PC**, with no Visual C++ Redistributable to install.
-- **Safer:** FFmpeg is never run from the video's own folder, and exports refuse
-  a runtime that does not match the lock, as live rendering does.
+- **Untagged HD videos play and render on the GPU.** A 4K file that declares no
+  colour matrix played at 3.5 fps while rendering; it now plays at 30.
+- **The keep-up warning learns from every session**, including one started
+  partway through a video.
+- **Seeking right after starting playback** takes about 50-95 ms, not
+  250-320, on audio devices that are slow to reopen.
+- **Measured speed:** on an RTX 5090, about 6.8 ms a frame at 1080p30, 9.9 at
+  1440p30 and 23 at 4K30.
 
-Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.26.0 added the compare
-views, RTX VSR beside DLSS 5, subtitles, HDR, the render quality ladder and
-`--render`.
+Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.26.1 fixed portrait
+video, subtitle exports and the Visual C++ runtime, and 0.26.0 added the
+compare views, RTX VSR beside DLSS 5, subtitles, HDR, the render quality ladder
+and `--render`.
 
 ## Controls
 
@@ -251,7 +255,7 @@ not what every source will gain.
 - **Driver 610.47 or newer.** Older drivers refuse neural rendering on any card,
   and the player tells you up front. See
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
-- **Tested GPUs.** An RTX 4080 SUPER and an RTX 5090, both on 0.26.1.
+- **Tested GPUs.** An RTX 5090 (on 0.26.2) and an RTX 4080 SUPER (on 0.26.1).
   RTX 20 and 30 series cards lack native FP8 and should be several times
   slower; nobody has tested one yet.
 - **Depth is estimated from the picture**, and so is motion on cards without

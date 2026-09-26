@@ -1,6 +1,6 @@
 # Architecture
 
-_Verified against 0.26.1 (d9c7b51) on 2026-09-25._
+_Verified against 0.26.2 (b965b53) on 2026-09-26._
 
 ## High-level pipeline
 
@@ -950,9 +950,9 @@ A session contributes the pace of the job that measured the most frames
 opened mid-video renders to the end and then fills the head behind the
 playhead, and that short last job used to replace the long one, fall under the
 120-frame floor and record nothing at all. With that fixed, and untagged HD
-sources decoded to NV12 rather than through a BGRA pipe, 0.26.1 on the current
+sources decoded to NV12 rather than through a BGRA pipe, 0.26.2 on the current
 runtime measured **6.75, 9.90 and 22.57 ms** at 1080p, 1440p and 4K on the same
-GPU and clips (see the [0.26.1 RTX 5090 record](VERIFICATION-2026-09-26-RTX5090.md)).
+GPU and clips (see the [0.26.2 RTX 5090 record](VERIFICATION-2026-09-26-RTX5090.md)).
 
 The paces are also kept per processing-scale rung. They used to be filed under
 the source geometry whatever rung rendered them, so the first 50% session was

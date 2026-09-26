@@ -1,6 +1,6 @@
 # Troubleshooting
 
-_Verified against 0.26.1 (d9c7b51) on 2026-09-25._
+_Verified against 0.26.2 (b965b53) on 2026-09-26._
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
 
