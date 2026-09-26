@@ -36,7 +36,7 @@ math, so the same network runs several times slower there; the offline cache
 still completes, and a live session simply buffers when it cannot keep up.
 
 The runtime lock currently selects RenoDX DLSS 5 add-on 6.5.3. Normal-mode
-helper bootstrap atomically enforces only these managed values in
+helper bootstrap atomically enforces these managed values in
 `neural-runtime/ReShade.ini`:
 
 ```ini
@@ -52,13 +52,11 @@ directly and does not use Streamline, so this avoids installing an unnecessary
 Streamline hook.
 
 `NRFollowInputRes=0` with `NRResolutionScale=1` holds the neural pass at the
-source's own resolution. These replace 4.70's single `NREnableUpscaling=0`,
-which 6.x removed when it split the working resolution into a mode and a
-scale. The scale is a multiplier, not a percentage - the add-on's overlay
-merely renders it as a percentage - and writing `100` there is silently
-normalised to `1` with nothing logged. A leftover `NREnableUpscaling` in an
-existing `ReShade.ini` is left alone at whatever value it holds; 6.x ignores
-it, and rewriting a key it classifies as pre-v4 would re-run its config
+source's own resolution. The scale is a multiplier, not a percentage - the
+add-on's overlay merely renders it as a percentage - and writing `100` there is
+silently normalised to `1` with nothing logged. A leftover `NREnableUpscaling`
+in an existing `ReShade.ini` is left alone at whatever value it holds; 6.x
+ignores it, and rewriting a key it classifies as pre-v4 would re-run its config
 migration, which backs the file up beside the add-on every time it fires.
 
 A section the player creates also opens with `ConfigVersion=6`, the schema
@@ -77,20 +75,25 @@ picture ahead of DLSS Super Resolution, and `NRPreUpscale=0` when a render at
 100% finds a 1 left behind. A render at 100% on a file that holds 0, or no such
 key, writes nothing.
 
-Other RenoDX controls—including preset, style, intensity, automatic mask, and
-guide overrides—are preserved. Safe mode skips the neural helper entirely and
-does not change those user settings.
+Each neural render also writes the model settings from **DLSS > Neural
+settings** into the same section: `NRIntensity`, `NRLocalTone`,
+`NRLocalStructure`, `NRSkinStructure`, `NRColorStrength`, `NRPreset`,
+`NRStyle`, `NRAutoMask`, `NRPasses` and `NRChainedHistory`, plus
+`NRNormGovernor`, which is pinned at `1`. Keys the player does not write are
+preserved. Safe mode skips the neural helper entirely and writes none of the
+neural settings.
 
 The selected neural runtime is modified and unsigned: its author removed the
-embedded NVIDIA signature (the previous RTX 40 lock reported Authenticode
-`HashMismatch` instead). The ReShade proxy and RenoDX add-on are unsigned.
+embedded NVIDIA signature. The ReShade proxy and RenoDX add-on are unsigned.
 These signature states do not establish malware or safety, and matching a
 SHA-256 lock proves only that a file is the expected byte stream.
 See [third-party notices](../THIRD_PARTY.md) and the packaged
 `EXPERIMENTAL_RUNTIME_NOTICE.txt`.
 
-The offline neural helper uses a native 1:1 DLAA carrier, with upscaling off.
-The player's independent runtime SR toggle starts off on a fresh install. Its output target
+At the default 100% processing scale the offline neural helper uses a native
+1:1 DLAA carrier, with upscaling off; the 75% and 50% rungs run it as Super
+Resolution back to the source size, as described above. The player's
+independent runtime SR toggle starts off on a fresh install. Its output target
 is Auto: the largest of the 1080p, 1440p and 2160p rungs that the monitor's
 current mode can scan out, never one above it. Any rung can be pinned from
 **DLSS > Upscaling output**. The backend selects a supported NGX
@@ -101,15 +104,18 @@ quality range without resizing or downsampling the decoded source.
 When the complete experimental layout is active, the current release takes the
 tallest rung up to 1440p for YouTube Auto, then the highest bitrate inside it,
 falling back to a rung up to 2160p only when nothing at 1440p or below exists,
-and uses native-resolution DLAA. Manual source
-choices are 1080p, 1440p, and 2160p; 480p and 720p are automatic fallbacks only.
-Within the selected resolution, acquisition prefers the highest advertised
-video bitrate across codecs. Offline DLSS upscaling and RenoDX neural upscaling
-remain off; playback SR follows the separately saved player preference.
+and, at the default 100% processing scale, native-resolution DLAA. Manual
+source choices are 1080p, 1440p, and 2160p; 480p and 720p are automatic
+fallbacks only. Within the selected resolution, acquisition prefers the highest
+advertised video bitrate across codecs. RenoDX neural upscaling stays off, and
+so does offline DLSS upscaling at 100%; playback SR follows the separately
+saved player preference.
 
 Neural rendering either completes into a cache entry before playback or runs
 behind live playback, publishing finalized segments that playback follows once
-a four-second lead exists. The player materializes a private
+a lead exists: four seconds from a render that just keeps up or whose pace is
+not yet known, less from one at 1.5 times real time or more, and up to 30
+seconds from one below real time. The player materializes a private
 local source when needed, evaluates every frame in timestamp order, encodes
 the neural output with NVENC, straight from D3D12 or after a readback (FFV1
 for Lossless; a failed NVENC restarts from frame zero with software H.264),
@@ -123,33 +129,16 @@ marker rejects the complete job. Offline decoding uses the software FFmpeg path
 so CUDA resources remain available to feature 18 and NVENC; normal playback
 continues to prefer hardware decoding.
 
-On the tested RTX 5090 (v0.15.0, previous RTX 40-targeted runtime), the
-complete GTA VI Trailer 2 run produced all 5,002 frames at 1920 x 1080 / 30
-fps, with default neural intensity 1.00 and no upscaling. Reopening the same
-example reused both source and neural caches. See the
-[verification record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md)
-for measurements and their limits. On an RTX 4080 SUPER (driver 610.47) the
-universal runtime passed the strict GPU smoke and a full 1080p30 live session
-at 15.31 ms/frame; see the
-[RTX 4080 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-09-RTX4080.md).
-An RTX 5090 (driver 616.64) then confirmed the universal runtime at 1080p
-(11.89 ms/frame), 1440p and 4K; see the
-[RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-09-RTX5090.md).
-The same machine re-ran all three geometries on 0.17.0 at 8.4, 15.4 and
-42.0 ms/frame; see the
-[0.17.0 RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-10-RTX5090.md).
-On 0.26.2 with the current runtime (DLSS SR 310.9.1, RenoDX 6.5.3) it measured
-6.75, 9.90 and 22.57 ms/frame; see the
-[0.26.2 RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-26-RTX5090.md).
-Later records - the 0.20.0 RTX 5090 session, the 0.21.x RTX 4080 gate and
-cold-stack record, and the driven-session matrix - are listed with dates under
-the README's [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).
+Hardware measurements and their limits are in the dated
+`VERIFICATION-*.md` records in this folder; the latest are the
+[RTX 5090 record](VERIFICATION-2026-09-26-RTX5090.md) of 2026-09-26 and the
+[RTX 4080 SUPER record](VERIFICATION-2026-09-14-RTX4080.md) of 2026-09-14.
 Turing and Ampere have no hardware verification in this project yet.
 
 Feature 18 is created by the driver's NGX core, so the driver is a hard
 requirement independent of the GPU: the player refuses a render below
 **610.47**, the lowest driver this project has rendered on, and names 616.64 -
-the driver both verification records used - in the message. The floor the wider
+the driver the runtime is verified against - in the message. The floor the wider
 community publishes for the same runtime is 616.56. An older driver answers
 `CreateFeature` with `0xbad00002`
 (`NVSDK_NGX_Result_FAIL_PlatformError`); an architecture the runtime itself

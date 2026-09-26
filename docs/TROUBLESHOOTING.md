@@ -24,7 +24,7 @@ involved. The refusal appears in `neural-runtime/ReShade.log` as
 
 The player reads the driver from DXGI and compares it against a **610.47**
 floor, the lowest driver this project has rendered on; **616.64** is the driver
-the verification records used, and 616.56 is the floor the wider community
+the runtime is verified against, and 616.56 is the floor the wider community
 publishes for the same runtime. Below the floor the render is refused up front
 with the detected, minimum and verified numbers, and the startup log carries the
 same verdict. DXGI reports the driver as `32.0.15.6614`-style; that is
@@ -81,8 +81,8 @@ at launch and cannot be changed by a running process.
 
 ## Update notice in the menu bar
 
-`↑ Update <version>` right-justified in the menu bar means a newer stable
-release exists; opening it goes to the GitHub releases page and retires that
+`↑ Update <version>` right-justified in the menu bar means a newer release
+exists; opening it goes to the GitHub releases page and retires that
 version until the next one ships. **Advanced > Check for updates** asks
 immediately and answers either way. The check runs at most once a day, ignores
 drafts (every published release is a pre-release, so those count), and stores its state in `[Updates]` in
@@ -117,22 +117,19 @@ rather than a failed one.
 
 ## The cache directory is unavailable
 
-Use a writable player/data location and check free space. Cache data prefers
-`cache\v1` beside the EXE, falling back to `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`;
-Windows may redirect the fallback into the launching package's private LocalCache. The player
-resolves that physical location before creating source/render buckets and saves
-it as `[Storage] CacheDirectory` in the INI beside the EXE. Check that value or
-the startup log's `Neural cache directory:` line for the exact location. A cache
-folder whose path is longer than about 140 characters is refused, because the files
-the cache writes inside it would pass Windows' 260-character path limit; choose a
+Use a writable player/data location and check free space. The player resolves
+the physical cache location - `cache\v1` beside the EXE, or its
+`%LOCALAPPDATA%` fallback, which Windows may redirect into the launching
+package's private LocalCache - and saves it as `[Storage] CacheDirectory` in the
+INI beside the EXE. Check that value or the startup log's
+`Neural cache directory:` line for the exact location. A cache folder whose
+path is longer than about 140 characters is refused, because the files the
+cache writes inside it would pass Windows' 260-character path limit; choose a
 shorter folder.
-Original YouTube downloads are in `sources/<key>/source.mkv`; processed videos
-are in `renders/<key>/neural.mkv`.
 
-Use **Advanced > Clear Neural Cache** to see its size and remove owned data after
-confirmation. It closes playback first and is blocked during acquisition,
-rendering or export. Local originals and exported files are preserved. The last
-five videos remain in the menu, but their cleared caches must be rebuilt.
+What the cache holds, how to choose its location and what **Advanced > Clear
+Neural Cache** removes are in
+[Recent videos and cache retention](USAGE.md#recent-videos-and-cache-retention).
 
 ## Neural cache staging could not be created
 
@@ -160,7 +157,8 @@ render's unique name was already there, which is refused rather than reused.
 ## A recent video is missing or needs a download
 
 The **menu** lists five videos; the cache behind it is not limited by the list
-(it evicts only when the drive falls below 20 GiB free). A video that
+(at startup it removes only entries nothing will ask for again, and the least
+recently watched when the drive has less than 20 GiB free). A video that
 has dropped off the list still has its render and its download, and reopening it
 by any route attaches to them. Local files must still exist at their saved
 location. YouTube entries need a valid acquired source to
@@ -169,11 +167,9 @@ older untracked cache is not automatically imported into recent history.
 
 Selecting the same game trailer or pasting the same URL checks recent
 history too. Keep the same source-quality setting to reuse its tracked download.
-The completeness and highest-bitrate selection policies replace older source
-caches once: earlier builds could accept a prematurely ended download or a
-lower-bitrate format. Current acquisition validates decoded video duration
-against YouTube metadata before starting neural rendering;
-a short audio stream no longer cuts off the video. Interrupted HTTP reads use
+Acquisition validates decoded video duration against YouTube metadata before
+starting neural rendering, so a short audio stream does not cut off the video.
+Interrupted HTTP reads use
 bounded retries, and an incomplete result fails instead of becoming a cache hit.
 For acquired YouTube sources, neural timing is checked against the video track;
 a slightly longer audio tail does not count as missing neural video.
@@ -184,9 +180,11 @@ a slightly longer audio tail does not count as missing neural video.
 opens. Select a new filename: existing destinations are never overwritten.
 Export needs the cached neural file, its original source and FFmpeg.
 
-Unsupported MKV subtitle codecs produce an error. The exporter does not silently
-drop tracks, transcode them, or burn subtitles into the image. Check the reported
-FFmpeg diagnostic and use compatible source tracks. While a write is in flight
+A subtitle stream the chosen container cannot hold is left out, and the export
+says how many were: MKV turns MP4 timed text into SubRip and leaves out codecs it
+cannot carry, and MP4 leaves out picture subtitles. Subtitles are never burned
+into the image. If the export fails, check the reported FFmpeg diagnostic.
+While a write is in flight
 the export row reads **Cancel export**; choosing it stops the job and removes
 its temporary output.
 
@@ -208,18 +206,17 @@ At the chosen resolution, the resolver prefers the highest advertised video
 bitrate across codecs. That estimate can differ from the downloaded file's
 average bitrate; bitrate alone is not a cross-codec quality score.
 
-If the helpers themselves are the problem, the message now names which one it
-is rather than always reporting them missing. "yt-dlp.exe is not beside the
+If the helpers themselves are the problem, the message names which one it is.
+"yt-dlp.exe is not beside the
 app" is a broken install; "is there but could not be opened" is usually
 antivirus or file permissions; "is a link rather than a file, so it was
 refused" and "resolves to somewhere outside the app's folder" are the
 junction checks doing their job and mean the install has been tampered with.
 "The YouTube helpers are present, but their cache folder beside the app could
-not be created" is a read-only install folder, which used to be reported as
-the files being missing.
+not be created" is a read-only install folder.
 
-Every refusal is also written to the log now, with the cause named, which is
-what to attach to a bug report when YouTube changes something upstream.
+Every refusal is also written to the log, with the cause named, which is what
+to attach to a bug report when YouTube changes something upstream.
 
 ## Upscaling is off or playback drops frames
 
@@ -388,11 +385,11 @@ writable extracted folder and close the player normally to save preferences.
 
 `DLSSVideoPlayer.log` sits beside the EXE, and the helper writes
 `neural-runtime/NeuralWorker.log`. Each file is named after the executable that
-writes it, so running a test binary no longer overwrites the player's.
+writes it, so running a test binary does not overwrite the player's.
 
 Both are **appended**, not truncated, and each run starts with a
-`===== session started <date> pid=N =====` banner. Relaunching after a crash to
-collect the log no longer destroys the evidence of it. They roll at 8 MB,
+`===== session started <date> pid=N =====` banner, so relaunching after a crash
+to collect the log keeps the evidence of it. They roll at 8 MB,
 keeping one previous generation as `<name>.log.1`.
 
 If the folder holding the EXE cannot be written - `%ProgramFiles%`, or a

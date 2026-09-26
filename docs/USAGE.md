@@ -2,8 +2,7 @@
 
 _Verified against 0.26.2 (b965b53) on 2026-09-26._
 
-The interface is English-only. It does not load external language packs;
-legacy language settings in the INI are ignored.
+The interface is English-only. It does not load external language packs.
 
 ## Open, render and compare
 
@@ -50,11 +49,19 @@ straight away as synchronized neural playback. Otherwise the **original starts
 playing** and the status line leads with
 `Mark I/O, then Ctrl+R renders the marked range`.
 
-A streamed source is downloaded into the cache once, and that starts as soon as
-you mark a range rather than when you open the video, so the render begins on a
-local file. Later renders and reopens of the same source and quality reuse that
-copy, and a source played from the cache seeks locally instead of re-opening the
-network stream.
+A streamed source is downloaded into the cache once, in the background, because
+a render always works from a local copy. The download starts when you mark a
+range or turn neural rendering on, not when you open the video. Playback
+continues while it runs and the status line says so; the render then starts on
+the file instead of waiting for the whole download. Later renders and reopens of
+the same source and quality reuse that copy.
+
+Playback itself moves onto that copy the first time a seek would otherwise have
+gone back to the network. Seeking a stream means asking YouTube for a fresh URL
+and rebuilding the decoder around it - a second or two, and it can fail - so
+once a copy of those exact frames is on disk, seeks use it instead. It is the
+same video either way; what changes is that seeking stops depending on the
+network.
 
 Press `D` or use **Neural Rendering** to switch views at the same timestamp.
 Pause with `Space` and press `.` to step a cached frame. Dragging the timeline
@@ -77,8 +84,12 @@ and renders it. A range that names no frame is refused before a render starts.
 
 Neural rendering has two shapes. **Turn it on while watching** with the
 toolbar's Neural Rendering button, the DLSS menu entry or `D`: rendering starts
-at the playhead and a panel over the current frame collects a lead of four
-seconds before playback resumes on the rendered frames. Rendering keeps running
+at the playhead and a panel over the current frame collects a lead before
+playback resumes on the rendered frames. The lead follows the render's pace:
+four seconds while the pace is unknown or just keeps up, two seconds at 1.5
+times real time or faster, one at three times, and more - up to 30 seconds - for
+a render slower than real time, so that each stretch of playback lasts longer
+between stops. Rendering keeps running
 behind playback; `Space` pauses playback rather than the render.
 
 The session's job is the whole video — or the marked range, when the playhead
@@ -180,19 +191,6 @@ second after the text. A video that reports no length, such as a
 browser-recorded WebM, greys the bar out: it takes no clicks, and `Left` and
 `Right` still seek 10 seconds.
 
-Marking a range on a YouTube stream, or turning neural rendering on, starts
-downloading that source in the background, because a render always works from a
-local copy. Playback continues while it runs and the status line says so; the
-render then starts on the file instead of waiting for the whole download, and
-later renders of the same source and quality reuse it.
-
-Playback itself moves onto that copy the first time a seek would otherwise have
-gone back to the network. Seeking a stream means asking YouTube for a fresh URL
-and rebuilding the decoder around it - a second or two, and it can fail - so
-once a copy of those exact frames is on disk, seeks use it instead. It is the
-same video either way; what changes is that seeking stops depending on the
-network.
-
 ### Compare the neural result
 
 The **compare bar** sits above the toolbar whenever a video is loaded, and works
@@ -248,8 +246,7 @@ still, the modes fold into one button that opens a menu of them:
   untouched, lower mixes back toward the original, higher extends the model's
   own change. Drag the slider or press `[` and `]` (a tenth per press). It
   costs a present, not a re-render, and it is the same value as **DLSS 5 mix**
-  in Image adjustments. It replaces both the old Blend mode and the Neural
-  strength slider: a saved Blend opens as the neural view at the same Mix.
+  in Image adjustments.
 - **A mask** limits where DLSS 5 shows. **Video > Compare > Load mask
   image...** takes any PNG, BMP, JPEG, TIFF or GIF and uses its brightness,
   stretched over the frame: white keeps DLSS 5 at the Mix, black shows the
@@ -301,15 +298,14 @@ the fourth pane's Mix and the RTX VSR choices (`AgainstVsr`, `VsrQuality`) are r
 
 The neural model renders in SDR, so an HDR10 (PQ) or HLG video is tone mapped
 to SDR BT.709 as it is decoded, for playback, for rendering and for export
-alike. The curve is Hable, mapped to the brightest the file says it gets: its
-MaxCLL, else its mastering display's peak, else 1000 nits. That peak is read
-once per video, never measured frame by frame, which would make the picture
-pump. The status line says **HDR tone-mapped to SDR** while one is
-loaded. Renders of HDR sources made before this saw the untone-mapped picture,
-flat and grey, and are not served again: the tone map and its peak are part of
-the render's identity. The curve runs on the GPU for a BT.2020 stream (every
-HDR10 and HLG file): a 4K HDR video decodes at about 85 fps on an RTX 4080 SUPER,
-where tone mapping on the CPU managed 30 and kept every core busy. A machine
+alike. The curve is Hable. For PQ it is mapped to the brightest the file says
+it gets: its MaxCLL, else its mastering display's peak, else 1000 nits. HLG is
+relative and always maps to 1000 nits. That peak is read once per video, never
+measured frame by frame, which would make the picture pump. The status line
+says **HDR tone-mapped to SDR** while one is loaded. The tone map and its peak
+are part of the render's identity. The curve runs on the GPU for a BT.2020
+stream (every HDR10 and HLG file): a 4K HDR video decodes at about 85 fps on an
+RTX 4080 SUPER. A machine
 without a usable GPU runs the same integer arithmetic on the CPU and gets the
 same picture, byte for byte.
 
@@ -391,14 +387,11 @@ pinned RenoDX 6.5.3 it changes nothing - the output is byte-identical - while a
 change still costs a full re-render. It remains in `DLSSVideoPlayer.ini` as
 `[NeuralSettings] Preset` so runtime-comparison work can still drive it, and it
 remains part of the render identity so a runtime that does honour it cannot be
-served a stale cache entry. Color strength was hidden for the same reason on
-RenoDX 4.70 and is back, because 6.5.3 honours it. Skin structure only acts
+served a stale cache entry. Skin structure only acts
 between 0.00 and 0.99 and only with Automatic mask on, so its slider reads **Off**
 (the default) at the left end and 0.00 to 0.99 after it, and it is greyed out with
 "Mask off" while Automatic mask is off; it keeps its value for when the mask comes
-back. A value saved by an older build's -1 to +1 slider loads as what it rendered
-as: every negative value and +1.00 render the default picture, so they load as Off.
-See [Benchmark](BENCHMARK.md).
+back. See [Benchmark](BENCHMARK.md).
 
 Photos support PNG, JPEG, BMP, TIFF and static WebP. They remain paused on the
 single processed frame; the cache uses a one-second carrier without adding
@@ -479,11 +472,8 @@ outlive it, and a video dropping off the end keeps everything rendered for it. R
 to the original file; YouTube entries retain the page identity and selected quality.
 Validated cached YouTube sources can reopen without resolving or downloading again,
 including when selected from Game trailers or pasted again at the same quality.
-New downloads must match the duration reported by YouTube using decoded video
-timestamps. Downloads made before the highest-bitrate selection policy require
-one replacement download on reopening. Successful downloads under the new policy
-are reused normally; existing files are retained until replacement succeeds
-and tracked-cache cleanup runs.
+Downloads must match the duration reported by YouTube using decoded video
+timestamps.
 
 The history tracks one current source/render pair per video, and nothing
 evicts a render on the list's behalf. A sixth video pushes the first out of the
@@ -511,9 +501,7 @@ The physical path is recorded under `[Storage] CacheDirectory` and in the startu
 log. `CacheDirectoryAutomatic=1` reselects storage at each launch so moving a
 portable installation works. For an explicit custom absolute path, set
 `CacheDirectoryAutomatic=0`; an invalid custom path does not silently fall back.
-Old automatic LocalAppData settings migrate to the new preference. Existing
-cache files at the old location remain untouched; copy or clear them separately
-if desired. Ownership checks still apply.
+Ownership checks still apply.
 
 Within that directory, `sources/<key>/source.mkv` contains the original YouTube
 download, including acquired audio. `renders/<key>/neural.mkv` contains the
@@ -549,9 +537,8 @@ fetching trailer thumbnails (see [Open, render and compare](#open-render-and-com
 model settings because they apply to the next render. Every one that changes the
 written pixels is part of the render identity, so changing one re-renders
 instead of serving a cached range made under the other value. Most add nothing
-to the key at their defaults; the two that changed the default bytes - the
-constant-quality Standard rung and the capture dither, both on by default -
-retire the cache entries written before them, so a range is rendered once more:
+to the key at their defaults; the constant-quality Standard rung and the capture
+dither, both on by default, do:
 
 - `NvencPreset` (1-7, default 5). p7 is the slowest and best; drop it if NVENC
   is the bottleneck on your card. A non-default preset adds `nvenc-p<N>` to the
@@ -561,11 +548,10 @@ retire the cache entries written before them, so a range is rendered once more:
   made from it. Standard is HEVC 8-bit at CQ 16. High captures 10 bits on the
   GPU (P010) and writes HEVC Main10 at CQ 14; Lossless writes the same 10-bit
   capture as FFV1, exactly. Both NVENC rungs run without NVENC's default bitrate
-  ceiling, which used to hold Standard near 11 Mbit/s at 1080p whatever the CQ:
-  lifting it took Standard from VMAF 93.5 to 96.9 on five 1080p clips (80.3 to
-  96.8 on the most detailed one) at about 17 Mbit/s instead of 9, and changed
-  its bytes, so its key carries `standard-cq16-uncapped-v1` and renders made
-  under the ceiling are rendered again. High scores 97.6 at about 19 Mbit/s;
+  ceiling, which holds Standard near 11 Mbit/s at 1080p whatever the CQ: without
+  it Standard scores VMAF 96.9 on five 1080p clips against 93.5 with it (96.8
+  against 80.3 on the most detailed one), at about 17 Mbit/s instead of 9. Its
+  key carries `standard-cq16-uncapped-v1`. High scores 97.6 at about 19 Mbit/s;
   Lossless is about 240 Mbit/s, 1.8 GB a minute at 1080p30. Render time did not
   change between rungs. The key carries `high-main10-cq14-v1` or
   `lossless-ffv1-10bit-v1` for the other two, and a
@@ -616,9 +602,8 @@ retire the cache entries written before them, so a range is rendered once more:
   it on the GPU, which saves 2.6x on pipe traffic. It is part of the render
   identity - the key carries `nv12-source-v1` when it is on - so a render made
   with it on is not served for a request with it off, and changing it re-renders.
-  Turning it on no longer risks the source's colour: the open probe reads
-  `color_space`,
-  `color_range`, `color_primaries` and `color_transfer` off the stream, and the
+  The open probe reads `color_space`, `color_range`, `color_primaries` and
+  `color_transfer` off the stream, and the
   GPU path is taken only for a source whose matrix and range the conversion
   implements - BT.709 or BT.601 (`bt470bg`/`smpte170m`), limited or full, as
   declared, or BT.709 limited for an HD source that declares none (below) -
@@ -629,16 +614,13 @@ retire the cache entries written before them, so a range is rendered once more:
   and the four tags it read. Falling back costs pipe bandwidth, never colour,
   and never fails a render.
 
-  Two things are still assumed rather than checked. Primaries and transfer are
-  read and logged but do not decide: the conversion produces R'G'B' from
-  Y'CbCr, which is a matrix and a range and nothing else, and the CPU fallback
-  does no better with a BT.2020-primaries or PQ source than the GPU path would.
-  And the flag remains off by default because **nobody has made the call yet**, not
-  because of a measured reason to keep it off: the colour hazard was the reason, and
-  this probe removed it. On the numbers in
-  `docs/measurements/gpu-readback-20260914/` the decoder side is quality-free on
-  tagged input (+0.067 dB) and NV12 buys about 7 % throughput at 4K, so the next
-  wave should decide the default rather than inherit it.
+  Primaries and transfer are read and logged but do not decide: the conversion
+  produces R'G'B' from Y'CbCr, which is a matrix and a range and nothing else,
+  and the CPU fallback does no better with a BT.2020-primaries or PQ source than
+  the GPU path would. The flag is off by default, though no measurement argues
+  for that: on the numbers in `docs/measurements/gpu-readback-20260914/` the
+  decoder side is quality-free on tagged input (+0.067 dB) and NV12 buys about
+  7 % throughput at 4K.
 
   Turning it on retires nothing. The render key's pipeline term carries
   `nv12-source-v1` only while the flag is on, so entries rendered with it off keep
@@ -648,16 +630,13 @@ retire the cache entries written before them, so a range is rendered once more:
   A source that declares no matrix is decoded the way players decode one: BT.709
   when it is HD (wider than 1279 or taller than 576 pixels), BT.601 below that.
   ffmpeg's own conversion would pick BT.601 at every size, and every export is
-  converted back with BT.709, so an untagged HD source used to come out of an export
-  with its colours moved - the cyan bar of an untagged 720p test pattern went from
-  Y 133 to 155 through frame generation alone. Its renders carry
-  `untagged-hd-bt709-v1` in the key, so none made under the old reading is served.
-  Because that reading is BT.709 limited, which the GPU conversion implements,
-  such a source takes the GPU path like a tagged one: playback always, and a
-  render when this flag is on, whose key then carries `untagged-hd-bt709-gpu-v1`.
-  It used to be refused to the CPU, and an untagged 4K30 file played at 3.5 fps
-  during a live session on an RTX 5090. An untagged SD source still decodes on
-  the CPU with BT.601. A declared matrix is always used as declared, and photos
+  converted back with BT.709, so an untagged HD source read that way would come
+  out of an export with its colours moved. Its renders carry
+  `untagged-hd-bt709-v1` in the key. Because that reading is BT.709 limited,
+  which the GPU conversion implements, such a source takes the GPU path like a
+  tagged one: playback always, and a render when this flag is on, whose key then
+  carries `untagged-hd-bt709-gpu-v1`. An untagged SD source decodes on the CPU
+  with BT.601. A declared matrix is always used as declared, and photos
   and GIFs are left as they are.
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
@@ -779,12 +758,12 @@ higher one that does not. 30 fps becomes 60 on a 60 Hz panel and 120 at 4x on a
 one - held for 1 or 2 refreshes, which is the cadence the film was already shown
 with, at half the step. The confirmation says so when it applies.
 
-**Hold repeated frames (animation on twos)**, in the same submenu, is for
-animation drawn on twos or threes, where every drawing is shown for two or three
-frames. With it on, a pair of source frames that is the same picture twice - up
-to codec noise - is not generated between: the frame is held for those slots,
-which is exact, instead of whatever the runtime makes between two copies of one
-image. It is off by default: measured on an RTX 4080 SUPER, the frame the runtime
+**Hold repeated frames (animation on twos)**, under **DLSS > Generated
+frames**, is for animation drawn on twos or threes, where every drawing is shown
+for two or three frames. With it on, a pair of source frames that is the same
+picture twice - up to codec noise - is not generated between: the frame is held
+for those slots, which is exact, instead of whatever the runtime makes between
+two copies of one image. It is off by default: measured on an RTX 4080 SUPER, the frame the runtime
 generates between two copies of one frame is already that frame to within the
 encoder's own noise, so holding changes nothing visible there, while the detector
 (`tools/benchmark/duplab.py`) can still hold a pair a small object moves in.
@@ -941,11 +920,13 @@ the film. **Convert whole video** produces an entry the item accepts.
 PNG is the default for photos, GIF for animation, and MKV for video. PNG and
 JPEG export the first processed frame. GIF exports animation with a generated
 palette at 50 fps and loops continuously; delays are rounded to 20 ms so common
-viewers do not slow down very short frame delays. MP4 transcodes video to H.264,
-audio to AAC, and text subtitles to MP4 text; picture subtitles (PGS, DVD, DVB)
-and font attachments, which MP4 has no place for, are left out. MP4 pads odd
-dimensions by at most one pixel for codec compatibility; photo exports retain
-source size. GIFs and photos have no audio or subtitle tracks.
+viewers do not slow down very short frame delays. MP4 carries the video by
+cache quality: Standard is transcoded to H.264, High's HEVC is copied as it is,
+and Lossless becomes lossless 10-bit H.264. Audio goes to AAC and text subtitles
+to MP4 text; picture subtitles (PGS, DVD, DVB) and font attachments, which MP4
+has no place for, are left out. An encoded MP4 of odd dimensions keeps its size,
+with full-resolution (4:4:4) chroma, rather than being padded; photo exports
+retain source size. GIFs and photos have no audio or subtitle tracks.
 
 MKV stream-copies the cached neural video and available source audio tracks,
 compatible subtitle tracks, font attachments, metadata and chapters, turning
@@ -961,6 +942,7 @@ precision it lost.
 Failure or cancellation removes the exporter-owned temporary output and leaves
 the inputs and any existing destination intact.
 
-See [troubleshooting](TROUBLESHOOTING.md) for diagnostics and the dated
-[hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing)
-for tested boundaries.
+See [troubleshooting](TROUBLESHOOTING.md) for diagnostics, and the dated
+`VERIFICATION-*.md` records in this folder for tested boundaries; the latest
+are the [RTX 5090 record](VERIFICATION-2026-09-26-RTX5090.md) and the
+[RTX 4080 SUPER record](VERIFICATION-2026-09-14-RTX4080.md).

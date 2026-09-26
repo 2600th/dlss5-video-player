@@ -67,9 +67,9 @@ store cards; what differs is how much sits in between.
    and silk. *Text:* a corner rating icon, one tagline card and about 10 s
    of pre-order art at the end.
 6. **Mafia: The Old Country, "Family Takes Sacrifice".** Unreal Engine 5.
-   1900s Sicily: weathered faces, period suits, sun-baked stone. Kept from
-   the previous list. *Text:* the heaviest here: a rating card, then roughly
-   the last 20 s of key art, "available now" and subscribe cards.
+   1900s Sicily: weathered faces, period suits, sun-baked stone. *Text:* the
+   heaviest here: a rating card, then roughly the last 20 s of key art,
+   "available now" and subscribe cards.
 7. **Kingdom Come: Deliverance II, Story Trailer.** CryEngine. Medieval
    Bohemia in overcast daylight and firelight: beards, mail, cloth and
    leather. *Text:* a rating card, a publisher logo, two single-word cards
@@ -83,16 +83,15 @@ historical role-play.
 
 Age-restricted videos were dropped whatever their merit. yt-dlp reports
 `age_limit=18` and `availability=needs_auth` for them, and an anonymous
-session can then be served a single 640x360 format. The previous list kept
-three of these, and they produced exactly that; see below.
+session can then be served a single 640x360 format.
 
 | Candidate | Why not |
 | --- | --- |
 | [GTA VI Trailer 1](https://www.youtube.com/watch?v=QdBZY2fkU-0) (296 M views, 1:30, 2160p, age 0) | Several shots are framed as social-media clips, with usernames and captions over the footage. One GTA entry keeps the publisher spread, and Trailer 2 has more close-up faces |
-| [Senua's Saga: Hellblade II - Launch Trailer](https://www.youtube.com/watch?v=PRbOmIcVXak) and its [TGA 2023 trailer](https://www.youtube.com/watch?v=3VYGOkMnGCE) | age_limit 18 (previous list) |
-| [The Last of Us Part II Remastered - PC Launch Trailer](https://www.youtube.com/watch?v=Tg1oRHd5zlw) | age_limit 18 (previous list) |
-| [Cyberpunk 2077: Phantom Liberty - Launch Trailer](https://www.youtube.com/watch?v=kfX9n_G0N2Y) | age_limit 18 (previous list) |
-| [Death Stranding 2 - Accolades Trailer](https://www.youtube.com/watch?v=od0ULrKzylQ) | 0:30, and mostly review quotes over the footage (previous list). Most other official DS2 trailers run 4 to 10 minutes |
+| [Senua's Saga: Hellblade II - Launch Trailer](https://www.youtube.com/watch?v=PRbOmIcVXak) and its [TGA 2023 trailer](https://www.youtube.com/watch?v=3VYGOkMnGCE) | age_limit 18 |
+| [The Last of Us Part II Remastered - PC Launch Trailer](https://www.youtube.com/watch?v=Tg1oRHd5zlw) | age_limit 18 |
+| [Cyberpunk 2077: Phantom Liberty - Launch Trailer](https://www.youtube.com/watch?v=kfX9n_G0N2Y) | age_limit 18 |
+| [Death Stranding 2 - Accolades Trailer](https://www.youtube.com/watch?v=od0ULrKzylQ) | 0:30, and mostly review quotes over the footage. Most other official DS2 trailers run 4 to 10 minutes |
 | Resident Evil Requiem [4th Trailer](https://www.youtube.com/watch?v=fXVy4mALHLY), [Reveal](https://www.youtube.com/watch?v=POz1-EmLsTY), [Launch](https://www.youtube.com/watch?v=9lrThxCoznw) | age_limit 18; 3:39; 0:30 |
 | [Oblivion Remastered - Official Trailer](https://www.youtube.com/watch?v=wFJ3PZuAjK4) | age_limit 18 (on NVIDIA's DLSS 5 list, otherwise a strong pick) |
 | [Battlefield 6 Reveal](https://www.youtube.com/watch?v=pgNCgJG0vnY) (19.8 M views) | age_limit 18 |
