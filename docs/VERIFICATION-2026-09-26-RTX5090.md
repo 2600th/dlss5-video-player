@@ -177,18 +177,54 @@ initialized a new one. `AudioPlayer::Start` now holds the stream it replaces,
 stopped, until its own is open; an exclusive (passthrough) stream is released
 first as before, since it owns the endpoint. Over six runs: seek right after
 start 252-317 ms -> 47-95 ms; format-change restart 0.32 s -> 0.08-0.10 s.
-Stop right after start went from 35-40 ms to 35-82 ms: two runs of six sat at
-82 ms, which is the fade's two bounded waits (2 x 42 ms at this endpoint's
-22 ms buffer, `audio_fade::StopWaitBudgetMs`) both running out. That is inside
-the 150 ms bound the smoke asserts; why the waits now run out in those runs
-was not established.
+Stop right after start went from 35-40 ms to 35-82 ms in some runs, inside the
+150 ms bound the smoke asserts. The follow-up below found why, and it is not a
+wait running out.
 
-## Not fixed
+## Follow-up: the items this run left open
 
-- `NeuralPrerenderTests` failed once in sixteen runs, at
-  `staging_sweep_reaps_invalid_and_orphaned_entries_but_not_live_ones_test`
-  (`!std::filesystem::exists(gone)`), and passed the next thirteen. It touches
-  none of the code changed here. Cause not established.
+Worked the same day on the same machine, after 0.26.2 shipped.
+
+**Packaged player dropped 3-6 frames per session; the build tree dropped none.**
+Every packaged session dropped them at one instant: when its render finished.
+Timed inside, the completion handler spent 88-102 ms in
+`SweepRetiredLiveSegments`, deleting the eleven segment files the joined cache
+entry had just replaced, on the thread that presents, and playback fell 103-113
+ms behind. The packaged player's cache is under `%LOCALAPPDATA%` (an older
+install's folder exists there); the build tree's is beside the executable on
+another drive. Deleting the same number of fresh files from a script took 5 ms
+on either drive, so the cost is in what the system does to files a helper has
+just written. `BackgroundFileReaper` now deletes them on its own thread; the UI
+thread still decides what is safe to delete. After: the handler takes about
+5 ms, and ten packaged sessions in a row showed no stall at completion. What
+remains is 0-2 frames at the instant the neural picture first appears (counted
+before the first health window after attach), none during neural playback.
+
+**Stop right after start at 82 ms.** Not the waits running out, as the section
+above first said. With every phase of `AudioPlayer::Stop` timed, ending the
+child and joining the reader took 3 ms each time; the fade took 25-32 ms when
+nothing had been queued yet (`tail not needed (already silent)`: the 24 ms
+grace and little else) and 78-80 ms when audio was already playing (`tail
+queued`: room for the tail, about 31 ms for one 1056-frame buffer to play out,
+then the grace). 80 ms is the designed cost of a click-free stop while sound
+plays, the same as a stop mid-playback (63-80 ms in the same log); a start that
+no longer waits 220 ms on the endpoint gets sound flowing before more of these
+early stops arrive. No change.
+
+**`NeuralPrerenderTests`, once in sixteen runs.** The staging sweep has a
+100 ms budget and leaves the rest to the next sweep, by design. Five removals
+take about 9 ms (median of 63 runs); the failing run's sweep took 150 ms and
+logged `removed=4 remaining=1`. The test now lets later sweeps finish, as the
+next start would. 15 consecutive passes.
+
+**`NeuralWorkerTests` crash dump, once on CI** (run 36230306450). The handler
+wrote its line but no dump, and never printed why; 88 local runs, 48 of them
+eight at a time, did not repeat it. The handler now retries once with a minimal
+dump and logs the full dump's winerr either way, and the test prints the
+handler's line whenever there is no dump, so the next failure names its cause.
+
+## Still open
+
 - The RTX 4080 SUPER's live pace, 15.31 ms/frame at 1080p, is from 0.16.0 and
   was not re-measured; the README says so.
 - The 1440p and 4K clips are re-encodes of the 1080p demo, not native captures.

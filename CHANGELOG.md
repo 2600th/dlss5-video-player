@@ -7,6 +7,17 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Unreleased
+
+### Fixed
+
+- **No more dropped frames when a render finishes.** Playback stalled for
+  about 100 ms at that moment, dropping 3 to 6 frames, while the player
+  deleted the render's temporary files; that now happens in the background.
+- **A crash leaves a readable dump more often.** When the full crash dump
+  cannot be written, the player now writes a smaller one instead of none, and
+  logs why the full one failed.
+
 ## 0.26.2 - 2026-09-26
 
 Fixes from re-measuring an RTX 5090 on 0.26.1
