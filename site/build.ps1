@@ -101,7 +101,7 @@ if ($ReleaseFixture) {
 } else {
     $release = Resolve-ReleaseData -Release (Get-CurrentRelease) -Repo $repo
 
-    # The checksum is the reason to trust a 308 MB download from a community
+    # The checksum is the reason to trust a large download from a community
     # project, so it goes on the page rather than one click away. Failing to
     # fetch it is not failing to build: the page falls back to linking the
     # sidecar file.

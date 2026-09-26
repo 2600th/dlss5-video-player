@@ -55,7 +55,7 @@ build resolves by tag instead:
    turns that state into a failed build rather than a published page with no
    download.
 
-CI has no way to know when the 308 MB complete package is attached by hand, so
+CI has no way to know when the 327 MB complete package is attached by hand, so
 a release carrying only the core zip is a supported state: the page offers the
 core package and links the release page for the other one.
 
@@ -113,7 +113,7 @@ the page names into `media/` at build time (the list is `$mediaFiles`). What
 `site/src/assets/` commits is small: the hero's two 1920x1080 plates, and the
 AVIF and WebP variants the page offers first. A built `dist/` is about 16 MB,
 13 MB of it `media/` - the 6 MB demonstration, the five comparison stills as
-PNG (0.6-0.8 MB each) and ten player screenshots - but a visitor only fetches
+PNG (0.6-0.8 MB each) and eleven player screenshots - but a visitor only fetches
 the variants and, on request, the video; the full-size files are the
 `<img>` fallbacks and the "full size" links.
 

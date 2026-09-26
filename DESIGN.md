@@ -374,7 +374,8 @@ Rules:
   slot: the line crossfades out as the toast comes in and back as it goes, so
   no part of the line shows behind or after it (without animations they swap). It is painted by the strip, never
   as a window over the picture: a layered popup over the swap chain cost
-  frames (6, 6 and 2 dropped at a render's completion, against 0, 0 and 1).
+  frames (6, 6 and 2 dropped at a render's completion, against 0, 0 and 1
+  without it).
   The status line keeps the same notice after it goes.
 - **Dialog group heading**: Segoe UI 11 dip semibold, upper case, tracked
   1 dip, in SecondaryText, with a `RGB(62,65,70)` hairline to the column's
@@ -417,10 +418,8 @@ and that is a decision, not an omission. The strip is painted in the main
 window below the picture, so easing it would mean one of two things:
 resizing the D3D12 swap chain every frame of the animation (a resize is a
 flush and a buffer reallocation, far over a frame's budget), or drawing the
-strip as a layered popup over the swap chain. The popup was measured: the
-round-two toast, built exactly that way, dropped 6, 6 and 2 frames at a
-render's completion against 0, 0 and 1 without it, and 0 once it was painted
-by the strip instead. What would make it possible: presenting the chrome
+strip as a layered popup over the swap chain, which drops frames (the
+**Toast** measurement above). What would make it possible: presenting the chrome
 through DirectComposition as a visual composed with the swap chain (the video
 in one visual, the strip in another, opacity and offset animated by the
 compositor, not by GDI on the presenting thread), measured to the same

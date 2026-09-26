@@ -1,6 +1,9 @@
 # Improvement task list
 
-_Audited against 0.26.0 (13f92b7) on 2026-09-25._
+_Audited against 0.26.0 (13f92b7) on 2026-09-25. Status re-checked against
+0.26.2 (335edb3) on 2026-09-26: every item below is still open unless it says
+what part is done. File:line citations are as of the audit and have drifted by
+up to ~75 lines in `main.cpp`; search for the named symbol._
 
 Open work only, highest priority first. Completed items are removed rather
 than ticked; what shipped is in `CHANGELOG.md` and git history. When a task
@@ -23,7 +26,6 @@ DLSS 5 landscape, on 2026-09-25, plus the open items carried over from the
 | **P1** | Reliability, CI, release hygiene and docs. The next few weeks. |
 | **P2** | High-value features, from the research. Each is justified on its own. |
 | **P3** | Large or strategic, or waiting on something outside this repo. |
-| ✅ | The lead re-read the cited code at 13f92b7 |
 | 🧪 | An audit agent reproduced it (pinned FFmpeg 9.0.1, `dumpbin`, or `gh`) |
 | 🔍 | Audit finding cited to file:line, not independently re-read |
 
@@ -33,9 +35,9 @@ feels), **Pipeline** (render, cache, export, helper), **Release** (packaging,
 CI, supply chain), **Site** or **Docs**. File references are relative to
 `src/` unless a path is given.
 
-**Baseline.** Not re-run for this audit. Last measured at 0.25.0: Release
-build clean at **0 warnings /W4**; CTest **26 tests, 24 pass, 2 expected
-skips** on an RTX 4080 SUPER, 175 s; `site/test.ps1` 31 pass.
+**Baseline.** Measured at 0.26.2 on an RTX 5090 with the RTX Video SDK staged:
+Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
+(14 portable, 19 hardware); `site/test.ps1` 61 pass.
 
 ## The rule that shapes this list
 
@@ -226,8 +228,9 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
     check, no "HEAD is the tag" check, and no commit in
     `PACKAGE_MANIFEST.txt`.
   - The `dlss5-video-player-v0.26.0` tag moved from a4a3411 to 13f92b7 after
-    release run 36047815691 failed; there is no tag ruleset to stop that.
-  - `SECURITY.md:3` and `THIRD_PARTY.md:3` say "verified against c81ccd8".
+    release run 36047815691 failed, and `dlss5-video-player-v0.26.2` from
+    581a13a to 5dbb3b9 after run 36229669021 failed on a stale stamp; there is
+    no tag ruleset to stop that.
   - README:53-56 says only the core zip has an attestation, yet
     `attest-release-asset.yml` exists for the complete one.
 - **Where.** `tools/package_release.ps1:83-125`,
@@ -298,8 +301,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 - [ ] "Save converted video" does not re-count the output's frames as
       `MuxStageExport` does.
 - [ ] `.dlss-export-*.tmp` files are left beside the output after a crash.
-- [ ] The Media Foundation path drops the sample that carries the type-change
-      flag.
 - [ ] Local HLS and concat playlists open without a `-protocol_whitelist`.
 - [ ] `PickExportFile` offers all five formats whatever the source is.
 - [ ] `tools/fetch_ui_assets.ps1:62` calls `tar.exe` without a full path.
@@ -703,12 +704,9 @@ owner's call.
 
 - **Media in history:** `docs/media/neural-comparison-demo.mp4` is stored
   five times (9.1, 7.9, 7.2, 6.3 and 5.3 MB; the 5.3 MB one lives on as the
-  benchmark fixture). There is also a 4.2 MB webp, and the pack is 60 MB.
-- **Stray build output:** a 775 MB `build/` directory sits in the tree
-  (gitignored, but still there).
+  benchmark fixture). There is also a 4.2 MB webp; the pack is 45.7 MiB.
 
 Serve media that can be re-shot from release assets or LFS, and run `git gc`.
-Delete the stray `build/`.
 
 ---
 ---
@@ -824,7 +822,7 @@ read them. Keep that standard. The docs' menu paths and shortcuts match
 ## Method
 
 **2026-09-25, against 13f92b7.** Five agents, read-only; the lead re-read the
-top findings (✅) against source.
+top findings against source.
 
 | Agent | Scope |
 | --- | --- |

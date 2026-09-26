@@ -155,7 +155,7 @@ DESIGN.md "Player" section.
 5. **Record the player's design tokens and motion spec** in DESIGN.md
    "Player": a separate docs commit.
 
-### Round 2: next tier (proposed)
+### Round 2: next tier
 
 6. **Toasts that rise from the strip** (F10, F4).
    - *Moment:* confirming that a file was saved, a subtitle shift, or a whole
@@ -220,7 +220,7 @@ DESIGN.md "Player" section.
       get padding up to a 24x24 target without changing their visual size.
     - *Build:* CSS only. `site/test.ps1` stays green.
 
-### Round 3: final set (proposed; close or cut)
+### Round 3: final set
 
 14. **Fullscreen overlay strip** (F7). In fullscreen the picture keeps the
     whole screen, and the strip is a layered, owned popup over its bottom

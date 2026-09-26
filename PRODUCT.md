@@ -19,7 +19,7 @@ to know whether the same thing can be pointed at video. [inferred from the
 product's own requirements and the README's framing]
 
 They arrive from a link, a forum post, or the repository itself, and the
-decision in front of them is whether to download 308 MB of unsigned community
+decision in front of them is whether to download 327 MB of unsigned community
 software and run it. That decision is made on evidence, not on adjectives: the
 question is always "does it actually look better, and by how much". [inferred]
 
@@ -50,24 +50,26 @@ that could not be truthfully copied.
 Windows only. Needs an RTX card and NVIDIA driver 610.47 or newer. The player
 ships as a zip that must be unpacked into a new, empty folder with
 `neural-runtime/` kept beside the executable. Sources are local files, pasted
-public YouTube links, or six bundled game trailers.
+public YouTube links, or seven bundled game trailers.
 
 Renders are cached and reused only when the source, the runtime and the neural
 settings all still match.
 
 ## Capabilities and Constraints
 
-Confirmed from `README.md` and `CHANGELOG.md` at 0.23.0:
+Confirmed from `README.md` and `CHANGELOG.md` at 0.26.2:
 
 - Live rendering with seek anywhere, rendered or not; nothing rendered is
   discarded on seek.
-- Compare as split, wipe or blend, without moving the playhead.
+- Compare views (Split, Wipe, Difference, Side by side, 2 x 2, and RTX VSR as
+  a view of its own) and a Mix control, without moving the playhead.
 - Export: PNG/JPEG for photos, GIF for animations, MP4/MKV for video; MKV keeps
   source audio, subtitles and chapters without re-encoding.
-- Optional DLSS Super Resolution on top, following the display rung by default.
+- Optional DLSS Super Resolution on top, off by default; its output follows the
+  display unless a rung is pinned.
 - Neural settings at `Ctrl+N`, re-rendering the paused frame on change.
-- Two packages: a complete 308 MB zip with the pinned neural runtime, and a
-  31 MB core zip without it.
+- Two packages: a complete 327 MB zip with the pinned neural runtime, and a
+  36 MB core zip without it.
 - The neural runtime is a modified, unsigned community build. This is not
   incidental and must never be softened or omitted.
 - Not an NVIDIA product. Community project.
@@ -89,24 +91,19 @@ Confirmed from `README.md` and `CHANGELOG.md` at 0.23.0:
 
 Real, in the repository, usable without fabrication:
 
-- `docs/screenshots/current/matrix-original.jpg` / `matrix-neural.jpg` and
-  `original-comparison.jpg` / `neural-playback.jpg` - one paused frame each,
-  only Neural Rendering switched between the two captures (v0.25.0).
-  Provenance in `docs/screenshots/README.md`.
+- `docs/screenshots/current/original-comparison.jpg` / `neural-playback.jpg` -
+  one paused frame, only Neural Rendering switched between the two captures
+  (v0.25.0). Provenance in `docs/screenshots/README.md`.
 - `docs/media/stills/` - five unscaled matched crops of a source frame and the
   player's render of it at default settings (007 First Light, Resident Evil
   Requiem, GTA VI, and one Assassin's Creed Shadows frame where the render is
-  worse), each with a `.provenance.json`; `docs/screenshots/current/`
-  `gta6-lucia-original.jpg` / `-neural.jpg`, the full frames behind the site
-  hero.
+  worse), each with a `.provenance.json`.
 - `docs/screenshots/current/neural-strength.jpg`, `recent-videos.jpg`,
   `player-start.jpg` (the current UI: the image adjustments window, the File
   menu and the start screen).
-- `docs/media/neural-comparison-demo.mp4` (19.7 s, 1080p) with poster and WebP
-  preview; `site/src/assets/hero/social-card.jpg` (1200x630 link preview).
-- Release telemetry, read live on 2026-09-18: 4,959 zip downloads across 17
-  releases; 127 stars; 12 forks.
-- Seven verification reports under `docs/` and measurement data under
+- `docs/media/neural-comparison-demo.mp4` (24.8 s, 1080p) with poster and WebP
+  preview; `docs/media/social/card-1200x630.jpg` (1200x630 link preview).
+- Eight verification reports under `docs/` and measurement data under
   `docs/measurements/`.
 
 Absent, and not to be invented: testimonials, named users, press coverage,
@@ -114,9 +111,9 @@ pricing, benchmark claims beyond the measured numbers already published in
 `docs/ARCHITECTURE.md` ("Decisions and the measurements behind them") and the
 verification documents.
 
-The screenshots are frames of official trailers (The Matrix, GTA VI Trailer 2;
-older UI shots show The Godfather and The Witcher IV). Provenance is documented; the usage matches what the
-README already does.
+The screenshots are frames of official game trailers (007 First Light, Mafia:
+The Old Country, GTA VI Trailer 2). Provenance is documented; the usage matches
+what the README already does.
 
 ## Product Principles
 

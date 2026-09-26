@@ -56,9 +56,11 @@ from different packages. See [runtime setup](docs/DLSS5_SETUP.md).
    cache identity. Video duration is checked against metadata so a short audio
    stream or interrupted download cannot publish an incomplete source.
 2. **Render in the helper.** Frames are decoded in order. Compact motion and
-   depth guides feed a native-resolution DLAA carrier; motion is accepted only
-   where the match beats standing still by a margin. The
-   experimental add-on observes NGX calls in a persistent feature-18 session.
+   depth guides feed a native-resolution DLAA carrier at the default 100%
+   processing scale; at 75% or 50% the frame is area-reduced first and Super
+   Resolution restores the source size. Motion is accepted only where the
+   match beats standing still by a margin. The experimental add-on observes
+   NGX calls in a persistent feature-18 session.
 3. **Validate and cache.** Every source frame must have a captured native
    evaluation. Runtime receipts, dimensions, timing, final-frame decode and
    content hashes must pass before atomic publication. Neural settings
@@ -92,10 +94,9 @@ diagnostics are in `neural-runtime/NeuralWorker.log` and
 `neural-runtime/ReShade.log`. **Advanced > Restart in DLSS SR safe mode** skips
 the neural helper for that launch. See [troubleshooting](docs/TROUBLESHOOTING.md).
 
-Fourteen portable CTest suites cover cache/history/settings, export, worker
-protocols, runtime policy, cached comparison playback through the real decoders,
-native UI regressions and the shipped executables' imports; seventeen GPU smokes and an audio-clock smoke run on an
-RTX card with an audio endpoint. Real-media
+Fourteen portable CTest suites, seventeen GPU smokes (one more in a build with
+the RTX Video SDK) and an audio-clock smoke are listed in
+[Building and testing](docs/BUILDING.md). Real-media
 GPU checks and their limits are recorded per machine and date in the
 repository's [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).
 These checks are not visual-quality benchmarks or proof of compatibility with
