@@ -322,6 +322,12 @@ public:
         return UntaggedSourceDecodesAsBt709(m_source.color, width, height,
             m_source.stillImage || m_source.gif);
     }
+    // What the frames are converted to RGB under, for whatever converts an NV12
+    // frame: ColorDescription() with the untagged HD rule applied. The declared
+    // description stays the one HDR and export decisions read.
+    SourceColorDescription DecodedColor() const {
+        return DecodedColorDescription(m_source.color, DecodesUntaggedAsBt709());
+    }
     // How the stream's display matrix stands the picture up. Width() and
     // Height() are already the upright geometry; this says what was done to
     // get there. Upright for a photo, whose EXIF turn ffmpeg applies itself.

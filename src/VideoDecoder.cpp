@@ -930,8 +930,8 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // players read one and how every export is converted back; ffmpeg would
     // pick BT.601 (UntaggedColorPolicy.h). The conversion is pinned to a scale
     // filter of its own, followed by format=bgra, so it is THAT filter that
-    // converts and the matrix it was given is the one used. Never on NV12: that
-    // layout is only chosen for a declared matrix.
+    // converts and the matrix it was given is the one used. Never on NV12: there
+    // the GPU converts, under the same BT.709 reading (DecodedColor).
     const bool bt709Untagged = !nv12 && m_source.untaggedBt709;
     const wchar_t* bgraConversion = bt709Untagged ? L",scale=in_color_matrix=bt709,format=bgra" : L",format=bgra";
     // A PQ or HLG source is tone mapped to SDR BT.709 before the BGRA conversion
@@ -1145,19 +1145,23 @@ void VideoDecoder::DecideSourceLayout() {
     // both axes); odd geometry stays BGRA even for a sequential/export open,
     // and so does a caller that opted out of NV12 via preferNv12=false.
     //
-    // It also needs the source to have DECLARED a colour description the GPU
-    // conversion implements. That conversion is a matrix plus a range mapping,
-    // and an undeclared stream states neither: handing one over as NV12 is what
-    // used to decode a BT.601 or full-range source under BT.709 limited-range
-    // coefficients with nothing in the log to say so. Undeclared is BGRA,
-    // converted on the CPU, which costs pipe bandwidth rather than colour - with
-    // the matrix players assume for it (BT.709 for HD, UntaggedColorPolicy.h),
-    // named in StartFFmpeg's filter rather than left to ffmpeg's BT.601. A `known` open skips the
-    // probe entirely and so declares nothing, which lands on the same refusal.
+    // It also needs a colour description the GPU conversion implements. That
+    // conversion is a matrix plus a range mapping, and handing a stream over as
+    // NV12 under a guessed one is what used to decode a BT.601 or full-range
+    // source under BT.709 limited-range coefficients with nothing in the log to
+    // say so. The description used is the one the frames are DECODED under
+    // (DecodedColor): as declared, except that an undeclared HD video is BT.709
+    // with the limited-range reading of an undeclared range, which is exactly
+    // what StartFFmpeg's BGRA filter pins for it (UntaggedColorPolicy.h) - so
+    // either layout reads it the same way. Undeclared SD has no such rule and
+    // stays BGRA with ffmpeg's BT.601. Refusing untagged HD outright sent every
+    // such file through a BGRA pipe: an untagged 3840x2160 live session on an
+    // RTX 5090 presented 3.5 fps where the same bytes tagged BT.709 played 30.
     //
     // This is also what makes the renderer's matching refusal unreachable: the
-    // decoder is the only thing that ever asks for an NV12 source, and it asks
-    // only for a description SourceNv12ConversionFor already accepted.
+    // decoder is the only thing that ever asks for an NV12 source, it asks only
+    // for a description SourceNv12ConversionFor already accepted, and callers
+    // hand the renderer that same DecodedColor.
     // Decided once here, from the probed geometry, and left alone by every
     // later StartFFmpeg call (acceleration fallback, seek restart) this session.
     const bool wantNv12 = m_source.nv12Requested;
@@ -1169,14 +1173,15 @@ void VideoDecoder::DecideSourceLayout() {
     // way it always has rather than reaching a conversion nobody wrote. The
     // export path is unaffected: it has no comparison reference and keeps all
     // four conversions the GPU pass implements.
+    const SourceColorDescription decoded = DecodedColor();
     const bool playbackConvertible =
         !m_source.playbackNv12Requested ||
-        SourceNv12ConversionFor(m_source.color) == SourceNv12Conversion::Bt709Limited;
+        SourceNv12ConversionFor(decoded) == SourceNv12Conversion::Bt709Limited;
     const bool evenGeometry = m_source.width % 2 == 0 && m_source.height % 2 == 0;
     // An HDR source is tone mapped on the CPU (StartFFmpeg), so it never takes the
     // GPU conversion, whatever matrix it declares: that pass would hand the model
     // PQ code values as SDR, which is the bug the tone map exists to fix.
-    const bool convertible = SourceNv12ConversionFor(m_source.color) != SourceNv12Conversion::Unsupported &&
+    const bool convertible = SourceNv12ConversionFor(decoded) != SourceNv12Conversion::Unsupported &&
                              hdr_policy::SignalOf(m_source.color) == hdr_policy::HdrSignal::Sdr;
     // Accepted and refused are deliberately one grep away from each other - same
     // "GPU source conversion" prefix, same four tags named either way - so a reader
@@ -1193,9 +1198,10 @@ void VideoDecoder::DecideSourceLayout() {
     m_source.layout = (wantNv12 && evenGeometry && convertible && playbackConvertible)
         ? VideoPixelLayout::Nv12 : VideoPixelLayout::Bgra;
     m_source.untaggedBt709 = DecodesUntaggedAsBt709();
-    if (m_source.untaggedBt709 && m_source.layout == VideoPixelLayout::Bgra)
+    if (m_source.untaggedBt709)
         LOG("Source declares no colour matrix (" << m_source.colorTags
-            << "); decoding it as BT.709, the reading for an HD video that states none.");
+            << "); decoding it as BT.709, the reading for an HD video that states none"
+            << (m_source.layout == VideoPixelLayout::Nv12 ? ", on the GPU." : "."));
 }
 
 // Position on the current timeline of the next frame the child will emit. The

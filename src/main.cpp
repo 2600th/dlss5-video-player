@@ -2514,7 +2514,7 @@ private:
             <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{})
             <<(modelStore.trustedRewrites?" trustedRewrites="+std::to_string(modelStore.trustedRewrites):std::string{})
             <<(modelStore.reads>1?" reads="+std::to_string(modelStore.reads)+" waited="+std::to_string(modelStore.waited.count())+"ms on "+WideToUtf8(modelStore.youngestFile):std::string{}));
-        identity_=NeuralCacheIdentity{*sourceDigest_,width_,height_,DLSS_VIDEO_PLAYER_VERSION,GpuGenerationPathName(in_.gpu),*runtimeDigest_,NeuralRenderPipelineIdentity(in_.gpuSourceConversion,KeyedNvencPreset(in_.nvencPreset,in_.cacheQuality),KeyedGpuColorConversion(in_.gpuColorConversion,in_.cacheQuality))+ProcessingScaleIdentityTerm(in_.processingScale)+UntaggedColorIdentityTerm(untaggedBt709_)+toneMapTerm_+orientationTerm_+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({in_.captureDither,in_.cacheQuality,in_.sourceDeband,in_.suppliedExposure}),false,*settingsDigest_,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(in_.driverVersion),modelStore.digest};renderKey_=BuildNeuralCacheKey(identity_);completion_->renderKey=renderKey_;completion_->range=range;completion_->settings=settings;completion_->guides=guides;completion_->temporal=temporal;
+        identity_=NeuralCacheIdentity{*sourceDigest_,width_,height_,DLSS_VIDEO_PLAYER_VERSION,GpuGenerationPathName(in_.gpu),*runtimeDigest_,NeuralRenderPipelineIdentity(in_.gpuSourceConversion,KeyedNvencPreset(in_.nvencPreset,in_.cacheQuality),KeyedGpuColorConversion(in_.gpuColorConversion,in_.cacheQuality))+ProcessingScaleIdentityTerm(in_.processingScale)+UntaggedColorIdentityTerm(untaggedBt709_,in_.gpuSourceConversion)+toneMapTerm_+orientationTerm_+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({in_.captureDither,in_.cacheQuality,in_.sourceDeband,in_.suppliedExposure}),false,*settingsDigest_,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(in_.driverVersion),modelStore.digest};renderKey_=BuildNeuralCacheKey(identity_);completion_->renderKey=renderKey_;completion_->range=range;completion_->settings=settings;completion_->guides=guides;completion_->temporal=temporal;
         LOG("Checking neural cache key="<<renderKey_<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
         if(const auto cached=cache_.LookupRender(renderKey_,stop_)){
             // LookupRender already verifies the full payload hash and
@@ -7101,7 +7101,7 @@ private:
     void ConfigureRendererSource(D3D12Renderer* renderer){
         if(!renderer)return;
         renderer->SetSourceLayout(m_decoder.PixelLayout());
-        renderer->SetSourceColor(m_decoder.ColorDescription());
+        renderer->SetSourceColor(m_decoder.DecodedColor());
         // Every renderer the player shows presents at its window's size, and may
         // present HDR when the display under it is in HDR mode (SyncHdrPresentation).
         renderer->SetPresentFollowsWindow(true);
@@ -10951,7 +10951,7 @@ private:
         // back), and a silent disagreement uploads a quarter of a BGRA image as a
         // Y plane rather than failing.
         candidate->renderer->SetSourceLayout(completion.decoder->PixelLayout());
-        candidate->renderer->SetSourceColor(completion.decoder->ColorDescription());
+        candidate->renderer->SetSourceColor(completion.decoder->DecodedColor());
         candidate->renderer->SetPresentFollowsWindow(true);
         candidate->renderer->SetHdrOutputAllowed(true);
         if(!candidate->renderer->Initialize(candidate->window,completion.configuration.decodeWidth,completion.configuration.decodeHeight,completion.configuration.outputWidth,completion.configuration.outputHeight,completion.configuration.guideWidth,completion.configuration.guideHeight,quality))return{};

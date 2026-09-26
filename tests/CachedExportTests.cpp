@@ -991,7 +991,7 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
         // request (`src/OfflineNeuralRenderer.cpp:1661`) - which is precisely the
         // colour hazard that kept the flag off by default.
         const bool convertible =
-            SourceNv12ConversionFor(decoder.ColorDescription()) != SourceNv12Conversion::Unsupported;
+            SourceNv12ConversionFor(decoder.DecodedColor()) != SourceNv12Conversion::Unsupported;
         CHECK((decoder.PixelLayout() == PixelLayout::Nv12) == convertible);
         CHECK_EQ(frame.bgra.size(), FrameBytes(decoder.PixelLayout(), 96, 64));
         CHECK(!decoder.ReadNext(frame));
@@ -1382,6 +1382,30 @@ void UntaggedVideoDecodesWithTheMatrixItsSizeImpliesTest(const std::filesystem::
                        << L", expected about " << expectB << L',' << expectG << L',' << expectR << L'\n';
         }
         CHECK(matches);
+
+        // Opened for NV12, the same clip takes the GPU conversion whenever its
+        // decoded description has one - untagged HD included, as BT.709 limited,
+        // the reading the BGRA filter above pins - and hands over the stored
+        // samples untouched for the shader to convert. Refusing untagged HD
+        // here sent every such file through a BGRA pipe.
+        VideoDecoder nv12Decoder;
+        CHECK(nv12Decoder.OpenSequential(path.wstring(), MediaSourceKind::LocalFile, {}, true));
+        const SourceNv12Conversion conversion = SourceNv12ConversionFor(nv12Decoder.DecodedColor());
+        if (std::wstring_view(clip.name) == L"hd-untagged")
+            CHECK(conversion == SourceNv12Conversion::Bt709Limited);
+        CHECK((nv12Decoder.PixelLayout() == PixelLayout::Nv12) == (conversion != SourceNv12Conversion::Unsupported));
+        VideoFrame nv12Frame;
+        CHECK(nv12Decoder.ReadNext(nv12Frame));
+        if (nv12Decoder.PixelLayout() == PixelLayout::Nv12 &&
+            nv12Frame.bgra.size() == FrameBytes(PixelLayout::Nv12, clip.width, clip.height)) {
+            const size_t x = clip.width / 2, y = clip.height / 2;
+            const uint8_t luma = nv12Frame.bgra[y * clip.width + x];
+            const uint8_t* chroma = nv12Frame.bgra.data() + size_t(clip.width) * clip.height +
+                                    (y / 2) * clip.width + (x / 2) * 2;
+            CHECK(std::abs(int(luma) - 100) <= 1);
+            CHECK(std::abs(int(chroma[0]) - 90) <= 1);
+            CHECK(std::abs(int(chroma[1]) - 180) <= 1);
+        }
     }
 }
 

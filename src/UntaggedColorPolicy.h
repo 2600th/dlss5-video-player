@@ -35,10 +35,31 @@ inline bool UntaggedSourceDecodesAsBt709(const SourceColorDescription& declared,
     return width > 1279 || height > 576;
 }
 
+// The description the pixels are decoded under, which is what a conversion has
+// to implement: for an undeclared HD video, BT.709 with ffmpeg's limited-range
+// reading of an undeclared range - exactly what the CPU path pins in its scale
+// filter - so the GPU NV12 conversion can take it instead of a BGRA pipe.
+// Primaries and transfer stay as declared; they are not the matrix. Every
+// other source is decoded as it declares.
+inline SourceColorDescription DecodedColorDescription(const SourceColorDescription& declared,
+                                                      bool decodesAsBt709)
+{
+    if (!decodesAsBt709) return declared;
+    SourceColorDescription decoded = declared;
+    decoded.matrix = ColorMatrix::Bt709;
+    if (decoded.range == ColorRange::Unspecified) decoded.range = ColorRange::Limited;
+    return decoded;
+}
+
 // The cache-key term a render of such a source carries: its input pixels are
 // the BT.709 reading now, where a render made before this rule saw BT.601.
-// Empty for every other source, whose key does not move.
-inline const char* UntaggedColorIdentityTerm(bool decodesAsBt709)
+// Empty for every other source, whose key does not move. With GPU source
+// conversion on, such a source is converted on the GPU (DecodedColorDescription)
+// where it used to be refused to the CPU pipe - the same reading, different
+// arithmetic - so that render carries a term of its own rather than being
+// served an entry the CPU path wrote.
+inline const char* UntaggedColorIdentityTerm(bool decodesAsBt709, bool gpuSourceConversion = false)
 {
-    return decodesAsBt709 ? "|untagged-hd-bt709-v1" : "";
+    if (!decodesAsBt709) return "";
+    return gpuSourceConversion ? "|untagged-hd-bt709-gpu-v1" : "|untagged-hd-bt709-v1";
 }

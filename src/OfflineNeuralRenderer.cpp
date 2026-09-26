@@ -2282,13 +2282,14 @@ struct ProductionSourceAdapter {
     }
     void Close(){decoder.Close();}
     // Fixed for the decoder session once Open has probed the source (NV12 only for
-    // even sizes that also declared a colour description the GPU conversion
+    // even sizes that also carry a colour description the GPU conversion
     // implements, BGRA otherwise), so the evaluator can be initialized for it.
     PixelLayout Layout()const{return decoder.PixelLayout();}
-    // What the probe read off the source. Nv12 above already implies this names a
+    // What the frames are decoded under (the probe's description, with the
+    // untagged HD rule applied). Nv12 above already implies this names a
     // conversion the shader has; it travels on so the shader can be specialised
     // for it instead of assuming one.
-    SourceColorDescription ColorDescription()const{return decoder.ColorDescription();}
+    SourceColorDescription ColorDescription()const{return decoder.DecodedColor();}
     JobRead Read(JobFrame& frame,std::stop_token stop){
         VideoFrame decoded;
         // Whatever this frame still carries has already been rendered and written,

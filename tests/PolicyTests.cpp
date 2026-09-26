@@ -5723,6 +5723,46 @@ void untagged_hd_video_decodes_as_bt709_and_only_it_test()
     CHECK(!UntaggedSourceDecodesAsBt709(none, 1920, 1080, true));   // photo or GIF
     CHECK(std::string_view(UntaggedColorIdentityTerm(false)).empty());
     CHECK(std::string_view(UntaggedColorIdentityTerm(true)) == "|untagged-hd-bt709-v1");
+    // With GPU source conversion on, such a render now converts on the GPU
+    // where it used to be refused to the CPU pipe, so its key moves; with it
+    // off, nothing about the render changed and neither does the key.
+    CHECK(std::string_view(UntaggedColorIdentityTerm(true, false)) == "|untagged-hd-bt709-v1");
+    CHECK(std::string_view(UntaggedColorIdentityTerm(true, true)) == "|untagged-hd-bt709-gpu-v1");
+    CHECK(std::string_view(UntaggedColorIdentityTerm(false, true)).empty());
+}
+
+// The description an untagged HD video is DECODED under is BT.709 limited, the
+// same reading the CPU path pins in its scale filter, so the GPU NV12
+// conversion implements it. Refusing it sent every untagged HD file through a
+// BGRA pipe: measured on an RTX 5090, an untagged 3840x2160 30 fps clip
+// presented 3.5 fps during a live session and dropped 413 of 646 frames, and
+// the same bytes tagged BT.709 played 30 fps with none dropped.
+void untagged_hd_video_is_decoded_under_a_description_the_gpu_converts_test()
+{
+    const SourceColorDescription none{};
+    const SourceColorDescription decoded = DecodedColorDescription(none, true);
+    CHECK(decoded.matrix == ColorMatrix::Bt709);
+    CHECK(decoded.range == ColorRange::Limited);
+    CHECK(SourceNv12ConversionFor(decoded) == SourceNv12Conversion::Bt709Limited);
+    CHECK(SourceNv12ConversionFor(none) == SourceNv12Conversion::Unsupported);
+
+    // A declared range is kept; only the matrix was missing.
+    SourceColorDescription fullOnly{};
+    fullOnly.range = ColorRange::Full;
+    CHECK(SourceNv12ConversionFor(DecodedColorDescription(fullOnly, true)) == SourceNv12Conversion::Bt709Full);
+
+    // Primaries and transfer are not the matrix and are not invented.
+    CHECK(decoded.primaries == none.primaries);
+    CHECK(decoded.transfer == none.transfer);
+
+    // Everything the untagged rule does not cover is decoded as declared: SD,
+    // a photo, and any stream that states its matrix.
+    const SourceColorDescription sd = DecodedColorDescription(none, false);
+    CHECK(sd.matrix == ColorMatrix::Unspecified && sd.range == ColorRange::Unspecified);
+    SourceColorDescription declared601{};
+    declared601.matrix = ColorMatrix::Bt601; declared601.range = ColorRange::Limited;
+    const SourceColorDescription kept = DecodedColorDescription(declared601, false);
+    CHECK(kept.matrix == ColorMatrix::Bt601 && kept.range == ColorRange::Limited);
 }
 
 // A stream's display matrix, read the way ffmpeg's autorotation reads it. The
@@ -15007,6 +15047,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
     TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),
     TEST_CASE(untagged_hd_video_decodes_as_bt709_and_only_it_test),
+    TEST_CASE(untagged_hd_video_is_decoded_under_a_description_the_gpu_converts_test),
     TEST_CASE(display_matrix_stands_the_picture_up_as_ffmpeg_does_test),
     TEST_CASE(media_foundation_copy_never_reads_past_the_sample_test),
     TEST_CASE(hdr_tone_map_integer_path_follows_the_curve_test),
