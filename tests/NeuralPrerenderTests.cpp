@@ -4,6 +4,7 @@
 #include "MediaPipeline.h"
 #include "PlaybackTiming.h"
 #include "NeuralSegmentIndex.h"
+#include "BackgroundFileReaper.h"
 #include "OfflineNeuralRenderer.h"
 #include "ResidentHelperPolicy.h"
 #include "SynchronizedPlayback.h"
@@ -4535,6 +4536,78 @@ void neural_segment_index_keeps_the_longest_job_pace_across_a_reset_test()
     CHECK_EQ(uint64_t{0},index.MeasuredPace().frames);
 }
 
+// Retired segments are deleted off the UI thread (BackgroundFileReaper.h): on
+// the UI thread the deletes stalled presentation for 88-102 ms every time a
+// render finished. What the reaper promises: files go, a missing one is not an
+// error, a held one is retried until it is released, one held throughout is
+// given up after its attempts, and shutting down never waits on a held file.
+void background_file_reaper_removes_retries_and_gives_up_test()
+{
+    TempDirectory fixture;
+    const auto a = fixture.Path() / L"neural-00000.mkv";
+    const auto b = fixture.Path() / L"neural-00001.mkv";
+    WriteBytes(a, "segment");
+    WriteBytes(b, "segment");
+    {
+        BackgroundFileReaper reaper;
+        reaper.Remove({a, b, fixture.Path() / L"already-gone.mkv"});
+        CHECK(reaper.WaitIdle(std::chrono::seconds(5)));
+        CHECK(!std::filesystem::exists(a));
+        CHECK(!std::filesystem::exists(b));
+        CHECK_EQ(size_t{0}, reaper.Abandoned());
+    }
+
+    // Held without FILE_SHARE_DELETE, the way a decoder still reading it or a
+    // scanner opening it holds a segment: not removed while held, removed by a
+    // retry once released.
+    const auto held = fixture.Path() / L"neural-00002.mkv";
+    WriteBytes(held, "segment");
+    const auto hold = [&] {
+        return CreateFileW(held.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    };
+    {
+        BackgroundFileReaper reaper;
+        HANDLE handle = hold();
+        CHECK(handle != INVALID_HANDLE_VALUE);
+        reaper.Remove({held});
+        CHECK(!reaper.WaitIdle(BackgroundFileReaper::kRetryDelay));
+        CHECK(std::filesystem::exists(held));
+        CloseHandle(handle);
+        CHECK(reaper.WaitIdle(std::chrono::seconds(5)));
+        CHECK(!std::filesystem::exists(held));
+        CHECK_EQ(size_t{0}, reaper.Abandoned());
+    }
+
+    // Held through every attempt: given up, left for the directory's removal.
+    WriteBytes(held, "segment");
+    {
+        BackgroundFileReaper reaper;
+        HANDLE handle = hold();
+        CHECK(handle != INVALID_HANDLE_VALUE);
+        reaper.Remove({held});
+        CHECK(reaper.WaitIdle(BackgroundFileReaper::kRetryDelay * (BackgroundFileReaper::kAttempts + 5)));
+        CHECK_EQ(size_t{1}, reaper.Abandoned());
+        CHECK(std::filesystem::exists(held));
+        CloseHandle(handle);
+    }
+
+    // Destroyed while a held file waits for its next attempt: the destructor
+    // stops the thread rather than sitting out the retries.
+    {
+        HANDLE handle = hold();
+        CHECK(handle != INVALID_HANDLE_VALUE);
+        const auto started = std::chrono::steady_clock::now();
+        {
+            BackgroundFileReaper reaper;
+            reaper.Remove({held});
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
+        CloseHandle(handle);
+    }
+}
+
 void live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test()
 {
     LiveFrameLibrary library;library.Add(L"original.mkv",40);
@@ -5923,6 +5996,7 @@ int wmain(int argc, wchar_t* argv[])
     live_render_forecast_predicts_from_this_gpu_measured_geometries_test();
     neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_test();
     neural_segment_index_keeps_the_longest_job_pace_across_a_reset_test();
+    background_file_reaper_removes_retries_and_gives_up_test();
     resident_helper_reuses_the_running_process_for_an_identical_key_test();
     resident_helper_relaunches_when_the_neural_settings_digest_changes_test();
     resident_helper_relaunches_when_the_runtime_digest_changes_test();

@@ -376,6 +376,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/NeuralRenderTypes.h
     src/ResidentHelperPolicy.h
     src/NeuralSegmentIndex.h
+    src/BackgroundFileReaper.h
     src/NeuralCoverage.h
     src/LiveSessionPolicy.h
     src/PlaybackTiming.h

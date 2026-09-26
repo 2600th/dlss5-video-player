@@ -119,6 +119,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "UpdateCheck.h"
 #include "TrailerThumbnail.h"
 #include "SynchronizedPlayback.h"
+#include "BackgroundFileReaper.h"
 #include "StatusChipPolicy.h"
 #include "ToolbarTipPolicy.h"
 #include "ChromeMotionPolicy.h"
@@ -9716,13 +9717,18 @@ private:
     // one a live decoder still has open or is opening: that one goes on a later
     // pass, once playback has crossed into the joined entry. A file something
     // else holds - a scanner, say - is simply tried again.
+    // Hands what a published run retired, and playback is not reading, to the
+    // reaper. Deleted here, on the thread that presents, the files cost 88-102
+    // ms at the moment every render finished - playback fell 103-113 ms behind
+    // and dropped 3 to 6 frames (BackgroundFileReaper.h).
     void SweepRetiredLiveSegments(const std::shared_ptr<NeuralSegmentIndex>& index){
         if(!index)return;
+        std::vector<std::filesystem::path> removable;
         for(const std::filesystem::path& path:index->RetiredFiles()){
             if(m_synchronizedPlayback.HoldsFile(path))continue;
-            std::error_code ec;std::filesystem::remove(path,ec);
-            if(!ec)index->ForgetRetired(path);
+            index->ForgetRetired(path);removable.push_back(path);
         }
+        m_segmentReaper.Remove(std::move(removable));
     }
     void DropRetainedLiveSegments(){
         m_retainedSegments.reset();m_retainedRange={};m_retainedKey.clear();
@@ -12246,6 +12252,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     ULONGLONG m_liveStartTick=0;double m_liveStartLead=kLiveStartLead;
     // Last pass of SweepRetiredLiveSegments from the tick.
     ULONGLONG m_liveSweepTick=0;
+    // Deletes retired segment files off the UI thread; see SweepRetiredLiveSegments.
+    BackgroundFileReaper m_segmentReaper;
     // The forecast this session started on, kept so the cushion has a pace to
     // size against before RealtimeRatio has enough samples to report one.
     double m_liveForecastRatio=0.0;
