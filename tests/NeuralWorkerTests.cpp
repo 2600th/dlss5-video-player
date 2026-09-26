@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <iostream>
 #include <fstream>
 #include <iterator>
 #include <stop_token>
@@ -1720,28 +1721,68 @@ void crash_handler_writes_its_dump_and_line_from_prepared_paths_test()
     // takes its designed fallback: no file, and a "could not be written" line.
     // That still proves what this test is for - the line from prepared paths -
     // and the uninstrumented build holds the dump itself to the strict check.
-    const auto checkWrittenDump = [&] {
-        CHECK_EQ(size_t{1}, dumps.size());
+    //
+    // The uninstrumented build lost its dump once too, on CI (run
+    // 36230306450 on 5dbb3b9; the file never appeared, and 88 local runs never
+    // repeated it). The handler now retries with a minimal dump, so a written
+    // dump may be either kind; and when there is none, the handler's own line
+    // - with the winerr of each attempt - is printed, so the next failure
+    // names its cause.
+    const auto checkWrittenDump = [&](const std::vector<std::filesystem::path>& written,
+                                      const std::string& text) {
+        CHECK_EQ(size_t{1}, written.size());
         const std::wstring expectedTail = L"-" + std::to_wstring(GetCurrentProcessId()) + L".dmp";
-        if (dumps.size() == 1) {
-            const std::wstring name = dumps[0].filename().wstring();
+        if (written.size() == 1) {
+            const std::wstring name = written[0].filename().wstring();
             CHECK(name.starts_with(L"NeuralWorker-crash-"));
             CHECK(name.ends_with(expectedTail));
-            CHECK(std::filesystem::file_size(dumps[0], error) > 0);
+            CHECK(std::filesystem::file_size(written[0], error) > 0);
+        } else {
+            std::cerr << "  crash handler wrote no dump; its line: "
+                      << text.substr(text.rfind('[') == std::string::npos ? 0 : text.rfind('['));
         }
-        CHECK(log.find("] Unhandled exception 0xc0000005 at 0x1234abcd; minidump written to ") != std::string::npos);
-        CHECK(log.ends_with(".dmp\n"));
+        const bool full = text.find("] Unhandled exception 0xc0000005 at 0x1234abcd; minidump written to ") != std::string::npos;
+        const bool minimal = text.find("] Unhandled exception 0xc0000005 at 0x1234abcd; the full minidump failed (winerr=") != std::string::npos &&
+                             text.find("); minidump written to ") != std::string::npos;
+        CHECK(full || minimal);
+        CHECK(text.ends_with(".dmp\n"));
     };
 #if defined(__SANITIZE_ADDRESS__)
     if (dumps.empty()) {
         CHECK(log.find("] Unhandled exception 0xc0000005 at 0x1234abcd; a minidump could not be written (winerr=") != std::string::npos);
         CHECK(log.ends_with(").\n"));
     } else {
-        checkWrittenDump();
+        checkWrittenDump(dumps, log);
     }
 #else
-    checkWrittenDump();
+    checkWrittenDump(dumps, log);
 #endif
+
+    // The retry itself, forced: the full dump reports ERROR_PARTIAL_COPY (299)
+    // without being tried, and the minimal one is written in its place with the
+    // full dump's error in the line. A log of its own, because the dump name
+    // carries only the second and the first dump above may share it.
+    const auto retryDirectory = directory / L"retry";
+    std::filesystem::create_directories(retryDirectory, error);
+    const std::filesystem::path retryLog = retryDirectory / L"NeuralWorker.log";
+    crash_dump::detail::Prepare(retryLog);
+    crash_dump::detail::g_failFullDumpForTest = true;
+    CHECK_EQ(LONG{EXCEPTION_EXECUTE_HANDLER}, crash_dump::detail::Handler(&pointers));
+    crash_dump::detail::g_failFullDumpForTest = false;
+    std::vector<std::filesystem::path> retryDumps;
+    for (const auto& entry : std::filesystem::directory_iterator(retryDirectory, error)) {
+        if (entry.path().extension() == L".dmp") retryDumps.push_back(entry.path());
+    }
+    std::ifstream retryInput(retryLog, std::ios::binary);
+    const std::string retryText{std::istreambuf_iterator<char>(retryInput), std::istreambuf_iterator<char>{}};
+    retryInput.close();
+#if defined(__SANITIZE_ADDRESS__)
+    if (!retryDumps.empty()) checkWrittenDump(retryDumps, retryText);
+#else
+    checkWrittenDump(retryDumps, retryText);
+#endif
+    if (!retryDumps.empty())
+        CHECK(retryText.find("; the full minidump failed (winerr=299); minidump written to ") != std::string::npos);
 
     // A log path too long for the prepared buffers costs the dump, never the
     // handler: it still returns, and there is nowhere it may write.

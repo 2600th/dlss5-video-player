@@ -39,6 +39,9 @@ inline constexpr size_t kPathCapacity = 520;
 inline wchar_t g_dumpBase[kPathCapacity]{};   // log path without its extension
 inline wchar_t g_logPath[kPathCapacity]{};
 inline bool g_prepared{};
+// Tests only: the full dump reports ERROR_PARTIAL_COPY without being tried, so
+// the reduced retry below can be exercised on a machine where it never fails.
+inline bool g_failFullDumpForTest{};
 
 inline bool CopyWide(wchar_t (&out)[kPathCapacity], const std::wstring& text)
 {
@@ -160,29 +163,50 @@ inline LONG WINAPI Handler(EXCEPTION_POINTERS* exception)
     wchar_t dump[kPathCapacity + 64];
     const bool named = ComposeDumpPath(dump, sizeof(dump) / sizeof(dump[0]), now, GetCurrentProcessId());
 
-    bool written = false;
-    DWORD error = ERROR_BAD_PATHNAME;
-    const HANDLE file = named ? CreateFileW(dump, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                            FILE_ATTRIBUTE_NORMAL, nullptr)
-                              : INVALID_HANDLE_VALUE;
-    if (named && file == INVALID_HANDLE_VALUE) error = GetLastError();
-    if (file != INVALID_HANDLE_VALUE) {
+    // One attempt: a fresh file, the dump, and the file removed again if the
+    // dump failed, so a failure never leaves a truncated .dmp behind.
+    const auto attempt = [&](MINIDUMP_TYPE type, DWORD& failure) {
+        const HANDLE file = CreateFileW(dump, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            failure = GetLastError();
+            return false;
+        }
         MINIDUMP_EXCEPTION_INFORMATION information{};
         information.ThreadId = GetCurrentThreadId();
         information.ExceptionPointers = exception;
         information.ClientPointers = FALSE;
-        // WithIndirectlyReferencedMemory costs a few MB and is what makes the
-        // frame buffers and the failing pointer readable in a debugger; without
-        // it a dump of this player shows the stack and almost nothing else.
-        const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory |
+        const bool ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
+                                          exception ? &information : nullptr, nullptr, nullptr) != FALSE;
+        if (!ok) failure = GetLastError();
+        CloseHandle(file);
+        if (!ok) DeleteFileW(dump);
+        return ok;
+    };
+    // WithIndirectlyReferencedMemory costs a few MB and is what makes the frame
+    // buffers and the failing pointer readable in a debugger; without it a dump
+    // of this player shows the stack and almost nothing else.
+    const auto fullType = static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory |
                                                      MiniDumpWithDataSegs |
                                                      MiniDumpWithThreadInfo |
                                                      MiniDumpWithUnloadedModules);
-        written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
-                                    exception ? &information : nullptr, nullptr, nullptr) != FALSE;
-        if (!written) error = GetLastError();
-        CloseHandle(file);
-        if (!written) DeleteFileW(dump);
+    // A process dumping itself is the case MiniDumpWriteDump documents as able
+    // to fail, and the full type is the likelier to: it reads memory the
+    // stacks point at while the process's other threads may be freeing it. It
+    // failed once on a CI runner, where the file never appeared, and not in
+    // 88 local runs. A minimal dump - stacks, modules, the exception -
+    // is still the difference between a crash that can be read and one that
+    // cannot, so it is tried once before giving up, and the full dump's error
+    // goes in the line either way.
+    bool written = false, reduced = false;
+    DWORD error = ERROR_BAD_PATHNAME, fullError = 0;
+    if (named) {
+        if (g_failFullDumpForTest) error = ERROR_PARTIAL_COPY;
+        else written = attempt(fullType, error);
+        if (!written) {
+            fullError = error;
+            written = reduced = attempt(MiniDumpNormal, error);
+        }
     }
 
     const DWORD code = exception && exception->ExceptionRecord
@@ -197,6 +221,11 @@ inline LONG WINAPI Handler(EXCEPTION_POINTERS* exception)
     line.Put(" at 0x");
     line.Hex(reinterpret_cast<uintptr_t>(at));
     if (written) {
+        if (reduced) {
+            line.Put("; the full minidump failed (winerr=");
+            line.Decimal(fullError);
+            line.Put(")");
+        }
         line.Put("; minidump written to ");
         // Converted in place into the line's remaining space.
         const int room = static_cast<int>(line.capacity - line.length - 2);
@@ -207,6 +236,10 @@ inline LONG WINAPI Handler(EXCEPTION_POINTERS* exception)
     } else {
         line.Put("; a minidump could not be written (winerr=");
         line.Decimal(error);
+        if (fullError && fullError != error) {
+            line.Put(", full dump winerr=");
+            line.Decimal(fullError);
+        }
         line.Put(").");
     }
     line.Put('\n');
