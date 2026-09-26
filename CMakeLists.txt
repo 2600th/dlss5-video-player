@@ -200,6 +200,13 @@ set(GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")
 # nvngx_vsr.dll is staged beside the player. It links no library of its own: the
 # DLSS SDK's NGX core already linked creates feature 16 (VsrEngine.h).
 set(RTX_VIDEO_SDK "" CACHE PATH "Path to the NVIDIA RTX Video SDK (optional; builds the RTX VSR comparison view)")
+# tools/stage_rtx_video_sdk.ps1 puts the SDK in external/rtx-video-sdk; a
+# checkout that has it there builds the view without being told. A plain
+# variable rather than the cache, so removing the folder turns it off again.
+if(NOT RTX_VIDEO_SDK AND EXISTS "${CMAKE_SOURCE_DIR}/external/rtx-video-sdk/include/nvsdk_ngx_helpers_vsr.h"
+   AND EXISTS "${CMAKE_SOURCE_DIR}/external/rtx-video-sdk/bin/Windows/x64/rel/nvngx_vsr.dll")
+    set(RTX_VIDEO_SDK "${CMAKE_SOURCE_DIR}/external/rtx-video-sdk")
+endif()
 set(RTX_VSR_FOUND FALSE)
 if(RTX_VIDEO_SDK)
     set(RTX_VSR_RUNTIME "${RTX_VIDEO_SDK}/bin/Windows/x64/rel/nvngx_vsr.dll")

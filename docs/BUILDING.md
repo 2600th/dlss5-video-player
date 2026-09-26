@@ -163,12 +163,28 @@ you which backend actually came up.
 ## RTX Video Super Resolution (optional)
 
 The player's **RTX VSR** comparison view (see [USAGE](USAGE.md)) needs the NVIDIA
-RTX Video SDK, which is not in this repository and cannot be fetched by a script:
-it is downloaded from https://developer.nvidia.com/rtx-video-sdk after signing in
-with an NVIDIA developer account, and its licence allows it to ship only as part
-of an application (see [third-party notices](../THIRD_PARTY.md)). Extract it
-anywhere outside the repository - or into `external/rtx-video-sdk`, which Git
-ignores - and point CMake at it:
+RTX Video SDK 1.1.0. It cannot be in this repository or fetched by a script: the
+download needs an NVIDIA developer login, and its licence allows it to ship only
+as object code inside an application (see [third-party notices](../THIRD_PARTY.md)).
+NVIDIA withdrew the SDK's public page in 2026 - `developer.nvidia.com/rtx-video-sdk`
+now redirects elsewhere - but the archive itself still downloads, once signed in,
+from:
+
+```
+https://developer.nvidia.com/downloads/rtx/sdk/rtx_video_sdk_v1.1.0.zip
+```
+
+Then stage it:
+
+```powershell
+./tools/stage_rtx_video_sdk.ps1 -Archive <path to the downloaded zip>
+```
+
+The script checks the archive's SHA-256 against the one this project is tested
+against, and `nvngx_vsr.dll`'s NVIDIA signature and version (1.6.0.0), before
+extracting it to `external/rtx-video-sdk`, which Git ignores. CMake uses that
+folder whenever it holds the SDK. To keep the SDK elsewhere, pass its path
+instead:
 
 ```
 cmake -S . -B build-vsr -G "Visual Studio 17 2022" -A x64 -DRTX_VIDEO_SDK=<path to the extracted SDK> ...

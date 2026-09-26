@@ -30,12 +30,16 @@ relicensed by this project. Both packages include the SDK's licence as
 
 ## NVIDIA RTX Video SDK (optional)
 
-Source and terms: https://developer.nvidia.com/rtx-video-sdk (behind an NVIDIA
-developer login; the RTX Video SDK licence agreement and its supplement)
+Source and terms: RTX Video SDK 1.1.0,
+https://developer.nvidia.com/downloads/rtx/sdk/rtx_video_sdk_v1.1.0.zip (behind an
+NVIDIA developer login; NVIDIA withdrew the public page at
+https://developer.nvidia.com/rtx-video-sdk in 2026). Terms: the NVIDIA RTX SDKs
+licence and its RTX supplement, `NVIDIA_RTX_Video_SDK_License.pdf` in the archive.
 
 The **RTX VSR** comparison view uses NVIDIA's RTX Video Super Resolution,
 NGX feature 16. It is optional and off by default: a build compiles it only when
-CMake is given `-DRTX_VIDEO_SDK=<path>` (docs/BUILDING.md), and only such a build
+CMake finds the SDK (`tools/stage_rtx_video_sdk.ps1` puts it in the ignored
+`external/rtx-video-sdk`, or `-DRTX_VIDEO_SDK=<path>`; docs/BUILDING.md), and only such a build
 carries the NVIDIA-signed feature DLL `nvngx_vsr.dll` (1.6.0.0, from the SDK's
 `bin/Windows/x64/rel` folder, unmodified) beside the player. The complete
 download is built that way and carries both; the core package, built by CI,
