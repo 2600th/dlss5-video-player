@@ -227,6 +227,16 @@ bool AudioPlayer::SelectAudioTrack(int audioIndex) {
 }
 
 bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, AudioStartState state) {
+    // The stream being replaced stays open, stopped, until this start has
+    // opened its own. Releasing an endpoint's last stream and initializing a
+    // new one straight after made some endpoints restart: IAudioClient::
+    // Initialize took 211-232 ms after a release and 7-12 ms otherwise,
+    // measured on the RTX 5090 machine's default endpoint, which put a seek
+    // right after a start at 252-317 ms against AudioClockSmoke's 250. Kept
+    // alive it measured 47-95 ms. Not an exclusive stream: that one owns the
+    // endpoint, and the next exclusive open would be refused while it lives.
+    std::shared_ptr<ReaderState> replaced;
+    if (m_reader && m_reader->renderer && !m_reader->renderer->Exclusive()) replaced = m_reader;
     Stop();
     m_seekBaseSec = std::max(0.0, seekSeconds);
     { std::lock_guard<std::mutex> lock(m_clockMutex); audio_clock::Reset(m_clock); audio_clock::Reset(m_continuity); m_clockStalled = false; }
@@ -731,7 +741,8 @@ bool AudioPlayer::Seek(double seconds) {
     const bool wasPaused = Paused();
     const float vol = m_volume;
     std::wstring path = m_path;
-    Stop();
+    // Start stops the current stream itself, after taking hold of it so the
+    // endpoint is never left without one (see Start).
     m_volume = vol;
     return Start(path,std::max(0.0,seconds),wasPaused?AudioStartState::Paused:AudioStartState::Playing);
 }
