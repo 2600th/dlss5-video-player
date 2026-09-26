@@ -74,6 +74,7 @@
 #include "FrameGenerationPass.h"
 #include "MediaPipeline.h"
 #include "Utf8Text.h"
+#include "VideoDecoder.h"
 
 #include <mfapi.h>
 
@@ -246,9 +247,10 @@ constexpr uint64_t kPhasePrefixSourceFrames = 5;
 
 // A source frame has to come out of the conversion as itself. One pixel of
 // centroid is slack a re-encode fits inside with room: measured here, the
-// worst passthrough delta over the first five frames is 0.595 px on
+// worst passthrough delta over the first five frames is 0.682 px on
 // external/test-media/dlaa-smoke.mp4, whose real content goes out through the
-// H.264 encoder, and 0.085 px on the lossless textured probe clip. So a
+// H.264 encoder, and 0.003 px on the lossless textured probe clip (RTX 5090,
+// each read under the matrix the pass reads it with). So a
 // passthrough frame that has moved a whole pixel was not re-encoded, it was
 // rewritten - or the pass wrote a generated frame into a source frame's slot.
 constexpr double kPassthroughTolerancePx = 1.0;
@@ -290,8 +292,19 @@ struct CentroidSeries {
 // with no subsampling to undo, so the frame boundaries are arithmetic and the
 // weight of a pixel is the byte itself. The scratch file is written beside the
 // converted output and removed before returning.
+//
+// `readAsBt709` measures the source the way the pass reads it when the player's
+// untagged rule applies (UntaggedColorPolicy.h): to RGB as BT.709 and back, as
+// BT.709, which is what the pass writes. For content that really is BT.709 that
+// changes nothing. external/test-media/dlaa-smoke.mp4 is untagged 1280x720 whose
+// samples are BT.601, and its saturated bars leave the RGB cube under BT.709 and
+// clip: every passthrough frame came back 1.914 px off its stored luma on an RTX
+// 5090, with average Y 125.97 -> 125.09, while the same round trip done by
+// ffmpeg on the source gave 125.09. The pass had copied the frames exactly as
+// the player reads them; the reference was the one reading them differently.
 CentroidSeries DecodeCentroids(const fs::path& ffmpeg, const fs::path& media, uint32_t width,
-                               uint32_t height, uint64_t frames, const fs::path& scratch)
+                               uint32_t height, uint64_t frames, const fs::path& scratch,
+                               bool readAsBt709 = false)
 {
     std::error_code ignored;
     fs::remove(scratch, ignored);
@@ -305,10 +318,14 @@ CentroidSeries DecodeCentroids(const fs::path& ffmpeg, const fs::path& media, ui
     // and the harness reported an 11 px passthrough shift for frames the pass
     // had copied exactly. The probe is about position, and position is in the
     // stored samples, not in how a converter reads their tags.
+    const std::wstring filter = readAsBt709
+        ? L"scale=in_color_matrix=bt709:out_range=pc,format=gbrp,"
+          L"scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,extractplanes=y"
+        : L"extractplanes=y";
     const std::vector<std::wstring> arguments{
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
         L"-i", media.wstring(), L"-frames:v", std::to_wstring(frames),
-        L"-vf", L"extractplanes=y", L"-f", L"rawvideo", L"-pix_fmt", L"gray", scratch.wstring()};
+        L"-vf", filter, L"-f", L"rawvideo", L"-pix_fmt", L"gray", scratch.wstring()};
     // Wrapped so the scratch file is removed on EVERY path out, the failures
     // included: a 20-frame gray prefix of 720p is 18 MB, nothing downstream
     // reads it, and a failing run is the one most likely to be repeated.
@@ -761,10 +778,17 @@ int wmain(int argc, wchar_t** argv)
                                                                     result.height, prefixOutputFrames,
                                                                     outputScratch);
                 // The same file the pass read, so the two series are the same
-                // frames: the audio-bearing copy stream-copies the video.
+                // frames: the audio-bearing copy stream-copies the video. Read
+                // under the matrix the pass reads it with, which is the
+                // player's own answer rather than one restated here.
+                VideoDecoder colourProbe;
+                const bool readAsBt709 = colourProbe.OpenMetadata(conversionSource.wstring()) &&
+                                         colourProbe.DecodesUntaggedAsBt709();
+                colourProbe.Close();
+                std::cout << "sourceReading=" << (readAsBt709 ? "untagged-hd-bt709" : "as-declared") << "\n";
                 const CentroidSeries sourceSeries = DecodeCentroids(ffmpeg, conversionSource, result.width,
                                                                     result.height, prefixSourceFrames,
-                                                                    sourceScratch);
+                                                                    sourceScratch, readAsBt709);
                 if (!outputSeries.ok || !sourceSeries.ok) {
                     // A failed decode is a FAIL and never a skip. The harness
                     // cannot tell a broken conversion from a broken decode, and
