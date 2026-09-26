@@ -107,8 +107,9 @@ a different resolution.
 Turning the button off stops the session and hands the same frame back to the
 original, but keeps the frames it already rendered: turning it back on resumes
 on them instead of redoing that work, so playback starts again in well under a
-second. On an RTX 5090 the render sustains about 120 frames per second at 1080p
-and 65 at 1440p; a 6.3 Mbit/s 4K30 re-encode measured 24 and could not keep up.
+second. On an RTX 5090 the render sustains about 148 frames per second at 1080p,
+101 at 1440p and 44 on a 6 Mbit/s 4K30 re-encode, so all three keep up; a
+heavier 4K file decodes more slowly.
 If the source is heavier than the GPU can follow the player says so with the
 predicted rate and asks before starting. Once a session has been running for a
 few seconds the status line reports the rate it is actually achieving whenever
@@ -618,10 +619,11 @@ retire the cache entries written before them, so a range is rendered once more:
   Turning it on no longer risks the source's colour: the open probe reads
   `color_space`,
   `color_range`, `color_primaries` and `color_transfer` off the stream, and the
-  GPU path is taken only for a source that declares a matrix and a range the
-  conversion implements - BT.709 or BT.601 (`bt470bg`/`smpte170m`), limited or
-  full - with the shader compiled for exactly the pair the source declared.
-  Anything else, including a stream that declares nothing, falls back to
+  GPU path is taken only for a source whose matrix and range the conversion
+  implements - BT.709 or BT.601 (`bt470bg`/`smpte170m`), limited or full, as
+  declared, or BT.709 limited for an HD source that declares none (below) -
+  with the shader compiled for exactly that pair.
+  Anything else, including an SD stream that declares nothing, falls back to
   ffmpeg's CPU conversion and says so in the log: grep
   `GPU source conversion` and every render answers with `accepted:`, `refused:`
   and the four tags it read. Falling back costs pipe bandwidth, never colour,
@@ -648,11 +650,15 @@ retire the cache entries written before them, so a range is rendered once more:
   ffmpeg's own conversion would pick BT.601 at every size, and every export is
   converted back with BT.709, so an untagged HD source used to come out of an export
   with its colours moved - the cyan bar of an untagged 720p test pattern went from
-  Y 133 to 155 through frame generation alone. Such a source still refuses the GPU
-  path and decodes on the CPU, now with BT.709; its renders carry
+  Y 133 to 155 through frame generation alone. Its renders carry
   `untagged-hd-bt709-v1` in the key, so none made under the old reading is served.
-  A declared matrix is always used as declared, and photos and GIFs are left as
-  they are.
+  Because that reading is BT.709 limited, which the GPU conversion implements,
+  such a source takes the GPU path like a tagged one: playback always, and a
+  render when this flag is on, whose key then carries `untagged-hd-bt709-gpu-v1`.
+  It used to be refused to the CPU, and an untagged 4K30 file played at 3.5 fps
+  during a live session on an RTX 5090. An untagged SD source still decodes on
+  the CPU with BT.601. A declared matrix is always used as declared, and photos
+  and GIFs are left as they are.
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,

@@ -242,14 +242,16 @@ not what every source will gain.
 
 ## Limits
 
-- **Speed.** A live session costs about 8.4 ms a frame at 1080p30 and 15.4 ms
-  at 1440p30 on an RTX 5090, and 15.3 ms at 1080p30 on an RTX 4080 SUPER. 4K
-  depends on the file. After your first session the player knows your GPU and
-  warns you before a video it expects to fall behind on.
+- **Speed.** On an RTX 5090 a live session costs about 6.8 ms a frame at
+  1080p30, 9.9 ms at 1440p30 and 23 ms at 4K30, all faster than the video
+  plays. An RTX 4080 SUPER measured 15.3 ms at 1080p30 on 0.16.0 and has not
+  been re-measured since. 4K depends on the file. After your first session the
+  player knows your GPU and warns you before a video it expects to fall behind
+  on.
 - **Driver 610.47 or newer.** Older drivers refuse neural rendering on any card,
   and the player tells you up front. See
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
-- **Tested GPUs.** An RTX 4080 SUPER (on 0.26.1) and an RTX 5090 (on 0.20.0).
+- **Tested GPUs.** An RTX 4080 SUPER and an RTX 5090, both on 0.26.1.
   RTX 20 and 30 series cards lack native FP8 and should be several times
   slower; nobody has tested one yet.
 - **Depth is estimated from the picture**, and so is motion on cards without

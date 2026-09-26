@@ -71,7 +71,7 @@ Confirmed from `README.md` and `CHANGELOG.md` at 0.23.0:
 - The neural runtime is a modified, unsigned community build. This is not
   incidental and must never be softened or omitted.
 - Not an NVIDIA product. Community project.
-- Verified on an RTX 4080 SUPER (0.23.0) and an RTX 5090 (0.20.0).
+- Verified on an RTX 4080 SUPER and an RTX 5090, both on 0.26.1.
 
 ## Brand Commitments
 

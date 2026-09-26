@@ -126,7 +126,7 @@
         {
           "@type": "Question",
           "name": "How long does a render take?",
-          "acceptedAnswer": { "@type": "Answer", "text": "You do not wait for it to start: playback joins the render a few seconds after you press D, and the rest fills in while you watch. A live 1080p30 session costs 8.4 ms a frame on an RTX 5090 and 15.3 ms on an RTX 4080 SUPER, both faster than the video plays; 1440p30 on the 5090 costs 15.4 ms. A whole 4K film on the 4080 SUPER rendered at 14.8 frames a second. After your first session the player warns you before a video it expects to fall behind on. The other limits are above." }
+          "acceptedAnswer": { "@type": "Answer", "text": "You do not wait for it to start: playback joins the render a few seconds after you press D, and the rest fills in while you watch. On an RTX 5090 a live session costs 6.8 ms a frame at 1080p30, 9.9 ms at 1440p30 and 23 ms at 4K30, all faster than the video plays. An RTX 4080 SUPER measured 15.3 ms at 1080p30 on an older version, and rendered a whole 4K film at 14.8 frames a second. After your first session the player warns you before a video it expects to fall behind on. The other limits are above." }
         },
         {
           "@type": "Question",
@@ -668,7 +668,7 @@
 
   <div class="readout">
     <p class="readout__row"><span class="readout__k">Hardware</span><span class="readout__v readout__v--prose">An NVIDIA RTX card and driver 610.47 or newer; older drivers are refused up front. Checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 cards lack native FP8, should be several times slower, and are untested.</span></p>
-    <p class="readout__row"><span class="readout__k">Speed</span><span class="readout__v readout__v--prose">A live 1080p30 session costs <span class="data">8.4&nbsp;ms</span> a frame on an RTX 5090 and <span class="data">15.3&nbsp;ms</span> on an RTX 4080 SUPER. A whole 4K render on the 4080 SUPER ran at <span class="data">14.8&nbsp;fps</span>, slower than a 30&nbsp;fps film plays.</span></p>
+    <p class="readout__row"><span class="readout__k">Speed</span><span class="readout__v readout__v--prose">On an RTX 5090 a live session costs <span class="data">6.8&nbsp;ms</span> a frame at 1080p30, <span class="data">9.9&nbsp;ms</span> at 1440p30 and <span class="data">23&nbsp;ms</span> at 4K30, all faster than the video plays. On an RTX 4080 SUPER a whole 4K render ran at <span class="data">14.8&nbsp;fps</span>, slower than a 30&nbsp;fps film plays.</span></p>
     <p class="readout__row"><span class="readout__k">Upscaling</span><span class="readout__v readout__v--prose">DLSS Super Resolution scored below a plain bicubic upscale on all six video clips measured. It is built for games, so it is off by default and there for its look, not for detail.</span></p>
     <p class="readout__row"><span class="readout__k">Runtime</span><span class="readout__v readout__v--prose">The neural runtime is a modified, unsigned community build, not a signed NVIDIA package. <a href="#faq-unsigned">Why it is unsigned</a>.</span></p>
     <p class="readout__row"><span class="readout__k">Artifacts</span><span class="readout__v readout__v--prose">Depth is estimated from the picture, and so is motion on cards without the optical flow engine. Expect some artifacts.</span></p>
@@ -794,10 +794,11 @@
       <p>
         You do not wait for it to start: playback joins the render a few
         seconds after you press <kbd>D</kbd>, and the rest fills in while you
-        watch. A live 1080p30 session costs 8.4&nbsp;ms a frame on an RTX 5090
-        and 15.3&nbsp;ms on an RTX 4080 SUPER, both faster than the video
-        plays; 1440p30 on the 5090 costs 15.4&nbsp;ms. A whole 4K film on the
-        4080 SUPER rendered at 14.8 frames a second. After your first session
+        watch. On an RTX 5090 a live session costs 6.8&nbsp;ms a frame at
+        1080p30, 9.9&nbsp;ms at 1440p30 and 23&nbsp;ms at 4K30, all faster
+        than the video plays. An RTX 4080 SUPER measured 15.3&nbsp;ms at
+        1080p30 on an older version, and rendered a whole 4K film at 14.8
+        frames a second. After your first session
         the player warns you before a video it expects to fall behind on. The
         other limits are <a href="#limits">above</a>.
       </p>

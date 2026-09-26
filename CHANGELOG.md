@@ -7,6 +7,30 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Unreleased
+
+Fixes from re-measuring an RTX 5090 on 0.26.1
+([record](docs/VERIFICATION-2026-09-26-RTX5090.md)). Renders are reused, except
+those of untagged HD videos made with GPU source conversion turned on.
+
+### Fixed
+
+- **Untagged HD videos play and render through the GPU.** A video that
+  declares no colour matrix was decoded on the CPU through a pipe; an untagged
+  4K30 file played at 3.5 fps during a live session. It now plays at 30 with
+  nothing dropped, read with the same BT.709 colours as before.
+- **The player learns your GPU's speed from a session started mid-video.** Such
+  a session measured nothing once it had also filled in the start of the video,
+  so the keep-up warning kept using its built-in guess.
+- **Seeking right after starting playback is quick again** on audio devices that
+  are slow to reopen: about 50-95 ms, not 250-320.
+
+### Speed
+
+- RTX 5090 live sessions measured about 6.8 ms a frame at 1080p30, 9.9 at
+  1440p30 and 23 at 4K30, all faster than real time (were 8.4, 15.4 and 42.0 on
+  0.17.0).
+
 ## 0.26.1 - 2026-09-25
 
 Fixes from a full audit of 0.26.0. Renders of videos turned 180 degrees or

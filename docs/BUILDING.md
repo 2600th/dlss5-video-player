@@ -1,6 +1,6 @@
 # Building and testing
 
-_Verified against 0.26.1 (d9c7b51) on 2026-09-25._
+_Verified against 0.26.1 on 2026-09-26, RTX 5090 ([record](VERIFICATION-2026-09-26-RTX5090.md))._
 
 Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
 C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the
@@ -245,7 +245,13 @@ Copy-Item packaging/ReShade.ini,packaging/ReShadePreset.ini build-upscaling/Rele
 ```
 
 The configuration copy is for initial setup; preserve existing neural settings
-before replacing it. Never place the neural `dxgi.dll` beside the main player.
+before replacing it.
+
+A build does not restage the runtime. When `packaging/runtime-lock.json` moves,
+re-run the fetch and the `stage_runtime.ps1` line above: until then the player
+refuses every render with `Neural runtime lock drift; render refused` in
+`DLSSVideoPlayer.log`, while the GPU smokes, which drive the worker without
+that check, still pass. Never place the neural `dxgi.dll` beside the main player.
 See [runtime setup](DLSS5_SETUP.md) for loading and validation contracts.
 
 `build_windows.bat` combines fetching and validating the locked runtime,

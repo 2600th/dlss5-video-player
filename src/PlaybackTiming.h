@@ -45,14 +45,15 @@ inline double LateFrameThreshold(double frameDuration)
 // does not fit at all.
 //
 // These constants are the seed for a machine that has not measured itself yet,
-// and 0.17.0 left them behind: the same GPU and the same clips now cost 8.4
-// ms/frame at 1080p, 15.4 at 1440p and 42.0 at 4K (docs/VERIFICATION-2026-09-10
-// -RTX5090.md), so the seed reads ~1.5x high below 1440p. They are kept because
-// those three points no longer fit one line - the 4K clip is a 6.3 Mbit/s
-// re-encode whose decode and encode set its pace, and a fit through it puts the
-// fixed term below zero - and because a seed that overstates cost asks before a
-// marginal session instead of dropping frames in it. One session replaces the
-// seed with this machine's own pace at that geometry.
+// and later releases left them behind: 0.17.0 cost 8.4 ms/frame at 1080p, 15.4
+// at 1440p and 42.0 at 4K on the same GPU and clips (docs/VERIFICATION-2026-09-10
+// -RTX5090.md), and 0.26.1 6.75, 9.90 and 22.57 (docs/VERIFICATION-2026-09-26
+// -RTX5090.md), so the seed reads ~1.85x high at 1080p. They are kept because
+// one GPU's points are not every GPU's - the 0.17.0 ones did not even fit one
+// line, the 4K clip's decode and encode setting its pace - and because a seed
+// that overstates cost asks before a marginal session instead of dropping
+// frames in it. One session replaces the seed with this machine's own pace at
+// that geometry.
 inline constexpr double kNeuralFrameFixedMs = 7.35;
 inline constexpr double kNeuralMillisecondsPerMegapixel = 2.50;
 

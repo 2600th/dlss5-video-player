@@ -138,6 +138,9 @@ An RTX 5090 (driver 616.64) then confirmed the universal runtime at 1080p
 The same machine re-ran all three geometries on 0.17.0 at 8.4, 15.4 and
 42.0 ms/frame; see the
 [0.17.0 RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-10-RTX5090.md).
+On 0.26.1 with the current runtime (DLSS SR 310.9.1, RenoDX 6.5.3) it measured
+6.75, 9.90 and 22.57 ms/frame; see the
+[0.26.1 RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-26-RTX5090.md).
 Later records - the 0.20.0 RTX 5090 session, the 0.21.x RTX 4080 gate and
 cold-stack record, and the driven-session matrix - are listed with dates under
 the README's [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).

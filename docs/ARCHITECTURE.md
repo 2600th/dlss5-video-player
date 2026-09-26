@@ -945,6 +945,15 @@ comfortably. Five samples and a median let the measurements outvote the outlier,
 and the minimum is deliberately not used - this forecast exists to refuse
 sessions that cannot keep up, so erasing slow evidence is the wrong failure.
 
+A session contributes the pace of the job that measured the most frames
+(`NeuralSegmentIndex::MeasuredPace`), not of the last job to start. A session
+opened mid-video renders to the end and then fills the head behind the
+playhead, and that short last job used to replace the long one, fall under the
+120-frame floor and record nothing at all. With that fixed, and untagged HD
+sources decoded to NV12 rather than through a BGRA pipe, 0.26.1 on the current
+runtime measured **6.75, 9.90 and 22.57 ms** at 1080p, 1440p and 4K on the same
+GPU and clips (see the [0.26.1 RTX 5090 record](VERIFICATION-2026-09-26-RTX5090.md)).
+
 The paces are also kept per processing-scale rung. They used to be filed under
 the source geometry whatever rung rendered them, so the first 50% session was
 forecast at the 100% pace and its own measurement then pulled the 100% forecast
