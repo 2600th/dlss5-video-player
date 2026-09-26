@@ -682,8 +682,11 @@ $P = @{
     # src/NeuralReceipt.cpp Seconds(): a dash for the total means
     # NeuralColdStartRecord::Presented never ran, so the job ended without ever
     # putting a neural frame on screen. Distinguishing this from a slow session
-    # is the difference between a diagnosis and a 90 s timeout.
-    NoPicture     = '^Neural cold start: total=-'
+    # is the difference between a diagnosis and a 90 s timeout. Not the open's
+    # own cache check (helper=none(range-selection)): on a slow first open that
+    # line lands in the same millisecond as the toggle, and reading it as the
+    # session's failure closed the player mid-render.
+    NoPicture     = '^Neural cold start: total=-(?!.*\bhelper=none\(range-selection\))'
 }
 
 function Parse-ColdStartFields([string]$fields) {
