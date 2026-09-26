@@ -4479,6 +4479,41 @@ void neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_te
     CHECK_EQ(uint64_t{0},index.Pace().frames);
 }
 
+// A session opened mid-video renders from the playhead to the end and then
+// fills the head behind it. The second job restarts the pace clock, and with
+// only its own one-segment pace left the session reported nothing: on an RTX
+// 5090 five 1080p sessions of 744 frames each logged no pace at all, since the
+// 30-frame head job never reaches the 120-frame floor. What the session
+// measured is the job that measured the most frames, not the last one to start.
+void neural_segment_index_keeps_the_longest_job_pace_across_a_reset_test()
+{
+    NeuralSegmentIndex index;
+    CHECK_EQ(uint64_t{0},index.MeasuredPace().frames);
+    index.Append(LiveSegmentRecord(L"job1/neural-00000.mkv",0,30,15,1));
+    index.Append(LiveSegmentRecord(L"job1/neural-00001.mkv",1,45,60,1));
+    index.Append(LiveSegmentRecord(L"job1/neural-00002.mkv",2,105,60,1));
+    index.Append(LiveSegmentRecord(L"job1/neural-00003.mkv",3,165,60,1));
+    CHECK_EQ(uint64_t{180},index.MeasuredPace().frames);
+
+    // The head job: its first segment is all it has, so its own pace is empty.
+    index.ResetPace();
+    index.Append(LiveSegmentRecord(L"job2/neural-00000.mkv",0,0,30,2));
+    CHECK_EQ(uint64_t{0},index.Pace().frames);
+    CHECK_EQ(uint64_t{180},index.MeasuredPace().frames);
+
+    // A later job that measures more frames is the better sample.
+    index.ResetPace();
+    index.Append(LiveSegmentRecord(L"job3/neural-00000.mkv",0,225,60,3));
+    for (uint64_t n=1;n<=4;++n)
+        index.Append(LiveSegmentRecord(L"job3/neural-0000"+std::to_wstring(n)+L".mkv",n,225+60*int64_t(n),60,3));
+    CHECK_EQ(uint64_t{240},index.Pace().frames);
+    CHECK_EQ(uint64_t{240},index.MeasuredPace().frames);
+
+    // A new session starts from nothing.
+    index.Restart();
+    CHECK_EQ(uint64_t{0},index.MeasuredPace().frames);
+}
+
 void live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test()
 {
     LiveFrameLibrary library;library.Add(L"original.mkv",40);
@@ -5866,6 +5901,7 @@ int wmain(int argc, wchar_t* argv[])
     live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test();
     live_render_forecast_predicts_from_this_gpu_measured_geometries_test();
     neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_test();
+    neural_segment_index_keeps_the_longest_job_pace_across_a_reset_test();
     resident_helper_reuses_the_running_process_for_an_identical_key_test();
     resident_helper_relaunches_when_the_neural_settings_digest_changes_test();
     resident_helper_relaunches_when_the_runtime_digest_changes_test();

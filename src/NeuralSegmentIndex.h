@@ -128,9 +128,7 @@ public:
     SegmentPace Pace() const
     {
         const std::lock_guard lock(mutex_);
-        if (!paceStart_ || totalFrames_ <= paceBaseFrames_) return {};
-        return {std::chrono::duration<double, std::milli>(paceLatest_ - *paceStart_).count(),
-                totalFrames_ - paceBaseFrames_};
+        return PaceLocked();
     }
 
     // A new job's pace is its own: the clock starts at its first segment. The
@@ -141,8 +139,22 @@ public:
     void ResetPace()
     {
         const std::lock_guard lock(mutex_);
+        const SegmentPace finished = PaceLocked();
+        if (finished.frames > longestPace_.frames) longestPace_ = finished;
         paceStart_.reset();
         paceBaseFrames_ = totalFrames_;
+    }
+
+    // What the session measured, for the forecast: the pace of whichever job
+    // counted the most frames, the current one included. `Pace` is the current
+    // job alone, which is what a status line wants while it runs. A session
+    // opened mid-video renders to the end and then fills the head behind the
+    // playhead, and that short last job must not replace the long one.
+    SegmentPace MeasuredPace() const
+    {
+        const std::lock_guard lock(mutex_);
+        const SegmentPace current = PaceLocked();
+        return current.frames >= longestPace_.frames ? current : longestPace_;
     }
 
     void Restart()
@@ -151,6 +163,7 @@ public:
         segments_.clear();
         totalFrames_ = 0;
         paceStart_.reset();
+        longestPace_ = {};
         ++revision_;
     }
 
@@ -375,6 +388,14 @@ public:
     }
 
 private:
+    // Callers hold mutex_.
+    SegmentPace PaceLocked() const
+    {
+        if (!paceStart_ || totalFrames_ <= paceBaseFrames_) return {};
+        return {std::chrono::duration<double, std::milli>(paceLatest_ - *paceStart_).count(),
+                totalFrames_ - paceBaseFrames_};
+    }
+
     mutable std::mutex mutex_;
     std::vector<NeuralSegment> segments_;
     uint64_t totalFrames_{};
@@ -389,4 +410,6 @@ private:
     std::optional<std::chrono::steady_clock::time_point> paceStart_;
     std::chrono::steady_clock::time_point paceLatest_{};
     uint64_t paceBaseFrames_{};
+    // The finished job that measured the most frames, kept across ResetPace.
+    SegmentPace longestPace_{};
 };

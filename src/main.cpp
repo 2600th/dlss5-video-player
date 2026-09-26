@@ -4981,7 +4981,7 @@ private:
             LOG("Neural render pace not recorded: the processing scale changed from "<<m_livePaceScale<<"% to "<<m_processingScale<<"% during the session.");
             return;
         }
-        const auto pace=m_liveSegments->Pace();
+        const auto pace=m_liveSegments->MeasuredPace();
         if(pace.frames<kMinPaceFrames||!(pace.wallMs>0.0))return;
         RecordPaceSample(m_livePaceWidth,m_livePaceHeight,pace.MsPerFrame(),m_livePaceScale);
         RebuildRenderPace();
