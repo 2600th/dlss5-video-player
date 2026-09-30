@@ -19,7 +19,6 @@ for images that have since been replaced are in the git history of this file.
 | `current/neural-strength.jpg` | Image adjustments, with the DLSS 5 mix slider at 1.00, over the DLSS 5 frame | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/neural-settings.jpg` | The Neural settings dialog at its defaults | 24 Sep 2026, `dced888` + `f2ae230` |
 | `current/recent-videos.jpg` | The File menu (Game trailers, Recent videos, Save comparison image) over the Mafia: The Old Country trailer, paused on a neural frame with the compare bar. The history submenu is closed, which keeps local paths out of frame. From the earlier round, at 175%, before the sliders were redrawn | 24 Sep 2026, v0.25.0+ |
-| `2026-09-03/face-comparison.png` | The Witcher IV, frame 3375, source beside render. Kept because the 2 September verification report shows it | 3 Sep 2026, v0.13.0 |
 
 ## 25 September 2026 image
 
@@ -177,18 +176,10 @@ colour. Everywhere else it matches the first JPEG to a mean of 0.01 levels.
 
 **Size.** 1493x932: at 175% the player's minimum width is 1493 visible pixels.
 
-## 3 September 2026 image
-
-`2026-09-03/face-comparison.png`, v0.13.0 on an RTX 5090, uses *The Witcher
-IV* Cinematic Reveal Trailer (CD PROJEKT RED), 1920x1080 at 30000/1001 fps,
-zero-based frame 3375 (112.6 s). Both 700x880 crops are at x=670, y=0 from the
-source and its fully verified render (10,868 of 10,868 frames).
-
 ## Rights
 
 These images document the software. They are not an image-quality benchmark,
 an official NVIDIA integration, or an endorsement by anyone shown. Footage
 belongs to its owners: The Matrix to Warner Bros., Grand Theft Auto VI to
-Rockstar Games, 007 First Light to IO Interactive, The Witcher IV to CD
-PROJEKT RED and Mafia: The Old Country to 2K and Hangar 13. NVIDIA components belong to NVIDIA. The source-code licence
+Rockstar Games, 007 First Light to IO Interactive and Mafia: The Old Country to 2K and Hangar 13. NVIDIA components belong to NVIDIA. The source-code licence
 doesn't relicense any of it.

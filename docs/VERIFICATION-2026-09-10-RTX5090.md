@@ -1,7 +1,7 @@
 # RTX 5090 on 0.17.0: live-session pace, and a seam that stopped playback
 
 Verified 10 September 2026 on the same machine as the
-[0.16.0 RTX 5090 record](VERIFICATION-2026-09-09-RTX5090.md), to check the speed
+0.16.0 RTX 5090 record (in git history as `docs/VERIFICATION-2026-09-09-RTX5090.md`), to check the speed
 claims the README makes for this GPU after 0.17.0 pipelined the export loop.
 
 Two results: the quoted paces were stale at 1080p and 1440p, and repeating the
