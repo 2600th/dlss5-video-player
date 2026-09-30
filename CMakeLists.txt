@@ -837,6 +837,10 @@ if(BUILD_TESTING)
         add_test(NAME PackageSourceIdentity COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_SOURCE_DIR}/tests/PackageSourceIdentity.ps1" -Tools "${CMAKE_SOURCE_DIR}/tools")
         set_tests_properties(PackageSourceIdentity PROPERTIES TIMEOUT 60)
+        # P1.31: the complete package needs a passing hardware-suite report.
+        add_test(NAME HardwareTestReport COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_SOURCE_DIR}/tests/HardwareTestReport.ps1" -Tools "${CMAKE_SOURCE_DIR}/tools")
+        set_tests_properties(HardwareTestReport PROPERTIES TIMEOUT 60)
     endif()
 
     dlss_video_player_test(NeuralPrerenderTests tests/NeuralPrerenderTests.cpp tests/TestSupport.h)

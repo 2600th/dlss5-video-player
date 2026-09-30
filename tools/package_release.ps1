@@ -25,6 +25,7 @@ if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
 }
 
 . (Join-Path $PSScriptRoot 'source_identity.ps1')
+. (Join-Path $PSScriptRoot 'hardware_report.ps1')
 
 $distRoot = Join-Path $repositoryRoot 'dist'
 $stageName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
@@ -193,6 +194,11 @@ $sourceIdentity = Get-PackageSourceIdentity -RepositoryRoot $repositoryRoot `
 Write-Host "Packaging commit $($sourceIdentity.Commit)$(if ($sourceIdentity.Tag) { " ($($sourceIdentity.Tag))" } else { ' (snapshot, untagged)' })."
 
 if (-not $PublicCore) {
+    # The complete package carries the neural runtime, and ships only a build
+    # the GPU and audio suites passed on (P1.31); CI cannot run them.
+    $hardwareTests = Assert-HardwareTestReport -Report (Join-Path (Join-Path $repositoryRoot $BuildDirectory) 'hardware-junit.xml') `
+        -Binaries @((Join-Path $buildRoot 'DLSSVideoPlayer.exe'), (Join-Path $buildRoot 'neural-runtime\NeuralWorker.exe'))
+    Write-Host "Hardware suite: $hardwareTests tests passed on this build."
     & (Join-Path $PSScriptRoot 'stage_runtime.ps1') -InputDirectory $runtimeRoot -Destination $runtimeRoot -ValidateOnly | Out-Host
     Assert-HashLock
 

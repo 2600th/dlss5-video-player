@@ -62,7 +62,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
 | [P1.30](#p130) | Release tags can still be moved (ruleset; owner) | S | Release | 🧪 |
-| [P1.31](#p131) | GPU and audio tests never run in CI | M | Release | 🧪 |
 | [P1.32](#p132) | Refresh `RELATED_PROJECTS.md` | S | Docs | |
 | [P1.33](#p133) | Small hardening and doc drift (checklist) | S | All | 🔍 |
 | [P1.34](#p134) | FFmpeg source availability and bundled-library notices | S-M | Release | |
@@ -124,22 +123,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
   updates and deletions (repository settings > Rules, or
   `gh api repos/2600th/dlss5-video-player/rulesets` with `target: tag`). An
   admin action, not a code change.
-
-<a id="p131"></a>
-### P1.31 · GPU and audio tests never run in CI
-
-`M` · **Release** · 🧪
-
-- **Problem.** `gpu-tests.yml` needs a `[self-hosted, windows, gpu]` runner
-  that does not exist; runs sit queued for 24 h and are cancelled.
-  `build.yml` and `release.yml` run the `portable` preset, which excludes
-  `gpu|audio`. Neural renders, frame generation, direct NVENC, the export
-  matrix and the audio clock never get a CI assertion, and a tag can ship
-  with neural rendering broken.
-- **Where.** `.github/workflows/gpu-tests.yml:36`, `build.yml:112`,
-  `release.yml:86`, `build_windows.bat:128`.
-- **Fix.** Register the runner, or make packaging require a recent passing
-  JUnit report from the full suite.
 
 <a id="p132"></a>
 ### P1.32 · Refresh `RELATED_PROJECTS.md`

@@ -299,7 +299,16 @@ release is built from its tag: the assembler refuses a HEAD that is not
 `dlss5-video-player-v<version>`. `-Snapshot` lifts only that second rule, for
 a package that is not a release (CI's per-push core package).
 
-This complete experimental package requires the locked runtime and helpers.
+This complete experimental package requires the locked runtime and helpers,
+and a build the GPU and audio suites passed on. CI cannot run those suites, so
+the assembler reads their JUnit report from the build directory and refuses a
+missing one, one older than the executables, one with a failed or skipped
+test, or one without the smokes it needs:
+
+```powershell
+ctest --preset hardware --output-junit hardware-junit.xml
+```
+
 The assembler refuses to replace an existing output; select a new suffix for
 another local candidate. The published download uses the
 `dlss5-video-player-v<version>-win64.zip` name.

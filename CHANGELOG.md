@@ -39,7 +39,9 @@ decisions that still shape the code are in
 ### Release
 
 - Every package names the commit it was built from, and packaging refuses
-  uncommitted changes or a release not built from its tag.
+  uncommitted changes or a release not built from its tag. The complete
+  package also requires a passing run of the GPU and audio test suites on the
+  same build.
 
 ## 0.26.2 - 2026-09-26
 
