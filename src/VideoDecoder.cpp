@@ -143,9 +143,19 @@ VideoDecoder::~VideoDecoder() { Close(); }
 void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     const bool restartThis = other.m_frameQueueEnabled;
     const bool restartOther = m_frameQueueEnabled;
-    StopFrameQueue();
-    other.StopFrameQueue();
+    // Kept, not discarded, and swapped with everything else (P1.27). The
+    // candidate keeps reading ahead while its renderer is built, and each of
+    // those frames is already counted in m_ffmpegEmittedFrames: clearing them
+    // here made the first frame after a YouTube open, seek or reload up to four
+    // frames late, with no discontinuity for temporal history to see.
+    StopFrameQueue(QueueBuffer::Keep);
+    other.StopFrameQueue(QueueBuffer::Keep);
     using std::swap;
+    if(this!=&other){
+        std::scoped_lock queueLock(m_frameMutex,other.m_frameMutex);
+        swap(m_frameQueue,other.m_frameQueue);
+        swap(m_frameTerminal,other.m_frameTerminal);
+    }
     swap(m_backend,other.m_backend);swap(m_reader,other.m_reader);swap(m_path,other.m_path);
     // Everything the probe (or KnownMedia, or Media Foundation) said about the
     // stream, and the layout it decodes to, travels as one value: the colour
@@ -176,8 +186,8 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     swap(m_helperDirectory,other.m_helperDirectory);
     swap(m_failureStage,other.m_failureStage);
     swap(m_accelerationMemo,other.m_accelerationMemo);
-    if(restartThis)StartFrameQueue();
-    if(restartOther)other.StartFrameQueue();
+    if(restartThis)StartFrameQueue(QueueBuffer::Keep);
+    if(restartOther)other.StartFrameQueue(QueueBuffer::Keep);
 }
 
 void VideoDecoder::Close() {

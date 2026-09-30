@@ -9909,6 +9909,29 @@ void deband_pre_pass_reaches_the_conversion_program_test()
     CHECK(contains(deband::kGrain/1000.0f));
 }
 
+// P1.27. A YouTube open, seek or reload builds its renderer while the
+// candidate decoder reads ahead, then swaps the candidate in. Swap stopped both
+// queues discarding what they held, after the child's frame count had taken
+// those frames, so playback resumed up to four frames on. The frame after a
+// swap is the next one, with its own number and time.
+void video_decoder_swap_keeps_the_frames_the_candidate_read_ahead_test()
+{
+    MediaFixture fixture;
+    auto live=VideoDecoderTestAccess::Create(fixture.directory);
+    auto candidate=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(candidate->Open(L"seekreuse",MediaSourceKind::LocalFile));
+    // Long enough for the queue to fill, as it does while a renderer is built.
+    Sleep(400);
+    live->Swap(*candidate);
+    for(uint32_t expected=0;expected<6;++expected){
+        const VideoFrame frame=read_one_frame(*live);
+        CHECK_EQ(expected,stamped_frame_index(frame));
+        CHECK_EQ(uint64_t{expected},frame.frameNumber);
+    }
+    candidate->Close();
+    live->Close();
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -15217,6 +15240,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_track_labels_say_what_distinguishes_the_tracks_test),
     TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
     TEST_CASE(audio_track_that_starts_late_is_led_with_silence_test),
+    TEST_CASE(video_decoder_swap_keeps_the_frames_the_candidate_read_ahead_test),
     TEST_CASE(audio_restarts_at_a_paused_seek_rather_than_the_last_clock_reading_test),
     TEST_CASE(audio_helper_stderr_keeps_a_bounded_tail_and_reports_only_bad_exits_test),
     TEST_CASE(audio_child_stderr_is_drained_and_logged_when_it_fails_test),

@@ -61,7 +61,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | **P0** | **Fix before the next release** | | | |
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
-| [P1.27](#p127) | YouTube open, seek or reload drops 1-4 frames | S | Player | 🔍 |
 | [P1.28](#p128) | Inherited handles can hang an export and the UI | M | Pipeline | 🔍 |
 | [P1.29](#p129) | Load-time DLLs are not pinned to System32 | S | Release | 🧪 |
 | [P1.30](#p130) | The complete zip cannot be traced to a commit | S-M | Release | 🧪 |
@@ -111,22 +110,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 ---
 
 # P1 — Next
-
-<a id="p127"></a>
-### P1.27 · YouTube open, seek or reload drops 1-4 frames
-
-`S` · **Player** · 🔍
-
-- **Problem.** The candidate decoder keeps reading ahead while its renderer is
-  built; `Swap` then stops both queues with `QueueBuffer::Discard` and clears
-  them, after `m_ffmpegEmittedFrames` counted those frames. Playback jumps by
-  up to ~133 ms at 30 fps with no discontinuity flag, and temporal history
-  crosses the gap.
-- **Where.** `VideoDecoder.cpp:144-145, 159, 1481-1482`;
-  `main.cpp:10797, 10952`.
-- **Fix.** In `Swap`, stop with `QueueBuffer::Keep`, swap
-  `m_frameQueue`/`m_frameTerminal`, and restart with `Keep`.
-- **Test.** The frame after a swap is the next frame.
 
 <a id="p128"></a>
 ### P1.28 · Inherited handles can hang an export and the UI

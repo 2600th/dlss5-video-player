@@ -22,6 +22,8 @@ decisions that still shape the code are in
   seek.
 - **Anamorphic videos export at their proper shape.** A DVD rip or HDV file
   looked right in the player but was written stretched.
+- **Opening, seeking or reloading a YouTube video no longer skips 1 to 4
+  frames.**
 - **A live render started about 30 seconds after the last one no longer
   fails.** The background renderer could accept the job just as it was closing.
 
