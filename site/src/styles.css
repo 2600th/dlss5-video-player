@@ -504,6 +504,7 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   max-width: var(--measure);
 }
 .readout__v--prose .data { font-size: 0.86em; color: var(--text); }
+.readout__v--prose code { white-space: nowrap; }
 
 /* --- beats ---------------------------------------------------------------- */
 

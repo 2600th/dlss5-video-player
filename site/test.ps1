@@ -844,11 +844,11 @@ Test-Case 'the star count is baked in at build time and never fetched by the pag
     Assert-NotContains $js 'stargazers' 'the page makes no star-count request of its own'
 }
 
-Test-Case 'features in main after v0.25.0 are marked New, and the note says so' {
+Test-Case 'features in main after v0.26.2 are marked New, and the note says so' {
     $marks = [regex]::Matches($htmlFull, '<span class="new"[^>]*>New</span>').Count
-    Assert-True ($marks -ge 10) "expected the post-0.25.0 features to be marked, found $marks"
+    Assert-True ($marks -ge 3) "expected the post-0.26.2 features to be marked, found $marks"
     $text = [regex]::Replace($htmlFull, '\s+', ' ')
-    Assert-Contains $text 'come from <code>main</code>, after v0.25.0' 'the download section says where the pictures and features come from'
+    Assert-Contains $text 'come from <code>main</code>, after v0.26.2' 'the download section says where the pictures and features come from'
     Assert-Contains $text 'The next release will carry them' 'and when they ship'
     Assert-NotContains $htmlFull '<!-- unreleased' 'the build removes its fences'
 }
@@ -860,11 +860,11 @@ Test-Case 'the New framing is kept or dropped by the release the page offers' {
     Assert-Equal 'a b' (Resolve-UnreleasedMarks -Html $page -ReleaseVersion '0.25.1' -LastWithout '0.25.0') 'dropped once a newer release is offered'
     Assert-Equal 'a b' (Resolve-UnreleasedMarks -Html $page -ReleaseVersion '0.26.0' -LastWithout '0.25.0') 'dropped for a minor release too'
 
-    # And end to end: a build offering 0.26.0 carries no New and no note.
+    # And end to end: a build offering 0.27.0 carries no New and no note.
     $fixture = Join-Path $tempRoot 'release-next.json'
-    Write-TextFile -Path $fixture -Text ((Read-TextFile -Path (Join-Path $fixtures 'release-full.json')).TrimStart([char]0xFEFF).Replace('0.23.0', '0.26.0'))
+    Write-TextFile -Path $fixture -Text ((Read-TextFile -Path (Join-Path $fixtures 'release-full.json')).TrimStart([char]0xFEFF).Replace('0.23.0', '0.27.0'))
     $html = Get-Html (Invoke-Build -Fixture $fixture -MeasurementId '' -Name 'next')
-    Assert-Contains $html 'v0.26.0' 'the build offers the newer release'
+    Assert-Contains $html 'v0.27.0' 'the build offers the newer release'
     Assert-NotContains $html 'class="new"' 'no feature is marked New once the release carries it'
     Assert-NotContains $html 'The next release will carry them' 'the note is gone'
     Assert-NotContains $html 'unreleased' 'no fence or note class survives'
