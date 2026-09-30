@@ -53,6 +53,10 @@ decisions that still shape the code are in
   uncommitted changes or a release not built from its tag. The complete
   package also requires a passing run of the GPU and audio test suites on the
   same build, and the release workflow runs code analysis and AddressSanitizer.
+- The bundled FFmpeg is now BtbN's GPL build of FFmpeg 9.0 (n9.0.2-14), whose
+  build scripts and library sources are public and pinned, instead of
+  gyan.dev's 9.0.1. The package names where that source is and carries the
+  notices of the permissively licensed libraries inside FFmpeg.
 
 ## 0.26.2 - 2026-09-26
 

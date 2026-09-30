@@ -3,17 +3,17 @@
   "entries": [
     {
       "name": "ffmpeg.exe",
-      "size": 102856192,
-      "sha256": "72A489ECCD008C2EC2C0A5856C5C75BC3D8BBFA90166C4566865C246445E6AA3",
+      "size": 165155840,
+      "sha256": "8B1374CC93156C8ADE8C2A91749A5BEA0EB658E88A6F8FAF6B108A41603C200B",
       "signatureStatus": "NotSigned",
-      "provenance": "Existing verified FFmpeg Essentials input from the main checkout."
+      "provenance": "BtbN FFmpeg-Builds GPL build n9.0.2-14-gebafaee10a (release autobuild-2026-09-29-13-10, archive ffmpeg-n9.0.2-14-gebafaee10a-win64-gpl-9.0.zip, SHA-256 11F676F2EE62C39768CEF1892E2E171ADF00FD04C85620B771520E985E7C7A69, build scripts at FFmpeg-Builds 6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b), fetched by tools/fetch_ffmpeg_helpers.ps1."
     },
     {
       "name": "ffprobe.exe",
-      "size": 102652416,
-      "sha256": "19202B23C0043F15AD1B7BCE2344F406FD52BD6EFD8F995CE02E7392A1CEC52F",
+      "size": 164954624,
+      "sha256": "4F90C18EBE44636A894B1E7F227206BD34DD49420F7EA1F9B4F8FC20A7AD97B2",
       "signatureStatus": "NotSigned",
-      "provenance": "Existing verified FFmpeg Essentials input from the main checkout."
+      "provenance": "BtbN FFmpeg-Builds GPL build n9.0.2-14-gebafaee10a (release autobuild-2026-09-29-13-10, archive ffmpeg-n9.0.2-14-gebafaee10a-win64-gpl-9.0.zip, SHA-256 11F676F2EE62C39768CEF1892E2E171ADF00FD04C85620B771520E985E7C7A69, build scripts at FFmpeg-Builds 6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b), fetched by tools/fetch_ffmpeg_helpers.ps1."
     },
     {
       "name": "yt-dlp.exe",

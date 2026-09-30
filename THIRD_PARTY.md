@@ -139,12 +139,16 @@ included in `THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt`.
 
 Source and licensing: https://ffmpeg.org/legal.html
 
-The package uses FFmpeg 9.0.1 Essentials from gyan.dev, built with
-`--enable-gpl --enable-version3`, so `ffmpeg.exe` and `ffprobe.exe` are under
-GPLv3. The licence text is `THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt`, the
-archive's own `LICENSE`. `THIRD_PARTY_LICENSES/ffmpeg.txt` names the exact
-build and where the source of FFmpeg and of each GPL, LGPL or MPL library it
-links statically can be obtained.
+The package uses BtbN's GPL build of FFmpeg n9.0.2-14-gebafaee10a
+(FFmpeg-Builds), built with `--enable-gpl --enable-version3`, so `ffmpeg.exe`
+and `ffprobe.exe` are under GPLv3. The licence text is
+`THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt`, the archive's own `LICENSE.txt`.
+`THIRD_PARTY_LICENSES/ffmpeg.txt` names the exact build and where its source
+is: FFmpeg, the public build scripts and every library they pin, each at the
+commit the build used. `THIRD_PARTY_LICENSES/ffmpeg-bundled-notices.txt`
+carries the copyright and licence notices of the permissively licensed
+libraries inside the two executables (aom, libvpx, Opus, libwebp, zlib,
+OpenSSL and the rest), which ask for them to travel with a binary copy.
 
 ## yt-dlp
 

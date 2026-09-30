@@ -324,6 +324,14 @@ experimental package is assembled locally, attached to the draft as
 the release published. A publish that failed can be re-run for the same tag
 from the Actions tab (`workflow_dispatch` with the tag as input).
 
+The complete package bundles FFmpeg under GPLv3. Its source is public
+upstream - FFmpeg, BtbN's FFmpeg-Builds scripts and every library they pin,
+each at the commit the build used - and `THIRD_PARTY_LICENSES/ffmpeg.txt` says
+where, so a release attaches nothing for it. Moving the FFmpeg pin means
+updating `ffmpeg.txt` and `ffmpeg-bundled-notices.txt` with it. BtbN prunes
+its autobuilds after a while; `-ArchiveUrl` on `tools/fetch_ffmpeg_helpers.ps1`
+then takes a kept copy of the pinned archive, held to its SHA-256 either way.
+
 The two shipped executables link the C and C++ runtimes statically (`/MT`), so
 a package needs no Visual C++ Redistributable; `ShippedRuntimeImports` fails
 the build's tests if either imports a runtime DLL again. The player resolves

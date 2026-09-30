@@ -291,6 +291,10 @@ else {
         # the checkout is already CRLF, and verify_package.ps1 holds the text
         # to the archive's own LICENSE by hash.
         @('THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\ffmpeg-GPL-3.0.txt')),
+        # The notices of the permissively licensed libraries statically linked
+        # into ffmpeg.exe and ffprobe.exe (P1.34): BSD, MIT, zlib and Apache-2.0
+        # ask for their notice to travel with a binary copy.
+        @('THIRD_PARTY_LICENSES/ffmpeg-bundled-notices.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\ffmpeg-bundled-notices.txt')),
         @('THIRD_PARTY_LICENSES/experimental-runtime.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\experimental-runtime.txt')),
         # The binaries under neural-runtime/. BSD-3-Clause and MIT both require
         # the notice itself to accompany a binary copy; a URL is not the notice.

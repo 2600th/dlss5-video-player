@@ -1363,8 +1363,10 @@ build named; the full entries are in `CHANGELOG.md` at tag
 **Claims checked and refuted**, so nobody chases them again. Helpers are not
 orphaned by a force-kill: a live session's worker and six `ffmpeg` children
 were reaped within four seconds of `Stop-Process -Force` (0.23.0). The pinned
-`ffmpeg` 9.0.1 verifies TLS certificates by default; the flag is passed
-explicitly anyway because the pin will move (0.23.0). The render preset
+`ffmpeg` verifies TLS certificates by default - GnuTLS in the 9.0.1 build this
+was checked on, Schannel in the n9.0.2 build since P1.34, which refuses a
+self-signed certificate too (SEC_E_UNTRUSTED_ROOT); the flag is passed
+explicitly anyway because the pin moves (0.23.0). The render preset
 changes no pixels, on RenoDX 4.70 (0.15.0) and again on 6.5.3; colour strength,
 inert on 4.70, moves 68-89 % of bytes on 6.5.3 and is back in the dialog
 (docs/measurements/knobs-653-20260924).

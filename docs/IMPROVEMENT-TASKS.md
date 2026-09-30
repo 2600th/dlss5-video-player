@@ -62,7 +62,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
 | [P1.30](#p130) | Release tags can still be moved (ruleset; owner) | S | Release | 🧪 |
-| [P1.34](#p134) | FFmpeg source availability and bundled-library notices | S-M | Release | |
 | **P2** | **High-value features** | | | |
 | | _Comparison and review_ | | | |
 | [P2.27](#p227) | Save a comparison clip | S-M | Player, Pipeline | |
@@ -106,6 +105,9 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 
 # P1 — Next
 
+P1.24-P1.34 landed on 2026-09-30 (branch `fix/p1-all-and-cli`), What is left of P1.30 needs the
+repository owner.
+
 <a id="p130"></a>
 ### P1.30 · Release tags can still be moved
 
@@ -121,30 +123,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
   updates and deletions (repository settings > Rules, or
   `gh api repos/2600th/dlss5-video-player/rulesets` with `target: tag`). An
   admin action, not a code change.
-
----
-
-<a id="p134"></a>
-### P1.34 · FFmpeg source availability and bundled-library notices
-
-`S-M` · **Release** · _left over from P0.17_
-
-**Blocker:** a licensing decision only the owner can make.
-
-- **Problem.** The complete zip now ships the GPLv3 text and
-  `THIRD_PARTY_LICENSES/ffmpeg.txt` points at the FFmpeg commit and each
-  statically linked library's upstream. GPLv3 §6(d) still leaves the
-  distributor responsible for the source staying available, and the build
-  scripts are part of it; gyan.dev's archive carries only its README, which
-  gives no x264 commit and no versions for zlib, bzip2, lzma or GnuTLS's
-  dependencies. Permissive libraries inside `ffmpeg.exe` (aom, vpx, opus,
-  webp, ...) also need their notices shipped.
-- **Options.** Host the exact source archives and build scripts beside the
-  complete zip; make a §6(b) written offer; or drop FFmpeg from the complete
-  zip.
-- **Fix.** Whichever is chosen, collect the permissive notices into
-  `THIRD_PARTY_LICENSES/` and add them to both packager lists and
-  allowlists.
 
 ---
 

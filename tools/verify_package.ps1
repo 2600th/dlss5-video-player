@@ -66,6 +66,7 @@ function Get-ExpectedPackageFiles {
             'THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt',
             'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
             'THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt',
+            'THIRD_PARTY_LICENSES/ffmpeg-bundled-notices.txt',
             'THIRD_PARTY_LICENSES/experimental-runtime.txt',
             'THIRD_PARTY_LICENSES/reshade-BSD-3-Clause.txt',
             'THIRD_PARTY_LICENSES/renodx-MIT.txt',
