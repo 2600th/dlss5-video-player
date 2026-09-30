@@ -881,9 +881,14 @@ std::optional<std::string> Sha256FileCached(const std::filesystem::path& path, s
     // time put back (SetFileTime, or a copy that keeps it) pass for the
     // hashed one for the rest of the process (P1.33). The file's identity on
     // its volume changes when another file is renamed over it, and its change
-    // time moves on every write and cannot be set by any user-mode call, so
-    // with both in the key a swap is hashed again. A file whose identity
-    // cannot be read is hashed every time.
+    // time moves when it is written, so with both in the key a swap is hashed
+    // again. Two limits. The change time is taken from a coarse clock and
+    // updated lazily, so a rewrite within one tick of the last change can
+    // leave it where it was: a file changed in the last few seconds is hashed
+    // every time and never remembered. And SetFileInformationByHandle can put
+    // a change time back, so this defeats copies, updaters and SetFileTime,
+    // not a writer forging every timestamp. A file whose identity cannot be
+    // read is hashed every time.
     struct Key {
         std::wstring path;
         uint64_t size{};
@@ -918,6 +923,11 @@ std::optional<std::string> Sha256FileCached(const std::filesystem::path& path, s
         static_assert(sizeof(id.FileId.Identifier) == 16);
         std::memcpy(key.fileId.data(), id.FileId.Identifier, key.fileId.size());
     }
+    FILETIME now{};
+    GetSystemTimePreciseAsFileTime(&now);
+    constexpr int64_t kSettled = 5LL * 10'000'000;  // 5 s in FILETIME units
+    const int64_t nowTicks = static_cast<int64_t>((uint64_t{now.dwHighDateTime} << 32) | now.dwLowDateTime);
+    if (nowTicks - key.changeTime < kSettled) return Sha256File(path, stop);
     {
         std::lock_guard lock(mutex);
         for (const auto& [candidate, digest] : memo)

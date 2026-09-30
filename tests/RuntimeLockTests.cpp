@@ -770,27 +770,66 @@ void hash_memo_sees_a_same_size_swap_with_the_write_time_restored_test()
         CHECK(GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) != FALSE);
         return data.ftLastWriteTime;
     };
+    // Only a file whose change time has settled is remembered, as an installed
+    // runtime's has. Setting both times an hour back stands in for that, and
+    // for a writer forging them.
+    const auto settle = [&](int64_t write, int64_t change) {
+        const HANDLE file = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(file != INVALID_HANDLE_VALUE);
+        FILE_BASIC_INFO basic{};
+        CHECK(GetFileInformationByHandleEx(file, FileBasicInfo, &basic, sizeof(basic)) != FALSE);
+        basic.LastWriteTime.QuadPart = write;
+        basic.ChangeTime.QuadPart = change;
+        CHECK(SetFileInformationByHandle(file, FileBasicInfo, &basic, sizeof(basic)) != FALSE);
+        CloseHandle(file);
+    };
+    FILETIME now{};
+    GetSystemTimePreciseAsFileTime(&now);
+    const int64_t hourAgo = static_cast<int64_t>((uint64_t{now.dwHighDateTime} << 32) | now.dwLowDateTime) -
+                            36'000'000'000LL;
+    constexpr int64_t second = 10'000'000;
+
     WriteFile(path, "locked runtime bytes");
+    settle(hourAgo, hourAgo);
     const FILETIME original = writeTime();
     const auto first = Sha256FileCached(path, {});
     CHECK(first && *first == Hex("locked runtime bytes"));
 
-    // In place: same size, write time put back.
+    // The limit the memo documents, and the proof it is in use: with every
+    // timestamp forged back, an in-place rewrite is served the old digest.
     WriteFile(path, "planted runtime byte");
-    restoreWriteTime(original);
+    settle(hourAgo, hourAgo);
+    CHECK(Sha256FileCached(path, {}) == first);
+
+    // In place with only the write time put back: the change time moved.
+    settle(hourAgo, hourAgo + second);
     const auto rewritten = Sha256FileCached(path, {});
     CHECK(rewritten && *rewritten == Hex("planted runtime byte"));
 
-    // Renamed over it: same size, the write time of the file it replaced.
+    // Renamed over it, with the same times as the file it replaced: its
+    // identity on the volume differs.
     const auto staged = directory / L"staged.dll";
     WriteFile(staged, "another runtime byte");
     CHECK(MoveFileExW(staged.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE);
-    restoreWriteTime(original);
+    settle(hourAgo, hourAgo + second);
     const auto replaced = Sha256FileCached(path, {});
     CHECK(replaced && *replaced == Hex("another runtime byte"));
 
     // Nothing changed: served from the memo, and the same answer.
     CHECK(Sha256FileCached(path, {}) == replaced);
+
+    // A plain rewrite a moment ago, write time put back by SetFileTime: the
+    // change time is too fresh to trust at the clock's granularity, so it is
+    // hashed again however close to the last change it landed.
+    WriteFile(path, "fourth runtime bytes");
+    restoreWriteTime(original);
+    const auto fresh = Sha256FileCached(path, {});
+    CHECK(fresh && *fresh == Hex("fourth runtime bytes"));
+    WriteFile(path, "latest runtime bytes");
+    restoreWriteTime(original);
+    const auto fresher = Sha256FileCached(path, {});
+    CHECK(fresher && *fresher == Hex("latest runtime bytes"));
     std::error_code error;
     std::filesystem::remove_all(directory, error);
 }
