@@ -221,6 +221,16 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
         if (index + 1 >= userArguments.size() || userArguments[index + 1].empty())
             return bad(argument + L" needs a value.");
         const std::wstring& value = userArguments[++index];
+        // Neural settings' Look group: 0 to 2, colour strength 0 to 1.
+        const auto look = [&](bool& seen, std::optional<float>& target, float high) -> std::optional<std::wstring> {
+            if (!once(seen)) return argument + L" was given twice.";
+            const auto level = ParseLevel(value, 0.0f, high);
+            if (!level)
+                return argument + (high < 2.0f ? L" takes a value from 0 to 1, such as 0.8."
+                                               : L" takes a value from 0 to 2, such as 1.5.");
+            target = *level;
+            return std::nullopt;
+        };
         if (argument == L"--render") {
             if (!once(seenRender)) return bad(L"--render was given twice.");
             command.input = value;
@@ -273,16 +283,14 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             const auto passes = ParseCount(value);
             if (!passes || *passes < 1 || *passes > 4) return bad(L"--passes takes 1, 2, 3 or 4.");
             command.passes = int(*passes);
-        } else if (argument == L"--intensity" || argument == L"--local-tone" || argument == L"--local-structure" ||
-                   argument == L"--color-strength") {
-            const bool color = argument == L"--color-strength";
-            bool& seen = argument == L"--intensity" ? seenIntensity : argument == L"--local-tone" ? seenTone
-                : argument == L"--local-structure" ? seenStructure : seenColor;
-            if (!once(seen)) return bad(argument + L" was given twice.");
-            const auto level = ParseLevel(value, 0.0f, color ? 1.0f : 2.0f);
-            if (!level) return bad(argument + (color ? L" takes a value from 0 to 1, such as 0.8." : L" takes a value from 0 to 2, such as 1.5."));
-            (argument == L"--intensity" ? command.intensity : argument == L"--local-tone" ? command.localTone
-                : argument == L"--local-structure" ? command.localStructure : command.colorStrength) = *level;
+        } else if (argument == L"--intensity") {
+            if (auto error = look(seenIntensity, command.intensity, 2.0f)) return bad(std::move(*error));
+        } else if (argument == L"--local-tone") {
+            if (auto error = look(seenTone, command.localTone, 2.0f)) return bad(std::move(*error));
+        } else if (argument == L"--local-structure") {
+            if (auto error = look(seenStructure, command.localStructure, 2.0f)) return bad(std::move(*error));
+        } else if (argument == L"--color-strength") {
+            if (auto error = look(seenColor, command.colorStrength, 1.0f)) return bad(std::move(*error));
         } else if (argument == L"--encode") {
             if (!once(seenEncode)) return bad(L"--encode was given twice.");
             if (value != L"standard" && value != L"high" && value != L"lossless")
