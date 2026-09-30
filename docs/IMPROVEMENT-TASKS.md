@@ -421,8 +421,8 @@ more promising guide (P3.6).
 `M` · **Pipeline**
 
 **Blocker:** the owner's decision. DLSS5Tool, Visual Enhancer and REAL all
-have one; the README lists it as unsupported, and watch folders are parked on
-the grounds that `--render` covers batch work.
+have one; the README lists it as unsupported in the player, and watch folders
+are parked on the grounds that `dlss5-convert` covers batch work.
 
 ---
 
@@ -485,7 +485,7 @@ are not proposed again.
 | Item | Why not |
 | --- | --- |
 | **Custom model loading (.pth/.onnx)** | Structurally impossible: NGX feature 18 has fixed weights. chaiNNer-style tools are a different category. |
-| **Watch folders** | Requested at Topaz since 2022 and never shipped, with no sign that users urgently need it. The `--render` command line covers the batch case. |
+| **Watch folders** | Requested at Topaz since 2022 and never shipped, with no sign that users urgently need it. `dlss5-convert` covers the batch case: files, folders and wildcards, skipping what is done. |
 | **Stabilization, deinterlacing, colorization, face restoration** | Each needs a model we cannot obtain. Inferior versions dilute a single-model product. |
 | **8K/16K output, 480 fps frame generation** | Marketing checkboxes that no panel can show. Cadence-aware multiple selection is the right design, so say that instead. |
 | **Cloud rendering / credits / tiering** | Being MIT and free is an asset against a closed competitor. |

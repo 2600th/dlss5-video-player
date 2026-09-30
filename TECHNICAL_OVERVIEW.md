@@ -73,13 +73,14 @@ from different packages. See [runtime setup](docs/DLSS5_SETUP.md).
    overwrites an existing destination. **Export with DLSS stages** is the other
    route: it writes one file with any combination of Super Resolution, neural
    rendering and frame generation, in NVIDIA's own order, without touching the
-   cache.
+   cache. `dlss5-convert.exe` runs that export from a console, for one file or
+   a folder, with every stage and Neural setting as an option.
 
 Neural cache output preserves source resolution. Playback upscaling and image
 adjustments do not change the cache or export. The Standard cache is 8-bit
 (High and Lossless are 10-bit), and HDR sources are tone mapped to SDR before
-the model. A render queue and resuming a render after a restart are not
-implemented.
+the model. A render queue in the player and resuming a render after a
+restart are not implemented; `dlss5-convert` converts a list of files in turn.
 See [architecture and remaining work](docs/ARCHITECTURE.md).
 
 ## Build, diagnose and verify

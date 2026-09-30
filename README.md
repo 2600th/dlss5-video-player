@@ -161,9 +161,18 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   dlss5-convert clip.mp4
   ```
 
+  Every stage and Neural setting is an option. Three stacked neural passes of
+  the strong look, frame generation at 3x, and a folder upscaled to 4K:
+
+  ```bat
+  dlss5-convert clip.mp4 --preset strong --passes 3
+  dlss5-convert clip.mp4 --stages fg --multiplier 3
+  dlss5-convert clips -r --stages sr,nr --height 2160 --out-dir clips-4k
+  ```
+
   `dlss5-convert probe clip.mp4` says what a file is and which stages this
-  machine can run on it. Batches, `--out-dir`, `--stages`, `--range` and the
-  rest are in the [usage guide](docs/USAGE.md#from-the-command-line).
+  machine can run on it. `--range`, `--encode`, `--report` and the rest are in
+  the [usage guide](docs/USAGE.md#from-the-command-line).
 
 ## What's new in 0.26.2
 
@@ -275,8 +284,9 @@ not what every source will gain.
 - **Save converted video copies the cached render as it is**: 8-bit at the
   default Standard quality, 10-bit at High or Lossless, without adjustments,
   upscaling or HDR. Use **Export with DLSS stages** to bake in a larger size.
-- **Not supported:** burning subtitles into an export, a render queue, or
-  resuming an interrupted render after a restart.
+- **Not supported:** burning subtitles into an export, a render queue in the
+  player (`dlss5-convert` converts a list or a folder in turn), or resuming an
+  interrupted render after a restart.
 - **YouTube:** public, non-DRM videos only, no login. Age-restricted videos can
   arrive as a 640x360 stream, and the status line tells you when that happens.
 - **Disk space.** The cache keeps renders until the drive falls below 20 GB
