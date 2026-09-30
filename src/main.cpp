@@ -12675,7 +12675,11 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
     // --render and --help run headless and never reach the player, its
     // bootstrap or a window. ParseRuntimeArguments has already run, so the
     // safe-mode flag means the same thing to both.
-    if(options.argumentsOk){
+    // Also when the player's own parse refused the line: a --render or --probe
+    // command line is judged by its own parser, which answers on the console.
+    // The player's refusal (the legacy --quality, say) raised a message box
+    // under a headless render, which a batch run cannot answer.
+    {
         const auto render=render_command::Parse(options.userArguments);
         if(render.mode!=render_command::Mode::Player)return RunRenderCommand(render,options.userArguments);
     }
