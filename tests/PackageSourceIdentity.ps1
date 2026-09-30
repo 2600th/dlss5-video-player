@@ -29,8 +29,12 @@ try {
     Invoke-ScratchGit config user.name test
     Invoke-ScratchGit config commit.gpgsign false
     Invoke-ScratchGit config tag.gpgsign false
+    # What a Windows runner checks out with: Git for Windows' default.
+    Invoke-ScratchGit config core.autocrlf true
     Set-Content -LiteralPath (Join-Path $scratch 'VERSION') -Value '1.2.3' -NoNewline
-    Invoke-ScratchGit add VERSION
+    $asset = Join-Path $scratch 'asset.txt'
+    [IO.File]::WriteAllText($asset, "line one`nline two`n")
+    Invoke-ScratchGit add VERSION asset.txt
     Invoke-ScratchGit commit -q -m one
     $tag = 'dlss5-video-player-v1.2.3'
 
@@ -51,6 +55,18 @@ try {
     # An untracked file is not part of what is packaged.
     Set-Content -LiteralPath (Join-Path $scratch 'notes.txt') -Value 'scratch'
     [void](Get-PackageSourceIdentity -RepositoryRoot $scratch -ExpectedTag $tag)
+
+    # The same content with other line endings is not a change. A fetch
+    # script rewrote a CRLF checkout with upstream's LF, git status called it
+    # modified for good, and CI refused to package a clean tree.
+    Remove-Item -LiteralPath $asset
+    Invoke-ScratchGit checkout -q -- asset.txt
+    [IO.File]::WriteAllText($asset, "line one`nline two`n")
+    [void](Get-PackageSourceIdentity -RepositoryRoot $scratch -ExpectedTag $tag)
+    # A deleted tracked file is a change.
+    Remove-Item -LiteralPath $asset
+    Expect-Refusal 'deleted file' { Get-PackageSourceIdentity -RepositoryRoot $scratch -ExpectedTag $tag } 'uncommitted changes'
+    Invoke-ScratchGit checkout -q -- asset.txt
 
     # The tag stays behind while HEAD moves on: the moved-tag case, seen from
     # the packager.

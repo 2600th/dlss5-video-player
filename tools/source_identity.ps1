@@ -31,8 +31,13 @@ function Get-PackageSourceIdentity {
             throw "The package's commit cannot be read: '$RepositoryRoot' is not a git checkout with a commit."
         }
         $head = "$head".Trim()
-        $changes = @(& git -C $RepositoryRoot status --porcelain --untracked-files=no 2>$null)
-        if ($LASTEXITCODE -ne 0) { throw 'git status failed, so the tree cannot be shown to be clean.' }
+        # The working tree's content against HEAD, not `git status`: a file
+        # rewritten with the same content but other line endings (the UI asset
+        # fetch writes upstream's LF where core.autocrlf=true checked out
+        # CRLF) stays "modified" to status forever, while diff, which compares
+        # after git's own line-ending conversion, sees it for what it is.
+        $changes = @(& git -C $RepositoryRoot diff --name-status HEAD -- 2>$null)
+        if ($LASTEXITCODE -ne 0) { throw 'git diff failed, so the tree cannot be shown to be clean.' }
         $changes = @($changes | Where-Object { "$_".Trim() })
         if ($changes.Count) {
             $listed = ($changes | Select-Object -First 10 | ForEach-Object { "  $_" }) -join "`n"
