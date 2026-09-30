@@ -784,7 +784,10 @@ if(BUILD_TESTING)
         src/YouTubeResolver.cpp
         src/YouTubeResolver.h
     )
-    target_compile_definitions(PolicyTests PRIVATE YOUTUBE_RESOLVER_TESTING)
+    # DLSS_TEST_SOURCE_DIR: every_child_spawn_names_the_handles_it_inherits_test
+    # reads the shipped sources' CreateProcessW calls.
+    target_compile_definitions(PolicyTests PRIVATE YOUTUBE_RESOLVER_TESTING
+        "DLSS_TEST_SOURCE_DIR=L\"${CMAKE_SOURCE_DIR}/src\"")
     add_dependencies(PolicyTests DLSSVideoPlayer)
     add_test(NAME PolicyTests COMMAND PolicyTests)
 

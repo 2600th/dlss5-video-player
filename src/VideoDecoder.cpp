@@ -1,6 +1,7 @@
 #include "VideoDecoder.h"
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
+#include "InheritedHandles.h"
 #include "KillOnCloseJob.h"
 #include "MediaTools.h"
 #include "FrameRatePolicy.h"
@@ -336,10 +337,15 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
+    const InheritedHandles inherit{si.hStdInput, si.hStdOutput, si.hStdError};
+    STARTUPINFOEXW startup{}; startup.StartupInfo = si; startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = inherit.AttributeList();
     HANDLE job = CreateKillOnCloseJob();
     const ScopedHardErrorSuppression noHardErrorDialog;
-    const BOOL ok = job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr,
-                                   TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+    const BOOL ok = job && inherit.Ready() &&
+                    CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, inherit.InheritHandles(),
+                                   CREATE_NO_WINDOW | CREATE_SUSPENDED | inherit.CreationFlags(), nullptr, nullptr,
+                                   &startup.StartupInfo, &pi);
     CloseHandle(writePipe);
     if (nul) CloseHandle(nul);
     errors.Start(ok != FALSE);
@@ -1021,9 +1027,13 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     HANDLE job=CreateKillOnCloseJob();
     PROCESS_INFORMATION pi{};
     const auto spawnStarted=std::chrono::steady_clock::now();
+    const InheritedHandles inherit{si.hStdInput, si.hStdOutput, si.hStdError};
+    STARTUPINFOEXW startup{}; startup.StartupInfo = si; startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = inherit.AttributeList();
     const ScopedHardErrorSuppression noHardErrorDialog;
-    const BOOL ok = job&&CreateProcessW(m_ffmpegExe.c_str(), mutableCommand.data(), nullptr, nullptr,
-                                   TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+    const BOOL ok = job&&inherit.Ready()&&CreateProcessW(m_ffmpegExe.c_str(), mutableCommand.data(), nullptr, nullptr,
+                                   inherit.InheritHandles(), CREATE_NO_WINDOW|CREATE_SUSPENDED|inherit.CreationFlags(),
+                                   nullptr, nullptr, &startup.StartupInfo, &pi);
     CloseHandle(writePipe);
     if (nul) CloseHandle(nul);
     stderrTail->Start(ok != FALSE);

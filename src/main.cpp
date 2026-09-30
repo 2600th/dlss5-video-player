@@ -47,6 +47,7 @@
 #include "Utf8Text.h"
 #include "Log.h"
 #include "HardErrorSuppression.h"
+#include "InheritedHandles.h"
 #include "ReShadeConfig.h"
 #include "CacheEvictionPolicy.h"
 #include "RendererRecoveryPolicy.h"
@@ -1929,13 +1930,16 @@ static std::optional<std::string> RunToolCapture(const std::filesystem::path& ex
     HANDLE job=CreateJobObjectW(nullptr,nullptr);
     if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits));}
-    STARTUPINFOW startup{sizeof(startup)};startup.dwFlags=STARTF_USESTDHANDLES;startup.hStdOutput=writePipe;
+    const InheritedHandles inherit{writePipe};
+    STARTUPINFOEXW startup{};startup.StartupInfo.cb=sizeof(startup);startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdOutput=writePipe;startup.lpAttributeList=inherit.AttributeList();
     PROCESS_INFORMATION process{};
     std::wstring commandLine=BuildWindowsCommandLine(executable.native(),arguments);
     BOOL created=FALSE;
     {const ScopedHardErrorSuppression noHardErrorDialog;
-     created=CreateProcessW(executable.c_str(),commandLine.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW|CREATE_SUSPENDED,
-                            nullptr,executable.parent_path().c_str(),&startup,&process);}
+     created=inherit.Ready()&&CreateProcessW(executable.c_str(),commandLine.data(),nullptr,nullptr,inherit.InheritHandles(),
+                            CREATE_NO_WINDOW|CREATE_SUSPENDED|inherit.CreationFlags(),
+                            nullptr,executable.parent_path().c_str(),&startup.StartupInfo,&process);}
     CloseHandle(writePipe);
     if(!created){CloseHandle(readPipe);if(job)CloseHandle(job);return std::nullopt;}
     if(job&&!AssignProcessToJobObject(job,process.hProcess)){CloseHandle(job);job=nullptr;}

@@ -24,8 +24,15 @@ decisions that still shape the code are in
   looked right in the player but was written stretched.
 - **Opening, seeking or reloading a YouTube video no longer skips 1 to 4
   frames.**
+- **Cancelling an export can no longer hang the player** when a seek started
+  playback while the export was running, and a ten-second audio stall in the
+  same situation is gone.
 - **A live render started about 30 seconds after the last one no longer
   fails.** The background renderer could accept the job just as it was closing.
+
+### Security
+
+- Helper processes inherit only the handles they are meant to have.
 
 ## 0.26.2 - 2026-09-26
 

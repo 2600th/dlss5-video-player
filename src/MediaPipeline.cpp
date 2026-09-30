@@ -421,9 +421,18 @@ CaptureResult RunCapture(const std::filesystem::path& executable,
             done = true;
         }
     }
+    // What the child wrote before it ended is in the pipe now; read it without
+    // waiting for end-of-file. End-of-file needs every write end closed, and a
+    // child spawned elsewhere that inherited this one (P1.28) kept a probe's
+    // drain - and the cancel that joined it on the UI thread - waiting until
+    // that child died. Bounded as well, for a writer nothing here knows about.
+    const auto drainUntil = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     for (;;) {
-        DWORD read = 0;
-        if (!ReadFile(readPipe, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr) || !read)
+        DWORD available = 0, read = 0;
+        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) || !available) break;
+        if (std::chrono::steady_clock::now() >= drainUntil) break;
+        const DWORD wanted = std::min<DWORD>(available, static_cast<DWORD>(buffer.size()));
+        if (!ReadFile(readPipe, buffer.data(), wanted, &read, nullptr) || !read)
             break;
         if (consume) consume(std::string_view(buffer.data(), read));
         else if (!captureOverflowed) {

@@ -1,6 +1,7 @@
 #include "SubtitleOverlay.h"
 
 #include "HardErrorSuppression.h"
+#include "InheritedHandles.h"
 #include "KillOnCloseJob.h"
 #include "Log.h"
 #include "MediaTools.h"
@@ -295,13 +296,18 @@ bool SubtitleOverlay::Spawn(const fs::path& exe, const std::wstring& arguments, 
     std::wstring command = L"\"" + exe.wstring() + L"\" " + arguments;
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
+    const InheritedHandles inherit{si.hStdInput, si.hStdOutput, si.hStdError};
+    STARTUPINFOEXW startup{}; startup.StartupInfo = si; startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = inherit.AttributeList();
     session.job = CreateKillOnCloseJob();
     PROCESS_INFORMATION pi{};
     BOOL started = FALSE;
     {
         const ScopedHardErrorSuppression noHardErrorDialog;
-        started = session.job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
-                                                CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+        started = session.job && inherit.Ready() &&
+                  CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, inherit.InheritHandles(),
+                                 CREATE_NO_WINDOW | CREATE_SUSPENDED | inherit.CreationFlags(), nullptr, nullptr,
+                                 &startup.StartupInfo, &pi);
     }
     const DWORD startError = GetLastError();
     if (outputWrite) CloseHandle(outputWrite);

@@ -1,6 +1,7 @@
 #include "AudioPlayer.h"
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
+#include "InheritedHandles.h"
 #include "KillOnCloseJob.h"
 #include "MediaTools.h"
 #include "Log.h"
@@ -98,11 +99,16 @@ bool CaptureHelperOutput(const std::wstring& exe, const std::wstring& arguments,
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
+    const InheritedHandles inherit{si.hStdInput, si.hStdOutput, si.hStdError};
+    STARTUPINFOEXW startup{}; startup.StartupInfo = si; startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = inherit.AttributeList();
     HANDLE job = CreateKillOnCloseJob();
     PROCESS_INFORMATION pi{};
     const ScopedHardErrorSuppression noHardErrorDialog;
-    const BOOL started = job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
-                                               CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+    const BOOL started = job && inherit.Ready() &&
+                         CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, inherit.InheritHandles(),
+                                        CREATE_NO_WINDOW | CREATE_SUSPENDED | inherit.CreationFlags(), nullptr, nullptr,
+                                        &startup.StartupInfo, &pi);
     CloseHandle(writePipe);
     if (errorWrite) CloseHandle(errorWrite);
     if (nul) CloseHandle(nul);
@@ -124,6 +130,14 @@ bool CaptureHelperOutput(const std::wstring& exe, const std::wstring& arguments,
         if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr)) break;
         if (!available) {
             if (GetTickCount64() >= deadline) break;
+            // An exited helper has nothing left in flight: what it wrote is in
+            // the pipe, and this peek found none of it. End-of-file alone is
+            // not enough - it needs every write end closed, and a child spawned
+            // meanwhile that inherited this one held it for the whole 10 s.
+            if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
+                if (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) && available) continue;
+                break;
+            }
             Sleep(1);
             continue;
         }
@@ -410,11 +424,14 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
               << (asFloat ? L" -c:a pcm_f32le -f f32le pipe:1" : L" -c:a pcm_s16le -f s16le pipe:1");
     std::wstring cmd = Q(m_ffmpeg) + L" " + args.str();
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
+    const InheritedHandles inherit{si.hStdInput, si.hStdOutput, si.hStdError};
+    STARTUPINFOEXW startup{}; startup.StartupInfo = si; startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = inherit.AttributeList();
     HANDLE job=CreateKillOnCloseJob();
     PROCESS_INFORMATION pi{};
     const ScopedHardErrorSuppression noHardErrorDialog;
-    BOOL ok = job&&CreateProcessW(m_ffmpeg.c_str(), mutableCmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED,
-                             nullptr, nullptr, &si, &pi);
+    BOOL ok = job&&inherit.Ready()&&CreateProcessW(m_ffmpeg.c_str(), mutableCmd.data(), nullptr, nullptr, inherit.InheritHandles(),
+                             CREATE_NO_WINDOW|CREATE_SUSPENDED|inherit.CreationFlags(), nullptr, nullptr, &startup.StartupInfo, &pi);
     CloseHandle(writePipe); if (errorWrite) CloseHandle(errorWrite); if (nul) CloseHandle(nul);
     if (!ok) { const DWORD error=GetLastError(); CloseHandle(readPipe);if(errorRead)CloseHandle(errorRead);if(job)CloseHandle(job); LOG("Audio: CreateProcess(ffmpeg) failed winerr=" << error); return false; }
     if(!AssignProcessToJobObject(job,pi.hProcess)){if(!TerminateProcess(pi.hProcess,1))LOG("Audio: failed to terminate unassigned child winerr="<<GetLastError());const DWORD waited=WaitForSingleObject(pi.hProcess,500);if(waited!=WAIT_OBJECT_0)LOG("Audio: unassigned child did not exit within bound result="<<waited);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);if(errorRead)CloseHandle(errorRead);CloseHandle(job);return false;}

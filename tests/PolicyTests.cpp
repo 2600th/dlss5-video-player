@@ -9909,6 +9909,64 @@ void deband_pre_pass_reaches_the_conversion_program_test()
     CHECK(contains(deband::kGrain/1000.0f));
 }
 
+// P1.28. A child created with bInheritHandles=TRUE and no handle list takes
+// every inheritable handle alive at that instant. A seek during an export
+// spawned the playback ffmpeg holding the export probe's stdout, so the probe's
+// drain waited for that child to die and the cancel joined it on the UI
+// thread. Every CreateProcessW in the shipped sources either inherits nothing
+// or names what it inherits (InheritedHandles, or the attribute directly).
+void every_child_spawn_names_the_handles_it_inherits_test()
+{
+    const std::filesystem::path sources = DLSS_TEST_SOURCE_DIR;
+    const auto trim = [](std::string text) {
+        const auto first = text.find_first_not_of(" \t\r\n");
+        const auto last = text.find_last_not_of(" \t\r\n");
+        return first == std::string::npos ? std::string() : text.substr(first, last - first + 1);
+    };
+    size_t spawns = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(sources)) {
+        const auto extension = entry.path().extension();
+        if (extension != L".cpp" && extension != L".h") continue;
+        std::ifstream in(entry.path(), std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        size_t previous = 0;
+        for (size_t at = text.find("CreateProcessW("); at != std::string::npos;
+             at = text.find("CreateProcessW(", at + 1)) {
+            // A comment's example is not a call.
+            const size_t lineStart = text.rfind('\n', at) == std::string::npos ? 0 : text.rfind('\n', at) + 1;
+            if (trim(text.substr(lineStart, at - lineStart)).rfind("//", 0) == 0) continue;
+            // The ten arguments, split at the top level of the call's parentheses.
+            std::vector<std::string> arguments(1);
+            int depth = 0;
+            size_t end = at + std::strlen("CreateProcessW(");
+            for (; end < text.size(); ++end) {
+                const char c = text[end];
+                if (c == '(') ++depth;
+                else if (c == ')') { if (depth == 0) break; --depth; }
+                else if (c == ',' && depth == 0) { arguments.emplace_back(); continue; }
+                arguments.back() += c;
+            }
+            ++spawns;
+            const std::string where = entry.path().filename().string() + " at byte " + std::to_string(at);
+            CHECK_EQ(size_t{10}, arguments.size());
+            if (arguments.size() != 10) { std::cerr << "  unparsed: " << where << '\n'; continue; }
+            const std::string inherit = trim(arguments[4]);
+            const std::string window = text.substr(std::max(previous, at > 4000 ? at - 4000 : size_t{0}), end - std::max(previous, at > 4000 ? at - 4000 : size_t{0}));
+            const bool listed = window.find("InheritedHandles") != std::string::npos ||
+                                window.find("PROC_THREAD_ATTRIBUTE_HANDLE_LIST") != std::string::npos;
+            const bool extended = window.find("EXTENDED_STARTUPINFO_PRESENT") != std::string::npos ||
+                                  arguments[5].find("CreationFlags()") != std::string::npos;
+            const bool ok = inherit == "FALSE" || (listed && extended);
+            if (!ok) std::cerr << "  inherits without a handle list: " << where << '\n';
+            CHECK(ok);
+            previous = at;
+        }
+    }
+    // Decoder probe and child, audio probe and child, subtitles, the export
+    // tools, the neural helper, yt-dlp and the crash reporter's relaunch.
+    CHECK(spawns >= 10);
+}
+
 // P1.27. A YouTube open, seek or reload builds its renderer while the
 // candidate decoder reads ahead, then swaps the candidate in. Swap stopped both
 // queues discarding what they held, after the child's frame count had taken
@@ -15241,6 +15299,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
     TEST_CASE(audio_track_that_starts_late_is_led_with_silence_test),
     TEST_CASE(video_decoder_swap_keeps_the_frames_the_candidate_read_ahead_test),
+    TEST_CASE(every_child_spawn_names_the_handles_it_inherits_test),
     TEST_CASE(audio_restarts_at_a_paused_seek_rather_than_the_last_clock_reading_test),
     TEST_CASE(audio_helper_stderr_keeps_a_bounded_tail_and_reports_only_bad_exits_test),
     TEST_CASE(audio_child_stderr_is_drained_and_logged_when_it_fails_test),

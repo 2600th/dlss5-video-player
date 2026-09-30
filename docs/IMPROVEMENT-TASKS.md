@@ -61,7 +61,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | **P0** | **Fix before the next release** | | | |
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
-| [P1.28](#p128) | Inherited handles can hang an export and the UI | M | Pipeline | 🔍 |
 | [P1.29](#p129) | Load-time DLLs are not pinned to System32 | S | Release | 🧪 |
 | [P1.30](#p130) | The complete zip cannot be traced to a commit | S-M | Release | 🧪 |
 | [P1.31](#p131) | GPU and audio tests never run in CI | M | Release | 🧪 |
@@ -110,25 +109,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 ---
 
 # P1 — Next
-
-<a id="p128"></a>
-### P1.28 · Inherited handles can hang an export and the UI
-
-`M` · **Pipeline** · 🔍 · _plausible race_
-
-- **Problem.** Several children are created with `bInheritHandles=TRUE` and no
-  handle list, so each inherits every inheritable handle alive at that moment.
-  A seek during an export spawns the playback ffmpeg, which then holds the
-  export probe's stdout pipe open. The drain loop blocks until that child dies
-  and `CancelExport` joins the worker on the UI thread, which can hang the
-  app. The milder form is a 10 s audio stall.
-- **Where.** Spawns: `VideoDecoder.cpp:329-330, 963-964`,
-  `AudioPlayer.cpp:101, 373`, `SubtitleOverlay.cpp:303`. Drain:
-  `MediaPipeline.cpp:301-304, 378-390`. Join: `main.cpp:3487`. Stall:
-  `AudioPlayer.cpp:115-132`.
-- **Fix.** `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` everywhere, as `MediaPipeline`
-  and `YouTubeResolver` already do; make the drain bounded and non-blocking.
-- **Test.** A policy test that every spawn passes a handle list.
 
 <a id="p129"></a>
 ### P1.29 · Load-time DLLs are not pinned to System32
