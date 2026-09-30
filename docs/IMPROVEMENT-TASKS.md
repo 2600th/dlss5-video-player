@@ -62,7 +62,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
 | [P1.30](#p130) | Release tags can still be moved (ruleset; owner) | S | Release | 🧪 |
-| [P1.32](#p132) | Refresh `RELATED_PROJECTS.md` | S | Docs | |
 | [P1.33](#p133) | Small hardening and doc drift (checklist) | S | All | 🔍 |
 | [P1.34](#p134) | FFmpeg source availability and bundled-library notices | S-M | Release | |
 | **P2** | **High-value features** | | | |
@@ -123,33 +122,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
   updates and deletions (repository settings > Rules, or
   `gh api repos/2600th/dlss5-video-player/rulesets` with `target: tag`). An
   admin action, not a code change.
-
-<a id="p132"></a>
-### P1.32 · Refresh `RELATED_PROJECTS.md`
-
-`S` · **Docs**
-
-- **New since the last survey:**
-  [DLSS5Tool](https://github.com/banbanzhige/DLSS5Tool) (queue, RTX Video
-  2x/4x, RAFT flow),
-  [DLSS5-Image-Converter](https://github.com/criso2hd-alt/DLSS5-Image-Converter)
-  ("Compare styles", tiled Ultra Detail),
-  [MPCVR-DLSS5](https://github.com/HumbleUser33/MPCVR-DLSS5),
-  [PotPlayer plugin](https://github.com/222222222l/DLSSNR-Potplayer-Plugin),
-  [OpenPlayer plugin](https://github.com/AreChen/openplayer-dlssnr),
-  [DaVinci Resolve OFX](https://github.com/SAOG0721/DaVinci-Resolve-DLSS5)
-  (Output Mix, Difference x10),
-  [Nuke plug-in](https://github.com/2148-wq/DLSS5-for-Nuke),
-  [Neural-coprocessor](https://github.com/maohgad-web/Neural-coprocessor)
-  (second GPU).
-- **Changed:** Visual Enhancer
-  [v11.0](https://github.com/Merserk/dlss5-visual-enhancer/releases/tag/v11.0)
-  (ProRes/FFV1, Face/Skin Protection, scale up to 200%); NeuralScreen
-  [v2.1.4](https://github.com/perseval-BLR/NeuralScreen/releases/tag/v2.1.4)
-  (display matrix, EXIF, ICC).
-- **Gone quiet:** Zonnery's player, the Blueforcer ComfyUI node.
-- **Still true:** no public DLSS 5 SDK (DLSS SDK 310.9.1 and Streamline 2.14.1
-  add nothing for it).
 
 <a id="p133"></a>
 ### P1.33 · Small hardening and doc drift
