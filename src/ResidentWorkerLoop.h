@@ -332,6 +332,20 @@ enum class ResidentExit {
     JobInvalidated,
 };
 
+// The process exit code for a loop that ended this way. Idle and
+// JobInvalidated are the helper's own decision, and a job the parent sent
+// while it was deciding was never read (kRetiredExitCode).
+inline unsigned long ResidentExitCode(ResidentExit exit)
+{
+    switch (exit) {
+        case ResidentExit::WriteFailed: return 3;
+        case ResidentExit::Malformed: return 4;
+        case ResidentExit::Idle:
+        case ResidentExit::JobInvalidated: return neural_worker_protocol::kRetiredExitCode;
+        default: return 0;
+    }
+}
+
 // Serves jobs until one of the ResidentExit reasons. `runner` must provide:
 //   bool Ready();                                             // answer Hello
 //   JobOutcome Job(std::span<const std::wstring>, std::stop_token);

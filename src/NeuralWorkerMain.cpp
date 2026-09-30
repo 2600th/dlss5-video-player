@@ -673,11 +673,7 @@ int wmain(int argc, wchar_t** argv)
             const resident_worker::ResidentExit reason =
                 resident_worker::RunResidentLoop(channel, runner);
             LOG("Resident helper session ended: " << ResidentExitName(reason));
-            switch (reason) {
-                case resident_worker::ResidentExit::WriteFailed: exitCode = 3; break;
-                case resident_worker::ResidentExit::Malformed: exitCode = 4; break;
-                default: exitCode = 0; break;
-            }
+            exitCode = static_cast<int>(resident_worker::ResidentExitCode(reason));
         });
         // After the runner, so the device and its swapchain are gone first.
         DestroyWindow(renderWindow);

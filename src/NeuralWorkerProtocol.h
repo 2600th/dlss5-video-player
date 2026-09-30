@@ -42,6 +42,14 @@ inline constexpr uint32_t kMaximumSegmentNameBytes = 512;
 // residency changes how a job arrives and not what a job means. A parallel
 // struct here would be a second schema to keep in step with it.
 inline constexpr uint32_t kMaximumJobArguments = 64;
+
+// The exit code of a resident helper that left by its own decision - the idle
+// timeout, or retiring after a job that left it unfit (P1.24). It stops
+// reading commands the moment it decides, but it is still alive, pipe open,
+// while it tears down, so a job sent then is written successfully and never
+// read. This code is how the parent tells that apart from a helper that took
+// the job and walked away (a Protocol failure) and dispatches the job again.
+inline constexpr unsigned long kRetiredExitCode = 76;
 inline constexpr uint32_t kMaximumJobArgumentBytes = 4 * 1024;
 
 enum class WireKind : uint16_t {

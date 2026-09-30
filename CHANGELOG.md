@@ -17,6 +17,8 @@ decisions that still shape the code are in
 - **A crash leaves a readable dump more often.** When the full crash dump
   cannot be written, the player now writes a smaller one instead of none, and
   logs why the full one failed.
+- **A live render started about 30 seconds after the last one no longer
+  fails.** The background renderer could accept the job just as it was closing.
 
 ## 0.26.2 - 2026-09-26
 

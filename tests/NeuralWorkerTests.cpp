@@ -280,6 +280,9 @@ struct FakeResidentRunner {
         const auto bytes = EncodeResult(ValidFakeResult(parsed->request.jobId));
         if (!Write(WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size())))
             return resident_worker::JobOutcome::WriteFailed;
+        // A finished job after which the helper retires, as the real one does
+        // when its session log has outgrown the evidence read.
+        if (source == L"resident-retire-source.mkv") return resident_worker::JobOutcome::Invalidated;
         return resident_worker::JobOutcome::Completed;
     }
 };
@@ -290,8 +293,12 @@ int RunFakeResidentWorker(const neural_worker_detail::WorkerArguments& arguments
     resident_worker::CommandChannel channel(arguments.command, arguments.parentProcess);
     // 150 ms of grace instead of the shipped five seconds: the boundary under
     // test is "a job, then quiet", not how long quiet has to last.
-    resident_worker::RunResidentLoop(channel, runner, 10s, 150ms);
-    return 0;
+    const resident_worker::ResidentExit reason = resident_worker::RunResidentLoop(channel, runner, 10s, 150ms);
+    // The real helper tears its device down after deciding to retire, alive
+    // and with its command pipe still open; a job sent in that window is
+    // written and never read. Long enough here that the next job lands in it.
+    if (reason == resident_worker::ResidentExit::JobInvalidated) std::this_thread::sleep_for(600ms);
+    return static_cast<int>(resident_worker::ResidentExitCode(reason));
 }
 
 int RunFakeWorker(int argc, wchar_t** argv)
@@ -2937,6 +2944,47 @@ void idle_vram_samples_reach_the_receipt_under_both_policies_test()
     CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
 }
 
+// P1.24. A helper that has decided to exit - the idle timeout, or retiring
+// after a job - tears down while still alive with its command pipe open.
+// Resident() saw a live process, so the next job was sent to it, written
+// successfully and never read; the helper exited 0 with no result and the job
+// failed as "incomplete metadata", which is never relaunched. The retiring
+// exit now has its own code, and the job goes to a fresh helper.
+void a_job_sent_to_a_retiring_helper_goes_to_a_fresh_one_test()
+{
+    std::vector<resident_helper::HelperPlan> accepted;
+    size_t restarts = 0;
+    NeuralJobHooks hooks;
+    hooks.accepted = [&](resident_helper::HelperPlan plan) { accepted.push_back(plan); };
+    // Not a crash: nothing was rendered, so nothing is superseded and no
+    // recovery probe or relaunch budget is spent on it.
+    hooks.segments.onRestart = [&] { ++restarts; };
+    ResidentNeuralHelper helper;
+    resident_helper::HelperPlan plan{};
+    const NeuralRenderResult first = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-retire-source.mkv", 21), hooks, {}, &plan);
+    CHECK(first.ok);
+    CHECK(plan == resident_helper::HelperPlan::Launch);
+    // Still alive, tearing down: the parent has every reason to reuse it.
+    CHECK(helper.Resident());
+    accepted.clear();
+    const NeuralRenderResult second = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-source.mkv", 22), hooks, {}, &plan);
+    CHECK(second.ok);
+    CHECK(second.failure == NeuralRenderFailure::None);
+    CHECK_EQ(uint64_t{22}, second.jobId);
+    CHECK(plan == resident_helper::HelperPlan::Reuse);
+    CHECK_EQ(size_t{0}, restarts);
+    // Handed to the retiring helper, then to the one launched in its place.
+    CHECK_EQ(size_t{2}, accepted.size());
+    if (accepted.size() == 2) {
+        CHECK(accepted[0] == resident_helper::HelperPlan::Reuse);
+        CHECK(accepted[1] == resident_helper::HelperPlan::Launch);
+    }
+    helper.Release();
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
 void killed_resident_helper_restarts_once_and_completes_the_job_test()
 {
     ResetFailureInjection(L"crash-once");
@@ -3103,6 +3151,7 @@ int wmain(int argc, wchar_t** argv)
     resident_loop_samples_once_per_idle_stretch_test();
     idle_vram_policy_is_named_on_the_launch_line_and_read_from_the_player_ini_test();
     idle_vram_samples_reach_the_receipt_under_both_policies_test();
+    a_job_sent_to_a_retiring_helper_goes_to_a_fresh_one_test();
     killed_resident_helper_restarts_once_and_completes_the_job_test();
     second_kill_fails_closed_with_a_reason_and_leaves_no_orphan_test();
     recovery_probe_refusal_fails_closed_instead_of_relaunching_test();

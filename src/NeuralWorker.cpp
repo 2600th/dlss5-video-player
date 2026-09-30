@@ -1780,7 +1780,10 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
                                                     const NeuralJobHooks& hooks, std::stop_token stop,
                                                     const std::function<void(bool)>& accepted)
 {
-    for (bool configurationRestarted = false;; configurationRestarted = true) {
+    bool configurationRestarted = false;
+    // One more dispatch for a job a retiring helper was sent and never read.
+    bool redispatched = false;
+    for (;;) {
         NeuralRenderResult result;
         result.jobId = request.jobId;
         if (stop.stop_requested()) {
@@ -1886,6 +1889,19 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
             // cold start, so this one's timeline is discarded with it.
             session_->Drop();
             session_.reset();
+            configurationRestarted = true;
+            continue;
+        }
+        if (exited && exitCode == neural_worker_protocol::kRetiredExitCode && !pump.cancelled &&
+            !stop.stop_requested() && !redispatched) {
+            // The helper had already decided to go - the idle timeout, or
+            // retiring after its last job - when this job was written to it,
+            // so it never read the job and rendered nothing (P1.24). That is
+            // the closed pipe the two tries above handle, arriving a moment
+            // later, and it gets the same answer: a fresh helper, once.
+            session_->Drop();
+            session_.reset();
+            redispatched = true;
             continue;
         }
         session_->Drop();

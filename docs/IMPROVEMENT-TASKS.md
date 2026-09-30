@@ -61,7 +61,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | **P0** | **Fix before the next release** | | | |
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
-| [P1.24](#p124) | A retiring resident helper accepts a job, which then fails | M | Pipeline | 🔍 |
 | [P1.25](#p125) | Audio that starts after the video plays early | S | Player | 🧪 |
 | [P1.26](#p126) | Anamorphic sources export stretched | S | Pipeline | 🔍 |
 | [P1.27](#p127) | YouTube open, seek or reload drops 1-4 frames | S | Player | 🔍 |
@@ -114,28 +113,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 ---
 
 # P1 — Next
-
-<a id="p124"></a>
-### P1.24 · A retiring resident helper accepts a job, which then fails
-
-`M` · **Pipeline** · 🔍
-
-- **Problem.** The helper decides to exit (30 s idle, or `JobInvalidated`,
-  including a session log over 2 MiB) and tears down while still alive with
-  its command pipe open. The parent's `Resident()` only checks the process,
-  so it reuses it and `Send` succeeds; the job is never read. The helper exits
-  0 with no result, `RunAttempt` reports "incomplete metadata", and
-  `RunWithRelaunches` does not relaunch for `Protocol`. The user sees a warm
-  toggle about 30 s after the last job, or the next hole-fill job, fail.
-- **Where.** `ResidentWorkerLoop.h:359, 370-374`; `NeuralWorkerMain.cpp:451-455,
-  676-680`; `NeuralWorker.cpp:1692, 1777, 1783-1805, 1847, 1880-1884,
-  1027-1031`.
-- **Fix.** Either give idle and retiring exits their own exit code and
-  re-dispatch "reused, exited with it, nothing received" through the two-try
-  launch loop, or have the helper announce it is retiring so the parent drops
-  the session first.
-- **Test.** Dispatch to a helper that is alive but has decided to exit
-  (`tests/NeuralWorkerTests.cpp:2413-2663` cover only the loop).
 
 <a id="p125"></a>
 ### P1.25 · Audio that starts after the video plays early
