@@ -89,7 +89,11 @@ function Get-CurrentRelease {
 
     $all = Invoke-GitHubApi "repos/$repo/releases?per_page=30"
     if ($null -eq $all) { return $null }
-    return @($all | Where-Object { -not (Get-Property $_ 'draft' $false) } |
+    # Only player releases: the deps-* pre-releases hold build inputs, such as
+    # the pinned FFmpeg archive, and have no download to advertise.
+    return @($all | Where-Object {
+            -not (Get-Property $_ 'draft' $false) -and
+            (Get-Property $_ 'tag_name' '') -like 'dlss5-video-player-v*' } |
         Sort-Object { [datetime](Get-Property $_ 'published_at' '1970-01-01') } -Descending) |
         Select-Object -First 1
 }

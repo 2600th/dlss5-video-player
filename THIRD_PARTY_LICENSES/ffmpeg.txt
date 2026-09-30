@@ -9,7 +9,9 @@ with SHA-256 11F676F2EE62C39768CEF1892E2E171ADF00FD04C85620B771520E985E7C7A69,
 as published in release autobuild-2026-09-29-13-10 of
 https://github.com/BtbN/FFmpeg-Builds and downloaded from
 https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-29-13-10/ffmpeg-n9.0.2-14-gebafaee10a-win64-gpl-9.0.zip
-by tools/fetch_ffmpeg_helpers.ps1. Each executable is pinned by SHA-256 in
+by tools/fetch_ffmpeg_helpers.ps1. An identical copy is kept at
+https://github.com/2600th/dlss5-video-player/releases/tag/deps-ffmpeg-n9.0.2-14
+for when BtbN prunes that release. Each executable is pinned by SHA-256 in
 packaging/tool-lock.json. DLSS Video Player runs them as separate processes
 and does not link them.
 

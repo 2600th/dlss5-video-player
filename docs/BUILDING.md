@@ -328,9 +328,11 @@ The complete package bundles FFmpeg under GPLv3. Its source is public
 upstream - FFmpeg, BtbN's FFmpeg-Builds scripts and every library they pin,
 each at the commit the build used - and `THIRD_PARTY_LICENSES/ffmpeg.txt` says
 where, so a release attaches nothing for it. Moving the FFmpeg pin means
-updating `ffmpeg.txt` and `ffmpeg-bundled-notices.txt` with it. BtbN prunes
-its autobuilds after a while; `-ArchiveUrl` on `tools/fetch_ffmpeg_helpers.ps1`
-then takes a kept copy of the pinned archive, held to its SHA-256 either way.
+updating `ffmpeg.txt` and `ffmpeg-bundled-notices.txt` with it, and uploading
+the new archive as a `deps-ffmpeg-<version>` pre-release, since BtbN prunes its
+autobuilds after a while. `tools/fetch_ffmpeg_helpers.ps1` downloads that copy
+first and BtbN's second, and `-ArchiveUrl` names any other copy. Every source is
+held to the archive's SHA-256.
 
 The shipped executables (the player, `dlss5-convert.exe` and the neural
 helper) link the C and C++ runtimes statically (`/MT`), so a package needs no

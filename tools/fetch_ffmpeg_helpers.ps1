@@ -1,9 +1,9 @@
 [CmdletBinding()]
 param(
     [string]$DestinationDirectory = '',
-    # BtbN prunes its autobuild releases after a while. The archive is pinned
-    # by SHA-256, so a copy of the same bytes anywhere - the project's own
-    # release assets, a local file:// path - can be named here instead.
+    # The archive is pinned by SHA-256, so a copy of the same bytes anywhere -
+    # a local file:// path, another mirror - can be named here instead of the
+    # project's mirror and BtbN's original.
     [string]$ArchiveUrl = ''
 )
 
@@ -22,8 +22,13 @@ if (-not $DestinationDirectory) {
 # gyan.dev, the previous build, publishes neither its build scripts nor its
 # libraries' sources.
 $archiveName = 'ffmpeg-n9.0.2-14-gebafaee10a-win64-gpl-9.0'
-if (-not $ArchiveUrl) {
-    $ArchiveUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-29-13-10/$archiveName.zip"
+# BtbN prunes its autobuild releases after a while, so the project keeps the
+# same bytes as a release asset and tries that first.
+$archiveUrls = if ($ArchiveUrl) { @($ArchiveUrl) } else {
+    @(
+        "https://github.com/2600th/dlss5-video-player/releases/download/deps-ffmpeg-n9.0.2-14/$archiveName.zip",
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-29-13-10/$archiveName.zip"
+    )
 }
 $archiveSha256 = '11F676F2EE62C39768CEF1892E2E171ADF00FD04C85620B771520E985E7C7A69'
 $lock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\tool-lock.json') -Raw | ConvertFrom-Json
@@ -35,7 +40,17 @@ try {
     New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
     $archivePath = Join-Path $temporaryRoot 'ffmpeg.zip'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $ArchiveUrl -OutFile $archivePath -UseBasicParsing -TimeoutSec 600
+    $downloaded = $false
+    foreach ($url in $archiveUrls) {
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $archivePath -UseBasicParsing -TimeoutSec 600
+            $downloaded = $true
+            break
+        } catch {
+            Write-Warning "FFmpeg archive unavailable from ${url}: $($_.Exception.Message)"
+        }
+    }
+    if (-not $downloaded) { throw 'The FFmpeg archive could not be downloaded from any source.' }
     if ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -cne $archiveSha256) {
         throw 'FFmpeg archive SHA-256 mismatch.'
     }
