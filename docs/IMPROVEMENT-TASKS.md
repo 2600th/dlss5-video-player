@@ -62,7 +62,7 @@ clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
 | **P0** | **Fix before the next release** | | | |
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
-| [P1.30](#p130) | Release tags can still be moved (ruleset; owner) | S | Release | 🧪 |
+| | _Nothing open_ | | | |
 | **P2** | **High-value features** | | | |
 | | _Comparison and review_ | | | |
 | [P2.27](#p227) | Save a comparison clip | S-M | Player, Pipeline | |
@@ -106,25 +106,10 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 
 # P1 — Next
 
-P1.24-P1.34 landed on 2026-09-30 (branch `fix/p1-all-and-cli`), with the
-`dlss5-convert` command-line converter. What is left of P1.30 needs the
-repository owner.
-
-<a id="p130"></a>
-### P1.30 · Release tags can still be moved
-
-`S` · **Release** · _left over from P1.30; needs the repository owner_
-
-- **Problem.** The `dlss5-video-player-v0.26.0` tag moved from a4a3411 to
-  13f92b7 after release run 36047815691 failed, and `dlss5-video-player-v0.26.2`
-  from 581a13a to 5dbb3b9 after run 36229669021 failed on a stale stamp. The
-  packager now refuses a release whose HEAD is not its tag and writes the
-  commit into `PACKAGE_MANIFEST.txt` (`tools/source_identity.ps1`), but nothing
-  on GitHub stops a published tag from being moved or deleted.
-- **Fix.** A tag ruleset on `refs/tags/dlss5-video-player-v*` that blocks
-  updates and deletions (repository settings > Rules, or
-  `gh api repos/2600th/dlss5-video-player/rulesets` with `target: tag`). An
-  admin action, not a code change.
+Nothing open. P1.24-P1.34 landed on 2026-09-30 (branch `fix/p1-all-and-cli`),
+with the `dlss5-convert` command-line converter. The release-tag protection
+P1.30 asked for is repository ruleset 24245175: `refs/tags/dlss5-video-player-v*`
+cannot be updated or deleted.
 
 ---
 
