@@ -152,6 +152,32 @@ inline void AppendToLog(const Text<char>& line)
     CloseHandle(file);
 }
 
+// One MiniDumpWriteDump call, made on a thread of its own: MiniDumpWriteDump
+// documents that a process dumping itself may not record the calling thread's
+// stack properly, and the faulting thread is the one that calls the handler.
+// It waits here instead, and the dump takes its registers from the exception.
+struct DumpCall {
+    HANDLE file;
+    MINIDUMP_TYPE type;
+    EXCEPTION_POINTERS* exception;
+    DWORD faultingThread;
+    BOOL ok;
+    DWORD error;
+};
+
+inline DWORD WINAPI WriteDump(void* parameter)
+{
+    auto& call = *static_cast<DumpCall*>(parameter);
+    MINIDUMP_EXCEPTION_INFORMATION information{};
+    information.ThreadId = call.faultingThread;
+    information.ExceptionPointers = call.exception;
+    information.ClientPointers = FALSE;
+    call.ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), call.file, call.type,
+                                call.exception ? &information : nullptr, nullptr, nullptr);
+    call.error = call.ok ? 0 : GetLastError();
+    return 0;
+}
+
 inline LONG WINAPI Handler(EXCEPTION_POINTERS* exception)
 {
     // Everything here runs in a process that is already broken, so it stays on
@@ -164,7 +190,11 @@ inline LONG WINAPI Handler(EXCEPTION_POINTERS* exception)
     const bool named = ComposeDumpPath(dump, sizeof(dump) / sizeof(dump[0]), now, GetCurrentProcessId());
 
     // One attempt: a fresh file, the dump, and the file removed again if the
-    // dump failed, so a failure never leaves a truncated .dmp behind.
+    // dump failed, so a failure never leaves a truncated .dmp behind. A process
+    // too broken to start a thread still gets the dump, from this one. A dump
+    // that has not finished in 30 s is abandoned with its file, since the
+    // thread still writes to it, and nothing more is tried.
+    bool hung = false;
     const auto attempt = [&](MINIDUMP_TYPE type, DWORD& failure) {
         const HANDLE file = CreateFileW(dump, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                         FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -172,16 +202,22 @@ inline LONG WINAPI Handler(EXCEPTION_POINTERS* exception)
             failure = GetLastError();
             return false;
         }
-        MINIDUMP_EXCEPTION_INFORMATION information{};
-        information.ThreadId = GetCurrentThreadId();
-        information.ExceptionPointers = exception;
-        information.ClientPointers = FALSE;
-        const bool ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
-                                          exception ? &information : nullptr, nullptr, nullptr) != FALSE;
-        if (!ok) failure = GetLastError();
+        DumpCall call{file, type, exception, GetCurrentThreadId(), FALSE, 0};
+        if (const HANDLE thread = CreateThread(nullptr, 0, &WriteDump, &call, 0, nullptr)) {
+            const DWORD waited = WaitForSingleObject(thread, 30'000);
+            CloseHandle(thread);
+            if (waited != WAIT_OBJECT_0) {
+                hung = true;
+                failure = WAIT_TIMEOUT;
+                return false;
+            }
+        } else {
+            WriteDump(&call);
+        }
+        if (!call.ok) failure = call.error;
         CloseHandle(file);
-        if (!ok) DeleteFileW(dump);
-        return ok;
+        if (!call.ok) DeleteFileW(dump);
+        return call.ok != FALSE;
     };
     // WithIndirectlyReferencedMemory costs a few MB and is what makes the frame
     // buffers and the failing pointer readable in a debugger; without it a dump
@@ -192,18 +228,21 @@ inline LONG WINAPI Handler(EXCEPTION_POINTERS* exception)
                                                      MiniDumpWithUnloadedModules);
     // A process dumping itself is the case MiniDumpWriteDump documents as able
     // to fail, and the full type is the likelier to: it reads memory the
-    // stacks point at while the process's other threads may be freeing it. It
-    // failed once on a CI runner, where the file never appeared, and not in
-    // 88 local runs. A minimal dump - stacks, modules, the exception -
-    // is still the difference between a crash that can be read and one that
-    // cannot, so it is tried once before giving up, and the full dump's error
-    // goes in the line either way.
+    // stacks point at while the process's other threads may be freeing it. A
+    // minimal dump - stacks, modules, the exception - is still the difference
+    // between a crash that can be read and one that cannot, so it follows a
+    // failed full one, and the full dump's error goes in the line either way.
+    // On CI runners, and never in 88 local runs, both have failed together
+    // (ERROR_PARTIAL_COPY, then ERROR_INVALID_USER_BUFFER as an HRESULT): the
+    // signature of a thread starting or exiting mid-dump. That passes, so the
+    // pair is tried once more after a pause.
     bool written = false, reduced = false;
     DWORD error = ERROR_BAD_PATHNAME, fullError = 0;
-    if (named) {
+    for (int round = 0; named && !written && !hung && round < 2; ++round) {
+        if (round) Sleep(250);
         if (g_failFullDumpForTest) error = ERROR_PARTIAL_COPY;
         else written = attempt(fullType, error);
-        if (!written) {
+        if (!written && !hung) {
             fullError = error;
             written = reduced = attempt(MiniDumpNormal, error);
         }

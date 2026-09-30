@@ -1748,10 +1748,12 @@ void crash_handler_writes_its_dump_and_line_from_prepared_paths_test()
     //
     // The uninstrumented build lost its dump once too, on CI (run
     // 36230306450 on 5dbb3b9; the file never appeared, and 88 local runs never
-    // repeated it). The handler now retries with a minimal dump, so a written
-    // dump may be either kind; and when there is none, the handler's own line
-    // - with the winerr of each attempt - is printed, so the next failure
-    // names its cause.
+    // repeated it), and again on 9b04344 with both kinds failing (299, then
+    // 0x800704F8). The handler now writes the dump from a thread of its own,
+    // follows a failed full dump with a minimal one, and tries that pair
+    // twice, so a written dump may be either kind; and when there is none, the
+    // handler's own line - with the winerr of each attempt - is printed, so
+    // the next failure names its cause.
     const auto checkWrittenDump = [&](const std::vector<std::filesystem::path>& written,
                                       const std::string& text) {
         CHECK_EQ(size_t{1}, written.size());
