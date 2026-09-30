@@ -57,7 +57,14 @@ constexpr CopyPlan PlanCopy(uint32_t width, uint32_t height, int32_t declaredStr
     int32_t stride = declaredStride;
     uint64_t absStride = declared;
     if (!fits(declared)) {
-        stride = static_cast<int32_t>(packed);
+        // Packed rows in the declared orientation (P1.33). The copy reads a
+        // contiguous buffer (IMFMediaBuffer::Lock), and for one of those the
+        // sign of MF_MT_DEFAULT_STRIDE is the layout: negative is bottom-up,
+        // the first row in memory the picture's last. A magnitude the buffer
+        // cannot hold says the stated padding is wrong, not that the frame
+        // turned over, and walking a bottom-up frame top-down showed it
+        // upside down.
+        stride = declaredStride < 0 ? -static_cast<int32_t>(packed) : static_cast<int32_t>(packed);
         absStride = packed;
         if (!fits(packed)) return {};
     }

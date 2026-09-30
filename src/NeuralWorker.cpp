@@ -108,6 +108,17 @@ bool ParseDouble(std::wstring_view text, double& value)
 }
 
 
+// Shortest text that reads back as exactly this double (P1.33). to_wstring
+// printed six decimals, so 30000/1001 reached the helper as 29.970030 and
+// every frame time it computed from that was off by a part in ten million.
+std::wstring FpsText(double fps)
+{
+    char buffer[64];
+    const auto written = std::to_chars(buffer, buffer + sizeof(buffer), fps);
+    if (written.ec != std::errc{}) return std::to_wstring(fps);
+    return std::wstring(buffer, written.ptr);
+}
+
 std::wstring HandleText(HANDLE handle)
 {
     return std::to_wstring(reinterpret_cast<uintptr_t>(handle));
@@ -1205,7 +1216,7 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         std::wstring(kWorkerMode), L"--metadata-handle", HandleText(metadata),
         L"--source", request.sourcePath.wstring(), L"--staging", request.stagingVideoPath.wstring(),
         L"--width", std::to_wstring(request.width), L"--height", std::to_wstring(request.height),
-        L"--fps", std::to_wstring(request.fps), L"--duration-100ns",
+        L"--fps", FpsText(request.fps), L"--duration-100ns",
         std::to_wstring(static_cast<int64_t>(std::llround(request.durationSeconds * 10000000.0))),
         L"--job-id", std::to_wstring(request.jobId),
         L"--range-start-100ns", std::to_wstring(request.range.start100ns),
@@ -1607,6 +1618,36 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
 // One resident helper, its pipes and the key it was started for. Defined here
 // rather than in the header because everything in it is a handle the player
 // has no business seeing.
+// The command frame a resident helper is handed a job in, or nothing when the
+// job cannot be one: more arguments, a longer argument (a source path past
+// 2048 characters) or a larger payload than the protocol carries. Such a job
+// is run by a single-shot helper instead, which takes its arguments on the
+// command line (P1.33); refusing it was a render that could not be made.
+std::optional<std::vector<std::byte>> FrameJobCommand(const std::filesystem::path& executable,
+                                                      const NeuralRenderRequest& request, HANDLE metadata,
+                                                      HANDLE pause, bool configurationRestarted)
+{
+    std::vector<std::wstring> arguments{executable.wstring()};
+    const std::vector<std::wstring> job =
+        neural_worker_detail::BuildWorkerArguments(request, metadata, pause, configurationRestarted);
+    arguments.insert(arguments.end(), job.begin(), job.end());
+    if (arguments.size() > kMaximumJobArguments) return std::nullopt;
+    for (const std::wstring& argument : arguments) {
+        if (argument.empty() || argument.size() * sizeof(wchar_t) > kMaximumJobArgumentBytes) return std::nullopt;
+    }
+    std::vector<std::byte> payload = EncodeJobArguments(arguments);
+    if (payload.size() > kMaximumPayloadBytes) return std::nullopt;
+    return payload;
+}
+
+// Whether any resident helper could be handed this job, judged with the
+// longest handle values a launch can produce.
+bool ResidentCanCarry(const std::filesystem::path& executable, const NeuralRenderRequest& request)
+{
+    const HANDLE widest = reinterpret_cast<HANDLE>(std::numeric_limits<uintptr_t>::max());
+    return FrameJobCommand(executable, request, widest, widest, true).has_value();
+}
+
 struct ResidentNeuralHelper::Session {
     HelperProcess helper;
     resident_helper::HelperKey key;
@@ -1672,19 +1713,10 @@ struct ResidentNeuralHelper::Session {
     Dispatch Send(const NeuralRenderRequest& request)
     {
         if (request.pauseEvent != launchPause) return Dispatch::Unsendable;
-        std::vector<std::wstring> arguments{executable.wstring()};
-        const std::vector<std::wstring> job = neural_worker_detail::BuildWorkerArguments(
-            request, helperMetadata, helperPause, configurationRestarted);
-        arguments.insert(arguments.end(), job.begin(), job.end());
-        if (arguments.size() > kMaximumJobArguments) return Dispatch::Unsendable;
-        for (const std::wstring& argument : arguments) {
-            if (argument.empty() || argument.size() * sizeof(wchar_t) > kMaximumJobArgumentBytes)
-                return Dispatch::Unsendable;
-        }
-        const std::vector<std::byte> payload = EncodeJobArguments(arguments);
-        if (payload.size() > kMaximumPayloadBytes) return Dispatch::Unsendable;
-        return WriteCommand(helper.command, CommandKind::Job, payload.data(),
-                            static_cast<uint32_t>(payload.size()))
+        const auto payload = FrameJobCommand(executable, request, helperMetadata, helperPause, configurationRestarted);
+        if (!payload) return Dispatch::Unsendable;
+        return WriteCommand(helper.command, CommandKind::Job, payload->data(),
+                            static_cast<uint32_t>(payload->size()))
             ? Dispatch::Sent : Dispatch::Gone;
     }
 };
@@ -1739,7 +1771,8 @@ NeuralRenderResult ResidentNeuralHelper::RunJob(const std::filesystem::path& exe
     resident_helper::ResidentState state;
     state.running = Resident();
     if (state.running) state.key = session_->key;
-    const HelperPlan chosen = resident_helper::PlanForJob(state, key);
+    const bool carried = ResidentCanCarry(executable, request);
+    const HelperPlan chosen = carried ? resident_helper::PlanForJob(state, key) : HelperPlan::SingleShot;
     if (plan) *plan = chosen;
     if (chosen == HelperPlan::SingleShot) {
         return RunNeuralWorker(executable, request, hooks.progress, stop, hooks.segments,

@@ -543,6 +543,19 @@ struct PlayerAppTestAccess {
         PlayerApp& app = fixture->app;
 
         CheckExportStagesDialog(app);
+
+        // P1.33: the job the dialog hands RunStageExport releases the
+        // player's resident helper; RunStageExport's ordering is tested with
+        // a job built by hand, so this is where the wiring is held.
+        ExportPlan plan;
+        plan.valid = true;
+        plan.workerStage = true;
+        const StageExportJob job = app.MakeStageExportJob(plan, L"C:/media/source.mkv", L"C:/out/export.mkv", L"C:/cache/stages");
+        CHECK(static_cast<bool>(job.releaseResidentHelper));
+        CHECK(!job.runtimeLock.has_value());
+        CHECK(job.destination == std::filesystem::path(L"C:/out/export.mkv"));
+        if (job.releaseResidentHelper) job.releaseResidentHelper();
+        CHECK(!app.m_residentHelper.Resident());
     }
 
     static void neural_settings_dialog_test()
@@ -2720,17 +2733,31 @@ struct PlayerAppTestAccess {
             L"The neural runtime does not match the locked stack: dxgi.dll"));
         std::filesystem::remove(runtime / L"Stray.addon64", ignored);
 
-        // A Super Resolution-only pass is not held to the neural lock, but it
-        // still runs a helper in this runtime: the resident one is released
-        // first, exactly once, before the pass begins. The helper itself is
-        // absent here, which is where this export ends.
+        // P1.33: a Super Resolution-only pass is held to the same lock. It is
+        // not presented as neural, but its helper loads this directory's
+        // proxy and Streamline modules all the same.
         job.plan.requireNeural = false;
         job.plan.outputWidth = 128;
         job.plan.outputHeight = 96;
-        const StageExportOutcome upscaled = RunStageExport(job, {}, progress);
-        CHECK(upscaled.status == StageExportStatus::Failed);
-        CHECK(upscaled.detail == L"The isolated neural helper executable is unavailable.");
-        CHECK((events == std::vector<std::string>{"release", "pass"}));
+        const StageExportOutcome drift = RunStageExport(job, {}, progress);
+        CHECK(drift.status == StageExportStatus::Refused);
+        CHECK(drift.detail.starts_with(L"The neural runtime does not match the locked stack: "));
+        CHECK(events.empty());
+
+        // Against a lock the directory satisfies, either pass runs a helper in
+        // this runtime: the resident one is released first, exactly once,
+        // before the pass begins. The helper itself is absent here, which is
+        // where this export ends.
+        write(runtime / L"dxgi.dll", locked);
+        job.runtimeLock = lock;
+        for (const bool neural : {false, true}) {
+            events.clear();
+            job.plan.requireNeural = neural;
+            const StageExportOutcome ran = RunStageExport(job, {}, progress);
+            CHECK(ran.status == StageExportStatus::Failed);
+            CHECK(ran.detail == L"The isolated neural helper executable is unavailable.");
+            CHECK((events == std::vector<std::string>{"release", "pass"}));
+        }
 
         std::filesystem::remove_all(root, ignored);
     }

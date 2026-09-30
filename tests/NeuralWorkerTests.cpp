@@ -664,6 +664,23 @@ void nonexistent_helper_fails_test()
 // The temporal settings reach the helper as one canonical pair, and only when
 // they leave the defaults: a default job's command line stays the one every
 // earlier helper accepts, and a value this build cannot name is refused.
+// P1.33. --fps went out at six decimals (to_wstring), so NTSC's 30000/1001
+// reached the helper as 29.970030. It reads back as the very same double.
+void the_frame_rate_reaches_the_helper_exactly_test()
+{
+    const HANDLE metadata = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(123));
+    for (const double fps : {30000.0 / 1001.0, 24000.0 / 1001.0, 60000.0 / 1001.0, 25.0, 59.94, 1.0 / 3.0}) {
+        NeuralRenderRequest request = TestRequest(L"source.mkv");
+        request.fps = fps;
+        const auto arguments = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
+        std::vector<std::wstring_view> values{L"NeuralWorker.exe"};
+        for (const auto& argument : arguments) values.emplace_back(argument);
+        const auto parsed = neural_worker_detail::ParseWorkerArguments(values);
+        CHECK(parsed.has_value());
+        if (parsed) CHECK(parsed->request.fps == fps);
+    }
+}
+
 void temporal_settings_reach_the_helper_only_off_their_defaults_test()
 {
     NeuralRenderRequest request = TestRequest(L"source.mkv");
@@ -2985,6 +3002,24 @@ void a_job_sent_to_a_retiring_helper_goes_to_a_fresh_one_test()
     CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
 }
 
+// P1.33. A job argument longer than a command frame carries - a source path
+// past 2048 characters - was refused by the resident helper with no fallback.
+// It runs single-shot instead, where the arguments are the command line.
+void a_job_too_long_for_a_command_frame_runs_single_shot_test()
+{
+    NeuralJobHooks hooks;
+    ResidentNeuralHelper helper;
+    resident_helper::HelperPlan plan{};
+    const std::wstring longSource = std::wstring(2100, L'a') + L".mkv";
+    const NeuralRenderResult result = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(longSource, 31), hooks, {}, &plan);
+    CHECK(plan == resident_helper::HelperPlan::SingleShot);
+    CHECK(result.ok);
+    CHECK_EQ(uint64_t{31}, result.jobId);
+    CHECK(!helper.Resident());
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
 void killed_resident_helper_restarts_once_and_completes_the_job_test()
 {
     ResetFailureInjection(L"crash-once");
@@ -3106,6 +3141,7 @@ int wmain(int argc, wchar_t** argv)
     SetEnvironmentVariableW(kTestRunVariable, std::to_wstring(GetCurrentProcessId()).c_str());
     nonexistent_helper_fails_test();
     helper_main_parser_accepts_normal_and_restarted_contracts_test();
+    the_frame_rate_reaches_the_helper_exactly_test();
     temporal_settings_reach_the_helper_only_off_their_defaults_test();
     benchmark_guide_sources_leave_the_shared_parser_canonical_test();
     guide_files_round_trip_the_estimator_grid_bit_for_bit_test();
@@ -3152,6 +3188,7 @@ int wmain(int argc, wchar_t** argv)
     idle_vram_policy_is_named_on_the_launch_line_and_read_from_the_player_ini_test();
     idle_vram_samples_reach_the_receipt_under_both_policies_test();
     a_job_sent_to_a_retiring_helper_goes_to_a_fresh_one_test();
+    a_job_too_long_for_a_command_frame_runs_single_shot_test();
     killed_resident_helper_restarts_once_and_completes_the_job_test();
     second_kill_fails_closed_with_a_reason_and_leaves_no_orphan_test();
     recovery_probe_refusal_fails_closed_instead_of_relaunching_test();

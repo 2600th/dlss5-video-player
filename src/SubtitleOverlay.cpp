@@ -374,7 +374,7 @@ subtitle::Discovery SubtitleOverlay::Probe(const std::wstring& media, bool lookB
         L"-v error -select_streams s "
         L"-show_entries stream=codec_name:stream_tags=language,title:"
         L"stream_disposition=default,forced,hearing_impaired,visual_impaired,comment:format=start_time "
-        L"-of default=noprint_wrappers=0 -i \"" + media + L"\"";
+        L"-of default=noprint_wrappers=0 " + media_tools::LocalInputOptions(media) + L"-i \"" + media + L"\"";
     if (!Spawn(FFprobe(), arguments, session, true)) return found;
     // Bounded like the audio track probe: a track list is a few hundred bytes,
     // and a probe that does not answer in ten seconds is not going to.
@@ -462,7 +462,7 @@ std::optional<std::wstring> SubtitleOverlay::Extracted(const Source& source, uin
         m_phase = Phase::Extracting;
     }
     const auto started = std::chrono::steady_clock::now();
-    const bool spawned = Spawn(FFmpeg(), subtitle::ExtractArguments(source.path, source.stream, source.codec, output.wstring()), session, false);
+    const bool spawned = Spawn(FFmpeg(), media_tools::LocalInputOptions(source.path) + subtitle::ExtractArguments(source.path, source.stream, source.codec, output.wstring()), session, false);
     {
         std::lock_guard lock(m_mutex);
         m_activeJob = spawned ? session.job : nullptr;
@@ -549,7 +549,12 @@ void SubtitleOverlay::RunSession(uint64_t generation)
 
     Session session;
     const auto started = std::chrono::steady_clock::now();
-    const bool spawned = Spawn(FFmpeg(), subtitle::RenderArguments(command), session, true);
+    const bool spawned = Spawn(FFmpeg(),
+        // A picture track is read as an input and gets the local whitelist; a
+        // text track is read by the subtitles filter inside a lavfi graph,
+        // which no input option reaches.
+        (command.kind == subtitle::Kind::Bitmap ? media_tools::LocalInputOptions(command.input) : std::wstring()) +
+            subtitle::RenderArguments(command), session, true);
     {
         std::lock_guard lock(m_mutex);
         if (!spawned) {

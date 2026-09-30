@@ -140,8 +140,58 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The same code analysis and AddressSanitizer run build.yml gates pull
+  # requests with, on the tagged commit itself (P1.33): a tag pushed without a
+  # green pull-request run - or one moved after it - never had either. Fetched
+  # fresh, like the build above, and publishing waits for it.
+  quality:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Clone NVIDIA DLSS SDK
+        shell: cmd
+        run: |
+          git init external\DLSS
+          git -C external\DLSS remote add origin https://github.com/NVIDIA/DLSS.git
+          git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
+          git -C external\DLSS checkout --detach FETCH_HEAD
+
+      - name: Fetch pinned UI assets and media helpers
+        shell: powershell
+        run: |
+          .\tools\fetch_ui_assets.ps1
+          .\tools\fetch_youtube_helpers.ps1
+          .\tools\fetch_ffmpeg_helpers.ps1
+
+      - name: Code analysis of the shipped targets
+        shell: cmd
+        run: |
+          cmake --preset analyze
+          if errorlevel 1 exit /b 1
+          cmake --build --preset analyze --parallel
+
+      - name: Build the device-free suites with AddressSanitizer
+        shell: cmd
+        run: |
+          cmake --preset asan
+          if errorlevel 1 exit /b 1
+          cmake --build --preset asan --parallel
+
+      - name: Run the device-free suites under AddressSanitizer
+        shell: cmd
+        run: ctest --preset asan
+
   publish:
-    needs: build
+    needs: [build, quality]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

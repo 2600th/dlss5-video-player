@@ -1379,14 +1379,29 @@ static std::wstring PickVideoFileFallback(HWND owner, const Localizer& loc) {
     return GetOpenFileNameW(&o)?path:L"";
 }
 
+// Where "Save converted video" writes. The containers offered are the ones
+// this source converts to (ExportContainerChoices), as the stage export's are:
+// every format for every source offered a PNG of a film and an MKV of a photo
+// (P1.33). The returned name ends in one of them. It never replaces a file -
+// the exporter refuses one that exists - so nothing is asked about here.
 static std::filesystem::path PickExportFile(HWND owner, std::wstring_view title, bool photo, bool animation) {
     wchar_t path[32768]{};
     std::wstring suggested(title.empty()?L"neural-video":std::wstring(title));
     for(wchar_t& c:suggested)if(c==L'<'||c==L'>'||c==L':'||c==L'"'||c==L'/'||c==L'\\'||c==L'|'||c==L'?'||c==L'*')c=L'_';
     suggested+=L"-neural";wcsncpy_s(path,suggested.c_str(),_TRUNCATE);
-    const wchar_t filter[]=L"Matroska video (*.mkv)\0*.mkv\0MP4 video (*.mp4)\0*.mp4\0Animated GIF (*.gif)\0*.gif\0PNG photo (*.png)\0*.png\0JPEG photo (*.jpg)\0*.jpg;*.jpeg\0\0";
-    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));dialog.lpstrFilter=filter;dialog.nFilterIndex=photo?4:animation?3:1;dialog.lpstrDefExt=photo?L"png":animation?L"gif":L"mkv";dialog.lpstrTitle=L"Save the converted video to a new file";dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST;
-    return GetSaveFileNameW(&dialog)?std::filesystem::path(path):std::filesystem::path{};
+    const auto choices=ExportContainerChoices(photo,animation);
+    std::wstring filter;
+    for(const ExportContainer container:choices){
+        const auto [name,pattern]=ExportContainerFilter(container);
+        filter+=name;filter.push_back(L'\0');filter+=pattern;filter.push_back(L'\0');
+    }
+    filter.push_back(L'\0');
+    const std::wstring defaultExtension=ExportContainerExtension(choices.front())+1;
+    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));
+    dialog.lpstrFilter=filter.c_str();dialog.nFilterIndex=1;dialog.lpstrDefExt=defaultExtension.c_str();dialog.lpstrTitle=L"Save the converted video to a new file";
+    dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST;
+    if(!GetSaveFileNameW(&dialog))return {};
+    return std::filesystem::path(ExportFileName(path,dialog.nFilterIndex?dialog.nFilterIndex-1u:0u,photo,animation));
 }
 
 // Where "Export with DLSS stages" writes. Only the containers the export can
@@ -1750,6 +1765,9 @@ struct StageExportJob {
     // starts in the same runtime directory. Empty for `--render`, which runs in
     // a process of its own and has none.
     std::function<void()> releaseResidentHelper;
+    // The lock the runtime directory is held to before any worker pass; empty
+    // is the embedded one. Tests only, which have no runtime that satisfies it.
+    std::optional<RuntimeLock> runtimeLock;
 };
 
 // `passKey` null is the end of the passes, when the finished file is moved
@@ -1811,13 +1829,14 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
             ?(plan.outputWidth!=job.sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
             :L"export.progress.pass_sr";
         const auto runtimeDirectory=job.helpers/L"neural-runtime";
-        // A neural pass is refused on what refuses a live render, before
-        // anything is written: a file that drifted from the lock, or a module
-        // the lock does not name beside feature 18. A Super Resolution-only
-        // pass is not presented as neural, and the helper still refuses a
-        // stray module at its own startup.
-        if(plan.requireNeural){
-            const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,EmbeddedRuntimeLock(),stop);
+        // Refused on what refuses a live render, before anything is written:
+        // a file that drifted from the lock, or a module the lock does not
+        // name beside feature 18. A Super Resolution-only pass too (P1.33): it
+        // is not presented as neural, but its helper loads the same proxy and
+        // Streamline modules from this directory, and the helper's own check
+        // of stray modules at startup came after the settings were written.
+        {
+            const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,job.runtimeLock?*job.runtimeLock:EmbeddedRuntimeLock(),stop);
             if(stop.stop_requested())return {StageExportStatus::Cancelled,{}};
             if(!refusal.empty()){
                 LOG("Stage export refused before the helper: "<<WideToUtf8(refusal));
@@ -1904,7 +1923,9 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
         return {StageExportStatus::Failed,finished.detail};
     }
     LOG("Stage export wrote "<<WideToUtf8(job.destination.wstring())<<(finished.detail.empty()?"":" - ")<<WideToUtf8(finished.detail));
-    return {StageExportStatus::Done,{}};
+    // The note (what the container left out) goes to the dialog and to
+    // --render's console, not only the log (P1.33).
+    return {StageExportStatus::Done,finished.detail};
 }
 
 // How a neural job relates to what is on screen: an offline job replaces
@@ -2935,13 +2956,17 @@ public:
     // it removes anything, so an entry being opened is skipped rather than
     // deleted from under the lookup.
     //
-    // Detached rather than joined: it walks directories, which on a large
-    // cache on a cold disk is seconds, and none of it needs to happen before
-    // the window appears. The manager is constructed inside the thread so
-    // nothing is shared with the UI.
+    // Off the UI thread: it walks directories, which on a large cache on a
+    // cold disk is seconds, and none of it needs to happen before the window
+    // appears. The manager is constructed inside the thread so nothing is
+    // shared with the UI. Owned and joined rather than detached: a detached
+    // pass still running at exit read the model-store memo's statics while
+    // they were destroyed (P1.33). The five-second wait between the two
+    // model-store reads is where most of its time goes, so a stop cuts it
+    // short and the pass ends without judging anything.
     void StartCacheEviction(){
         if(m_cacheRoot.empty())return;
-        std::thread([root=m_cacheRoot,driverVersion=m_opt.detectedGpu.driverVersion,moduleDirectory=ExecutableDirectory()]{
+        m_cacheEviction=std::jthread([root=m_cacheRoot,driverVersion=m_opt.detectedGpu.driverVersion,moduleDirectory=ExecutableDirectory()](std::stop_token stop){
             NeuralCacheManager cache(root);
             if(!cache.Valid())return;
             // A crashed session's live/pid<N> - gigabytes of segments - had no
@@ -2962,7 +2987,9 @@ public:
                 const NeuralModelStore models=ResolveNeuralModelStore(driverVersion);
                 NeuralModelStore confirm;
                 if(runtime&&NeuralModelStoreSettled(models)){
-                    std::this_thread::sleep_for(kEvictionModelStoreGap);
+                    std::mutex gapMutex;std::condition_variable_any gap;std::unique_lock gapLock(gapMutex);
+                    gap.wait_for(gapLock,stop,kEvictionModelStoreGap,[]{return false;});
+                    if(stop.stop_requested())return;
                     confirm=ResolveNeuralModelStore(driverVersion);
                 }
                 // The agreed pair is also the only thing the model-store memo
@@ -2976,8 +3003,9 @@ public:
                                             !NeuralModelStoreSettled(confirm)?"unsettled on the second read":"changed between reads")
                          <<" first="<<models.digest<<" second="<<confirm.digest<<".");
             }
+            if(stop.stop_requested())return;
             cache.Evict({},cache_eviction::kDefaultFreeFloorBytes,current?&*current:nullptr);
-        }).detach();
+        });
     }
 
     // Only a live network stream needs the non-blocking read and the
@@ -3536,6 +3564,29 @@ private:
         if(!std::filesystem::is_regular_file(entry.source,fileError)){MessageBoxW(m_hwnd,T(L"recent.missing").c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONINFORMATION);return;}
         Load(entry.source,entry.title,MediaSourceKind::LocalFile);
     }
+    // The dialog's export job, from the player's current source and settings.
+    // Its own method so the regression suite can see what the dialog hands
+    // RunStageExport - the resident helper's release above all (P1.33).
+    StageExportJob MakeStageExportJob(const ExportPlan& plan,const std::filesystem::path& source,
+                                      const std::filesystem::path& destination,const std::filesystem::path& scratch){
+        StageExportJob job;
+        job.plan=plan;job.source=source;job.destination=destination;job.scratch=scratch;
+        job.helpers=ExecutableDirectory();
+        job.sourceWidth=m_decoder.Width();job.sourceHeight=m_decoder.Height();
+        job.displayAspect=ExportDisplayAspect(m_decoder.Width(),m_decoder.Height(),m_decoder.DisplayAspectRatio());
+        job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
+        job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
+        job.upscalingHistory=m_upscalingHistory;
+        job.captureDither=m_captureDither;job.quality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
+        job.holdDuplicates=m_frameGenHoldDuplicates;
+        // Called on the export thread, which is safe for a helper that is not
+        // thread-safe: RunStageExport calls it only while holding the runtime
+        // lease, and a neural job only touches the helper while holding it too.
+        // The export thread is joined before this player is destroyed.
+        job.releaseResidentHelper=[this]{m_residentHelper.Release();};
+        return job;
+    }
+
     void ExportCachedVideo(){
         if(!m_cachedPlayback||m_neuralPath.empty()||m_exportWorker.joinable())return;
         // The file on disk carries the settings it was rendered with. Saving it
@@ -3560,7 +3611,11 @@ private:
         m_stageExport={};SyncActivityFeedback();if(m_hwnd&&IsWindow(m_hwnd)){SyncFeatureMenuState();UpdateCachedStatus();}}
     void CompleteExport(uint64_t token){auto completion=m_exportCompletions.Take(token);if(!completion)return;
         // Whatever happened, the export is over and the panel says so.
-        m_stageExport={};SyncActivityFeedback();if(m_exportWorker.joinable()){m_exportWorker.join();m_exportWorker=std::jthread{};}SyncFeatureMenuState();UpdateCachedStatus();if(completion->result.ok){const std::wstring message=L"Exported to:\n"+completion->output.wstring();MessageBoxW(m_hwnd,message.c_str(),T(L"export.title.complete").c_str(),MB_OK|MB_ICONINFORMATION);}else if(completion->result.error!=MaterializeError::Cancelled)MessageBoxW(m_hwnd,completion->result.detail.c_str(),T(L"export.title.failed").c_str(),MB_OK|MB_ICONERROR);}
+        m_stageExport={};SyncActivityFeedback();if(m_exportWorker.joinable()){m_exportWorker.join();m_exportWorker=std::jthread{};}SyncFeatureMenuState();UpdateCachedStatus();if(completion->result.ok){std::wstring message=L"Exported to:\n"+completion->output.wstring();
+            // What the file left out (subtitles MP4 cannot hold) is the note a
+            // finished export carries; it used to be dropped here (P1.33).
+            if(!completion->result.detail.empty())message+=L"\n\n"+completion->result.detail;
+            MessageBoxW(m_hwnd,message.c_str(),T(L"export.title.complete").c_str(),MB_OK|MB_ICONINFORMATION);}else if(completion->result.error!=MaterializeError::Cancelled)MessageBoxW(m_hwnd,completion->result.detail.c_str(),T(L"export.title.failed").c_str(),MB_OK|MB_ICONERROR);}
 
     // Frame generation runs as a conversion, not as live presentation: the pass
     // writes a new file at the planned multiple of the source rate, the user
@@ -6742,21 +6797,7 @@ private:
             <<" output="<<plan.outputWidth<<"x"<<plan.outputHeight<<" fps="<<plan.outputFps
             <<" passes="<<ExportStageCount(plan)<<" source="<<WideToUtf8(source.wstring()));
 
-        StageExportJob job;
-        job.plan=plan;job.source=source;job.destination=destination;job.scratch=scratch;
-        job.helpers=ExecutableDirectory();
-        job.sourceWidth=m_decoder.Width();job.sourceHeight=m_decoder.Height();
-        job.displayAspect=ExportDisplayAspect(m_decoder.Width(),m_decoder.Height(),m_decoder.DisplayAspectRatio());
-        job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
-        job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
-        job.upscalingHistory=m_upscalingHistory;
-        job.captureDither=m_captureDither;job.quality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
-        job.holdDuplicates=m_frameGenHoldDuplicates;
-        // Called on the export thread, which is safe for a helper that is not
-        // thread-safe: RunStageExport calls it only while holding the runtime
-        // lease, and a neural job only touches the helper while holding it too.
-        // The export thread is joined before this player is destroyed.
-        job.releaseResidentHelper=[this]{m_residentHelper.Release();};
+        const StageExportJob job=MakeStageExportJob(plan,source,destination,scratch);
         HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{
             m_exportWorker=std::jthread([=](std::stop_token stop){
@@ -12038,6 +12079,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     StartHover m_startHover=StartHover::None;size_t m_startHoverIndex=0;
     std::map<int,chrome_motion::Fade> m_tileFades;bool m_tilesWereMoving=false;
     std::jthread m_startWorker;
+    // StartCacheEviction's pass; joined with the player (P1.33).
+    std::jthread m_cacheEviction;
     // The curated trailers' YouTube thumbnails, fetched once the start screen
     // is first shown (TrailerThumbnail.h).
     std::unique_ptr<TrailerThumbnails> m_trailerThumbnails=std::make_unique<TrailerThumbnails>();
@@ -12503,6 +12546,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         }
         if(outcome.status==StageExportStatus::Refused)return refuse(outcome.detail);
         if(outcome.status!=StageExportStatus::Done)return failed(outcome.detail.empty()?std::wstring(L"the export did not finish."):outcome.detail);
+        if(!outcome.detail.empty())console.Out(L"note: "+outcome.detail);
         console.Out(L"done: "+output.wstring());
         LOG("--render finished: "<<WideToUtf8(output.wstring()));
         return kExitOk;

@@ -1148,8 +1148,10 @@ neural after the upscale - so the model then runs on the upscaled frame with no
 further plumbing. The second pass is frame generation over the file the first
 one wrote. `ExportStageCount` is what the progress panel divides by.
 
-A neural pass is refused on exactly what refuses a live render, in the same
-words and before its settings are written: a file that drifted from the runtime
+Any worker pass - a neural one, and since P1.33 a Super Resolution-only one,
+whose helper loads the same proxy and Streamline modules - is refused on
+exactly what refuses a live render, in the same words and before its settings
+are written: a file that drifted from the runtime
 lock, or a module the lock does not name (`StageExportRuntimeRefusal`, built on
 the two checks `NeuralJobRun` uses), so a runtime the live path refuses cannot
 produce a file presented as neural. Under the runtime lease, and whatever the

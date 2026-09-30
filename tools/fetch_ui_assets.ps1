@@ -60,7 +60,13 @@ try {
         throw "Integrity check failed for $packageName $packageVersion. Expected '$expectedSri' but received '$actualSri'."
     }
 
-    & tar.exe -xzf $archive -C $extracted
+    # The bsdtar Windows ships, by full path: a bare tar.exe is resolved from
+    # the current directory and PATH first, so anything named tar.exe there
+    # would unpack the verified archive (P1.33), as fetch_neural_runtime.ps1
+    # already avoids.
+    $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+    if (-not (Test-Path -LiteralPath $tar -PathType Leaf)) { throw "bsdtar was not found at '$tar'." }
+    & $tar -xzf $archive -C $extracted
     if ($LASTEXITCODE -ne 0) {
         throw "tar.exe failed with exit code $LASTEXITCODE."
     }

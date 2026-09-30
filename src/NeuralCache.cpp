@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <charconv>
+#include <cstring>
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -876,21 +877,47 @@ std::optional<std::string> Sha256File(const std::filesystem::path& path, std::st
 
 std::optional<std::string> Sha256FileCached(const std::filesystem::path& path, std::stop_token stop)
 {
+    // Path, size and write time alone let a same-size file with its write
+    // time put back (SetFileTime, or a copy that keeps it) pass for the
+    // hashed one for the rest of the process (P1.33). The file's identity on
+    // its volume changes when another file is renamed over it, and its change
+    // time moves on every write and cannot be set by any user-mode call, so
+    // with both in the key a swap is hashed again. A file whose identity
+    // cannot be read is hashed every time.
     struct Key {
         std::wstring path;
-        uintmax_t size{};
+        uint64_t size{};
         int64_t writeTime{};
+        int64_t changeTime{};
+        uint64_t volume{};
+        std::array<unsigned char, 16> fileId{};
         bool operator==(const Key&) const = default;
     };
     static std::mutex mutex;
     static std::vector<std::pair<Key, std::string>> memo;
 
-    std::error_code error;
-    const auto size = std::filesystem::file_size(path, error);
-    if (error) return Sha256File(path, stop);
-    const auto written = std::filesystem::last_write_time(path, error);
-    if (error) return Sha256File(path, stop);
-    const Key key{path.wstring(), size, written.time_since_epoch().count()};
+    Key key{path.wstring()};
+    {
+        const HANDLE file = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return Sha256File(path, stop);
+        FILE_BASIC_INFO basic{};
+        FILE_STANDARD_INFO standard{};
+        FILE_ID_INFO id{};
+        const bool read =
+            GetFileInformationByHandleEx(file, FileBasicInfo, &basic, sizeof(basic)) &&
+            GetFileInformationByHandleEx(file, FileStandardInfo, &standard, sizeof(standard)) &&
+            GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id));
+        CloseHandle(file);
+        if (!read) return Sha256File(path, stop);
+        key.size = static_cast<uint64_t>(standard.EndOfFile.QuadPart);
+        key.writeTime = basic.LastWriteTime.QuadPart;
+        key.changeTime = basic.ChangeTime.QuadPart;
+        key.volume = id.VolumeSerialNumber;
+        static_assert(sizeof(id.FileId.Identifier) == 16);
+        std::memcpy(key.fileId.data(), id.FileId.Identifier, key.fileId.size());
+    }
     {
         std::lock_guard lock(mutex);
         for (const auto& [candidate, digest] : memo)

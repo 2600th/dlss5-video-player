@@ -5864,9 +5864,12 @@ void media_foundation_copy_never_reads_past_the_sample_test()
         CHECK(plan.copy);
         CHECK_EQ(int32_t{16}, plan.stride);
         CHECK_EQ(size_t{0}, plan.firstRow);
+        // P1.33: a bottom-up frame stays bottom-up; walked top-down it was
+        // shown upside down.
         const CopyPlan bottomUp = PlanCopy(4, 3, -32, 48);
         CHECK(bottomUp.copy);
-        CHECK_EQ(int32_t{16}, bottomUp.stride);
+        CHECK_EQ(int32_t{-16}, bottomUp.stride);
+        CHECK_EQ(size_t{32}, bottomUp.firstRow);
         CHECK(!PlanCopy(4, 3, 32, 47).copy);
         CHECK(!PlanCopy(4, 3, -32, 47).copy);
     }
@@ -5889,7 +5892,8 @@ void media_foundation_copy_never_reads_past_the_sample_test()
     CHECK(!PlanCopy(0, 1080, 7680, size_t{1} << 30).copy);
     CHECK(!PlanCopy(1920, 0, 7680, size_t{1} << 30).copy);
     CHECK(PlanCopy(4, 3, INT32_MIN, 48).copy);
-    CHECK_EQ(int32_t{16}, PlanCopy(4, 3, INT32_MIN, 48).stride);
+    CHECK_EQ(int32_t{-16}, PlanCopy(4, 3, INT32_MIN, 48).stride);
+    CHECK_EQ(size_t{32}, PlanCopy(4, 3, INT32_MIN, 48).firstRow);
     // A type change is followed at the same size and ends the decode at another.
     CHECK(FollowsTypeChange(1920, 1080, 1920, 1080));
     CHECK(!FollowsTypeChange(1920, 1080, 1280, 720));
@@ -9965,6 +9969,33 @@ void every_child_spawn_names_the_handles_it_inherits_test()
     // Decoder probe and child, audio probe and child, subtitles, the export
     // tools, the neural helper, yt-dlp and the crash reporter's relaunch.
     CHECK(spawns >= 10);
+}
+
+// P1.33. A local HLS or concat playlist - demuxed by content, whatever it is
+// named - opened with every protocol ffmpeg has. Every local input reaches
+// files only; a URL, a pipe, a lavfi graph and an input that already has a
+// whitelist are left as they are.
+void local_inputs_reach_files_only_test()
+{
+    using media_tools::GuardLocalInputs;
+    using media_tools::LocalInputOptions;
+    CHECK(LocalInputOptions(L"C:\\media\\list.m3u8") == L"-protocol_whitelist file,crypto,data ");
+    CHECK(LocalInputOptions(L"clip.mp4") == L"-protocol_whitelist file,crypto,data ");
+    CHECK(LocalInputOptions(L"https://rr1.googlevideo.com/videoplayback").empty());
+    CHECK(LocalInputOptions(L"HTTP://example.invalid/a.m3u8").empty());
+
+    const std::vector<std::wstring> arguments{
+        L"-v", L"error", L"-i", L"C:/media/a.mkv", L"-itsoffset", L"1", L"-i", L"https://example.invalid/b",
+        L"-f", L"lavfi", L"-i", L"testsrc2", L"-f", L"rawvideo", L"-i", L"pipe:0",
+        L"-protocol_whitelist", L"file", L"-i", L"C:/media/c.mkv", L"-i", L"C:/media/d.mkv", L"out.mkv"};
+    const std::vector<std::wstring> expected{
+        L"-v", L"error", L"-protocol_whitelist", L"file,crypto,data", L"-i", L"C:/media/a.mkv",
+        L"-itsoffset", L"1", L"-i", L"https://example.invalid/b",
+        L"-f", L"lavfi", L"-i", L"testsrc2", L"-f", L"rawvideo", L"-i", L"pipe:0",
+        L"-protocol_whitelist", L"file", L"-i", L"C:/media/c.mkv",
+        L"-protocol_whitelist", L"file,crypto,data", L"-i", L"C:/media/d.mkv", L"out.mkv"};
+    CHECK(GuardLocalInputs(arguments) == expected);
+    CHECK(GuardLocalInputs({L"-version"}) == std::vector<std::wstring>{L"-version"});
 }
 
 // P1.27. A YouTube open, seek or reload builds its renderer while the
@@ -14380,6 +14411,10 @@ void player_command_line_takes_the_output_box_and_the_last_file_test()
     CHECK_EQ(64u, tiny.maxWidth);
     CHECK_EQ(64u, tiny.maxHeight);
     CHECK(tiny.outputExplicit);
+    // P1.33: and above D3D12's texture limit is that limit.
+    const auto huge = Parse({L"--output", L"99999x2147483647"});
+    CHECK_EQ(16384u, huge.maxWidth);
+    CHECK_EQ(16384u, huge.maxHeight);
     // A value without a cross is consumed and ignored, so it is never taken
     // for the file to open; a trailing --output with no value is ignored too.
     const auto noCross = Parse({L"--output", L"1080", L"--output"});
@@ -15300,6 +15335,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_track_that_starts_late_is_led_with_silence_test),
     TEST_CASE(video_decoder_swap_keeps_the_frames_the_candidate_read_ahead_test),
     TEST_CASE(every_child_spawn_names_the_handles_it_inherits_test),
+    TEST_CASE(local_inputs_reach_files_only_test),
     TEST_CASE(audio_restarts_at_a_paused_seek_rather_than_the_last_clock_reading_test),
     TEST_CASE(audio_helper_stderr_keeps_a_bounded_tail_and_reports_only_bad_exits_test),
     TEST_CASE(audio_child_stderr_is_drained_and_logged_when_it_fails_test),

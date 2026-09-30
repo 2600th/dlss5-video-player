@@ -332,3 +332,27 @@ inline std::wstring ExportDisplayAspect(uint32_t width, uint32_t height, double 
     if (!bestNum || !bestDen) return {};
     return std::to_wstring(bestNum) + L":" + std::to_wstring(bestDen);
 }
+
+// The process that reserved an export staging file, from its name:
+// `.dlss-export-<pid>-<tick>-<sequence>.tmp` (ReserveExportStaging). Empty for
+// any other name, so nothing the user put in the folder is ever taken for one.
+inline std::optional<uint32_t> ExportStagingOwner(std::wstring_view name)
+{
+    constexpr std::wstring_view prefix = L".dlss-export-", suffix = L".tmp";
+    if (name.size() <= prefix.size() + suffix.size() || !name.starts_with(prefix) || !name.ends_with(suffix))
+        return std::nullopt;
+    const std::wstring_view body = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+    uint64_t fields[3]{};
+    size_t field = 0, digits = 0;
+    for (const wchar_t c : body) {
+        if (c == L'-') {
+            if (!digits || ++field == 3) return std::nullopt;
+            digits = 0;
+            continue;
+        }
+        if (c < L'0' || c > L'9' || ++digits > 20) return std::nullopt;
+        fields[field] = fields[field] * 10 + uint64_t(c - L'0');
+    }
+    if (field != 2 || !digits || !fields[0] || fields[0] > 0xFFFFFFFFull) return std::nullopt;
+    return uint32_t(fields[0]);
+}

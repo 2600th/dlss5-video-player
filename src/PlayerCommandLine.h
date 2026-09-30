@@ -13,6 +13,9 @@
 // is decided here.
 namespace player_command_line {
 
+// D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION.
+inline constexpr int kMaxOutputSide = 16384;
+
 struct Parsed {
     // The output box a neural render is fitted into; `--output WxH`.
     uint32_t maxWidth = 3840, maxHeight = 2160;
@@ -40,13 +43,16 @@ inline Parsed Parse(const std::vector<std::wstring>& arguments)
             continue;
         } else if (argument == L"--output" && index + 1 < arguments.size()) {
             // A value without an `x` is taken and ignored; either side below
-            // 64, or not a number, is 64.
+            // 64, or not a number, is 64, and either side above 16384 - the
+            // largest texture D3D12 allocates, and the decoder's own ceiling -
+            // is 16384 (P1.33): an unclamped box asked the renderer for
+            // swap-chain and target sizes it could only fail to create.
             const std::wstring value = arguments[++index];
             auto cross = value.find(L'x');
             if (cross == std::wstring::npos) cross = value.find(L'X');
             if (cross != std::wstring::npos) {
-                parsed.maxWidth = static_cast<uint32_t>(std::max(64, _wtoi(value.substr(0, cross).c_str())));
-                parsed.maxHeight = static_cast<uint32_t>(std::max(64, _wtoi(value.substr(cross + 1).c_str())));
+                parsed.maxWidth = static_cast<uint32_t>(std::clamp(_wtoi(value.substr(0, cross).c_str()), 64, kMaxOutputSide));
+                parsed.maxHeight = static_cast<uint32_t>(std::clamp(_wtoi(value.substr(cross + 1).c_str()), 64, kMaxOutputSide));
                 parsed.outputExplicit = true;
             }
         } else if (argument == L"--quality") {

@@ -747,9 +747,58 @@ void receipt_carries_the_cold_start_and_keeps_absent_phases_absent_test()
 
 } // namespace
 
+// P1.33. The runtime-lock hash was memoised on path, size and write time, so
+// a same-size file swapped in with the old write time put back passed for the
+// rest of the process. Both kinds of swap are hashed again: a rewrite in place
+// (which moves the change time no user-mode call can set) and a file renamed
+// over the original (a different file on the volume).
+void hash_memo_sees_a_same_size_swap_with_the_write_time_restored_test()
+{
+    const auto directory = std::filesystem::temp_directory_path() /
+        (L"RuntimeLockTests-memo-" + std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::create_directories(directory);
+    const auto path = directory / L"nvngx_dlssnr.dll";
+    const auto restoreWriteTime = [&](const FILETIME& time) {
+        const HANDLE file = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(file != INVALID_HANDLE_VALUE);
+        CHECK(SetFileTime(file, nullptr, nullptr, &time) != FALSE);
+        CloseHandle(file);
+    };
+    const auto writeTime = [&] {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        CHECK(GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) != FALSE);
+        return data.ftLastWriteTime;
+    };
+    WriteFile(path, "locked runtime bytes");
+    const FILETIME original = writeTime();
+    const auto first = Sha256FileCached(path, {});
+    CHECK(first && *first == Hex("locked runtime bytes"));
+
+    // In place: same size, write time put back.
+    WriteFile(path, "planted runtime byte");
+    restoreWriteTime(original);
+    const auto rewritten = Sha256FileCached(path, {});
+    CHECK(rewritten && *rewritten == Hex("planted runtime byte"));
+
+    // Renamed over it: same size, the write time of the file it replaced.
+    const auto staged = directory / L"staged.dll";
+    WriteFile(staged, "another runtime byte");
+    CHECK(MoveFileExW(staged.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE);
+    restoreWriteTime(original);
+    const auto replaced = Sha256FileCached(path, {});
+    CHECK(replaced && *replaced == Hex("another runtime byte"));
+
+    // Nothing changed: served from the memo, and the same answer.
+    CHECK(Sha256FileCached(path, {}) == replaced);
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+}
+
 int wmain()
 {
     parse_accepts_the_lock_shape_and_normalizes_hashes_test();
+    hash_memo_sees_a_same_size_swap_with_the_write_time_restored_test();
     parse_rejects_malformed_documents_test();
     parse_rejects_missing_fields_and_wrong_schema_test();
     embedded_lock_parses_and_names_the_locked_runtime_files_test();

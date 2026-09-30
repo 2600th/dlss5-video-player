@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // Where ffmpeg.exe and ffprobe.exe are taken from. Three lookups had drifted:
 // the video decoder guarded the neural-runtime package and searched four
@@ -126,6 +127,57 @@ inline std::filesystem::path FindTool(const std::filesystem::path& explicitDirec
 {
     return FindToolIn(explicitDirectory,
                       platform_paths::ModuleDirectory().value_or(std::filesystem::path{}), name, fallback);
+}
+
+// The protocols a local input may reach (P1.33). ffmpeg picks the demuxer by
+// content, not by name, so a local HLS or concat playlist - or one named .mp4 -
+// had every protocol ffmpeg was built with, and a playlist could make the
+// player fetch http:// addresses nobody chose. A local file needs only the
+// file protocol; crypto is AES-128 HLS over it, and data is inline segments.
+// Network inputs keep their own, stricter list (https,tls,tcp).
+inline constexpr std::wstring_view kLocalProtocolWhitelist = L"file,crypto,data";
+
+inline bool IsNetworkUrl(std::wstring_view input)
+{
+    const auto starts = [&](std::wstring_view prefix) {
+        return input.size() >= prefix.size() && _wcsnicmp(input.data(), prefix.data(), prefix.size()) == 0;
+    };
+    return starts(L"https://") || starts(L"http://");
+}
+
+// "-protocol_whitelist file,crypto,data " for a local input, empty for a URL.
+inline std::wstring LocalInputOptions(std::wstring_view input)
+{
+    if (IsNetworkUrl(input)) return {};
+    return L"-protocol_whitelist " + std::wstring(kLocalProtocolWhitelist) + L" ";
+}
+
+// The same for an argument vector: each `-i` of a local path that no
+// whitelist precedes gets the local one. Pipes and lavfi graphs are not paths.
+inline std::vector<std::wstring> GuardLocalInputs(const std::vector<std::wstring>& arguments)
+{
+    std::vector<std::wstring> guarded;
+    guarded.reserve(arguments.size() + 4);
+    bool listed = false;
+    std::wstring format;
+    for (size_t index = 0; index < arguments.size(); ++index) {
+        const std::wstring& argument = arguments[index];
+        if (argument == L"-protocol_whitelist") listed = true;
+        if (argument == L"-f" && index + 1 < arguments.size()) format = arguments[index + 1];
+        if (argument == L"-i" && index + 1 < arguments.size()) {
+            const std::wstring& input = arguments[index + 1];
+            const bool path = !IsNetworkUrl(input) && input.rfind(L"pipe:", 0) != 0 && input != L"-";
+            if (path && !listed && format != L"lavfi")
+                guarded.insert(guarded.end(), {L"-protocol_whitelist", std::wstring(kLocalProtocolWhitelist)});
+            guarded.insert(guarded.end(), {argument, input});
+            listed = false;
+            format.clear();
+            ++index;
+            continue;
+        }
+        guarded.push_back(argument);
+    }
+    return guarded;
 }
 
 } // namespace media_tools

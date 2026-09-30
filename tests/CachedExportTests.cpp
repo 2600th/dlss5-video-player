@@ -1,5 +1,6 @@
 #include "ExportPipeline.h"
 #include "MediaPipeline.h"
+#include "MediaTools.h"
 #include "NeuralSegmentIndex.h"
 #include "RuntimePolicy.h"
 #include "SubtitleOverlay.h"
@@ -190,8 +191,8 @@ void SavedExportStreamArgumentTests()
             CHECK(mapped < IndexOf(arguments, L"-map_metadata"));
             CHECK_EQ(std::wstring(L"-map"), arguments[mapped - 1]);
             const std::wstring specifier = std::to_wstring(output++);
-            // MP4 audio is AAC at 192k whatever it was, as "Save converted video" has always written it.
-            const std::wstring codec = mp4 && stream.type == "audio" ? L"aac"
+            // Audio MP4 holds is copied; only the rest becomes AAC at 192k (P1.33).
+            const std::wstring codec = action == ExportStreamAction::EncodeAac ? L"aac"
                 : action == ExportStreamAction::ToMovText ? L"mov_text"
                 : action == ExportStreamAction::ToSubrip ? L"srt" : L"copy";
             CHECK_EQ(codec, at(arguments, L"-c:" + specifier));
@@ -212,13 +213,17 @@ void SavedExportStreamArgumentTests()
     CHECK_EQ(std::wstring(L"srt"), at(mkv, L"-c:3"));            // mov_text
     const auto mp4 = BuildCachedExportArguments({neural, source, L"C:/out/clip.mp4"}, staging, streams, false);
     for (const auto* left : {L"1:0", L"1:2", L"1:6", L"1:7", L"1:8", L"1:9"}) CHECK_EQ(mp4.size(), IndexOf(mp4, left));
-    CHECK_EQ(std::wstring(L"aac"), at(mp4, L"-c:1"));             // aac, encoded as always
+    CHECK_EQ(std::wstring(L"copy"), at(mp4, L"-c:1"));            // aac, copied as MP4 holds it
     CHECK_EQ(std::wstring(L"copy"), at(mp4, L"-c:2"));            // mov_text
     CHECK_EQ(std::wstring(L"aac"), at(mp4, L"-c:3"));             // pcm_s16le
     CHECK_EQ(std::wstring(L"mov_text"), at(mp4, L"-c:4"));        // subrip
     CHECK_EQ(mp4.size(), IndexOf(mp4, L"-c:5"));
     // One mechanism: an MKV of the render is the stage export's MKV, argument for argument.
     CHECK(mkv == BuildStageExportMuxArguments({neural, source, L"C:/out/clip.mkv"}, staging, "hevc", streams));
+    // And the two exports' MP4 audio is one rule: the stage export carries the
+    // same audio options (its video is copied where this one encodes).
+    const auto stageMp4 = BuildStageExportMuxArguments({neural, source, L"C:/out/clip.mp4"}, staging, "h264", streams);
+    for (const auto* option : {L"-c:1", L"-c:3", L"-b:3"}) CHECK_EQ(at(stageMp4, option), at(mp4, option));
     // Nothing beside the video still makes a valid command.
     const auto bare = BuildCachedExportArguments({neural, source, L"C:/out/clip.mp4"}, staging, {}, false);
     CHECK_EQ(std::ptrdiff_t{1}, std::count(bare.begin(), bare.end(), L"-map"));
@@ -2109,6 +2114,18 @@ void AnamorphicExportKeepsItsDisplayAspectTest(const std::filesystem::path& help
         L"-c:v", L"libx265", L"-x265-params", L"log-level=error", L"-pix_fmt", L"yuv420p", carrier.wstring()}, log));
     if (!std::filesystem::exists(dvd) || !std::filesystem::exists(carrier)) return;
 
+    // P1.33: a crashed export's staging file is swept by the next export into
+    // the same folder, and only when its owner is gone. Process ids are
+    // multiples of four below 2^32, and this one names no process.
+    CHECK(ExportStagingOwner(L".dlss-export-1234-99-0.tmp") == std::optional<uint32_t>(1234));
+    CHECK(!ExportStagingOwner(L".dlss-export-1234-99.tmp"));
+    CHECK(!ExportStagingOwner(L".dlss-export-12a4-99-0.tmp"));
+    CHECK(!ExportStagingOwner(L"clip.dlss-export-1-2-3.tmp"));
+    CHECK(!ExportStagingOwner(L".dlss-export-0-1-2.tmp"));
+    const auto abandoned = fixture.path / L".dlss-export-4294967292-1-0.tmp";
+    const auto ours = fixture.path / (L".dlss-export-" + std::to_wstring(GetCurrentProcessId()) + L"-1-0.tmp");
+    const auto unrelated = fixture.path / L"notes.dlss-export-.tmp";
+    for (const auto& file : {abandoned, ours, unrelated}) Write(file, "staging");
 
     VideoDecoder decoder;
     CHECK(decoder.OpenMetadata(dvd.wstring()));
@@ -2134,6 +2151,38 @@ void AnamorphicExportKeepsItsDisplayAspectTest(const std::filesystem::path& help
         CHECK(CachedVideoExporter(helpers).Run(request, {}).ok);
         CHECK_EQ(std::string("sample_aspect_ratio=32:27\ndisplay_aspect_ratio=16:9\n"), shape(fixture.path / name));
     }
+    CHECK(!std::filesystem::exists(abandoned));
+    CHECK(std::filesystem::exists(ours));
+    CHECK(std::filesystem::exists(unrelated));
+}
+
+// P1.33, against the pinned FFmpeg: the local whitelist lets a local playlist
+// play its own segments and refuses one that reaches for the network.
+// (This FFmpeg already refuses HLS behind another extension - "Not detecting
+// m3u8/hls with non standard extension" - so the playlist is named for it.)
+void LocalPlaylistStaysOnDiskTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto log = fixture.path / L"playlist.log";
+    const auto segment = fixture.path / L"segment.ts";
+    CHECK(RunTool(helpers / L"ffmpeg.exe", {L"-v", L"error", L"-nostdin", L"-y", L"-f", L"lavfi", L"-i",
+        L"testsrc2=s=64x48:r=10:d=0.5", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", segment.wstring()}, log));
+    const auto playlist = [&](const wchar_t* name, std::string_view uri) {
+        const auto path = fixture.path / name;
+        Write(path, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:0.5,\n" + std::string(uri) +
+                    "\n#EXT-X-ENDLIST\n");
+        return path;
+    };
+    const auto local = playlist(L"local.m3u8", "segment.ts");
+    const auto remote = playlist(L"remote.m3u8", "http://127.0.0.1:9/segment.ts");
+    const auto probe = [&](const std::filesystem::path& file) {
+        std::vector<std::wstring> arguments{L"-v", L"error", L"-show_entries", L"stream=codec_type",
+            L"-of", L"csv=p=0", L"-i", file.wstring()};
+        return RunTool(helpers / L"ffprobe.exe", media_tools::GuardLocalInputs(arguments), log);
+    };
+    CHECK(probe(local));
+    CHECK(!probe(remote));
+    CHECK(Read(log).find("not on whitelist") != std::string::npos);
 }
 
 int wmain(int argc, wchar_t** argv)
@@ -2175,6 +2224,7 @@ int wmain(int argc, wchar_t** argv)
     EmbeddedSubtitleTracksAreListedAndDrawnTest(helpers);
     QualityLadderRoundTripTest(helpers);
     AnamorphicExportKeepsItsDisplayAspectTest(helpers);
+    LocalPlaylistStaysOnDiskTest(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";
     return 0;

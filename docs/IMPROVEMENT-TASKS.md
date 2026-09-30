@@ -62,7 +62,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
 | [P1.30](#p130) | Release tags can still be moved (ruleset; owner) | S | Release | 🧪 |
-| [P1.33](#p133) | Small hardening and doc drift (checklist) | S | All | 🔍 |
 | [P1.34](#p134) | FFmpeg source availability and bundled-library notices | S-M | Release | |
 | **P2** | **High-value features** | | | |
 | | _Comparison and review_ | | | |
@@ -122,44 +121,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
   updates and deletions (repository settings > Rules, or
   `gh api repos/2600th/dlss5-video-player/rulesets` with `target: tag`). An
   admin action, not a code change.
-
-<a id="p133"></a>
-### P1.33 · Small hardening and doc drift
-
-`S` each · **All** · 🔍
-
-- [ ] The detached cache-eviction thread can outlive static destruction at
-      exit (`main.cpp:2876-2912` → `NeuralPreflight.cpp:604-607`). Two audits
-      flagged it.
-- [ ] The runtime-lock hash is memoised on path, size and write time
-      (`RuntimeLock.cpp:163`, `NeuralCache.cpp:877-909`): a same-size,
-      same-timestamp swap passes for the rest of the process.
-- [ ] A source path over 2048 characters is refused by the resident helper
-      with no single-shot fallback (`NeuralWorker.cpp:1651-1654`).
-- [ ] `--fps` is sent at 6 decimals (`NeuralWorker.cpp:1180`).
-- [ ] `--output WxH` has no upper clamp (`PlayerCommandLine.h:48-49`).
-- [ ] "Save converted video" does not re-count the output's frames as
-      `MuxStageExport` does.
-- [ ] `.dlss-export-*.tmp` files are left beside the output after a crash.
-- [ ] Local HLS and concat playlists open without a `-protocol_whitelist`.
-- [ ] `PickExportFile` offers all five formats whatever the source is.
-- [ ] `tools/fetch_ui_assets.ps1:62` calls `tar.exe` without a full path.
-- [ ] The release workflow does not run the ASan/analyze `quality` job.
-- [ ] `SECURITY.md:23` still says "RTX 40 compatibility modification"; the
-      locked runtime is the universal SF-v2 build.
-- [ ] "Save converted video" returns a note when it leaves subtitles out of
-      an MP4, but the success dialog never shows it (the stage export only
-      logs its note).
-- [ ] Whole-file MP4 export still re-encodes every audio track to AAC 192k;
-      the stage export copies audio MP4 can hold (`AppendSourceStreams`,
-      `encodeAudio`). One argument to align them.
-- [ ] A Super Resolution-only stage export is not pre-checked against the
-      runtime lock (the helper still refuses stray modules at startup).
-- [ ] The Media Foundation packed-row fallback walks a negative-stride
-      (bottom-up) frame top-down (`MediaFoundationSamplePolicy.h`); no fixture
-      proves which is right.
-- [ ] Nothing tests that the export dialog wires `releaseResidentHelper`;
-      the ordering is tested through `RunStageExport` only.
 
 ---
 

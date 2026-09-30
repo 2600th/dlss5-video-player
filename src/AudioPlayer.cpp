@@ -179,6 +179,7 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
     std::wstring inputOptions;
     if (_wcsnicmp(videoPath.c_str(), L"https://", 8) == 0 || _wcsnicmp(videoPath.c_str(), L"http://", 7) == 0)
         inputOptions = L"-tls_verify 1 -protocol_whitelist https,tls,tcp ";
+    else inputOptions = media_tools::LocalInputOptions(videoPath);
 
     std::string text;
     audio_stderr::Tail errors;
@@ -404,6 +405,7 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     // the same input options VideoDecoder and MediaPipeline put ahead of theirs.
     if (_wcsnicmp(m_path.c_str(), L"https://", 8) == 0 || _wcsnicmp(m_path.c_str(), L"http://", 7) == 0)
         args << L"-tls_verify 1 -protocol_whitelist https,tls,tcp ";
+    else args << media_tools::LocalInputOptions(m_path);
     // Matching the endpoint's mix format means neither ffmpeg nor the Windows
     // mixer resamples or requantizes: the samples the decoder produces are the
     // samples the endpoint is handed. With the device disabled there is no

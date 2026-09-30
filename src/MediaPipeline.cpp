@@ -107,9 +107,35 @@ std::chrono::milliseconds MediaDeadline(double mediaSeconds, std::chrono::minute
 // into and then renamed onto its final name, or an empty path when none could
 // be created. Beside the output rather than in a temporary folder, so the
 // final rename never crosses a volume.
+// A player that crashed mid-export left its staging file beside the user's
+// output, named for its process and never removed (P1.33). Only a file whose
+// owner is certainly gone is taken: its process id names no running process.
+// A live process under that id - the owner, or another one reusing the number
+// - keeps its file, and so does anything this process could still be writing.
+void SweepAbandonedExportStaging(const std::filesystem::path& folder)
+{
+    std::error_code error;
+    std::filesystem::directory_iterator entries(folder, error);
+    if (error) return;
+    for (const auto& entry : entries) {
+        const auto owner = ExportStagingOwner(entry.path().filename().wstring());
+        if (!owner || *owner == GetCurrentProcessId()) continue;
+        if (const HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, *owner)) {
+            const bool exited = WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+            CloseHandle(process);
+            if (!exited) continue;
+        } else if (GetLastError() != ERROR_INVALID_PARAMETER) {
+            continue;  // Access denied: a process runs under that id.
+        }
+        std::error_code ignored;
+        if (entry.is_regular_file(ignored)) std::filesystem::remove(entry.path(), ignored);
+    }
+}
+
 std::filesystem::path ReserveExportStaging(const std::filesystem::path& folder)
 {
     static std::atomic_uint64_t sequence{};
+    SweepAbandonedExportStaging(folder);
     for (unsigned attempt = 0; attempt < 100; ++attempt) {
         const auto candidate = folder / (L".dlss-export-" +
             std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) +
@@ -166,7 +192,8 @@ std::wstring CommandLine(const std::filesystem::path& executable,
                          const std::vector<std::wstring>& arguments)
 {
     std::wstring result = QuoteArgument(executable.wstring());
-    for (const auto& argument : arguments) {
+    // Every local input ffmpeg or ffprobe is handed here reaches files only.
+    for (const auto& argument : media_tools::GuardLocalInputs(arguments)) {
         result.push_back(L' ');
         result += QuoteArgument(argument);
     }
@@ -772,10 +799,13 @@ std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& 
         if (request.sourceStartSeconds > 0.0)
             arguments.insert(arguments.end(), {L"-itsoffset", FrameRateText(request.sourceStartSeconds)});
         arguments.insert(arguments.end(), {L"-i", request.sourceMedia.wstring(), L"-map", L"0:v:0"});
-        // MP4 audio is AAC at 192k whatever it was, as it always has been here.
+        // Audio MP4 can hold is copied as it stands, and only the rest is
+        // encoded to AAC - the stage export's rule (P1.33). Every MP4 track
+        // used to be re-encoded at 192k, a generation of loss on audio the
+        // container could have carried untouched.
         std::vector<std::wstring> codecs;
         AppendSourceStreams(format.mkv ? ExportContainer::Matroska : ExportContainer::Mp4, sourceStreams,
-                            format.mp4, arguments, codecs);
+                            false, arguments, codecs);
         arguments.insert(arguments.end(), {L"-map_metadata", L"1", L"-map_chapters", L"1"});
         if (format.mkv) arguments.insert(arguments.end(), {L"-c:v", L"copy"});
         else if (mp4Path == CachedVideoMp4Path::CopyHevc) {
@@ -1104,6 +1134,20 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         return {false, MaterializeError::ProcessFailed, std::move(detail)};
     }
     if (stop.stop_requested()) return cancelled();
+    // Read back off the file before it is published, as MuxStageExport does
+    // (P1.33): a copy that lost packets still leaves its video track behind,
+    // and the file reads as a finished video until it is played. A GIF is
+    // resampled to its own frame rate and a picture is one frame, so only the
+    // two video containers are held to the render's count.
+    if (format.mkv || format.mp4) {
+        const ProbeResult renderedVideo = ProbeMedia(helperDirectory_, neuralVideo, stop);
+        const ProbeResult writtenVideo = ProbeMedia(helperDirectory_, staging.path, stop);
+        if (stop.stop_requested()) return cancelled();
+        if (!renderedVideo.ok || !writtenVideo.ok || writtenVideo.frameCount != renderedVideo.frameCount)
+            return {false, MaterializeError::ProcessFailed,
+                L"The export carries " + std::to_wstring(writtenVideo.frameCount) + L" of the " +
+                std::to_wstring(renderedVideo.frameCount) + L" rendered frames."};
+    }
     if (!MoveFileExW(staging.path.c_str(), output.c_str(), MOVEFILE_WRITE_THROUGH))
         return {false, MaterializeError::ProcessFailed,
             L"The completed export could not be saved. Check folder access and choose a filename that does not already exist."};

@@ -29,11 +29,22 @@ decisions that still shape the code are in
   same situation is gone.
 - **A live render started about 30 seconds after the last one no longer
   fails.** The background renderer could accept the job just as it was closing.
+- **A source path longer than 2048 characters renders** instead of being
+  refused.
+- **Save converted video** offers only the formats the source can be saved as,
+  copies MP4 audio it can carry instead of re-encoding it, checks the finished
+  file has every frame, and says when it had to leave subtitles out; so does
+  Export with DLSS stages.
+- **Temporary export files left by a crash are cleaned up** the next time you
+  export to that folder.
+- **Some Media Foundation videos no longer play upside down.**
 
 ### Security
 
 - The player loads its Windows system libraries from System32 only, so a
   planted `dxgi.dll` or similar beside it is never loaded.
+- A local playlist file (HLS or concat) can only read local files; it can no
+  longer make the player fetch network addresses.
 - Helper processes inherit only the handles they are meant to have.
 
 ### Release
@@ -41,7 +52,7 @@ decisions that still shape the code are in
 - Every package names the commit it was built from, and packaging refuses
   uncommitted changes or a release not built from its tag. The complete
   package also requires a passing run of the GPU and audio test suites on the
-  same build.
+  same build, and the release workflow runs code analysis and AddressSanitizer.
 
 ## 0.26.2 - 2026-09-26
 

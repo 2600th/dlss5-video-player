@@ -60,7 +60,10 @@ static constexpr size_t kCaptureLimit = 1024 * 1024;
 static std::wstring NetworkInputOptions(MediaSourceKind kind, const std::wstring& path) {
     const bool networkUrl = _wcsnicmp(path.c_str(), L"https://", 8) == 0 ||
                             _wcsnicmp(path.c_str(), L"http://", 7) == 0;
-    return (kind == MediaSourceKind::YouTube && networkUrl)
+    // A local path reaches files only (media_tools::LocalInputOptions): a
+    // playlist on disk is demuxed by content whatever it is called.
+    if (!networkUrl) return media_tools::LocalInputOptions(path);
+    return kind == MediaSourceKind::YouTube
         ? std::wstring(L"-tls_verify 1 -protocol_whitelist https,tls,tcp ") : std::wstring();
 }
 
