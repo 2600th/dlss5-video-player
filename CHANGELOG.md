@@ -17,6 +17,9 @@ decisions that still shape the code are in
 - **A crash leaves a readable dump more often.** When the full crash dump
   cannot be written, the player now writes a smaller one instead of none, and
   logs why the full one failed.
+- **Audio that starts after the video no longer plays early.** A file whose
+  sound begins half a second in played it half a second early until the first
+  seek.
 - **A live render started about 30 seconds after the last one no longer
   fails.** The background renderer could accept the job just as it was closing.
 

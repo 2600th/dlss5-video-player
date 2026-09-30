@@ -1,6 +1,9 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -30,6 +33,9 @@ struct Track {
     int channels = 0;
     // What passthrough needs to choose the IEC 61937 rate; 0 when unknown.
     int sampleRate = 0;
+    // The stream's start_time, on the container's clock; empty when ffprobe
+    // gave none (N/A, or a probe that did not ask).
+    std::optional<double> startSeconds;
     bool isDefault = false;
     // The four dispositions that mean "this is not the feature audio".
     bool comment = false;
@@ -136,6 +142,24 @@ inline std::string ChannelName(int channels)
 }
 
 } // namespace detail
+
+// Silence owed ahead of a track that starts after the container does (P1.25).
+//
+// The video's clock counts from the container's start_time. Raw PCM out of
+// ffmpeg has no timestamps, so the first sample it writes is the track's first
+// sample wherever that sits: an MKV with video at 0.0 s and audio at 0.5 s
+// played the audio half a second early until the first seek past 0.5 s, and a
+// seek to 0.2 s played it 0.3 s early. What is owed is the part of the gap the
+// seek has not already passed. Nothing is owed when either time is unknown,
+// or when the gap is under a millisecond - timestamp rounding, not an offset.
+inline double LeadingSilenceSeconds(std::optional<double> trackStart, std::optional<double> containerStart,
+                                    double seekSeconds)
+{
+    if (!trackStart || !containerStart) return 0.0;
+    if (!std::isfinite(*trackStart) || !std::isfinite(*containerStart) || !std::isfinite(seekSeconds)) return 0.0;
+    const double owed = (*trackStart - *containerStart) - std::max(0.0, seekSeconds);
+    return owed >= 0.001 ? owed : 0.0;
+}
 
 // What the menu shows. Enough to tell two English tracks apart, which is the
 // whole job: a list of four entries all reading "English" is no better than

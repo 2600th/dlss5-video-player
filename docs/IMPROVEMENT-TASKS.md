@@ -61,7 +61,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | **P0** | **Fix before the next release** | | | |
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
-| [P1.25](#p125) | Audio that starts after the video plays early | S | Player | 🧪 |
 | [P1.26](#p126) | Anamorphic sources export stretched | S | Pipeline | 🔍 |
 | [P1.27](#p127) | YouTube open, seek or reload drops 1-4 frames | S | Player | 🔍 |
 | [P1.28](#p128) | Inherited handles can hang an export and the UI | M | Pipeline | 🔍 |
@@ -113,20 +112,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 ---
 
 # P1 — Next
-
-<a id="p125"></a>
-### P1.25 · Audio that starts after the video plays early
-
-`S` · **Player** · 🧪 · _0.5 s early, reproduced_
-
-- **Problem.** With no seek there is no `-ss`, and raw `f32le` output drops
-  the audio stream's start offset while the clock treats byte 0 as the seek
-  base. Audio runs ahead by the offset until the first seek.
-- **Where.** `AudioPlayer.cpp:344, 361-367`. The repo's own test notes it:
-  `tests/CachedExportTests.cpp:733-737`.
-- **Fix.** `-af aresample=async=1:first_pts=0` with `-copyts`, or shift the
-  seek base by each stream's `start_time`.
-- **Test.** An MKV with video at 0.0 s and audio at 0.5 s.
 
 <a id="p126"></a>
 ### P1.26 · Anamorphic sources export stretched

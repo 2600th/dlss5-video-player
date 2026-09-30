@@ -10786,6 +10786,15 @@ int run_fake_media_child(int argc,wchar_t* argv[])
                      <<"duration=5\n"<<color("bt709","tv","bt709","bt709")<<std::flush;
             return 0;
         }
+        // A track that starts after the container: the MKV with video at
+        // 0.0 s and audio at 0.5 s that played its audio early (P1.25).
+        if(all.find(L"lateaudio_")!=std::wstring::npos){
+            if(all.find(L"stream_disposition")==std::wstring::npos)return 0;
+            std::cout<<"[STREAM]\nindex=1\ncodec_name=aac\nchannels=2\nsample_rate=48000\n"
+                     <<(all.find(L"lateaudio_unknown")!=std::wstring::npos?"start_time=N/A\n":"start_time=1.500000\n")
+                     <<"DISPOSITION:default=1\n[/STREAM]\n[FORMAT]\nstart_time=1.000000\n[/FORMAT]\n"<<std::flush;
+            return 0;
+        }
         // Audio track enumeration. Two English tracks with the commentary
         // listed first and flagged default, which is the disc-rip layout that
         // made the old first-stream rule play the wrong one.
@@ -12987,6 +12996,42 @@ void audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test()
     plain->Stop();
 }
 
+// P1.25. Raw PCM carries no timestamps, so a track that starts 0.5 s after
+// the container played 0.5 s early until a seek passed its start. The owed
+// silence is the part of the gap a start has not already passed, measured on
+// the container's clock rather than from zero (this one starts at 1.0 s).
+void audio_track_that_starts_late_is_led_with_silence_test()
+{
+    using audio_track::LeadingSilenceSeconds;
+    CHECK_EQ(0.5, LeadingSilenceSeconds(0.5, 0.0, 0.0));
+    CHECK(std::abs(LeadingSilenceSeconds(0.5, 0.0, 0.2) - 0.3) < 1e-9);
+    CHECK_EQ(0.0, LeadingSilenceSeconds(0.5, 0.0, 0.5));
+    CHECK_EQ(0.0, LeadingSilenceSeconds(0.5, 0.0, 10.0));
+    // On the container's clock: an MPEG-TS whose clock starts at 1.4 s.
+    CHECK(std::abs(LeadingSilenceSeconds(1.423, 1.4, 0.0) - 0.023) < 1e-9);
+    // Unknown, rounding, and a track ahead of the container owe nothing.
+    CHECK_EQ(0.0, LeadingSilenceSeconds(std::nullopt, 0.0, 0.0));
+    CHECK_EQ(0.0, LeadingSilenceSeconds(0.5, std::nullopt, 0.0));
+    CHECK_EQ(0.0, LeadingSilenceSeconds(0.0004, 0.0, 0.0));
+    CHECK_EQ(0.0, LeadingSilenceSeconds(0.0, 0.5, 0.0));
+    CHECK_EQ(0.0, LeadingSilenceSeconds(std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0));
+
+    // Through the probe the player runs: stream and container start_time.
+    MediaFixture fixture;
+    auto audio = AudioPlayerTestAccess::Create(fixture.directory);
+    CHECK(audio->Start(L"lateaudio_half", 0.0, AudioStartState::Paused));
+    CHECK_EQ(0.5, audio->LeadingSilenceSeconds());
+    CHECK(audio->Seek(0.2));
+    CHECK(std::abs(audio->LeadingSilenceSeconds() - 0.3) < 1e-9);
+    CHECK(audio->Seek(3.0));
+    CHECK_EQ(0.0, audio->LeadingSilenceSeconds());
+    audio->Stop();
+    auto unknown = AudioPlayerTestAccess::Create(fixture.directory);
+    CHECK(unknown->Start(L"lateaudio_unknown", 0.0, AudioStartState::Paused));
+    CHECK_EQ(0.0, unknown->LeadingSilenceSeconds());
+    unknown->Stop();
+}
+
 // A track change and a device restart both respawn the child at the last
 // position the clock reported - and the clock is not read while paused. So
 // play to 60 s, pause, seek to 10 s, then pick another track: audio came back
@@ -15171,6 +15216,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_track_selection_skips_the_tracks_nobody_asked_for_test),
     TEST_CASE(audio_track_labels_say_what_distinguishes_the_tracks_test),
     TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
+    TEST_CASE(audio_track_that_starts_late_is_led_with_silence_test),
     TEST_CASE(audio_restarts_at_a_paused_seek_rather_than_the_last_clock_reading_test),
     TEST_CASE(audio_helper_stderr_keeps_a_bounded_tail_and_reports_only_bad_exits_test),
     TEST_CASE(audio_child_stderr_is_drained_and_logged_when_it_fails_test),

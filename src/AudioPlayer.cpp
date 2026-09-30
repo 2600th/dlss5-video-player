@@ -11,7 +11,10 @@
 #include <algorithm>
 #include <iterator>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
+#include <cstdlib>
+#include <optional>
 #include <thread>
 
 namespace fs = std::filesystem;
@@ -150,6 +153,7 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
     m_tracksPath = videoPath;
     m_tracks.clear();
     m_probedTracks.clear();
+    m_containerStart.reset();
     m_tracksProbed = false;
     m_selectedTrack = 0;
 
@@ -166,8 +170,8 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
     audio_stderr::Tail errors;
     if (!CaptureHelperOutput(ffprobe,
             L"-v error -select_streams a "
-            L"-show_entries stream=index,codec_name,channels,sample_rate:stream_tags=language,title:"
-            L"stream_disposition=default,comment,visual_impaired,descriptions,hearing_impaired "
+            L"-show_entries stream=index,codec_name,channels,sample_rate,start_time:stream_tags=language,title:"
+            L"stream_disposition=default,comment,visual_impaired,descriptions,hearing_impaired:format=start_time "
             L"-of default=noprint_wrappers=0 " + inputOptions + L"-i " + Q(videoPath), text, errors)) {
         LOG("Audio: the track list could not be read; playing the first stream.");
         if (!errors.Empty()) LOG("Audio: ffprobe said: " << errors.Line());
@@ -179,19 +183,31 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
     // missing an optional tag would silently absorb the next one's.
     std::vector<audio_track::Track> tracks;
     audio_track::Track current;
-    bool inStream = false;
+    bool inStream = false, inFormat = false;
     std::istringstream lines(text);
     std::string line;
     const auto flag = [](const std::string& value) { return value == "1"; };
+    // "N/A", and anything else that is not wholly a number, is unknown.
+    const auto seconds = [](const std::string& value) -> std::optional<double> {
+        char* end = nullptr;
+        const double parsed = std::strtod(value.c_str(), &end);
+        if (value.empty() || end != value.c_str() + value.size() || !std::isfinite(parsed)) return std::nullopt;
+        return parsed;
+    };
+    std::optional<double> containerStart;
     while (std::getline(lines, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line == "[STREAM]") { current = {}; current.audioIndex = int(tracks.size()); inStream = true; continue; }
         if (line == "[/STREAM]") { if (inStream) tracks.push_back(current); inStream = false; continue; }
-        if (!inStream) continue;
+        if (line == "[FORMAT]") { inFormat = true; continue; }
+        if (line == "[/FORMAT]") { inFormat = false; continue; }
         const size_t equals = line.find('=');
         if (equals == std::string::npos) continue;
         const std::string key = line.substr(0, equals), value = line.substr(equals + 1);
+        if (inFormat) { if (key == "start_time") containerStart = seconds(value); continue; }
+        if (!inStream) continue;
         if (key == "codec_name") current.codec = value;
+        else if (key == "start_time") current.startSeconds = seconds(value);
         else if (key == "channels") { try { current.channels = std::stoi(value); } catch (...) {} }
         else if (key == "sample_rate") { try { current.sampleRate = std::stoi(value); } catch (...) {} }
         else if (key == "TAG:language") current.language = value;
@@ -204,6 +220,7 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
     }
 
     m_probedTracks = tracks;
+    m_containerStart = containerStart;
     m_tracksProbed = true;
     // One track needs no menu and no decision; the list stays empty so
     // everything downstream takes the path it always did.
@@ -277,6 +294,22 @@ bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, Audio
         // run the endpoint dry and advance its clock over silence.
         if(!reader->paused&&!reader->renderer->Start()){LOG("Audio: the endpoint refused to start.");AwaitEndpoint(false);return false;}
     }else m_passthroughStatus={};
+    // A track that starts after the container is owed silence up to its first
+    // sample, which the raw output does not carry (P1.25). It goes to the
+    // endpoint as zero frames ahead of the pipe - silence in PCM, null data in
+    // an IEC 61937 stream - so the clock counts it like any other frame. With
+    // no endpoint there is no clock to keep, and nothing is added.
+    m_leadingSilenceSec=0.0;
+    for(const auto& candidate:m_probedTracks)
+        if(candidate.audioIndex==m_selectedTrack){
+            m_leadingSilenceSec=audio_track::LeadingSilenceSeconds(candidate.startSeconds,m_containerStart,m_seekBaseSec);
+            break;
+        }
+    if(m_leadingSilenceSec>0.0){
+        if(reader->renderer)
+            reader->leadingSilenceFrames=uint64_t(std::llround(m_leadingSilenceSec*double(reader->renderer->CurrentFormat().sampleRate)));
+        LOG("Audio: the track starts "<<m_leadingSilenceSec<<" s after this start; leading it with silence.");
+    }
     if (!StartProcess(seekSeconds,reader,format,bitstream)) return false;
     m_reader=reader;
     try{m_thread=std::thread(&AudioPlayer::ReaderThread,reader);}catch(...){StopProcess(reader);m_reader.reset();throw;}
@@ -497,6 +530,14 @@ void AudioPlayer::ThreadMain(const std::shared_ptr<ReaderState>& state) {
                                             : size_t(kNoDeviceSliceBytes);
         chunk.assign(pending.begin(), pending.end());
         pending.clear();
+        // The silence owed ahead of a late-starting track, a slice at a time
+        // so an offset of minutes never sits in memory at once.
+        if (state->leadingSilenceFrames && chunk.size() < wantedBytes) {
+            const uint64_t room = (wantedBytes - chunk.size()) / bytesPerFrame;
+            const uint64_t frames = std::min<uint64_t>(room, state->leadingSilenceFrames);
+            chunk.resize(chunk.size() + size_t(frames) * bytesPerFrame, std::byte{0});
+            state->leadingSilenceFrames -= frames;
+        }
 
         bool ended = false;
         while (!state->stop && chunk.size() < wantedBytes) {

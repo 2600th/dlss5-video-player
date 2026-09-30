@@ -13,6 +13,7 @@
 #include <mutex>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 
 enum class AudioStartState {
@@ -67,6 +68,9 @@ public:
     double PositionSeconds() const;
     // Seek position the current helper process was started at.
     double SeekBaseSeconds() const { return m_seekBaseSec; }
+    // Silence this start put ahead of the track because it begins after the
+    // container does (P1.25); 0 when it does not, or the seek is past it.
+    double LeadingSilenceSeconds() const { return m_leadingSilenceSec; }
     // Buffers handed to the endpoint since Start; 0 when stopped.
     uint64_t SubmittedBuffers() const;
 
@@ -137,6 +141,9 @@ private:
         // Copied out of the renderer so the clock can be read without taking
         // its lock behind the UI thread.
         uint32_t sampleRate = 0;
+        // Zero frames still owed to the endpoint ahead of the pipe's first
+        // sample; read and written only by the reader thread once it runs.
+        uint64_t leadingSilenceFrames = 0;
         std::atomic<bool> stop{false};
         std::atomic<bool> paused{false};
         std::atomic<bool> hasAudioData{false};
@@ -176,6 +183,8 @@ private:
     // ffprobe answered for m_tracksPath, so an empty m_probedTracks means no
     // audio rather than no answer.
     bool m_tracksProbed = false;
+    // The container's start_time from the same probe; the clock's zero.
+    std::optional<double> m_containerStart;
     // The path m_tracks describes, so a seek reuses them and a new media load
     // re-enumerates.
     std::wstring m_tracksPath;
@@ -186,6 +195,7 @@ private:
     // RenderEndpointArrival.
     std::unique_ptr<RenderEndpointArrival> m_endpointArrival;
     double m_seekBaseSec = 0.0;
+    double m_leadingSilenceSec = 0.0;
     float m_volume = 1.0f;
     bool m_passthroughEnabled = false;
     audio_passthrough::Status m_passthroughStatus;
