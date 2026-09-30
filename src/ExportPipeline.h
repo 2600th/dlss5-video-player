@@ -2,6 +2,7 @@
 
 #include "UpscalingPolicy.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cwctype>
 #include <initializer_list>
@@ -292,4 +293,42 @@ inline ExportStreamAction ExportStreamActionFor(ExportContainer container, std::
 inline const wchar_t* ExportVideoTag(ExportContainer container, std::string_view videoCodec)
 {
     return container == ExportContainer::Mp4 && videoCodec == "hevc" ? L"hvc1" : L"";
+}
+
+// The display aspect an export states for its video, as FFmpeg's -aspect
+// takes it (P1.26). Empty for square pixels, which leaves the file exactly as
+// it always was. Every pass keeps the source's pixel shape - a neural render
+// is at the source's size, and Super Resolution scales both sides by one
+// factor - so the source's display aspect is the output's. Without it a DVD
+// rip (720x480 at 32:27) or HDV (1440x1080 at 4:3) looked right in the player,
+// which reads the sample aspect, and exported stretched, because the encode
+// and the mux both wrote square pixels.
+//
+// `displayAspect` is the upright display aspect the decoder reports. Within
+// 0.1% of width:height is square: rounding in a probe, not an anamorphic
+// source. The ratio is the nearest with a denominator up to 1000, which is
+// exact for every broadcast and disc shape (4:3, 16:9, 2.35:1 as 47:20).
+inline std::wstring ExportDisplayAspect(uint32_t width, uint32_t height, double displayAspect)
+{
+    if (!width || !height || !(displayAspect > 0.1) || !(displayAspect < 10.0)) return {};
+    const double frame = double(width) / double(height);
+    if (std::abs(displayAspect / frame - 1.0) < 0.001) return {};
+    // Continued fractions: the convergents are the best approximations.
+    uint64_t hNum = 1, hPrev = 0, kDen = 0, kPrev = 1;
+    double x = displayAspect;
+    uint64_t bestNum = 0, bestDen = 1;
+    for (int step = 0; step < 32; ++step) {
+        const double whole = std::floor(x);
+        const uint64_t a = uint64_t(whole);
+        const uint64_t num = a * hNum + hPrev, den = a * kDen + kPrev;
+        if (den > 1000) break;
+        bestNum = num; bestDen = den;
+        hPrev = hNum; hNum = num; kPrev = kDen; kDen = den;
+        if (std::abs(double(num) / double(den) - displayAspect) < 1e-9) break;
+        const double fraction = x - whole;
+        if (fraction < 1e-12) break;
+        x = 1.0 / fraction;
+    }
+    if (!bestNum || !bestDen) return {};
+    return std::to_wstring(bestNum) + L":" + std::to_wstring(bestDen);
 }

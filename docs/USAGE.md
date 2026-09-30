@@ -831,7 +831,10 @@ offers MKV (the default) and MP4 for a video, GIF (the default), MP4 and MKV
 for an animated GIF, and PNG (the default) or JPEG for a photo; a name typed
 with any other extension gets the selected type's extension added. MKV and MP4
 keep the video exactly as the passes encoded it - only the container changes -
-and an MP4 of HEVC is tagged `hvc1`, which Apple's players need.
+and an MP4 of HEVC is tagged `hvc1`, which Apple's players need. A source with
+non-square pixels (a DVD rip at 720x480, HDV at 1440x1080) keeps its display
+shape: the file states the source's display aspect, as **Save converted
+video**'s does.
 
 Whatever the stages, the file carries the source's audio, subtitles and
 chapters (only the part a range covers, on the range's own clock: a subtitle

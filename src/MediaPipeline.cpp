@@ -788,6 +788,9 @@ std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& 
             else arguments.insert(arguments.end(), {L"-vf", L"pad=ceil(iw/2)*2:ceil(ih/2)*2", L"-pix_fmt", L"yuv420p"});
         }
         arguments.insert(arguments.end(), codecs.begin(), codecs.end());
+        // An anamorphic source's shape, which the render was encoded without.
+        if (!request.displayAspect.empty())
+            arguments.insert(arguments.end(), {L"-aspect:v:0", request.displayAspect});
         if (format.mp4) arguments.insert(arguments.end(), {L"-movflags", L"+faststart", L"-f", L"mp4"});
         else arguments.insert(arguments.end(), {L"-f", L"matroska"});
     } else if (format.gif) {
@@ -1641,6 +1644,9 @@ std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxReque
     AppendSourceStreams(*container, sourceStreams, false, arguments, codecs);
     arguments.insert(arguments.end(), {L"-map_metadata", L"1", L"-map_chapters", L"1"});
     arguments.insert(arguments.end(), codecs.begin(), codecs.end());
+    // An anamorphic source's shape, which the passes encoded without.
+    if (!request.displayAspect.empty())
+        arguments.insert(arguments.end(), {L"-aspect:v:0", request.displayAspect});
     if (*container == ExportContainer::Mp4)
         arguments.insert(arguments.end(), {L"-movflags", L"+faststart", L"-f", L"mp4"});
     else

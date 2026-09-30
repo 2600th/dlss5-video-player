@@ -1718,6 +1718,8 @@ struct StageExportJob {
     std::filesystem::path helpers;
     uint32_t sourceWidth{},sourceHeight{};
     double fps{},duration{};
+    // ExportDisplayAspect of the source; empty for square pixels.
+    std::wstring displayAspect;
     // FrameGenerationRequest::holdDuplicates for the frame-generation pass.
     bool holdDuplicates{};
     // Whole for the dialog. A range reaches the worker pass only; frame
@@ -1887,6 +1889,7 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
     // streams need no retime - only the trim a ranged carrier needs, which
     // is the cached-range export's.
     StageExportMuxRequest finish{produced,job.source,job.destination};
+    finish.displayAspect=job.displayAspect;
     if(!job.range.Whole()){
         finish.rangeStartSeconds=double(job.range.start100ns)*1e-7;
         if(job.range.end100ns>job.range.start100ns)finish.rangeDurationSeconds=double(job.range.end100ns-job.range.start100ns)*1e-7;
@@ -3539,7 +3542,7 @@ private:
             return;
         }
         const auto output=PickExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());if(output.empty())return;
-        CachedExportRequest request{m_neuralPath,std::filesystem::path(m_path),output};if(!m_cachedRange.Whole()){request.rangeStartSeconds=double(m_cachedRange.start100ns)*1e-7;request.rangeDurationSeconds=double(m_cachedRange.end100ns-m_cachedRange.start100ns)*1e-7;}
+        CachedExportRequest request{m_neuralPath,std::filesystem::path(m_path),output};request.displayAspect=ExportDisplayAspect(m_decoder.Width(),m_decoder.Height(),m_decoder.DisplayAspectRatio());if(!m_cachedRange.Whole()){request.rangeStartSeconds=double(m_cachedRange.start100ns)*1e-7;request.rangeDurationSeconds=double(m_cachedRange.end100ns-m_cachedRange.start100ns)*1e-7;}
         const auto helpers=ExecutableDirectory();HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{m_exportWorker=std::jthread([target,request,helpers,completions](std::stop_token stop){auto completion=std::make_unique<ExportCompletion>();completion->output=request.output;completion->result=CachedVideoExporter(helpers).Run(request,stop);completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});});}
         catch(const std::system_error&){MessageBoxW(m_hwnd,T(L"export.worker_failed").c_str(),T(L"export.title.failed").c_str(),MB_OK|MB_ICONERROR);return;}
@@ -6739,6 +6742,7 @@ private:
         job.plan=plan;job.source=source;job.destination=destination;job.scratch=scratch;
         job.helpers=ExecutableDirectory();
         job.sourceWidth=m_decoder.Width();job.sourceHeight=m_decoder.Height();
+        job.displayAspect=ExportDisplayAspect(m_decoder.Width(),m_decoder.Height(),m_decoder.DisplayAspectRatio());
         job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
         job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
         job.upscalingHistory=m_upscalingHistory;
@@ -12401,6 +12405,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         if(!decoder.OpenMetadata(input.wstring()))return failed(L"the input could not be read as a video or an image.");
         const uint32_t width=decoder.Width(),height=decoder.Height();
         const double fps=decoder.FrameRate(),duration=decoder.DurationSeconds();
+        const std::wstring displayAspect=ExportDisplayAspect(width,height,decoder.DisplayAspectRatio());
         const bool still=decoder.IsStillImage();
         const bool animation=decoder.IsAnimation();
         decoder.Close();
@@ -12451,6 +12456,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         StageExportJob job;
         job.plan=plan;job.source=input;job.destination=output;job.scratch=scratch;job.helpers=helpers;
         job.sourceWidth=width;job.sourceHeight=height;job.fps=fps;job.duration=duration;job.range=range;
+        job.displayAspect=displayAspect;
         job.nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,settings.c_str())),1,7);
         job.neuralSettings=neuralSettings;
         job.processingScale=command.processingScale?*command.processingScale:ReadProcessingScale(settings);

@@ -90,6 +90,9 @@ struct CachedExportRequest {
     // the encode keeps instead of rebasing it to zero (see
     // StageExportMuxRequest::streamSourceStartSeconds). 0 for a source.
     double sourceStartSeconds{};
+    // The source's display aspect as -aspect takes it (ExportDisplayAspect);
+    // empty for square pixels. MKV and MP4 only.
+    std::wstring displayAspect;
 };
 
 // Capacity requested for a child process's stdin pipe. Large enough that the encoder
@@ -466,6 +469,9 @@ struct StageExportMuxRequest {
     // chapters, audio and subtitles early by that much - 24 ms with 48 kHz
     // AAC. 0 for a source that is not a cut.
     double streamSourceStartSeconds{};
+    // The source's display aspect as -aspect takes it (ExportDisplayAspect);
+    // empty for square pixels. MKV and MP4 only.
+    std::wstring displayAspect;
 };
 
 // The FFmpeg arguments for MuxStageExport, from what the two inputs were

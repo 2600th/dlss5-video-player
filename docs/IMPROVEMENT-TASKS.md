@@ -61,7 +61,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | **P0** | **Fix before the next release** | | | |
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
-| [P1.26](#p126) | Anamorphic sources export stretched | S | Pipeline | 🔍 |
 | [P1.27](#p127) | YouTube open, seek or reload drops 1-4 frames | S | Player | 🔍 |
 | [P1.28](#p128) | Inherited handles can hang an export and the UI | M | Pipeline | 🔍 |
 | [P1.29](#p129) | Load-time DLLs are not pinned to System32 | S | Release | 🧪 |
@@ -112,21 +111,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 ---
 
 # P1 — Next
-
-<a id="p126"></a>
-### P1.26 · Anamorphic sources export stretched
-
-`S` · **Pipeline** · 🔍
-
-- **Problem.** The sample aspect ratio is probed but used only for the
-  on-screen display ratio. The rawvideo encode sets no SAR and direct NVENC
-  hard-codes square pixels, so a DVD rip (720x480 at 32:27) or HDV (1440x1080
-  at 4:3) looks right in the player and exports stretched.
-- **Where.** `VideoDecoder.cpp:458-459`, `main.cpp:6806`,
-  `MediaPipeline.cpp:578-582`, `NvencDirectPolicy.h:278-279`.
-- **Fix.** Carry the SAR into the encode (`setsar`/`-aspect`, and
-  `darWidth`/`darHeight` for NVENC), or apply it at export with `-aspect`.
-- **Test.** An anamorphic export keeps its display aspect.
 
 <a id="p127"></a>
 ### P1.27 · YouTube open, seek or reload drops 1-4 frames

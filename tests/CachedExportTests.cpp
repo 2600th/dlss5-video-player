@@ -2059,6 +2059,83 @@ void EmbeddedSubtitleTracksAreListedAndDrawnTest(const std::filesystem::path& he
 
 } // namespace
 
+// P1.26. The sample aspect was read for the screen only: the render is
+// encoded with square pixels and both exports muxed it that way, so a DVD
+// rip (720x480 at 32:27) looked right in the player and exported stretched
+// to 3:2. The source's display aspect now goes into every MKV and MP4 export,
+// and a square source's command line is exactly what it was.
+void AnamorphicExportKeepsItsDisplayAspectTest(const std::filesystem::path& helpers)
+{
+    CHECK(ExportDisplayAspect(720, 480, 16.0 / 9.0) == L"16:9");
+    CHECK(ExportDisplayAspect(720, 480, 4.0 / 3.0) == L"4:3");
+    CHECK(ExportDisplayAspect(1440, 1080, 16.0 / 9.0) == L"16:9");
+    CHECK(ExportDisplayAspect(720, 576, 2.35) == L"47:20");
+    CHECK(ExportDisplayAspect(1920, 1080, 16.0 / 9.0).empty());
+    CHECK(ExportDisplayAspect(1920, 1080, 1.7785).empty());
+    CHECK(ExportDisplayAspect(720, 480, 0.0).empty());
+    CHECK(ExportDisplayAspect(0, 480, 16.0 / 9.0).empty());
+    CHECK(ExportDisplayAspect(720, 480, std::numeric_limits<double>::quiet_NaN()).empty());
+
+    const std::filesystem::path neural = L"C:/cache/neural.mkv", source = L"C:/media/dvd.mkv", staging = L"C:/out/.stage.tmp";
+    const std::vector<MediaStreamInfo> streams{{0, "video", "mpeg2video"}, {1, "audio", "ac3"}};
+    for (const auto* extension : {L"clip.mkv", L"clip.mp4"}) {
+        CachedExportRequest cached{neural, source, extension};
+        const auto square = BuildCachedExportArguments(cached, staging, streams, false);
+        CHECK_EQ(square.size(), IndexOf(square, L"-aspect:v:0"));
+        cached.displayAspect = L"16:9";
+        const auto withAspect = BuildCachedExportArguments(cached, staging, streams, false);
+        const size_t at = IndexOf(withAspect, L"-aspect:v:0");
+        CHECK(at + 1 < withAspect.size() && withAspect[at + 1] == L"16:9");
+        StageExportMuxRequest stage{neural, source, extension};
+        const auto squareStage = BuildStageExportMuxArguments(stage, staging, "hevc", streams);
+        CHECK_EQ(squareStage.size(), IndexOf(squareStage, L"-aspect:v:0"));
+        stage.displayAspect = L"16:9";
+        const auto staged = BuildStageExportMuxArguments(stage, staging, "hevc", streams);
+        const size_t stagedAt = IndexOf(staged, L"-aspect:v:0");
+        CHECK(stagedAt + 1 < staged.size() && staged[stagedAt + 1] == L"16:9");
+    }
+
+    // On real files: an anamorphic source, the square carrier a render is,
+    // and both exporters' MKV and MP4.
+    FixtureDirectory fixture;
+    const auto log = fixture.path / L"anamorphic.log";
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    const auto dvd = fixture.path / L"dvd.mkv";
+    const auto carrier = fixture.path / L"carrier.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-y", L"-f", L"lavfi", L"-i", L"testsrc2=s=72x48:r=10:d=0.5",
+        L"-f", L"lavfi", L"-i", L"sine=f=440:d=0.5", L"-vf", L"setsar=32/27", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p",
+        L"-c:a", L"aac", dvd.wstring()}, log));
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-y", L"-f", L"lavfi", L"-i", L"testsrc2=s=72x48:r=10:d=0.5",
+        L"-c:v", L"libx265", L"-x265-params", L"log-level=error", L"-pix_fmt", L"yuv420p", carrier.wstring()}, log));
+    if (!std::filesystem::exists(dvd) || !std::filesystem::exists(carrier)) return;
+
+
+    VideoDecoder decoder;
+    CHECK(decoder.OpenMetadata(dvd.wstring()));
+    const std::wstring aspect = ExportDisplayAspect(decoder.Width(), decoder.Height(), decoder.DisplayAspectRatio());
+    decoder.Close();
+    CHECK(aspect == L"16:9");
+
+    const auto shape = [&](const std::filesystem::path& file) {
+        auto text = Probe(helpers, file, log, {L"-select_streams", L"v:0", L"-show_entries",
+            L"stream=sample_aspect_ratio,display_aspect_ratio", L"-of", L"default=noprint_wrappers=1"});
+        text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+        return text;
+    };
+    for (const auto* name : {L"staged.mkv", L"staged.mp4"}) {
+        StageExportMuxRequest request{carrier, dvd, fixture.path / name};
+        request.displayAspect = aspect;
+        CHECK(MuxStageExport(helpers, request, {}).ok);
+        CHECK_EQ(std::string("sample_aspect_ratio=32:27\ndisplay_aspect_ratio=16:9\n"), shape(fixture.path / name));
+    }
+    for (const auto* name : {L"saved.mkv", L"saved.mp4"}) {
+        CachedExportRequest request{carrier, dvd, fixture.path / name};
+        request.displayAspect = aspect;
+        CHECK(CachedVideoExporter(helpers).Run(request, {}).ok);
+        CHECK_EQ(std::string("sample_aspect_ratio=32:27\ndisplay_aspect_ratio=16:9\n"), shape(fixture.path / name));
+    }
+}
+
 int wmain(int argc, wchar_t** argv)
 {
     test_support::ContainChildProcesses();
@@ -2097,6 +2174,7 @@ int wmain(int argc, wchar_t** argv)
     SavedExportKeepsWhatEachContainerHoldsTest(helpers);
     EmbeddedSubtitleTracksAreListedAndDrawnTest(helpers);
     QualityLadderRoundTripTest(helpers);
+    AnamorphicExportKeepsItsDisplayAspectTest(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";
     return 0;

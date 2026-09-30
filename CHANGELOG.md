@@ -20,6 +20,8 @@ decisions that still shape the code are in
 - **Audio that starts after the video no longer plays early.** A file whose
   sound begins half a second in played it half a second early until the first
   seek.
+- **Anamorphic videos export at their proper shape.** A DVD rip or HDV file
+  looked right in the player but was written stretched.
 - **A live render started about 30 seconds after the last one no longer
   fails.** The background renderer could accept the job just as it was closing.
 
