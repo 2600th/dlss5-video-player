@@ -12604,6 +12604,13 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         NeuralSettings neuralSettings{};
         if(command.preset)neuralSettings=neural_presets::kPresets[*command.preset].settings;
         else LoadNeuralSettings(settings,neuralSettings);
+        // Each knob given on the command line wins over the preset or the
+        // saved settings; the ones not given keep theirs.
+        if(command.passes)neuralSettings.passes=*command.passes;
+        if(command.intensity)neuralSettings.intensity=*command.intensity;
+        if(command.localTone)neuralSettings.localTone=*command.localTone;
+        if(command.localStructure)neuralSettings.localStructure=*command.localStructure;
+        if(command.colorStrength)neuralSettings.colorStrength=*command.colorStrength;
         NeuralCacheManager cache(RenderScratchRoot(settings));
         if(!cache.Valid())return failed(L"no writable cache directory for the intermediate passes.");
         const std::filesystem::path scratch=cache.Root()/L"export-stages";
@@ -12617,9 +12624,10 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         job.nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,settings.c_str())),1,7);
         job.neuralSettings=neuralSettings;
         job.processingScale=command.processingScale?*command.processingScale:ReadProcessingScale(settings);
-        job.upscalingHistory=ReadUpscalingHistory(settings);
+        job.upscalingHistory=command.history?*command.history:ReadUpscalingHistory(settings);
         job.captureDither=GetPrivateProfileIntW(L"Encoding",L"CaptureDither",1,settings.c_str())!=0;
         job.quality=ReadCacheQuality(settings);
+        if(!command.quality.empty())ParseEncoderQuality(command.quality,job.quality);
         job.sourceDeband=GetPrivateProfileIntW(L"Encoding",L"SourceDeband",0,settings.c_str())!=0;
         job.suppliedExposure=GetPrivateProfileIntW(L"Encoding",L"SuppliedExposure",0,settings.c_str())!=0;
 
@@ -12627,6 +12635,11 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         swprintf_s(summary,L"%u x %u at %.4g fps -> %u x %u at %.4g fps, %u pass%s",width,height,fps,
                    plan.outputWidth,plan.outputHeight,plan.outputFps,ExportStageCount(plan),ExportStageCount(plan)==1?L"":L"es");
         say(summary);
+        // What the render will look like and how it is encoded, whichever of
+        // the command line, the preset and the saved settings each came from.
+        if(plan.requireNeural)say(L"neural: "+Utf8ToWide(CanonicalNeuralSettings(neuralSettings)));
+        say(L"encode: "+Utf8ToWide(std::string(EncoderQualityName(job.quality)))+
+            (plan.outputWidth!=width&&!plan.requireNeural?L", history "+Utf8ToWide(std::string(UpscalingHistoryName(job.upscalingHistory))):std::wstring()));
         say(L"writing "+output.wstring());
         LOG("--render plan: upscale="<<command.selection.upscale<<" neural="<<command.selection.neural
             <<" framegen="<<command.selection.frameGeneration<<" output="<<plan.outputWidth<<"x"<<plan.outputHeight

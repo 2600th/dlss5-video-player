@@ -5475,6 +5475,39 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
     CHECK(plain.mode == Mode::Render);
     CHECK(plain.command.input == L"clip.mp4");
     CHECK(plain.command.selection.neural);
+
+    // Neural settings' knobs, the encoder ladder and SR history, each only
+    // where the stage it belongs to runs, and only within the dialog's range.
+    const Parsed tuned = parse({L"--render", L"clip.mp4", L"--passes", L"3", L"--intensity", L"1.5",
+        L"--local-tone", L"0.5", L"--local-structure", L"2", L"--color-strength", L"0.8", L"--encode", L"lossless"});
+    CHECK(tuned.mode == Mode::Render);
+    CHECK(tuned.command.passes == std::optional<int>(3));
+    CHECK(tuned.command.intensity == std::optional<float>(1.5f));
+    CHECK(tuned.command.localTone == std::optional<float>(0.5f));
+    CHECK(tuned.command.localStructure == std::optional<float>(2.0f));
+    CHECK(tuned.command.colorStrength && std::abs(*tuned.command.colorStrength - 0.8f) < 1e-6f);
+    CHECK(tuned.command.quality == "lossless");
+        for (const auto& refused : std::vector<std::vector<std::wstring>>{
+             {L"--render", L"c.mp4", L"--passes", L"5"}, {L"--render", L"c.mp4", L"--passes", L"0"},
+             {L"--render", L"c.mp4", L"--intensity", L"2.5"}, {L"--render", L"c.mp4", L"--intensity", L"-1"},
+             {L"--render", L"c.mp4", L"--intensity", L"1e0"}, {L"--render", L"c.mp4", L"--color-strength", L"1.2"},
+             {L"--render", L"c.mp4", L"--encode", L"best"}, {L"--render", L"c.mp4", L"--passes", L"2", L"--passes", L"3"},
+             {L"--render", L"c.mp4", L"--stages", L"sr", L"--passes", L"2"},
+             {L"--render", L"c.mp4", L"--stages", L"fg", L"--encode", L"high"},
+             {L"--render", L"c.mp4", L"--history", L"temporal"},
+             {L"--render", L"c.mp4", L"--stages", L"sr,nr", L"--history", L"per-frame"},
+             {L"--render", L"c.mp4", L"--stages", L"sr", L"--history", L"sometimes"}})
+        CHECK(render_command::Parse(refused).mode == Mode::BadArguments);
+    // The retired --quality points at --encode instead of being unknown.
+    const Parsed retired = parse({L"--render", L"c.mp4", L"--quality", L"high"});
+    CHECK(retired.mode == Mode::BadArguments);
+    CHECK(retired.error.find(L"--encode") != std::wstring::npos);
+    const Parsed history = parse({L"--render", L"c.mp4", L"--stages", L"sr", L"--history", L"per-frame", L"--encode", L"high"});
+    CHECK(history.mode == Mode::Render);
+    CHECK(history.command.history == std::optional<UpscalingHistory>(UpscalingHistory::PerFrame));
+
+    CHECK(!plain.command.passes && !plain.command.intensity && plain.command.quality.empty() && !plain.command.history);
+
     CHECK(!plain.command.selection.upscale); CHECK(!plain.command.selection.frameGeneration);
     CHECK(!plain.command.preset); CHECK(plain.command.output.empty()); CHECK(!plain.command.hasRange);
     CHECK_EQ(uint32_t{1440}, plain.command.selection.targetHeight);

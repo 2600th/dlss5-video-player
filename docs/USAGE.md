@@ -879,8 +879,21 @@ What to render, as the dialog's ticks and settings choose it:
 - `--preset` is one of `natural`, `detail-only`, `gentle` or `strong`, the
   presets in **Neural settings**. Without it the render uses the Neural
   settings the player saved.
+- `--passes` is **Neural passes**, `1` to `4`: the add-on stacks the model that
+  many times, each pass one more model evaluation per frame. `--intensity`,
+  `--local-tone` and `--local-structure` (`0` to `2`) and `--color-strength`
+  (`0` to `1`) are the rest of Neural settings' **Look** group. Each needs `nr`
+  and applies over `--preset`; one not given keeps the preset's or the saved
+  value. For example, three stacked passes of the strong look:
+  `dlss5-convert clip.mp4 --preset strong --passes 3`.
 - `--processing-scale` is `100`, `75` or `50`, the rungs of **DLSS >
   Processing scale**, for `nr` without `sr`. Without it, the saved rung.
+- `--encode` is the **Encoder settings** quality ladder: `standard` (8-bit
+  HEVC), `high` (10-bit HEVC) or `lossless` (10-bit FFV1). `--history` is Super
+  Resolution's history, `temporal` or `per-frame`, for `sr` without `nr`.
+  Without them, the saved choices. The render prints the neural settings and
+  the encode it will use, whichever of these, the preset and the saved settings
+  each came from.
 - `--range` renders part of each source, in the timecode forms **Go to
   timecode** accepts, for example `0:10-0:25` or `f0-f300`. It needs `sr` or
   `nr`: frame generation then converts that pass's result rather than the whole

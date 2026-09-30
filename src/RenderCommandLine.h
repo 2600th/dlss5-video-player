@@ -58,6 +58,18 @@ struct Command {
     // Index into neural_presets::kPresets; empty uses the saved Neural settings,
     // as the dialog does.
     std::optional<size_t> preset;
+    // The Neural settings dialog's knobs, applied over the preset (or the
+    // saved settings): neural passes 1..4, and the Look group's intensity,
+    // local tone and local structure 0..2 and colour strength 0..1. Empty
+    // leaves the value the preset or the saved settings give.
+    std::optional<int> passes;
+    std::optional<float> intensity, localTone, localStructure, colorStrength;
+    // Encoder settings' quality ladder, by its stable name (standard, high,
+    // lossless; EncoderQualityName); empty uses the saved rung.
+    std::string quality;
+    // Super Resolution's history for sr without nr (UpscalingHistoryName);
+    // empty uses the saved choice.
+    std::optional<UpscalingHistory> history;
     // One of kProcessingScaleRungs; empty uses the saved processing scale.
     std::optional<uint32_t> processingScale;
     // Stages, output rung and multiplier, in the dialog's own vocabulary so the
@@ -91,6 +103,28 @@ inline bool EqualsIgnoringCase(std::wstring_view left, std::wstring_view right)
 inline bool IsHelpFlag(std::wstring_view argument)
 {
     return argument == L"--help" || argument == L"-h" || argument == L"/?";
+}
+
+// A plain decimal within [low, high]: digits with at most one point, no sign,
+// no exponent, no trailing text. What the dialog's sliders can reach.
+inline std::optional<float> ParseLevel(std::wstring_view text, float low, float high)
+{
+    if (text.empty() || text.size() > 12) return std::nullopt;
+    double value = 0.0, scale = 0.0;
+    bool digits = false;
+    for (const wchar_t character : text) {
+        if (character == L'.') {
+            if (scale != 0.0) return std::nullopt;
+            scale = 1.0;
+            continue;
+        }
+        if (character < L'0' || character > L'9') return std::nullopt;
+        digits = true;
+        if (scale == 0.0) value = value * 10.0 + double(character - L'0');
+        else { scale /= 10.0; value += scale * double(character - L'0'); }
+    }
+    if (!digits || value < low || value > high) return std::nullopt;
+    return float(value);
 }
 
 // Strict decimal: digits only, no sign, no trailing text, and it must fit.
@@ -152,7 +186,8 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     Command& command = parsed.command;
     bool seenRender = false, seenRange = false, seenPreset = false, seenStages = false,
          seenHeight = false, seenMultiplier = false, seenOut = false, seenQuiet = false,
-         seenScale = false;
+         seenScale = false, seenPasses = false, seenIntensity = false, seenTone = false,
+         seenStructure = false, seenColor = false, seenEncode = false, seenHistory = false;
     std::wstring_view presetName;
     // What the dialog opens with: the neural pass alone.
     command.selection = ExportSelection{};
@@ -176,7 +211,12 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
         };
         const bool takesValue = argument == L"--render" || argument == L"--range" ||
             argument == L"--preset" || argument == L"--stages" || argument == L"--height" ||
-            argument == L"--multiplier" || argument == L"--out" || argument == L"--processing-scale";
+            argument == L"--multiplier" || argument == L"--out" || argument == L"--processing-scale" ||
+            argument == L"--passes" || argument == L"--intensity" || argument == L"--local-tone" ||
+            argument == L"--local-structure" || argument == L"--color-strength" || argument == L"--encode" ||
+            argument == L"--history";
+        if (argument == L"--quality")
+            return bad(L"The encode is --encode standard, high or lossless (--quality is an option the player retired).");
         if (!takesValue) return bad(L"Unknown argument: " + argument);
         if (index + 1 >= userArguments.size() || userArguments[index + 1].empty())
             return bad(argument + L" needs a value.");
@@ -228,6 +268,30 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             if (!percent || !IsProcessingScaleRung(*percent))
                 return bad(L"--processing-scale takes 100, 75 or 50.");
             command.processingScale = *percent;
+        } else if (argument == L"--passes") {
+            if (!once(seenPasses)) return bad(L"--passes was given twice.");
+            const auto passes = ParseCount(value);
+            if (!passes || *passes < 1 || *passes > 4) return bad(L"--passes takes 1, 2, 3 or 4.");
+            command.passes = int(*passes);
+        } else if (argument == L"--intensity" || argument == L"--local-tone" || argument == L"--local-structure" ||
+                   argument == L"--color-strength") {
+            const bool color = argument == L"--color-strength";
+            bool& seen = argument == L"--intensity" ? seenIntensity : argument == L"--local-tone" ? seenTone
+                : argument == L"--local-structure" ? seenStructure : seenColor;
+            if (!once(seen)) return bad(argument + L" was given twice.");
+            const auto level = ParseLevel(value, 0.0f, color ? 1.0f : 2.0f);
+            if (!level) return bad(argument + (color ? L" takes a value from 0 to 1, such as 0.8." : L" takes a value from 0 to 2, such as 1.5."));
+            (argument == L"--intensity" ? command.intensity : argument == L"--local-tone" ? command.localTone
+                : argument == L"--local-structure" ? command.localStructure : command.colorStrength) = *level;
+        } else if (argument == L"--encode") {
+            if (!once(seenEncode)) return bad(L"--encode was given twice.");
+            if (value != L"standard" && value != L"high" && value != L"lossless")
+                return bad(L"--encode takes standard, high or lossless.");
+            command.quality = value == L"standard" ? "standard" : value == L"high" ? "high" : "lossless";
+        } else if (argument == L"--history") {
+            if (!once(seenHistory)) return bad(L"--history was given twice.");
+            command.history = ParseUpscalingHistory(value == L"temporal" ? "temporal" : value == L"per-frame" ? "per-frame" : "");
+            if (!command.history) return bad(L"--history takes temporal or per-frame.");
         } else if (argument == L"--multiplier") {
             if (!once(seenMultiplier)) return bad(L"--multiplier was given twice.");
             const auto multiplier = ParseCount(value);
@@ -267,6 +331,15 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     if (seenScale && (!selection.neural || selection.upscale))
         return bad(L"--processing-scale needs the nr stage without sr.");
     if (seenMultiplier && !selection.frameGeneration) return bad(L"--multiplier needs the fg stage.");
+    if ((seenPasses || seenIntensity || seenTone || seenStructure || seenColor) && !selection.neural)
+        return bad(L"--passes, --intensity, --local-tone, --local-structure and --color-strength need the nr stage.");
+    // The model keeps its own history on the carrier it runs on, so History is
+    // Super Resolution's choice only when the model does not run (the dialog
+    // greys it out the same way).
+    if (seenHistory && (!selection.upscale || selection.neural))
+        return bad(L"--history needs the sr stage without nr.");
+    if (seenEncode && !selection.upscale && !selection.neural)
+        return bad(L"--encode needs the sr or nr stage: frame generation alone keeps its own encode.");
     // Frame generation converts a whole file and copies the source's audio onto
     // it with no retime, so it has no range of its own; a range reaches it only
     // through the worker pass, whose carrier already covers just that range.
@@ -314,6 +387,16 @@ inline std::wstring Usage()
         L"                     this GPU admits. Default: 2.\n"
         L"  --preset NAME      Neural look for nr: natural, detail-only, gentle or strong.\n"
         L"                     Default: the Neural settings saved by the player.\n"
+        L"  --passes N         Neural passes for nr, 1 to 4, stacked by the add-on; each\n"
+        L"                     costs one more model evaluation per frame. Default: the\n"
+        L"                     preset's or the saved setting.\n"
+        L"  --intensity X      nr intensity, 0 to 2. --local-tone X and --local-structure\n"
+        L"                     X, 0 to 2, and --color-strength X, 0 to 1, are the rest of\n"
+        L"                     Neural settings' Look group. Each applies over --preset.\n"
+        L"  --encode Q         The encode: standard (8-bit), high (10-bit) or lossless.\n"
+        L"                     Default: the player's saved Encoder settings.\n"
+        L"  --history H        Super Resolution's history for sr without nr: temporal or\n"
+        L"                     per-frame. Default: the player's saved choice.\n"
         L"  --processing-scale N  The resolution the model runs at, as a percentage of\n"
         L"                     the source: 100, 75 or 50, restored to the source size by\n"
         L"                     Super Resolution. For nr without sr. Default: the player's\n"

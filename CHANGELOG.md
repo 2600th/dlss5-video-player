@@ -16,6 +16,10 @@ decisions that still shape the code are in
   and cancels with Ctrl+C. It takes files, folders and wildcards, skips what is
   already converted, writes to an output folder if asked, and ends with a
   summary, a single exit code and, with `--report`, a JSON record of every file.
+  Every Neural settings choice that shapes an export is an option too: stacked
+  neural passes (`--passes 3`), intensity, local tone and structure, colour
+  strength, the encode (`--encode standard|high|lossless`) and Super
+  Resolution's history.
   `dlss5-convert probe` says what a file is and which stages your machine can
   run on it before you render anything.
 

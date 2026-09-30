@@ -83,6 +83,12 @@ void planner_test()
     CHECK(plain.mode == Mode::Convert);
     CHECK((plain.renderOptions == std::vector<std::wstring>{L"--stages", L"sr,nr", L"--height", L"2160"}));
     CHECK(ParseLine({L"a.mp4", L"--height", L"1080", L"--height", L"1440"}).mode == Mode::BadArguments);
+    // Neural settings, the encoder ladder and SR history reach the player as given.
+    const auto tuned = ParseLine({L"a.mp4", L"--passes", L"3", L"--intensity", L"1.5", L"--encode", L"high",
+                                  L"--color-strength", L"0.8"});
+    CHECK((tuned.renderOptions == std::vector<std::wstring>{L"--passes", L"3", L"--intensity", L"1.5",
+                                                           L"--encode", L"high", L"--color-strength", L"0.8"}));
+    CHECK(ParseLine({L"a.mp4", L"--stages", L"sr", L"--history", L"per-frame"}).renderOptions.back() == L"per-frame");
     CHECK(ParseLine({}).mode == Mode::BadArguments);
     CHECK(ParseLine({L"a.mp4", L"--bogus"}).mode == Mode::BadArguments);
     CHECK(ParseLine({L"a.mp4", L"--format", L"avi"}).mode == Mode::BadArguments);

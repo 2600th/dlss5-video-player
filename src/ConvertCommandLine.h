@@ -143,7 +143,10 @@ inline Options Parse(std::span<const std::wstring> arguments)
         else if (argument == L"--quiet" || argument == L"-q") options.quiet = true;
         else if (argument == L"--safe-mode") options.renderOptions.push_back(argument);
         else if (argument == L"--stages" || argument == L"--height" || argument == L"--multiplier" ||
-                 argument == L"--preset" || argument == L"--processing-scale" || argument == L"--range") {
+                 argument == L"--preset" || argument == L"--processing-scale" || argument == L"--range" ||
+                 argument == L"--passes" || argument == L"--intensity" || argument == L"--local-tone" ||
+                 argument == L"--local-structure" || argument == L"--color-strength" || argument == L"--encode" ||
+                 argument == L"--history") {
             const std::wstring* given = value();
             if (!given) return bad(argument + L" needs a value.");
             for (size_t seen = 0; seen < options.renderOptions.size(); ++seen)
@@ -159,6 +162,8 @@ inline Options Parse(std::span<const std::wstring> arguments)
                 : argument == L"--suffix" ? options.suffix
                 : argument == L"--report" ? options.report : options.player;
             slot = *given;
+        } else if (argument == L"--quality") {
+            return bad(L"The encode is --encode standard, high or lossless (--quality is an option the player retired).");
         } else {
             return bad(L"Unknown option: " + argument);
         }
@@ -302,7 +307,13 @@ inline std::wstring Usage()
         L"  --height N             sr output height: 1080, 1440 or 2160. Default: 1440.\n"
         L"  --multiplier N         fg frames per source frame: 2 to 5. Default: 2.\n"
         L"  --preset NAME          nr look: natural, detail-only, gentle or strong.\n"
+        L"  --passes N             nr passes, 1 to 4 (each one more model evaluation).\n"
+        L"  --intensity X          nr intensity 0-2; also --local-tone X, --local-structure X\n"
+        L"                         (0-2) and --color-strength X (0-1). Each applies over\n"
+        L"                         --preset; unset ones keep the player's saved settings.\n"
         L"  --processing-scale N   nr without sr: 100, 75 or 50.\n"
+        L"  --encode Q             standard (8-bit), high (10-bit) or lossless encode.\n"
+        L"  --history H            sr without nr: temporal or per-frame.\n"
         L"  --range START-END      Part of each source, e.g. 0:10-0:25 or f0-f300.\n"
         L"\n"
         L"Where it goes:\n"
