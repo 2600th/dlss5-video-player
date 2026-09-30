@@ -39,7 +39,7 @@ function Get-ExpectedPackageFiles {
     param([bool]$Core)
     if ($Core) {
         $files = @(
-            'DLSSVideoPlayer.exe', 'nvngx_dlss.dll', 'nvngx_dlssg.dll', 'README.md', 'LICENSE',
+            'DLSSVideoPlayer.exe', 'dlss5-convert.exe', 'nvngx_dlss.dll', 'nvngx_dlssg.dll', 'README.md', 'LICENSE',
             'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
             'PUBLIC_RELEASE_NOTICE.txt', 'THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt',
             'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
@@ -56,7 +56,7 @@ function Get-ExpectedPackageFiles {
     }
     else {
         $files = @(
-            'DLSSVideoPlayer.exe', 'neural-runtime/NeuralWorker.exe', 'neural-runtime/nvngx_dlss.dll', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
+            'DLSSVideoPlayer.exe', 'dlss5-convert.exe', 'neural-runtime/NeuralWorker.exe', 'neural-runtime/nvngx_dlss.dll', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
             'neural-runtime/dxgi.dll', 'neural-runtime/ReShade.ini', 'neural-runtime/ReShadePreset.ini', 'neural-runtime/renodx-dlss5.addon64',
             'nvngx_dlss.dll', 'nvngx_dlssg.dll',
             'neural-runtime/nvngx_dlssnr.dll', 'neural-runtime/sl.common.dll', 'neural-runtime/sl.dlss.dll',
@@ -381,7 +381,8 @@ function Assert-Stage {
         throw $message
     }
 
-    $knownExecutables = if ($PublicCore) { @('DLSSVideoPlayer.exe') } else { @('DLSSVideoPlayer.exe', 'neural-runtime/NeuralWorker.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe') }
+    # dlss5-convert.exe is the console front end for DLSSVideoPlayer.exe --render.
+    $knownExecutables = if ($PublicCore) { @('DLSSVideoPlayer.exe', 'dlss5-convert.exe') } else { @('DLSSVideoPlayer.exe', 'dlss5-convert.exe', 'neural-runtime/NeuralWorker.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe') }
     $unexpectedExecutables = @($actual | Where-Object { $_.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase) -and $_ -cnotin $knownExecutables })
     if ($unexpectedExecutables.Count -ne 0) {
         throw "Unexpected launchable executable(s): $([string]::Join(', ', $unexpectedExecutables))"

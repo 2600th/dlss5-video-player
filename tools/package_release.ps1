@@ -226,6 +226,7 @@ if (-not $PublicCore) {
 if ($PublicCore) {
     $sources = @(
         @('DLSSVideoPlayer.exe', (Join-Path $buildRoot 'DLSSVideoPlayer.exe')),
+        @('dlss5-convert.exe', (Join-Path $buildRoot 'dlss5-convert.exe')),
         @('nvngx_dlss.dll', (Join-Path $buildRoot 'nvngx_dlss.dll')),
         @('nvngx_dlssg.dll', (Join-Path $buildRoot 'nvngx_dlssg.dll')),
         @('README.md', (Join-Path $repositoryRoot 'TECHNICAL_OVERVIEW.md')),
@@ -256,6 +257,7 @@ if ($PublicCore) {
 else {
     $sources = @(
         @('DLSSVideoPlayer.exe', (Join-Path $buildRoot 'DLSSVideoPlayer.exe')),
+        @('dlss5-convert.exe', (Join-Path $buildRoot 'dlss5-convert.exe')),
         @('ffmpeg.exe', (Join-Path $ffmpegRoot 'ffmpeg.exe')),
         @('ffprobe.exe', (Join-Path $ffmpegRoot 'ffprobe.exe')),
         @('yt-dlp.exe', (Join-Path $youtubeRoot 'yt-dlp.exe')),

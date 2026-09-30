@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <iomanip>
 #include <sstream>
 #include <algorithm>
 #include <memory>
@@ -103,6 +104,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 }
 #include "RecentMedia.h"
 #include "MediaPipeline.h"
+#include "JsonEscape.h"
 #include "OfflineNeuralRenderer.h"
 #include "NeuralWorker.h"
 #include "NeuralPreflight.h"
@@ -12407,6 +12409,113 @@ static std::filesystem::path RenderScratchRoot(const std::filesystem::path& sett
     return root.is_absolute()&&length<32767&&automatic!=1?root:std::filesystem::path{};
 }
 
+// `--probe <input>`: what `dlss5-convert probe` prints. Everything a
+// conversion would find out minutes in - that the source is a photo, that no
+// Super Resolution rung grows it, that the runtime drifted from its lock, how
+// far frame generation goes on this GPU - said before anything renders. One
+// line per fact, key=value, or one JSON object with --json. The exit codes are
+// --render's: 0 read, 2 bad arguments, 4 the source could not be read.
+static int RunProbeCommand(const render_command::Command& command,RenderConsole& console){
+    using namespace render_command;
+    std::error_code fileError;
+    const std::filesystem::path input=std::filesystem::absolute(command.input,fileError);
+    if(fileError||!std::filesystem::is_regular_file(input,fileError)){
+        console.Err(L"error: the input is not a file: "+command.input);return kExitBadArguments;
+    }
+    std::filesystem::path executable;std::wstring pathError;
+    if(!CurrentExecutablePath(executable,pathError)){console.Err(L"failed: "+pathError);return kExitFailed;}
+    const std::filesystem::path helpers=executable.parent_path();
+    if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE))){console.Err(L"failed: COM could not be initialized.");return kExitFailed;}
+    if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();console.Err(L"failed: Media Foundation could not be started.");return kExitFailed;}
+    return RunPlayerRuntime([&]() -> int {
+        VideoDecoder decoder;
+        if(!decoder.OpenMetadata(input.wstring())){console.Err(L"failed: the input could not be read as a video or an image.");return kExitFailed;}
+        const uint32_t width=decoder.Width(),height=decoder.Height();
+        const double fps=decoder.FrameRate(),duration=decoder.DurationSeconds();
+        const bool still=decoder.IsStillImage(),animation=decoder.IsAnimation();
+        const std::wstring aspect=ExportDisplayAspect(width,height,decoder.DisplayAspectRatio());
+        const hdr_policy::HdrSignal hdr=decoder.SourceHdrSignal();
+        const std::string codec=decoder.Media().hardwareProfile;
+        decoder.Close();
+        const MediaStreamSummary streams=SummarizeMediaStreams(helpers,input,{});
+
+        // Ordered facts; `json` is the value as JSON (quoted or not), `text`
+        // as a key=value line prints it.
+        struct Fact{std::string key,json,text;};
+        std::vector<Fact> facts;
+        const auto text=[&](const char* key,const std::string& value){facts.push_back({key,"\""+JsonEscape(value)+"\"",value});};
+        const auto number=[&](const char* key,const std::string& value){facts.push_back({key,value,value});};
+        const auto flag=[&](const char* key,bool value){facts.push_back({key,value?"true":"false",value?"true":"false"});};
+        const auto list=[&](const char* key,const std::vector<std::string>& values){
+            std::string json="[",line;
+            for(size_t i=0;i<values.size();++i){json+=(i?",\"":"\"")+JsonEscape(values[i])+"\"";line+=(i?",":"")+values[i];}
+            facts.push_back({key,json+"]",line});
+        };
+        const auto fixed=[](double value,int digits){std::ostringstream out;out<<std::fixed<<std::setprecision(digits)<<value;return out.str();};
+
+        text("input",WideToUtf8(input.wstring()));
+        text("kind",still?"photo":animation?"animation":"video");
+        number("width",std::to_string(width));number("height",std::to_string(height));
+        text("display_aspect",aspect.empty()?"square pixels":WideToUtf8(aspect));
+        if(!still){
+            number("fps",fixed(fps,3));number("duration_seconds",fixed(duration,3));
+            number("frames",std::to_string(static_cast<uint64_t>(std::llround(std::max(0.0,duration)*fps))));
+        }
+        text("codec",codec.empty()?"unknown":codec);
+        text("hdr",hdr==hdr_policy::HdrSignal::Pq?"pq":hdr==hdr_policy::HdrSignal::Hlg?"hlg":"sdr");
+        if(streams.ok){number("audio_streams",std::to_string(streams.audioStreams));number("subtitle_streams",std::to_string(streams.subtitleStreams));}
+        std::vector<std::string> containers;
+        for(const ExportContainer container:ExportContainerChoices(still,animation))containers.push_back(WideToUtf8(ExportContainerExtension(container)+1));
+        list("containers",containers);
+        std::filesystem::path output=DefaultOutput(input);output.replace_extension(ExportContainerExtension(ExportContainerChoices(still,animation).front()));
+        text("default_output",WideToUtf8(output.wstring()));
+
+        // Super Resolution: the rungs that grow this source, at the size each
+        // writes.
+        std::vector<std::string> rungs;
+        for(const uint32_t rung:kUpscaleRungHeights){
+            const UpscalingSize target=UpscalingTarget(width,height,rung);
+            if(target.grows)rungs.push_back(std::to_string(rung)+"="+std::to_string(target.width)+"x"+std::to_string(target.height));
+        }
+        list("sr_heights",rungs);
+
+        // The neural runtime, held to the same lock a render is held to.
+        const auto runtimeDirectory=helpers/L"neural-runtime";
+        std::string runtime="verified";
+        if(!std::filesystem::is_regular_file(runtimeDirectory/L"NeuralWorker.exe",fileError))runtime="missing";
+        else if(const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,EmbeddedRuntimeLock(),{});!refusal.empty())runtime="refused: "+WideToUtf8(refusal);
+        text("neural_runtime",runtime);
+        const bool worker=runtime=="verified"&&!command.safeMode;
+
+        std::string frameGeneration="not measured (add --capabilities)";
+        uint32_t maxMultiplier=0;
+        if(still)frameGeneration="not for a photo";
+        else if(command.capabilities){
+            const FrameGenerationCapability capability=QueryFrameGenerationCapability();
+            // What --multiplier can ask for: the runtime's cap, and no more than
+            // the 5 the command line takes.
+            maxMultiplier=capability.available?std::min(1u+capability.multiFrameCountMax,5u):0u;
+            frameGeneration=maxMultiplier>=2?"up to "+std::to_string(maxMultiplier)+"x":"unavailable"+(capability.detail.empty()?std::string():": "+WideToUtf8(capability.detail));
+        }
+        text("frame_generation",frameGeneration);
+
+        std::vector<std::string> stages;
+        if(worker&&!rungs.empty())stages.push_back("sr");
+        if(worker)stages.push_back("nr");
+        if(!still&&(!command.capabilities||maxMultiplier>=2))stages.push_back("fg");
+        list("stages",stages);
+
+        if(command.json){
+            std::string json="{";
+            for(size_t i=0;i<facts.size();++i)json+=(i?",":"")+std::string("\"")+facts[i].key+"\":"+facts[i].json;
+            console.Out(Utf8ToWide(json+"}"));
+        }else{
+            for(const Fact& fact:facts)console.Out(Utf8ToWide(fact.key+"="+fact.text));
+        }
+        return kExitOk;
+    },[]{MFShutdown();},[]{CoUninitialize();});
+}
+
 static int RunRenderCommand(const render_command::Parsed& parsed,const std::vector<std::wstring>& userArguments){
     using namespace render_command;
     RenderConsole console;
@@ -12417,6 +12526,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         LOG("--render refused its arguments: "<<WideToUtf8(parsed.error));
         return kExitBadArguments;
     }
+    if(parsed.mode==Mode::Probe)return RunProbeCommand(parsed.command,console);
     const Command& command=parsed.command;
     const bool quiet=command.quiet;
     const auto say=[&](const std::wstring& line){if(!quiet)console.Out(line);};

@@ -5458,6 +5458,18 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
     CHECK(parse({L"/?"}).mode == Mode::Help);
     CHECK(parse({L"--render", L"clip.mp4", L"-h"}).mode == Mode::Help);
 
+    // --probe, what dlss5-convert probe runs: one input, two flags, and never
+    // together with --render.
+    const Parsed probe = parse({L"--probe", L"clip.mp4", L"--json", L"--capabilities"});
+    CHECK(probe.mode == Mode::Probe);
+    CHECK(probe.command.input == L"clip.mp4");
+    CHECK(probe.command.json && probe.command.capabilities);
+    CHECK(!parse({L"--probe", L"clip.mp4"}).command.json);
+    CHECK(parse({L"--probe", L"clip.mp4", L"--render", L"clip.mp4"}).mode == Mode::BadArguments);
+    CHECK(parse({L"--probe"}).mode == Mode::BadArguments);
+    CHECK(parse({L"--probe", L"a.mp4", L"--probe", L"b.mp4"}).mode == Mode::BadArguments);
+    CHECK(parse({L"--probe", L"a.mp4", L"--stages", L"sr"}).mode == Mode::BadArguments);
+
     // The default is the dialog's: the neural pass alone, at the saved settings.
     const Parsed plain = parse({L"--render", L"clip.mp4"});
     CHECK(plain.mode == Mode::Render);

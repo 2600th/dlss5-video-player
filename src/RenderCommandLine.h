@@ -40,6 +40,9 @@ enum class Mode {
     Player,
     Help,
     Render,
+    // `--probe <input>`: what the source is and what this machine can do with
+    // it, without rendering anything (dlss5-convert probe).
+    Probe,
     BadArguments,
 };
 
@@ -61,6 +64,10 @@ struct Command {
     // plan comes out of the same PlanExport.
     ExportSelection selection;
     bool quiet{};
+    // --probe only: JSON rather than key=value lines, and whether to bring up
+    // the frame-generation probe, which needs a device of its own.
+    bool json{};
+    bool capabilities{};
     // ParseRuntimeArguments keeps --safe-mode in the user arguments; the render
     // honours it by refusing the neural stage rather than rejecting the flag.
     bool safeMode{};
@@ -103,13 +110,35 @@ inline std::optional<uint32_t> ParseCount(std::wstring_view text)
 inline Parsed Parse(std::span<const std::wstring> userArguments)
 {
     Parsed parsed;
-    bool render = false;
+    bool render = false, probe = false;
     for (const std::wstring& argument : userArguments) {
         if (IsHelpFlag(argument)) {
             parsed.mode = Mode::Help;
             return parsed;
         }
         render = render || argument == L"--render";
+        probe = probe || argument == L"--probe";
+    }
+    if (probe) {
+        const auto bad = [&](std::wstring error) {
+            parsed.mode = Mode::BadArguments;
+            parsed.error = std::move(error);
+            return parsed;
+        };
+        if (render) return bad(L"--probe and --render are two commands; give one.");
+        for (size_t index = 0; index < userArguments.size(); ++index) {
+            const std::wstring& argument = userArguments[index];
+            if (argument == L"--json") { parsed.command.json = true; continue; }
+            if (argument == L"--capabilities") { parsed.command.capabilities = true; continue; }
+            if (argument == L"--safe-mode") { parsed.command.safeMode = true; continue; }
+            if (argument != L"--probe") return bad(L"Unknown argument for --probe: " + argument);
+            if (!parsed.command.input.empty()) return bad(L"--probe was given twice.");
+            if (index + 1 >= userArguments.size() || userArguments[index + 1].empty())
+                return bad(L"--probe needs a value.");
+            parsed.command.input = userArguments[++index];
+        }
+        parsed.mode = Mode::Probe;
+        return parsed;
     }
     // Anything without --render is a player launch, and ParseArgs owns it -
     // including a bare file path, the drag-onto-the-exe case.
@@ -298,6 +327,12 @@ inline std::wstring Usage()
         L"                     never replaced.\n"
         L"  --quiet            Print only the final line.\n"
         L"  --help             Print this and exit.\n"
+        L"\n"
+        L"       DLSSVideoPlayer.exe --probe <input> [--json] [--capabilities]\n"
+        L"\n"
+        L"Prints what the source is and which stages this machine can run on it,\n"
+        L"without rendering. --capabilities also measures frame generation's rate\n"
+        L"cap, which brings up a device of its own. dlss5-convert probe runs this.\n"
         L"\n"
         L"Exit codes: 0 done, 2 bad arguments, 3 refused (the reason is printed),\n"
         L"4 failed, 5 cancelled (Ctrl+C).";

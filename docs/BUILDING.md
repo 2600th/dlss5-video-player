@@ -332,12 +332,13 @@ updating `ffmpeg.txt` and `ffmpeg-bundled-notices.txt` with it. BtbN prunes
 its autobuilds after a while; `-ArchiveUrl` on `tools/fetch_ffmpeg_helpers.ps1`
 then takes a kept copy of the pinned archive, held to its SHA-256 either way.
 
-The two shipped executables link the C and C++ runtimes statically (`/MT`), so
-a package needs no Visual C++ Redistributable; `ShippedRuntimeImports` fails
-the build's tests if either imports a runtime DLL again. The player resolves
-its load-time DLLs from System32 only (`/DEPENDENTLOADFLAG:0x800`, checked by
-`PlayerDllSearchPinned`); the neural helper does not, because its `dxgi.dll` is
-the proxy beside it. They are linked with
+The shipped executables (the player, `dlss5-convert.exe` and the neural
+helper) link the C and C++ runtimes statically (`/MT`), so a package needs no
+Visual C++ Redistributable; `ShippedRuntimeImports` fails the build's tests if
+one imports a runtime DLL again. The player and `dlss5-convert.exe` resolve
+their load-time DLLs from System32 only (`/DEPENDENTLOADFLAG:0x800`, checked by
+`PlayerDllSearchPinned`); the helper does not, because its `dxgi.dll` is the
+proxy beside it. They are linked with
 `/DEBUG` and `/Brepro`: each has
 a PDB beside it in the build tree, for the minidumps the player and the worker
 write, and a clean rebuild from the same checkout path with the same toolset

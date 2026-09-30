@@ -35,9 +35,10 @@ feels), **Pipeline** (render, cache, export, helper), **Release** (packaging,
 CI, supply chain), **Site** or **Docs**. File references are relative to
 `src/` unless a path is given.
 
-**Baseline.** Measured at 0.26.2 on an RTX 5090 with the RTX Video SDK staged:
-Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
-(14 portable, 19 hardware); `site/test.ps1` 61 pass.
+**Baseline.** Measured on 2026-09-30 (0.26.2 plus P1.24-P1.33 and
+`dlss5-convert`) on an RTX 5090 with the RTX Video SDK staged: Release build
+clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
+19 hardware); `site/test.ps1` 61 pass at 0.26.2, not re-run.
 
 ## The rule that shapes this list
 
@@ -105,7 +106,8 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 
 # P1 — Next
 
-P1.24-P1.34 landed on 2026-09-30 (branch `fix/p1-all-and-cli`), What is left of P1.30 needs the
+P1.24-P1.34 landed on 2026-09-30 (branch `fix/p1-all-and-cli`), with the
+`dlss5-convert` command-line converter. What is left of P1.30 needs the
 repository owner.
 
 <a id="p130"></a>

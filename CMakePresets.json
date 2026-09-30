@@ -39,14 +39,14 @@
         "RecentMediaTests", "RenderSettingsTests", "CachedExportTests", "RuntimeLockTests",
         "RangeSelectionTests", "FrameIdentityTests", "NeuralWorkerTests", "UpscalingTests",
         "UpdateCheckTests", "PolicyTests", "ReleaseApiCompileTests", "NeuralPrerenderTests",
-        "PlayerUiRegressionTests"
+        "PlayerUiRegressionTests", "ConvertTests"
       ]
     },
     {
       "name": "analyze",
       "configurePreset": "analyze",
       "configuration": "Release",
-      "targets": [ "DLSSVideoPlayer", "NeuralWorker" ]
+      "targets": [ "DLSSVideoPlayer", "NeuralWorker", "dlss5-convert" ]
     }
   ],
   "testPresets": [

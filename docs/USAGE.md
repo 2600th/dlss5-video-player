@@ -860,17 +860,20 @@ already watching.
 
 ### From the command line
 
-The same export runs without opening the player:
+`dlss5-convert.exe`, beside the player, runs the same export without opening
+it. It is a console program: it waits for each file, shows the player's
+progress, and Ctrl+C cancels the file being converted and stops a batch.
 
 ```
-DLSSVideoPlayer.exe --render <input> [--stages sr,nr,fg] [--height 1080|1440|2160]
-                    [--multiplier 2-5] [--preset NAME] [--processing-scale 100|75|50]
-                    [--range START-END] [--out FILE] [--quiet]
+dlss5-convert <file|folder|wildcard>... [options]
+dlss5-convert probe <file> [--json] [--capabilities]
 ```
 
-- `--stages` picks the stages as the dialog's ticks do: `sr` (Super
-  Resolution), `nr` (neural rendering), `fg` (frame generation). They run in
-  the fixed order above whatever order they are listed in. Without it, `nr`.
+What to render, as the dialog's ticks and settings choose it:
+
+- `--stages` picks the stages: `sr` (Super Resolution), `nr` (neural
+  rendering), `fg` (frame generation), comma-separated. They run in the fixed
+  order above whatever order they are listed in. Without it, `nr`.
 - `--height` is the Super Resolution rung and `--multiplier` the frame
   generation rate, 1440 and 2 by default. Each needs its stage.
 - `--preset` is one of `natural`, `detail-only`, `gentle` or `strong`, the
@@ -878,30 +881,83 @@ DLSSVideoPlayer.exe --render <input> [--stages sr,nr,fg] [--height 1080|1440|216
   settings the player saved.
 - `--processing-scale` is `100`, `75` or `50`, the rungs of **DLSS >
   Processing scale**, for `nr` without `sr`. Without it, the saved rung.
-- `--range` renders part of the source, in the timecode forms **Go to
+- `--range` renders part of each source, in the timecode forms **Go to
   timecode** accepts, for example `0:10-0:25` or `f0-f300`. It needs `sr` or
   `nr`: frame generation then converts that pass's result rather than the whole
   film, and the file carries the source's audio, subtitles and chapters for
   that range.
-- `--out` names the file to write and replaces an existing one. Its extension
-  picks the container, from the ones the dialog offers that source: `.mkv` or
-  `.mp4` for a video, also `.gif` for an animated GIF, `.png` or `.jpg` for a
-  photo; any other is refused as a bad argument. Without it the file is
-  `<input>-dlss.mkv` beside the input (`.gif` for an animation, `.png` for a
-  photo), and an existing one is refused rather than overwritten.
-- `--quiet` prints only the last line; `--help` prints the options.
 
-It prints the plan, a progress line per pass at most once a second, and a final
-`done:`, `refused:`, `failed:` or `cancelled` line. The exit code says which:
-0 done, 2 bad arguments, 3 refused (the reason is printed - the same refusals
-the dialog names, plus a busy neural runtime, a missing one, or one that does
-not match the lock or holds a module it does not name), 4 failed, 5
-cancelled with Ctrl+C.
+Where it goes:
+
+- Without options, each result is written beside its source as
+  `<name>-dlss.mkv` (`.gif` for an animated GIF, `.png` for a photo), and a
+  result that already exists is skipped - so running the same command again
+  converts only what is new. `--overwrite` replaces results instead.
+- `-o`/`--out FILE` names the file for a single input. Its extension picks the
+  container, from the ones the dialog offers that source: `.mkv` or `.mp4` for
+  a video, also `.gif` for an animated GIF, `.png` or `.jpg` for a photo.
+- `--out-dir DIR` writes every result there, creating it if needed.
+  `--format mkv|mp4|gif|png|jpg` picks the container for every result, and
+  `--suffix TEXT` replaces `-dlss` (it may be empty with `--out-dir`).
+
+Batches:
+
+- A folder converts the videos in it (`.mp4`, `.mkv`, `.mov`, `.avi`, `.webm`,
+  `.ts`, `.gif` and the other common ones) and leaves out files that already
+  carry the suffix. `-r`/`--recursive` looks in subfolders too; with
+  `--out-dir`, the subfolders are kept under it, so two `clip.mp4` in two
+  folders stay two files. A file named on the command line is always tried,
+  whatever its extension. Wildcards such as `*.mp4` are expanded by
+  dlss5-convert itself, so they work in `cmd.exe` as well.
+- Every output is decided before anything renders: two inputs that would
+  write the same file, or an output that would replace its input, are reported
+  up front rather than after an hour of rendering.
+- A file that fails or is refused is reported and the batch goes on;
+  `--fail-fast` stops it there. `--dry-run` prints the command each file would
+  run and runs nothing. `--report FILE` writes a JSON summary of every file
+  (input, output, result, exit code, detail). `-q`/`--quiet` prints only each
+  file's result and the summary.
+
+For example, to upscale the `clips` folder and its subfolders to 4K with the
+neural look, into `clips-4k`:
+
+```bat
+dlss5-convert clips -r --stages sr,nr --height 2160 --out-dir clips-4k
+```
+
+With several files, each line of the player's output is prefixed `[3/12]`, and
+a summary follows: how many were done, skipped, refused or failed, and why for
+each that was not done. The exit code is `0` when every file was done or
+already there, `2` for a bad argument, `3` refused, `4` failed and `5`
+cancelled; with several files the worst decides, and a cancel always wins.
+
+`dlss5-convert probe clip.mp4` reads a file and renders nothing: its kind,
+size, display aspect, frame rate, length, codec, HDR signal, audio and subtitle
+streams, the containers it can be written as, the Super Resolution rungs that
+grow it (and to what size), whether the neural runtime is installed and matches
+its lock, and so which stages this machine can run on it. `--capabilities`
+also measures how far frame generation goes on this GPU, which brings up a
+device of its own; `--json` prints one JSON object instead of `key=value`
+lines.
+
+#### What dlss5-convert runs
+
+Each conversion is `DLSSVideoPlayer.exe --render <input> [options] --out FILE`,
+and `probe` is `DLSSVideoPlayer.exe --probe <input>`; they can be run directly.
+`--render` takes the render options above, `--out`, and `--quiet`. It prints
+the plan, a progress line per pass at most once a second, and a final `done:`,
+`refused:`, `failed:` or `cancelled` line. The exit code says which: 0 done, 2
+bad arguments, 3 refused (the reason is printed - the same refusals the dialog
+names, plus a busy neural runtime, a missing one, or one that does not match
+the lock or holds a module it does not name), 4 failed, 5 cancelled with
+Ctrl+C. When the file leaves something out, such as subtitles MP4 cannot hold,
+a `note:` line says so before `done:`. Without `--out` the file is
+`<input>-dlss.mkv` beside the input, and an existing one is refused rather than
+overwritten; with `--out` an existing one is replaced.
 
 The player is a Windows program rather than a console one, so `cmd.exe` does
-not wait for it: use `start /wait "" DLSSVideoPlayer.exe --render ...` and read
-`%ERRORLEVEL%`, or in PowerShell
-`$p = Start-Process DLSSVideoPlayer.exe -ArgumentList '--render','clip.mp4' -Wait -PassThru -NoNewWindow; $p.ExitCode`.
+not wait for it: run it through dlss5-convert, or use
+`start /wait "" DLSSVideoPlayer.exe --render ...` and read `%ERRORLEVEL%`.
 Output redirected to a file or a pipe is written there as UTF-8. It shares the
 neural runtime with a running player, so it waits for a render the player is
 doing, and refuses after five seconds rather than interleaving with it.

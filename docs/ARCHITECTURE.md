@@ -1161,6 +1161,17 @@ starts: it holds the device, its feature-18 workset and the proxy's
 to `ReShade.log1`. `--render` runs in a process of its
 own and has none to release.
 
+`dlss5-convert.exe` is a console front end and nothing else: it expands files,
+folders and wildcards, decides every output before anything runs
+(`ConvertCommandLine.h`, which is pure), and runs `DLSSVideoPlayer.exe
+--render ... --out FILE` once per file, relaying its output and exit code. The
+player is a GUI-subsystem program, so a shell neither waits for it nor shows
+its output; the front end owns the console, hands the player pipes, and the
+player's `AttachConsole(ATTACH_PARENT_PROCESS)` puts it on the same console so
+Ctrl+C reaches the render it cancels. There is one conversion pipeline and one
+set of refusals, whichever way a render is started. `probe` is the player's
+`--probe`, which reads the source and the runtime lock and renders nothing.
+
 Every pass writes Matroska, so the last step is not a rename: `MuxStageExport`
 writes the container the chosen name's extension asks for
 (`ExportContainerFor`), stream-copying the video into MKV or MP4 (`hvc1` for

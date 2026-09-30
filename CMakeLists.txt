@@ -410,6 +410,18 @@ target_link_libraries(NeuralWorker PRIVATE player_media player_render player_neu
 dlss_video_player_harden(NeuralWorker)
 dlss_video_player_symbols(NeuralWorker)
 set_target_properties(NeuralWorker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/neural-runtime")
+
+# dlss5-convert.exe: the console front end for the player's --render and
+# --probe (ConvertCommandLine.h). A console program, so a shell waits for it,
+# shows its progress and hands it Ctrl+C; it runs DLSSVideoPlayer.exe from its
+# own folder for every conversion, so there is still one pipeline.
+add_executable(dlss5-convert src/ConvertMain.cpp src/ConvertCommandLine.h)
+target_link_libraries(dlss5-convert PRIVATE dlss_video_player_common dlss_video_player_shipped_code)
+dlss_video_player_harden(dlss5-convert)
+dlss_video_player_symbols(dlss5-convert)
+if(NOT DLSS_VIDEO_PLAYER_ASAN)
+    target_link_options(dlss5-convert PRIVATE /DEPENDENTLOADFLAG:0x800)
+endif()
 add_dependencies(DLSSVideoPlayer NeuralWorker)
 
 add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
@@ -803,6 +815,12 @@ if(BUILD_TESTING)
     add_dependencies(PolicyTests DLSSVideoPlayer)
     add_test(NAME PolicyTests COMMAND PolicyTests)
 
+    # dlss5-convert.exe, driven for real with the test binary standing in for
+    # the player (ConvertTests.cpp).
+    dlss_video_player_test(ConvertTests tests/ConvertTests.cpp tests/TestSupport.h)
+    add_dependencies(ConvertTests dlss5-convert)
+    add_test(NAME ConvertTests COMMAND ConvertTests "$<TARGET_FILE_DIR:dlss5-convert>")
+
     add_executable(ReleaseApiCompileTests tests/ReleaseApiCompileTests.cpp)
     target_link_libraries(ReleaseApiCompileTests PRIVATE dlss_video_player_common)
     add_test(NAME ReleaseApiCompileTests COMMAND ReleaseApiCompileTests)
@@ -823,7 +841,7 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME ShippedRuntimeImports COMMAND "${CMAKE_COMMAND}"
             "-DDUMPBIN=${DLSS_VIDEO_PLAYER_DUMPBIN}"
-            "-DBINARIES=$<TARGET_FILE:DLSSVideoPlayer>|$<TARGET_FILE:NeuralWorker>"
+            "-DBINARIES=$<TARGET_FILE:DLSSVideoPlayer>|$<TARGET_FILE:NeuralWorker>|$<TARGET_FILE:dlss5-convert>"
             -P "${CMAKE_SOURCE_DIR}/tests/ShippedRuntimeImports.cmake")
         set_tests_properties(ShippedRuntimeImports PROPERTIES TIMEOUT 60)
         add_test(NAME PlayerDllSearchPinned COMMAND "${CMAKE_COMMAND}"

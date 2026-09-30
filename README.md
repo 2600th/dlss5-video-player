@@ -153,15 +153,17 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
 - **Export with DLSS stages** (`Ctrl+S`) renders a new file with any of Super
   Resolution, neural rendering and frame generation (2x to 5x the frame rate),
   in NVIDIA's order.
-- **From the command line**, the same export without opening the player. This
-  writes `clip-dlss.mkv` beside the input:
+- **From the command line**, `dlss5-convert` runs the same export without
+  opening the player, waits for it and shows its progress. Give it files,
+  folders or wildcards; this writes `clip-dlss.mkv` beside the input:
 
   ```bat
-  start /wait "" DLSSVideoPlayer.exe --render clip.mp4
+  dlss5-convert clip.mp4
   ```
 
-  `--out`, `--stages`, `--range` and the rest are in the
-  [usage guide](docs/USAGE.md#from-the-command-line).
+  `dlss5-convert probe clip.mp4` says what a file is and which stages this
+  machine can run on it. Batches, `--out-dir`, `--stages`, `--range` and the
+  rest are in the [usage guide](docs/USAGE.md#from-the-command-line).
 
 ## What's new in 0.26.2
 
