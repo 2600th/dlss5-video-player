@@ -99,7 +99,10 @@ function Read-PackageIdentity {
         throw 'PACKAGE_MANIFEST.txt has an invalid header.'
     }
     $manifestVersion = $Matches[1]
-    $paths = @($lines[2..($lines.Count - 1)] | ForEach-Object { ($_ -split '\|', 2)[0] })
+    # The commit line (P1.30) sits between the version and the column header;
+    # packages from before it have none.
+    $firstRow = if ($lines[1] -match '^Commit=') { 3 } else { 2 }
+    $paths = @($lines[$firstRow..($lines.Count - 1)] | ForEach-Object { ($_ -split '\|', 2)[0] })
     $isCore = $paths -ccontains 'PUBLIC_RELEASE_NOTICE.txt'
     $isComplete = $paths -ccontains 'EXPERIMENTAL_RUNTIME_NOTICE.txt'
     if ($isCore -eq $isComplete) {
@@ -428,11 +431,19 @@ function Assert-Stage {
 
     $manifestPath = Join-Path $resolvedRoot 'PACKAGE_MANIFEST.txt'
     $lines = @(Get-Content -LiteralPath $manifestPath)
-    if ($lines.Count -lt 3 -or $lines[0] -cne "ProductVersion=$version" -or
-        $lines[1] -cne 'Path|Size|SHA256|Authenticode|Signer') {
+    # The commit the package was built from (P1.30), when the packager wrote
+    # one: a full object name and nothing else.
+    $header = 1
+    if ($lines.Count -gt 1 -and $lines[1] -like 'Commit=*') {
+        if ($lines[1] -cnotmatch '^Commit=[0-9a-f]{40}$') { throw 'PACKAGE_MANIFEST.txt names its commit in an invalid form.' }
+        if (-not $repositoryMode) { Write-Host "Built from commit $($lines[1].Substring(7))." }
+        $header = 2
+    }
+    if ($lines.Count -lt $header + 2 -or $lines[0] -cne "ProductVersion=$version" -or
+        $lines[$header] -cne 'Path|Size|SHA256|Authenticode|Signer') {
         throw 'PACKAGE_MANIFEST.txt has an invalid header.'
     }
-    $manifestRows = $lines[2..($lines.Count - 1)]
+    $manifestRows = $lines[($header + 1)..($lines.Count - 1)]
     $manifestExpected = @($actual | Where-Object { $_ -cne 'PACKAGE_MANIFEST.txt' })
     if ($manifestRows.Count -ne $manifestExpected.Count) {
         throw 'PACKAGE_MANIFEST.txt row count does not match the package.'

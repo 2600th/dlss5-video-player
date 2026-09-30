@@ -61,7 +61,7 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | **P0** | **Fix before the next release** | | | |
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
-| [P1.30](#p130) | The complete zip cannot be traced to a commit | S-M | Release | 🧪 |
+| [P1.30](#p130) | Release tags can still be moved (ruleset; owner) | S | Release | 🧪 |
 | [P1.31](#p131) | GPU and audio tests never run in CI | M | Release | 🧪 |
 | [P1.32](#p132) | Refresh `RELATED_PROJECTS.md` | S | Docs | |
 | [P1.33](#p133) | Small hardening and doc drift (checklist) | S | All | 🔍 |
@@ -110,26 +110,20 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 # P1 — Next
 
 <a id="p130"></a>
-### P1.30 · The complete zip cannot be traced to a commit
+### P1.30 · Release tags can still be moved
 
-`S-M` · **Release** · 🧪 · _`gh run`, `gh api rulesets`, `git ls-remote`_
+`S` · **Release** · _left over from P1.30; needs the repository owner_
 
-- **Problem.**
-  - `Assert-ReleaseBuild` checks only the version resource: no clean-tree
-    check, no "HEAD is the tag" check, and no commit in
-    `PACKAGE_MANIFEST.txt`.
-  - The `dlss5-video-player-v0.26.0` tag moved from a4a3411 to 13f92b7 after
-    release run 36047815691 failed, and `dlss5-video-player-v0.26.2` from
-    581a13a to 5dbb3b9 after run 36229669021 failed on a stale stamp; there is
-    no tag ruleset to stop that.
-  - README:53-56 says only the core zip has an attestation, yet
-    `attest-release-asset.yml` exists for the complete one.
-- **Where.** `tools/package_release.ps1:83-125`,
-  `.github/workflows/attest-release-asset.yml`.
-- **Fix.** Refuse a dirty tree or a HEAD that is not the tag; write the commit
-  into the manifest; add a tag ruleset; run the attest workflow for the
-  complete zip, or correct the README.
-- **Test.** Packaging from a dirty tree fails.
+- **Problem.** The `dlss5-video-player-v0.26.0` tag moved from a4a3411 to
+  13f92b7 after release run 36047815691 failed, and `dlss5-video-player-v0.26.2`
+  from 581a13a to 5dbb3b9 after run 36229669021 failed on a stale stamp. The
+  packager now refuses a release whose HEAD is not its tag and writes the
+  commit into `PACKAGE_MANIFEST.txt` (`tools/source_identity.ps1`), but nothing
+  on GitHub stops a published tag from being moved or deleted.
+- **Fix.** A tag ruleset on `refs/tags/dlss5-video-player-v*` that blocks
+  updates and deletions (repository settings > Rules, or
+  `gh api repos/2600th/dlss5-video-player/rulesets` with `target: tag`). An
+  admin action, not a code change.
 
 <a id="p131"></a>
 ### P1.31 · GPU and audio tests never run in CI

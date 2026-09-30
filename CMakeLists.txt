@@ -832,6 +832,11 @@ if(BUILD_TESTING)
             "-DUNPINNED=$<TARGET_FILE:NeuralWorker>"
             -P "${CMAKE_SOURCE_DIR}/tests/PlayerDllSearchPinned.cmake")
         set_tests_properties(PlayerDllSearchPinned PROPERTIES TIMEOUT 60)
+        # P1.30: the packager refuses a dirty tree and, for a release, a HEAD
+        # that is not the release tag. Needs git, which every checkout has.
+        add_test(NAME PackageSourceIdentity COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_SOURCE_DIR}/tests/PackageSourceIdentity.ps1" -Tools "${CMAKE_SOURCE_DIR}/tools")
+        set_tests_properties(PackageSourceIdentity PROPERTIES TIMEOUT 60)
     endif()
 
     dlss_video_player_test(NeuralPrerenderTests tests/NeuralPrerenderTests.cpp tests/TestSupport.h)

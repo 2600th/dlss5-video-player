@@ -51,10 +51,15 @@ sha256sum -c DLSSVideoPlayer-v0.26.2-core-win64.zip.sha256
 gh attestation verify DLSSVideoPlayer-v0.26.2-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
-Only the core zip has an attestation. CI can't fetch the neural runtime, so the
-complete zip is assembled on the maintainer's machine and has a checksum only.
-If you would rather not trust that step, take the core zip and add the runtime
-yourself: [docs/BUILDING.md](docs/BUILDING.md).
+Only the core zip has build provenance. CI can't fetch the neural runtime, so
+the complete zip is assembled on the maintainer's machine. Once it is uploaded,
+the `attest-release-asset` workflow signs its digest, and `gh attestation
+verify` on it shows that this repository vouches for those exact bytes, not
+that CI built them. Either zip's `PACKAGE_MANIFEST.txt` names the commit it was
+built from, and the packager refuses a tree with uncommitted changes or a
+release that is not built from its tag. If you would rather not trust the
+maintainer's machine, take the core zip and add the runtime yourself:
+[docs/BUILDING.md](docs/BUILDING.md).
 
 Before the first run, `verify_package.ps1` (in the zip) checks every unpacked
 file against the package manifest and shows which binaries are signed. From the

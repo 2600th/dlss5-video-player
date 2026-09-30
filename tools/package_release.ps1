@@ -2,6 +2,9 @@
 param(
     [switch]$ValidateBuildOnly,
     [switch]$PublicCore,
+    # A package that is not a release (CI's per-push build): the tree must
+    # still be clean, but HEAD need not be the release tag.
+    [switch]$Snapshot,
     [string]$BuildDirectory = 'build-upscaling',
     [string]$PackageSuffix = '-upscaling'
 )
@@ -20,6 +23,8 @@ $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw)
 if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
     throw "VERSION must read major.minor.patch; received '$version'."
 }
+
+. (Join-Path $PSScriptRoot 'source_identity.ps1')
 
 $distRoot = Join-Path $repositoryRoot 'dist'
 $stageName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
@@ -181,6 +186,12 @@ function Get-AuthenticodeRecord {
 Assert-ReleaseBuild
 if ($ValidateBuildOnly) { return }
 
+# Before anything is staged, so a package that cannot name its commit is
+# never assembled at all.
+$sourceIdentity = Get-PackageSourceIdentity -RepositoryRoot $repositoryRoot `
+    -ExpectedTag "dlss5-video-player-v$version" -Snapshot:$Snapshot
+Write-Host "Packaging commit $($sourceIdentity.Commit)$(if ($sourceIdentity.Tag) { " ($($sourceIdentity.Tag))" } else { ' (snapshot, untagged)' })."
+
 if (-not $PublicCore) {
     & (Join-Path $PSScriptRoot 'stage_runtime.ps1') -InputDirectory $runtimeRoot -Destination $runtimeRoot -ValidateOnly | Out-Host
     Assert-HashLock
@@ -335,6 +346,7 @@ foreach ($source in $sources) {
 $files = @(Get-OrdinalPackageFiles -Root $stageFull)
 $manifest = New-Object Collections.Generic.List[string]
 $manifest.Add("ProductVersion=$version")
+$manifest.Add("Commit=$($sourceIdentity.Commit)")
 $manifest.Add('Path|Size|SHA256|Authenticode|Signer')
 foreach ($file in $files) {
     $relative = Get-RelativePackagePath -Root $stageFull -Path $file.FullName

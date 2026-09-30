@@ -128,10 +128,11 @@ jobs:
 
       # The same packager the release workflow runs, on the build ctest just
       # ran, so a packaging break is found on the pull request and not on the
-      # tag.
+      # tag. -Snapshot: this commit is not the release tag, so the packager
+      # checks only that the tree is clean (tools/source_identity.ps1).
       - name: Assemble the core package from the tested build
         shell: cmd
-        run: package_public_release.bat
+        run: package_public_release.bat -Snapshot
 
       - name: Verify the core package
         shell: powershell

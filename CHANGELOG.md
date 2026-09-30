@@ -36,6 +36,11 @@ decisions that still shape the code are in
   planted `dxgi.dll` or similar beside it is never loaded.
 - Helper processes inherit only the handles they are meant to have.
 
+### Release
+
+- Every package names the commit it was built from, and packaging refuses
+  uncommitted changes or a release not built from its tag.
+
 ## 0.26.2 - 2026-09-26
 
 Fixes from re-measuring an RTX 5090 on 0.26.1

@@ -293,6 +293,12 @@ package has neither, so from an unpacked folder it runs in package mode: it
 reads the version and variant from `PACKAGE_MANIFEST.txt` and holds every file
 to the manifest and the allowlist. CI runs that copy from an extracted core zip.
 
+Every package names the commit it was built from in `PACKAGE_MANIFEST.txt`,
+and the assembler refuses a tree with uncommitted changes to tracked files. A
+release is built from its tag: the assembler refuses a HEAD that is not
+`dlss5-video-player-v<version>`. `-Snapshot` lifts only that second rule, for
+a package that is not a release (CI's per-push core package).
+
 This complete experimental package requires the locked runtime and helpers.
 The assembler refuses to replace an existing output; select a new suffix for
 another local candidate. The published download uses the
