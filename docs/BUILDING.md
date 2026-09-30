@@ -1,6 +1,6 @@
 # Building and testing
 
-_Verified against 0.26.2 (b965b53) on 2026-09-26._
+_Verified against 0.27.0 (2939517) on 2026-10-01._
 
 Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
 C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the
@@ -68,7 +68,7 @@ ctest --preset portable
 ```
 
 Two more presets reproduce CI's quality job. `analyze` runs the MSVC code
-analyzer on the two shipped targets, and `asan` builds the portable suites with
+analyzer on the three shipped targets, and `asan` builds the portable suites with
 AddressSanitizer into `build-asan`; run them with
 `cmake --preset asan`, `cmake --build --preset asan --parallel` and
 `ctest --preset asan`. Every target builds at `/W4 /WX`, and an analyzer
@@ -83,12 +83,14 @@ Launch `build-upscaling/Release/DLSSVideoPlayer.exe`. Its neural worker is built
 as `build-upscaling/Release/neural-runtime/NeuralWorker.exe`. Without the
 experimental runtime, a source build uses the native playback path.
 
-The fourteen portable suites cover recent history, settings/cache integrity,
+The eighteen portable suites cover recent history, settings/cache integrity,
 real-media export and cached comparison playback through the real decoders,
 runtime lock and worker protocols, runtime, upscaling and export policy, range selection,
 frame identity, update checks, the release API surface, prerender, playback and
-native UI regressions, and that neither shipped executable imports a Visual C++
-runtime DLL. Every test carries a time limit, and the real-media suite
+native UI regressions, the `dlss5-convert.exe` console converter, that no shipped
+executable imports a Visual C++ runtime DLL, that the player resolves its
+load-time DLLs from System32 only, and the packager's source-commit and
+hardware-report checks. Every test carries a time limit, and the real-media suite
 reports itself skipped rather than failed when FFmpeg is not staged.
 
 Seventeen more are registered under the `gpu` label and need an RTX card with the
@@ -338,8 +340,8 @@ The shipped executables (the player, `dlss5-convert.exe` and the neural
 helper) link the C and C++ runtimes statically (`/MT`), so a package needs no
 Visual C++ Redistributable; `ShippedRuntimeImports` fails the build's tests if
 one imports a runtime DLL again. The player and `dlss5-convert.exe` resolve
-their load-time DLLs from System32 only (`/DEPENDENTLOADFLAG:0x800`, checked by
-`PlayerDllSearchPinned`); the helper does not, because its `dxgi.dll` is the
+their load-time DLLs from System32 only (`/DEPENDENTLOADFLAG:0x800`, which
+`PlayerDllSearchPinned` checks on the player); the helper does not, because its `dxgi.dll` is the
 proxy beside it. They are linked with
 `/DEBUG` and `/Brepro`: each has
 a PDB beside it in the build tree, for the minidumps the player and the worker

@@ -1,6 +1,6 @@
 # YouTube resolver helpers
 
-_Verified against 0.26.2 (b965b53) on 2026-09-26._
+_Verified against 0.27.0 (2939517) on 2026-10-01._
 
 Run `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools\fetch_youtube_helpers.ps1` from the repository root to fetch the two package-local helper executables used by YouTube playback.
 

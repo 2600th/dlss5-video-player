@@ -1,6 +1,6 @@
 # Neural quality benchmark
 
-_Verified against 0.26.2 (b965b53) on 2026-09-26._
+_Verified against 0.27.0 (2939517) on 2026-10-01._
 
 Repeatable corpus, worker driver, metric analysis and blind A/B tooling for the
 isolated `NeuralWorker.exe`. Everything is written
@@ -93,7 +93,7 @@ must never reset.
 | `orig-film-cuts-a` | camera-original | **Camera-original** (see below): 131 frames at 23.976 fps, **eight** hard cuts at 4/14/24/39/51/81/105/120 — the densest real editing rhythm here. Locals 4 and 51 have histogram overlap 0.65/0.75, so a threshold alone misses them |
 | `orig-film-cuts-b` | camera-original | **Camera-original**: 70 frames, three hard cuts at 13/41/60. Starts one frame later than first cut, so the clip does not open with a one-frame shot |
 | `orig-film-fade` | camera-original | **Camera-original**, and a **real** gradual transition: the trailer's own fade to black, luma 77 → 0 across locals 6-27, no pair above \|dY\| 6. `soft_cuts` marks it |
-| `orig-faces` | faces | **Camera-original** faces: 101 frames, four hard cuts at 19/34/56/83, a face clearly visible on at least one side of each. Shares the `faces` category with the `faces` clip above, which is deliberate - they are alternatives, not a pair. On a machine that still has `mafia-60s.mkv` both are built and `--faces` scores both under one category name, so drop one from `--clips` if you want a single face row |
+| `orig-faces` | faces | **Camera-original** faces: 101 frames, four hard cuts at 19/34/56/83, a face clearly visible on at least one side of each. Shares the `faces` category with the `faces` clip above, which is deliberate - they are alternatives, not a pair. On a machine that still has `mafia-60s.mkv` both are built and `analyze.py` scores both under one category name, so drop one from `--clips` if you want a single face row |
 | `orig-game-cuts` | camera-original | **Camera-original** game footage: 91 frames, hard cuts at 20 and 70 (street chase → jet skis → armoured truck) |
 | `orig-game-motion` | camera-original | **Camera-original**: 66 frames, one continuous moving shot — the only span in its 26 s source that is both cut-free and actually moving (median \|dY\| 3.9); every other cut-free span is the static end card |
 | `orig-dissolve` | camera-original | **Camera-original**, and the **real cross-dissolve** this corpus lacked: locals 21-48 are a linear blend of the shots either side, alpha sliding 1 → 0, residual 0.063 of the endpoint difference, mid-transition gradient below both ends. Both sides carry burned-in title text |

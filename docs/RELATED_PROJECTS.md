@@ -1,6 +1,6 @@
 # Related DLSS 5 neural-rendering projects
 
-_Verified against 0.26.2 (b965b53) on 2026-09-30._
+_Verified against 0.27.0 (2939517) on 2026-10-01._
 
 Every link, and every fact in "Where this player fits" and "The landscape", was
 checked on the project's public page on 2026-09-30. Star counts are that day's

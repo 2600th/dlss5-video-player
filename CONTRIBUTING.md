@@ -1,6 +1,6 @@
 # Contributing
 
-_Verified against 0.26.2 (b965b53) on 2026-09-26._
+_Verified against 0.27.0 (2939517) on 2026-10-01._
 
 Start with [Building and testing](docs/BUILDING.md) for the pinned dependencies
 and the canonical `build-upscaling` commands.
@@ -18,7 +18,7 @@ and the canonical `build-upscaling` commands.
 
 ## Before opening a pull request
 
-For code changes, build Release x64 and run the fourteen portable CTest suites
+For code changes, build Release x64 and run the eighteen portable CTest suites
 (`ctest -LE "gpu|audio"`). FFmpeg and FFprobe must be staged so the real-media suite runs
 rather than reporting itself skipped. For rendering, timing or decoding changes
 also run the hardware smokes on an RTX card with an audio endpoint

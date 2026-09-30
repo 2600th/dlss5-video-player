@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-_Verified against 0.26.2 (b965b53) on 2026-09-26._
+_Verified against 0.27.0 (2939517) on 2026-10-01._
 
 The interface is English-only. It does not load external language packs.
 
@@ -824,7 +824,7 @@ history**: Temporal or Per-frame, with the measured VMAF and steadiness in its
 tooltip. It applies only to Super Resolution on its own. With Neural rendering
 ticked it is greyed and the pass keeps Temporal, because the model runs on the same
 frames. Cached renders are therefore never affected. `--render` uses the saved
-choice.
+choice unless `--history` names one.
 
 The file is written in the container its name asks for. The Save dialog
 offers MKV (the default) and MP4 for a video, GIF (the default), MP4 and MKV
@@ -965,8 +965,9 @@ names, plus a busy neural runtime, a missing one, or one that does not match
 the lock or holds a module it does not name), 4 failed, 5 cancelled with
 Ctrl+C. When the file leaves something out, such as subtitles MP4 cannot hold,
 a `note:` line says so before `done:`. Without `--out` the file is
-`<input>-dlss.mkv` beside the input, and an existing one is refused rather than
-overwritten; with `--out` an existing one is replaced.
+`<input>-dlss.mkv` beside the input (`.gif` for an animated GIF, `.png` for a
+photo), and an existing one is refused rather than overwritten; with `--out` an
+existing one is replaced.
 
 The player is a Windows program rather than a console one, so `cmd.exe` does
 not wait for it: run it through dlss5-convert, or use

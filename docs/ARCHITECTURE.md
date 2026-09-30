@@ -1,6 +1,6 @@
 # Architecture
 
-_Verified against 0.26.2 (b965b53) on 2026-09-26._
+_Verified against 0.27.0 (2939517) on 2026-10-01._
 
 ## High-level pipeline
 
@@ -557,7 +557,7 @@ Which adapter the device actually got is logged once per creation - description,
 LUID, vendor, dedicated memory - beside the adapter `DetectHighPerformanceGpu`
 picked, compared by LUID rather than by model name, because on a hybrid laptop
 the two can differ and then the cache identity, the receipt's GPU label and the
-pace prior all describe a part that did not render. Both binaries also export
+pace prior all describe a part that did not render. The player and the worker export
 `NvOptimusEnablement` and `AmdPowerXpressRequestHighPerformance` from
 `src/GpuPreference.cpp`: the driver reads them from the main module at process
 launch, so there is nothing to call and the worker - the process that loads the
@@ -1333,7 +1333,7 @@ build named; the full entries are in `CHANGELOG.md` at tag
   exactly (30.10 dB either way; it had been 0.64 dB behind). The pipeline term
   moved to `bt709-export-v1`.
 - **The model-store digest is not memoised** (0.22.0). The memo used elsewhere
-  keys on path, size and write time, and Windows write times move in ~15 ms
+  then keyed only on path, size and write time, and Windows write times move in ~15 ms
   ticks, enough for a selector file rewritten in place at the same size to
   reuse a stale digest.
 
@@ -1359,7 +1359,7 @@ build named; the full entries are in `CHANGELOG.md` at tag
   than in 450). An hour-long render is ~1800 parts, about 18 s of join; the fix,
   not yet made, is to stop gating the next hole on the publish.
 - **Segments after the first are opened without a probe** (0.20.1).
-  `ffprobe.exe` is 98 MB, and an antivirus that scans process starts made each
+  `ffprobe.exe` was 98 MB, and an antivirus that scans process starts made each
   probe 684 ms against 32 ms inside an exclusion; paid every two seconds, that
   dropped 1110 of 2525 frames. `VideoDecoder::OpenKnown` reuses the first
   segment's parameters, on a worker thread.

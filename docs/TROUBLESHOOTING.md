@@ -1,6 +1,6 @@
 # Troubleshooting
 
-_Verified against 0.26.2 (b965b53) on 2026-09-26._
+_Verified against 0.27.0 (2939517) on 2026-10-01._
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
 
@@ -398,8 +398,10 @@ protected location under Controlled Folder Access - the log falls back to
 logged.
 
 An unhandled crash writes a minidump beside the log, named
-`DLSSVideoPlayer-crash-<date>-<pid>.dmp`, and records the exception code and
-address in the log itself. Attach both.
+`DLSSVideoPlayer-crash-<date>-<time>-<pid>.dmp` (`NeuralWorker-crash-...` for
+the helper), and records the exception code and address in the log itself.
+When the full dump cannot be written, a minimal one is written instead and the
+log line says so. Attach both.
 
 ## Reporting an issue
 

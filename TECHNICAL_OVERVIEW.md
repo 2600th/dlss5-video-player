@@ -1,6 +1,6 @@
 # DLSS 5 Video Player — technical overview
 
-_Verified against 0.26.2 (b965b53) on 2026-09-26._
+_Verified against 0.27.0 (2939517) on 2026-10-01._
 
 The player renders a whole video while you watch it, keeps every rendered
 region seekable, reuses the validated result, and compares it with the original
@@ -95,7 +95,7 @@ diagnostics are in `neural-runtime/NeuralWorker.log` and
 `neural-runtime/ReShade.log`. **Advanced > Restart in DLSS SR safe mode** skips
 the neural helper for that launch. See [troubleshooting](docs/TROUBLESHOOTING.md).
 
-Fourteen portable CTest suites, seventeen GPU smokes (one more in a build with
+Eighteen portable CTest suites, seventeen GPU smokes (one more in a build with
 the RTX Video SDK) and an audio-clock smoke are listed in
 [Building and testing](docs/BUILDING.md). Real-media
 GPU checks and their limits are recorded per machine and date in the
