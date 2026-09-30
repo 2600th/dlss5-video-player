@@ -32,6 +32,8 @@ decisions that still shape the code are in
 
 ### Security
 
+- The player loads its Windows system libraries from System32 only, so a
+  planted `dxgi.dll` or similar beside it is never loaded.
 - Helper processes inherit only the handles they are meant to have.
 
 ## 0.26.2 - 2026-09-26

@@ -311,7 +311,10 @@ from the Actions tab (`workflow_dispatch` with the tag as input).
 
 The two shipped executables link the C and C++ runtimes statically (`/MT`), so
 a package needs no Visual C++ Redistributable; `ShippedRuntimeImports` fails
-the build's tests if either imports a runtime DLL again. They are linked with
+the build's tests if either imports a runtime DLL again. The player resolves
+its load-time DLLs from System32 only (`/DEPENDENTLOADFLAG:0x800`, checked by
+`PlayerDllSearchPinned`); the neural helper does not, because its `dxgi.dll` is
+the proxy beside it. They are linked with
 `/DEBUG` and `/Brepro`: each has
 a PDB beside it in the build tree, for the minidumps the player and the worker
 write, and a clean rebuild from the same checkout path with the same toolset

@@ -390,6 +390,18 @@ add_executable(DLSSVideoPlayer WIN32
 target_link_libraries(DLSSVideoPlayer PRIVATE ${PLAYER_OBJECT_LIBRARIES} dlss_video_player_shipped_code)
 dlss_video_player_harden(DLSSVideoPlayer)
 dlss_video_player_symbols(DLSSVideoPlayer)
+# Load-time imports resolve from System32 only (P1.29). None of dxgi, d3d12,
+# d3d11, D3DCOMPILER_47, dbghelp, VERSION, WINHTTP or dwmapi is a KnownDLL, and
+# SetDefaultDllDirectories in wWinMain runs after the loader has resolved them,
+# so a dxgi.dll beside the exe - the old layout's ReShade proxy, or a planted
+# one - loaded before the guard that refuses it could run. 0x800 is
+# LOAD_LIBRARY_SEARCH_SYSTEM32, and every static import of the player lives
+# there (PlayerDllSearchPinned checks the flag). Not on NeuralWorker, which
+# needs the proxy dxgi.dll beside it, and not under ASan, whose runtime DLL is
+# found beside the executable.
+if(NOT DLSS_VIDEO_PLAYER_ASAN)
+    target_link_options(DLSSVideoPlayer PRIVATE /DEPENDENTLOADFLAG:0x800)
+endif()
 
 # Only the offline helper loads the experimental proxy/add-on. The player root
 # stays hook-free for its independent runtime Super Resolution feature.
@@ -814,6 +826,12 @@ if(BUILD_TESTING)
             "-DBINARIES=$<TARGET_FILE:DLSSVideoPlayer>|$<TARGET_FILE:NeuralWorker>"
             -P "${CMAKE_SOURCE_DIR}/tests/ShippedRuntimeImports.cmake")
         set_tests_properties(ShippedRuntimeImports PROPERTIES TIMEOUT 60)
+        add_test(NAME PlayerDllSearchPinned COMMAND "${CMAKE_COMMAND}"
+            "-DDUMPBIN=${DLSS_VIDEO_PLAYER_DUMPBIN}"
+            "-DPINNED=$<TARGET_FILE:DLSSVideoPlayer>"
+            "-DUNPINNED=$<TARGET_FILE:NeuralWorker>"
+            -P "${CMAKE_SOURCE_DIR}/tests/PlayerDllSearchPinned.cmake")
+        set_tests_properties(PlayerDllSearchPinned PROPERTIES TIMEOUT 60)
     endif()
 
     dlss_video_player_test(NeuralPrerenderTests tests/NeuralPrerenderTests.cpp tests/TestSupport.h)

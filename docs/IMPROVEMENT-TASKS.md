@@ -61,7 +61,6 @@ Release build clean at **0 warnings /W4**; CTest **33 registrations, all pass**
 | **P0** | **Fix before the next release** | | | |
 | | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
-| [P1.29](#p129) | Load-time DLLs are not pinned to System32 | S | Release | 🧪 |
 | [P1.30](#p130) | The complete zip cannot be traced to a commit | S-M | Release | 🧪 |
 | [P1.31](#p131) | GPU and audio tests never run in CI | M | Release | 🧪 |
 | [P1.32](#p132) | Refresh `RELATED_PROJECTS.md` | S | Docs | |
@@ -109,23 +108,6 @@ Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
 ---
 
 # P1 — Next
-
-<a id="p129"></a>
-### P1.29 · Load-time DLLs are not pinned to System32
-
-`S` · **Release** · 🧪 · _`dumpbin`: Dependent Load Flag 0000_
-
-- **Problem.** The player statically imports `dxgi`, `d3d12`, `d3d11`,
-  `D3DCOMPILER_47`, `dbghelp`, `VERSION`, `WINHTTP` and `dwmapi`, none of them
-  KnownDLLs. `SetDefaultDllDirectories` runs after they are resolved, so a
-  `dxgi.dll` beside the exe (the old layout's unsigned ReShade proxy, or a
-  planted one) loads before the guard that rejects it.
-- **Where.** `CMakeLists.txt:242`; `main.cpp:12431` (too late),
-  `main.cpp:1308-1309` (guard).
-- **Fix.** `/DEPENDENTLOADFLAG:0x800` on `DLSSVideoPlayer` only, or delay-load
-  those DLLs. Not on `NeuralWorker`, which needs the proxy `dxgi.dll` beside
-  it.
-- **Test.** A CTest check that reads the load-config flag from the built exe.
 
 <a id="p130"></a>
 ### P1.30 · The complete zip cannot be traced to a commit
