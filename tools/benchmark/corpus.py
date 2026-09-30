@@ -496,7 +496,7 @@ def build_orig_faces(corpus: Path) -> dict | None:
               "redistributed. Four hard cuts, each confirmed by frame-pair inspection, and a face is clearly "
               "visible on at least one side of every one of them; locals 19, 34 and 83 have histogram overlap "
               "0.67-0.71, so they are exactly the 'similar cut' case a threshold misses. This is the only clip "
-              "here whose category drives face metrics, so `analyze.py --faces` has real faces to embed for "
+              "here whose category drives face metrics, so `analyze.py` has real faces to embed for "
               "the first time."))
 
 

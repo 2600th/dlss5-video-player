@@ -43,12 +43,13 @@ constexpr const wchar_t* kNgxCoreKey = L"SOFTWARE\\NVIDIA Corporation\\Global\\N
 
 // The model store is over a gigabyte of weight blobs on this machine's driver
 // (measure it at %ProgramData%\NVIDIA\NGX\models), and this digest is computed
-// on the path that answers a cache lookup, so hashing every byte per request
-// is not affordable. Files at or below this bound - every config, mapping,
-// deny list and Streamline module, which is what decides *which* weights load
-// - are hashed byte for byte; the blobs above it are identified by relative
-// name, size and write time, the same identity Sha256FileCached already
-// trusts for installation files. A refresh writes new version directories and
+// on the path that answers a cache lookup, so hashing every byte per request is
+// not affordable. Files at or below this bound - every config, mapping, deny
+// list and Streamline module, which is what decides *which* weights load - are
+// hashed byte for byte; the blobs above it are identified by relative name,
+// size and write time - less than Sha256FileCached, which also keys on the
+// file's identity and change time, but the model store is written by NVIDIA's
+// updater, not swapped in place. A refresh writes new version directories and
 // new blob names, so it moves the listing either way.
 constexpr uintmax_t kModelContentHashLimit = 1u << 20;
 
@@ -288,14 +289,15 @@ std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoo
             file.unreadable = true;
         }
         if (sized && size <= kModelContentHashLimit) {
-            // Uncached on purpose. Sha256FileCached keys on (path, size, write
-            // time), and Windows write times move in ~15 ms ticks, so a small
-            // selector file replaced in place at the same size inside one tick
-            // reuses the previous digest. That is tolerable for installation
-            // files, which this process does not edit, and not tolerable for a
-            // term of the render identity: a stale digest here serves a render
-            // built against weights that are no longer the ones on disk. Only
-            // files at or below the bound reach this, so the re-read is small.
+            // Uncached on purpose. Sha256FileCached trusts a file's change time
+            // once it is five seconds old, and a change time can be written
+            // back, so a small selector file rewritten in place at the same
+            // size with its times restored reuses the previous digest. That is
+            // tolerable for installation files, which this process does not
+            // edit, and not tolerable for a term of the render identity: a
+            // stale digest here serves a render built against weights that are
+            // no longer the ones on disk. Only files at or below the bound
+            // reach this, so the re-read is small.
             const bool selector =
                 SectionedSelector(LowerWide(entry.path().filename().wstring()));
             if (const auto digest = selector ? HashNeuralPassSelector(entry.path())

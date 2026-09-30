@@ -69,7 +69,7 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/WX>)
 # Neither is for shipping: ASan instruments every object, and /analyze only
 # adds diagnostics.
 option(DLSS_VIDEO_PLAYER_ASAN "Build with AddressSanitizer, for the device-free test suites" OFF)
-option(DLSS_VIDEO_PLAYER_ANALYZE "Run the MSVC code analyzer (/analyze) on the two shipped targets" OFF)
+option(DLSS_VIDEO_PLAYER_ANALYZE "Run the MSVC code analyzer (/analyze) on the three shipped targets" OFF)
 if(DLSS_VIDEO_PLAYER_ASAN)
     # /Zi so ASan reports carry file and line. The shipped targets' /guard:cf
     # and /INCREMENTAL-free Release link are compatible with it.
@@ -130,7 +130,7 @@ else()
     message(WARNING "The NVENC API header is missing from ${NVENC_SDK}. It ships with this repository, so this build will encode every neural render through the ffmpeg child - see docs/BUILDING.md.")
 endif()
 
-# Control Flow Guard and CET shadow stacks for the two shipped binaries. The
+# Control Flow Guard and CET shadow stacks for the three shipped binaries. The
 # compiler and linker already default to /GS, /DYNAMICBASE, /NXCOMPAT and
 # /HIGHENTROPYVA; they are spelled out so a toolset that stops defaulting them
 # shows up as a diff here rather than in dumpbin output of a shipped package.
@@ -139,10 +139,10 @@ function(dlss_video_player_harden target)
     target_link_options(${target} PRIVATE /GUARD:CF /CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)
 endfunction()
 
-# Symbols and reproducibility for the two shipped binaries. CrashDump.h writes
-# minidumps from both processes, and without a PDB that matches the build a
-# dump cannot be symbolised, so their code compiles with /Zi and they link
-# with /DEBUG. /DEBUG turns the linker's default /OPT:REF and /OPT:ICF off,
+# Symbols and reproducibility for the three shipped binaries. CrashDump.h
+# writes minidumps from the player and the helper, and without a PDB that
+# matches the build a dump cannot be symbolised, so their code compiles with
+# /Zi and they link with /DEBUG. /DEBUG turns the linker's default /OPT:REF and /OPT:ICF off,
 # which would grow and change the shipped code, so they are stated again.
 # /PDBALTPATH keeps only the PDB's file name in the executable instead of the
 # builder's absolute path - the complete package is linked on a maintainer's

@@ -24,7 +24,7 @@
       "name": "analyze",
       "inherits": "vs2022",
       "displayName": "Code analysis",
-      "description": "/analyze on the two shipped targets; a finding fails the build.",
+      "description": "/analyze on the three shipped targets; a finding fails the build.",
       "binaryDir": "${sourceDir}/build-analyze",
       "cacheVariables": { "BUILD_TESTING": "OFF", "DLSS_VIDEO_PLAYER_ANALYZE": "ON" }
     }
