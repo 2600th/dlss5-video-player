@@ -7,7 +7,10 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Unreleased
+## 0.27.0 - 2026-10-01
+
+A command-line converter, and the fixes left open by the 25 September audit.
+Renders made with 0.26.2 are reused.
 
 ### Added
 
@@ -28,9 +31,10 @@ decisions that still shape the code are in
 - **No more dropped frames when a render finishes.** Playback stalled for
   about 100 ms at that moment, dropping 3 to 6 frames, while the player
   deleted the render's temporary files; that now happens in the background.
-- **A crash leaves a readable dump more often.** When the full crash dump
-  cannot be written, the player now writes a smaller one instead of none, and
-  logs why the full one failed.
+- **A crash leaves a readable dump more often.** The dump is written from a
+  thread of its own rather than the one that crashed; when the full dump cannot
+  be written, a smaller one is, the pair is tried once more, and the log says
+  why each attempt failed.
 - **Audio that starts after the video no longer plays early.** A file whose
   sound begins half a second in played it half a second early until the first
   seek.
@@ -52,6 +56,8 @@ decisions that still shape the code are in
 - **Temporary export files left by a crash are cleaned up** the next time you
   export to that folder.
 - **Some Media Foundation videos no longer play upside down.**
+- **A mistyped `--render` command line prints its error** in the console with
+  exit code 2, instead of opening a message box a script cannot answer.
 
 ### Security
 
@@ -60,6 +66,8 @@ decisions that still shape the code are in
 - A local playlist file (HLS or concat) can only read local files; it can no
   longer make the player fetch network addresses.
 - Helper processes inherit only the handles they are meant to have.
+- A neural runtime file replaced while the player runs is hashed again, even
+  when the replacement keeps the original's size and dates.
 
 ### Release
 

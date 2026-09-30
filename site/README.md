@@ -55,7 +55,7 @@ build resolves by tag instead:
    turns that state into a failed build rather than a published page with no
    download.
 
-CI has no way to know when the 327 MB complete package is attached by hand, so
+CI has no way to know when the 377 MB complete package is attached by hand, so
 a release carrying only the core zip is a supported state: the page offers the
 core package and links the release page for the other one.
 

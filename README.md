@@ -31,12 +31,12 @@ unscaled. [Four more, including one where the model makes the picture worse](doc
 
 ## Download
 
-**v0.26.2** (2026-09-26): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.26.2)
+**v0.27.0** (2026-10-01): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.27.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.26.2-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 327 MB |
-| `DLSSVideoPlayer-v0.26.2-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
+| `dlss5-video-player-v0.27.0-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 377 MB |
+| `DLSSVideoPlayer-v0.27.0-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
 
 Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run: it
 has no runtime.
@@ -47,8 +47,8 @@ The checksum shows the file arrived intact; the attestation shows this
 repository built it.
 
 ```sh
-sha256sum -c DLSSVideoPlayer-v0.26.2-core-win64.zip.sha256
-gh attestation verify DLSSVideoPlayer-v0.26.2-core-win64.zip --repo 2600th/dlss5-video-player
+sha256sum -c DLSSVideoPlayer-v0.27.0-core-win64.zip.sha256
+gh attestation verify DLSSVideoPlayer-v0.27.0-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
 Only the core zip has build provenance. CI can't fetch the neural runtime, so
@@ -174,23 +174,29 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   machine can run on it. `--range`, `--encode`, `--report` and the rest are in
   the [usage guide](docs/USAGE.md#from-the-command-line).
 
-## What's new in 0.26.2
+## What's new in 0.27.0
 
-**0.26.2** (2026-09-26). Fixes from re-measuring an RTX 5090.
+**0.27.0** (2026-10-01). A command-line converter, and fixes. Renders made
+with 0.26.2 are reused.
 
-- **Untagged HD videos play and render on the GPU.** A 4K file that declares no
-  colour matrix played at 3.5 fps while rendering; it now plays at 30.
-- **The keep-up warning learns from every session**, including one started
-  partway through a video.
-- **Seeking right after starting playback** takes about 50-95 ms, not
-  250-320, on audio devices that are slow to reopen.
-- **Measured speed:** on an RTX 5090, about 6.8 ms a frame at 1080p30, 9.9 at
-  1440p30 and 23 at 4K30.
+- **`dlss5-convert`** runs the player's export from a terminal, on one file or
+  a whole folder: `dlss5-convert clip.mp4 --preset strong --passes 3` stacks
+  three neural passes, `--stages fg --multiplier 3` triples the frame rate. It
+  skips what is already converted, ends with a summary and an exit code, and
+  `dlss5-convert probe` says what a file is and what your machine can run on
+  it.
+- **Exports keep their shape and sync.** Anamorphic videos are no longer
+  written stretched, and audio that starts after the video no longer plays
+  early.
+- **Smoother playback** as a render finishes, and when opening or seeking a
+  YouTube video.
+- **Safer:** system libraries load from System32 only, helpers inherit only the
+  handles they need, and a local playlist cannot reach the network.
+- **FFmpeg** is now BtbN's build of 9.0.2, whose source is public and pinned.
 
-Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.26.1 fixed portrait
-video, subtitle exports and the Visual C++ runtime, and 0.26.0 added the
-compare views, RTX VSR beside DLSS 5, subtitles, HDR, the render quality ladder
-and `--render`.
+Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.26.2 fixed GPU
+decoding of untagged HD video, and 0.26.0 added the compare views, RTX VSR beside DLSS 5, subtitles, HDR, the
+render quality ladder and `--render`.
 
 ## Controls
 

@@ -19,7 +19,7 @@ to know whether the same thing can be pointed at video. [inferred from the
 product's own requirements and the README's framing]
 
 They arrive from a link, a forum post, or the repository itself, and the
-decision in front of them is whether to download 327 MB of unsigned community
+decision in front of them is whether to download 377 MB of unsigned community
 software and run it. That decision is made on evidence, not on adjectives: the
 question is always "does it actually look better, and by how much". [inferred]
 
@@ -57,18 +57,19 @@ settings all still match.
 
 ## Capabilities and Constraints
 
-Confirmed from `README.md` and `CHANGELOG.md` at 0.26.2:
+Confirmed from `README.md` and `CHANGELOG.md` at 0.27.0:
 
 - Live rendering with seek anywhere, rendered or not; nothing rendered is
   discarded on seek.
 - Compare views (Split, Wipe, Difference, Side by side, 2 x 2, and RTX VSR as
   a view of its own) and a Mix control, without moving the playhead.
 - Export: PNG/JPEG for photos, GIF for animations, MP4/MKV for video; MKV keeps
-  source audio, subtitles and chapters without re-encoding.
+  source audio, subtitles and chapters without re-encoding. The same export
+  runs from a terminal with `dlss5-convert`, on files or whole folders.
 - Optional DLSS Super Resolution on top, off by default; its output follows the
   display unless a rung is pinned.
 - Neural settings at `Ctrl+N`, re-rendering the paused frame on change.
-- Two packages: a complete 327 MB zip with the pinned neural runtime, and a
+- Two packages: a complete 377 MB zip with the pinned neural runtime, and a
   36 MB core zip without it.
 - The neural runtime is a modified, unsigned community build. This is not
   incidental and must never be softened or omitted.
