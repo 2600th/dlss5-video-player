@@ -1,6 +1,6 @@
 # Contributing
 
-_Verified against 0.27.1 (0133b98) on 2026-10-01._
+_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
 
 Start with [Building and testing](docs/BUILDING.md) for the pinned dependencies
 and the canonical `build-upscaling` commands.

@@ -1,6 +1,6 @@
 # Security
 
-_Verified against 0.27.1 (0133b98) on 2026-10-01._
+_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
 
 The player launches its package-local `ffmpeg.exe`, `ffprobe.exe`,
 `yt-dlp.exe`, and `deno.exe` helpers without a command shell. Playback falls
