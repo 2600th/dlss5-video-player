@@ -297,10 +297,22 @@ status line reads "needs an RTX 40 or 50 GPU".
 
 The community [dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm86)
 add-on runs Frame Generation on RTX 20 and 30 GPUs. It is unofficial and not
-tested here. Put its `dlssg_sm86.ini` and its proxy (`version.dll`, or
-`winmm.dll`, `dbghelp.dll` or `dinput8.dll`) beside `DLSSVideoPlayer.exe`. The
-player loads it automatically at startup and the start screen shows
-**Frame Generation: dlssg_sm86 add-on found and loaded**. Its `dxgi.dll` and
+tested here, and the player does not ship it: its binary carries NVIDIA's
+runtime with recompiled kernels and its source is not published.
+
+The easy way: on an RTX 20 or 30, when Generate frames is refused, the dialog
+offers to download the add-on from its author (about 29 MB). Say yes, and the
+player fetches `version.dll`, `dlssg_sm86.ini` and the add-on's third-party
+notices from one pinned commit of its repository, checks each against the
+SHA-256 it expects, and only then writes them beside the player; then it offers
+to restart. A file that does not match is not written, and a different
+`version.dll` already beside the player (another mod's) is never replaced.
+
+By hand: put its `dlssg_sm86.ini` and its proxy (`version.dll`, or
+`winmm.dll`, `dbghelp.dll` or `dinput8.dll`) beside `DLSSVideoPlayer.exe`.
+
+Either way, the player loads it automatically at startup and the start screen
+shows **Frame Generation: dlssg_sm86 add-on found and loaded**. Its `dxgi.dll` and
 `d3d12.dll` alternatives are not loaded. Neither is a proxy without the ini
 beside it, and nothing is loaded in safe mode. `dlss5-convert probe <file>
 --capabilities` prints `frame_generation_addon` when it is loaded.
@@ -311,7 +323,9 @@ reads "refused with the dlssg_sm86 add-on". The add-on's own log is in the
 load (`dlssg_sm86 add-on loaded for Frame Generation`).
 
 0.27.0 loads its imports from System32 only, which kept this add-on out of the
-player entirely (issue #14). The automatic load above replaces that.
+player entirely (issue #14). The automatic load above replaces that. To remove
+the add-on, delete `version.dll`, `dlssg_sm86.ini` and
+`dlssg_sm86-THIRD_PARTY_NOTICES.txt` from beside the player.
 
 ## A neural session keeps stopping to buffer
 

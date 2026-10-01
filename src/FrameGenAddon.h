@@ -2,11 +2,19 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
+#include "AtomicFile.h"
+#include "NeuralCache.h"
 #include "RuntimePolicy.h"
 
 // The community dlssg_for_sm86 add-on (github.com/sdli1995/dlssg_for_sm86),
@@ -111,6 +119,99 @@ inline const wchar_t* AdviceShortKey(RefusalAdvice advice)
     case RefusalAdvice::UpdateDriver: break;
     }
     return L"framegen.refusal.runtime.short";
+}
+
+// ---- Getting it --------------------------------------------------------------
+//
+// The add-on is not bundled. Its binary embeds NVIDIA's runtime with kernels
+// recompiled outside any NVIDIA licence and its source is unpublished, so the
+// package must not carry it. On an RTX 20/30 whose runtime refusal the user
+// sees, the player offers to fetch it instead: from its author's repository,
+// at one pinned commit, each file held to its SHA-256 before anything is
+// written. What is offered is exactly what was reviewed.
+struct PinnedFile {
+    std::wstring_view name;     // the path in the author's repository
+    std::string_view sha256;    // lowercase hex
+    uint64_t bytes{};
+    std::wstring_view saveAs;   // beside the player
+};
+
+inline constexpr std::wstring_view kSourceHost = L"raw.githubusercontent.com";
+inline constexpr std::wstring_view kSourceRepository = L"sdli1995/dlssg_for_sm86";
+// 0.3.5, 2026-09-19.
+inline constexpr std::wstring_view kSourceCommit = L"9621db573e07ed54f50c15bbb585ed9a7bdfac28";
+inline constexpr std::wstring_view kSourcePage = L"https://github.com/sdli1995/dlssg_for_sm86";
+// The ini last: it is the loader's marker, so a run cut short leaves a proxy
+// nothing loads rather than a half-installed add-on that does.
+inline constexpr std::array<PinnedFile, 3> kPinnedFiles{{
+    {L"version.dll", "c3934a09399f022504227c72df0bf8c0de55f9a08880dddde898c5262cefa838", 30021920, L"version.dll"},
+    {L"THIRD_PARTY_NOTICES.txt", "ac3b44ab30a4235edd18feca1ab4f802d57c8d3d0ee4878dc77b81a6b127155f", 3349,
+     L"dlssg_sm86-THIRD_PARTY_NOTICES.txt"},
+    {L"dlssg_sm86.ini", "2616857ee29ec61e33c8b52e1b50f4c93cb5339adbb13b73f0ae71a722427a43", 3548, L"dlssg_sm86.ini"},
+}};
+
+inline uint64_t PinnedBytes()
+{
+    uint64_t total = 0;
+    for (const PinnedFile& file : kPinnedFiles) total += file.bytes;
+    return total;
+}
+
+inline std::wstring SourcePath(const PinnedFile& file)
+{
+    return L"/" + std::wstring(kSourceRepository) + L"/" + std::wstring(kSourceCommit) + L"/" + std::wstring(file.name);
+}
+
+// Offered where the runtime refuses because of the GPU and nothing would
+// change that: an RTX 20 or 30 without the add-on loaded.
+inline bool OfferDownload(GpuGeneration generation, bool addonLoaded)
+{
+    return !addonLoaded && AdviceFor(generation, false) == RefusalAdvice::NeedsRtx40;
+}
+
+enum class InstallStep { None, Download, Verify, Conflict, Write };
+
+struct InstallResult {
+    InstallStep failed{InstallStep::None};
+    std::wstring file;      // the file the step failed on
+    DWORD error{};          // Write only
+};
+
+inline std::optional<std::string> ReadWholeFile(const std::filesystem::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    return std::string(std::istreambuf_iterator<char>(in), {});
+}
+
+// `fetch(file)` returns the file's bytes, or nothing when it could not be
+// fetched. Every file is fetched and verified before any is written, and an
+// existing file of the same name that is not the pinned one - another mod's
+// version.dll - stops the install with nothing changed.
+template <class Fetch>
+InstallResult Install(const std::filesystem::path& directory, Fetch&& fetch,
+                      std::span<const PinnedFile> files = kPinnedFiles)
+{
+    std::vector<std::string> bodies;
+    bodies.reserve(files.size());
+    for (const PinnedFile& file : files) {
+        const std::filesystem::path destination = directory / file.saveAs;
+        if (RegularFile(destination)) {
+            const auto existing = ReadWholeFile(destination);
+            if (!existing || Sha256Bytes(*existing).value_or(std::string()) != file.sha256)
+                return {InstallStep::Conflict, std::wstring(file.saveAs)};
+        }
+        std::optional<std::string> body = fetch(file);
+        if (!body) return {InstallStep::Download, std::wstring(file.name)};
+        if (body->size() != file.bytes || Sha256Bytes(*body).value_or(std::string()) != file.sha256)
+            return {InstallStep::Verify, std::wstring(file.name)};
+        bodies.push_back(std::move(*body));
+    }
+    for (size_t index = 0; index < files.size(); ++index) {
+        const atomic_file::Outcome written = atomic_file::Replace(directory / files[index].saveAs, bodies[index]);
+        if (!written) return {InstallStep::Write, std::wstring(files[index].saveAs), written.error};
+    }
+    return {};
 }
 
 } // namespace framegen_addon

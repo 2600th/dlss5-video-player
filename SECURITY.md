@@ -9,7 +9,12 @@ never the current directory or a relative `PATH` entry; rendering and export
 never do. YouTube support is limited to validated public HTTPS video URLs.
 Besides YouTube, the player contacts only `api.github.com` for the update check
 and `i.ytimg.com` for trailer thumbnails, both over HTTPS; `[Updates] Enabled=0`
-and `[Start] ThumbnailFetch=0` in `DLSSVideoPlayer.ini` turn them off.
+and `[Start] ThumbnailFetch=0` in `DLSSVideoPlayer.ini` turn them off. On an
+RTX 20/30 it can also fetch the community dlssg_sm86 Frame Generation add-on
+from `raw.githubusercontent.com`, only when the user accepts the offer, from one
+pinned commit, with every file checked against its SHA-256 before it is written.
+The player loads that add-on's `version.dll` from beside itself, by full path,
+only when the add-on's `dlssg_sm86.ini` is there too, and never in safe mode.
 
 Offline neural jobs run in the package-local
 `neural-runtime/NeuralWorker.exe`. The experimental proxy/add-on belongs in

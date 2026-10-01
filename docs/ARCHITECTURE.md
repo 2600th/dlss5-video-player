@@ -1019,7 +1019,18 @@ proxy by full path at the top of `wWinMain`, before any NGX feature exists, and
 Windows admits it as a second module of that name. It does this only when the
 add-on's `dlssg_sm86.ini` is beside it, and never for `dxgi.dll` or `d3d12.dll`
 or in safe mode. The start screen names it, and a runtime refusal on an RTX
-20/30 says the GPU is the limit rather than the driver (issue #14, 0.27.1).
+20/30 says the GPU is the limit rather than the driver (issue #14).
+
+The add-on is offered, never bundled. Its binary embeds NVIDIA's DLSS-G runtime
+with kernels recompiled outside any NVIDIA licence, and its GPL source is
+unpublished, so the package cannot carry it. On an RTX 20/30 whose runtime
+refusal the user sees, the dialog offers to fetch it: `framegen_addon::Install`
+downloads every file in `kPinnedFiles` from the author's repository at one
+commit through `HttpsGet` (no redirects), holds each to its size and SHA-256,
+and writes nothing until all of them pass. The ini, the loader's marker, is
+written last, and an existing file of the same name that is not the pinned one
+stops the install. Moving the pin means reviewing that commit and replacing the
+commit and the three hashes together.
 
 The order is deliberately the opposite of NVIDIA's. NVIDIA's own pipeline
 upscales first and generates frames on the upscaled result; here the pass

@@ -74,6 +74,7 @@
 #include "MediaTransportPolicy.h"
 #include "StartScreenPolicy.h"
 #include "FrameGenAddon.h"
+#include "UpdateCheck.h"
 #include "CompareBarPolicy.h"
 #include "CompareViewPolicy.h"
 #include "VsrPolicy.h"
@@ -1378,6 +1379,86 @@ void framegen_addon_loads_its_proxy_as_a_second_module_beside_system32_test()
     CHECK(std::filesystem::equivalent(loadedPath, directory / L"version.dll", error));
     FreeLibrary(result.module);
     FreeLibrary(system);
+    std::filesystem::remove_all(directory, error);
+}
+
+// The add-on is offered, never bundled: only where the runtime refuses for the
+// GPU's sake and nothing is loaded yet.
+void framegen_addon_download_is_offered_only_on_rtx20_and_rtx30_without_it_test()
+{
+    using framegen_addon::OfferDownload;
+    CHECK(OfferDownload(GpuGeneration::Rtx30Ampere, false));
+    CHECK(OfferDownload(GpuGeneration::Rtx20Turing, false));
+    CHECK(!OfferDownload(GpuGeneration::Rtx30Ampere, true));
+    CHECK(!OfferDownload(GpuGeneration::Rtx40Ada, false));
+    CHECK(!OfferDownload(GpuGeneration::Rtx50Blackwell, false));
+    CHECK(!OfferDownload(GpuGeneration::OtherRtx, false));
+    CHECK(!OfferDownload(GpuGeneration::Unsupported, false));
+    // The pins install exactly what the loader then picks up.
+    const auto pinned = [](std::wstring_view name) {
+        return std::any_of(framegen_addon::kPinnedFiles.begin(), framegen_addon::kPinnedFiles.end(),
+                           [&](const framegen_addon::PinnedFile& file) { return file.saveAs == name; });
+    };
+    CHECK(framegen_addon::ProxyToLoad(pinned) == L"version.dll");
+    CHECK(framegen_addon::SourcePath(framegen_addon::kPinnedFiles[0]) ==
+          L"/sdli1995/dlssg_for_sm86/9621db573e07ed54f50c15bbb585ed9a7bdfac28/version.dll");
+    for (const auto& file : framegen_addon::kPinnedFiles) {
+        CHECK(file.sha256.size() == 64);
+        CHECK(file.bytes > 0);
+    }
+}
+
+// Every file is fetched and held to its pin before any is written, so a bad
+// download leaves nothing behind, and the ini - the loader's marker - lands
+// last. A version.dll that is someone else's is never overwritten.
+void framegen_addon_install_verifies_every_pin_before_writing_test()
+{
+    using framegen_addon::InstallStep;
+    using framegen_addon::PinnedFile;
+    const std::string dll = "MZ fake proxy", ini = "[General]\nEnabled=1\n";
+    const std::string dllHash = Sha256Bytes(dll).value(), iniHash = Sha256Bytes(ini).value();
+    const std::array<PinnedFile, 2> pins{{
+        {L"version.dll", dllHash, dll.size(), L"version.dll"},
+        {L"dlssg_sm86.ini", iniHash, ini.size(), L"dlssg_sm86.ini"},
+    }};
+    const auto serve = [&](const std::string& dllBody) {
+        return [&, dllBody](const PinnedFile& file) -> std::optional<std::string> {
+            return file.name == L"version.dll" ? std::optional<std::string>(dllBody) : std::optional<std::string>(ini);
+        };
+    };
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    std::error_code error;
+    const auto directory = test_support::FixtureTempRoot() / (L"PolicyTests-framegen-install-" + std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::remove_all(directory, error);
+    REQUIRE(std::filesystem::create_directories(directory, error));
+
+    auto result = framegen_addon::Install(directory, serve("MZ tampered!!"), pins);
+    CHECK(result.failed == InstallStep::Verify);
+    CHECK(result.file == L"version.dll");
+    CHECK(!std::filesystem::exists(directory / L"version.dll"));
+    CHECK(!std::filesystem::exists(directory / L"dlssg_sm86.ini"));
+
+    result = framegen_addon::Install(directory, [](const PinnedFile&) { return std::optional<std::string>{}; }, pins);
+    CHECK(result.failed == InstallStep::Download);
+    CHECK(std::filesystem::is_empty(directory, error));
+
+    { std::ofstream(directory / L"version.dll", std::ios::binary) << "another mod's proxy"; }
+    result = framegen_addon::Install(directory, serve(dll), pins);
+    CHECK(result.failed == InstallStep::Conflict);
+    CHECK(result.file == L"version.dll");
+    CHECK(read(directory / L"version.dll") == "another mod's proxy");
+    CHECK(!std::filesystem::exists(directory / L"dlssg_sm86.ini"));
+    std::filesystem::remove(directory / L"version.dll", error);
+
+    result = framegen_addon::Install(directory, serve(dll), pins);
+    CHECK(result.failed == InstallStep::None);
+    CHECK(read(directory / L"version.dll") == dll);
+    CHECK(read(directory / L"dlssg_sm86.ini") == ini);
+    // Installing over itself is not a conflict.
+    CHECK(framegen_addon::Install(directory, serve(dll), pins).failed == InstallStep::None);
     std::filesystem::remove_all(directory, error);
 }
 
@@ -15177,6 +15258,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(framegen_addon_picks_the_dlssg_sm86_proxy_beside_the_player_test),
     TEST_CASE(framegen_addon_refusal_advice_names_the_gpu_not_the_driver_on_rtx20_and_rtx30_test),
     TEST_CASE(framegen_addon_loads_its_proxy_as_a_second_module_beside_system32_test),
+    TEST_CASE(framegen_addon_download_is_offered_only_on_rtx20_and_rtx30_without_it_test),
+    TEST_CASE(framegen_addon_install_verifies_every_pin_before_writing_test),
     TEST_CASE(start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),
@@ -15538,6 +15621,21 @@ int wmain(int argc, wchar_t* argv[])
     const std::wstring executableName=current_test_executable().filename().wstring();
     if(_wcsicmp(executableName.c_str(),L"ffprobe.exe")==0||_wcsicmp(executableName.c_str(),L"ffmpeg.exe")==0)return run_fake_media_child(argc,argv);
     test_support::ContainChildProcesses();
+    // Manual and online, so never registered with CTest: the real download of
+    // the pinned dlssg_sm86 files into <dir>, through the same HttpsGet and
+    // Install the player uses. `PolicyTests --addon-download-smoke <dir>`.
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--addon-download-smoke") {
+        std::wstring transport;
+        const auto result = framegen_addon::Install(argv[2], [&](const framegen_addon::PinnedFile& file) -> std::optional<std::string> {
+            const std::wstring path = framegen_addon::SourcePath(file);
+            HttpsGetResult got = HttpsGet({framegen_addon::kSourceHost, path, {}, static_cast<size_t>(file.bytes), 60000, false}, {});
+            if (got.outcome == HttpsGetResult::Outcome::Ok) return std::move(got.body);
+            transport = got.error + L" status " + std::to_wstring(got.status);
+            return std::nullopt;
+        });
+        std::wcout << L"step=" << static_cast<int>(result.failed) << L" file=" << result.file << L" " << transport << L'\n';
+        return result.failed == framegen_addon::InstallStep::None ? 0 : 1;
+    }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--resolver-availability-tests") {
         test_support::run_cases(kResolverAvailabilityCases, std::size(kResolverAvailabilityCases), {});
         return test_support::failure_count == 0 ? 0 : 1;

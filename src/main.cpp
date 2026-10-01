@@ -435,6 +435,8 @@ static constexpr UINT WM_MEDIA_BUTTON = WM_APP + 50;
 static constexpr UINT WM_MEDIA_SEEK = WM_APP + 51;
 // A start-screen fact arrived from GatherStartScreen.
 static constexpr UINT WM_START_SCREEN = WM_APP + 52;
+// The dlssg_sm86 add-on download finished (wParam: its completion token).
+static constexpr UINT WM_FRAMEGEN_ADDON_INSTALLED = WM_APP + 53;
 
 struct YouTubeUrlDialogState {
     const Localizer* localizer{};
@@ -1212,6 +1214,12 @@ struct FrameGenerationCompletion {
 
 struct FrameGenerationProgressMessage {
     FrameGenerationProgress progress{};
+};
+
+struct AddonInstallCompletion {
+    framegen_addon::InstallResult result;
+    std::wstring transportError;   // what the failed fetch reported
+    bool cancelled{false};
 };
 
 struct UpdateCheckCompletion {
@@ -4019,6 +4027,63 @@ private:
     // signal; a conversion started from a settled playing session was measured
     // safe (the probe, the conversion and a live SR feature coexisted) and that
     // is the only shape this code takes.
+    // The add-on download (FrameGenAddon.h): every pinned file from the
+    // author's repository at one commit, verified before anything is written
+    // beside the player. It is loaded at startup, so it takes a restart.
+    void StartAddonDownload(){
+        if(m_addonWorker.joinable())return;
+        const std::filesystem::path directory=ExecutableDirectory();
+        if(directory.empty())return;
+        HWND target=m_hwnd;auto* completions=&m_addonCompletions;
+        try{
+            m_addonWorker=std::jthread([target,completions,directory](std::stop_token stop){
+                auto completion=std::make_unique<AddonInstallCompletion>();
+                completion->result=framegen_addon::Install(directory,[&](const framegen_addon::PinnedFile& file)->std::optional<std::string>{
+                    const std::wstring path=framegen_addon::SourcePath(file);
+                    HttpsGetResult got=HttpsGet({framegen_addon::kSourceHost,path,{},static_cast<size_t>(file.bytes),60000,false},stop);
+                    if(got.outcome==HttpsGetResult::Outcome::Ok)return std::move(got.body);
+                    if(got.outcome==HttpsGetResult::Outcome::Cancelled)completion->cancelled=true;
+                    else completion->transportError=got.outcome==HttpsGetResult::Outcome::HttpStatus?L"HTTP "+std::to_wstring(got.status):
+                                                    got.outcome==HttpsGetResult::Outcome::TooLarge?std::wstring(L"larger than expected"):got.error;
+                    return std::nullopt;
+                });
+                completions->RegisterAndPost(std::move(completion),[&](uint64_t token){
+                    return PostMessageW(target,WM_FRAMEGEN_ADDON_INSTALLED,static_cast<WPARAM>(token),0)!=FALSE;});
+            });
+            LOG("Downloading the dlssg_sm86 add-on from "<<WideToUtf8(framegen_addon::kSourcePage)<<" at "<<WideToUtf8(framegen_addon::kSourceCommit));
+            UpdateCachedStatus();InvalidateControls();
+        }catch(const std::system_error&){LOG("The add-on download worker could not start.");}
+    }
+    void CancelAddonDownload(){if(m_addonWorker.joinable()){m_addonWorker.request_stop();m_addonWorker.join();m_addonWorker=std::jthread{};}m_addonCompletions.Clear();}
+    void CompleteAddonDownload(uint64_t token){
+        auto completion=m_addonCompletions.Take(token);if(!completion)return;
+        if(m_addonWorker.joinable()){m_addonWorker.join();m_addonWorker=std::jthread{};}
+        UpdateCachedStatus();InvalidateControls();
+        if(completion->cancelled)return;
+        const auto& result=completion->result;
+        const std::wstring title=T(L"framegen.title");
+        using framegen_addon::InstallStep;
+        if(result.failed==InstallStep::None){
+            LOG("dlssg_sm86 add-on installed beside the player; it loads on the next start.");
+            if(MessageBoxW(m_hwnd,T(L"framegen.addon.installed").c_str(),title.c_str(),MB_YESNO|MB_ICONINFORMATION)!=IDYES)return;
+            std::wstring launchError;
+            if(!LaunchSameExecutable(m_opt.userArguments,launchError)){
+                LOG("Restart after the add-on install failed: "<<WideToUtf8(launchError));
+                MessageBoxW(m_hwnd,T(L"framegen.addon.restart_failed").c_str(),title.c_str(),MB_OK|MB_ICONWARNING);
+                return;
+            }
+            DestroyWindow(m_hwnd);
+            return;
+        }
+        const wchar_t* key=result.failed==InstallStep::Download?L"framegen.addon.failed.download":
+                           result.failed==InstallStep::Verify?L"framegen.addon.failed.verify":
+                           result.failed==InstallStep::Conflict?L"framegen.addon.failed.conflict":L"framegen.addon.failed.write";
+        LOG("dlssg_sm86 add-on install failed at step "<<static_cast<int>(result.failed)<<" on "<<WideToUtf8(result.file)
+            <<(completion->transportError.empty()?std::string():" ("+WideToUtf8(completion->transportError)+")")
+            <<(result.error?" error "+std::to_string(result.error):std::string()));
+        const std::wstring subject=result.failed==InstallStep::Download&&!completion->transportError.empty()?completion->transportError:result.file;
+        MessageBoxW(m_hwnd,Format(T(key),subject.c_str()).c_str(),title.c_str(),MB_OK|MB_ICONWARNING);
+    }
     void ShowFrameGenerationRefusal(frame_rate_policy::FrameGenerationRefusal refusal){
         // A refusal the setting causes is a different sentence from one the
         // video or the display causes, because the user can act on it.
@@ -4041,6 +4106,16 @@ private:
             text+=T(framegen_addon::AdviceKey(FrameGenerationRefusalAdvice()));
             if(m_frameGenCapability&&!m_frameGenCapability->detail.empty())
                 LOG("Frame generation runtime refusal detail: "<<WideToUtf8(m_frameGenCapability->detail));
+            // The one refusal with something to offer: on an RTX 20/30 the
+            // community add-on, fetched from its author on a yes (issue #14).
+            if(framegen_addon::OfferDownload(m_opt.detectedGpu.generation,FrameGenAddonState().loaded)&&!m_addonWorker.joinable()){
+                const unsigned megabytes=static_cast<unsigned>((framegen_addon::PinnedBytes()+(1u<<20)-1)>>20);
+                text+=Format(T(L"framegen.addon.offer"),megabytes);
+                LOG("Frame generation refused on "<<GpuGenerationPathName(m_opt.detectedGpu.generation)<<"; offering the dlssg_sm86 add-on.");
+                if(MessageBoxW(m_hwnd,text.c_str(),T(L"framegen.title").c_str(),MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)==IDYES)
+                    StartAddonDownload();
+                return;
+            }
         }
         LOG("Frame generation refused: "<<frame_rate_policy::FrameGenerationRefusalName(refusal)
             <<" source="<<m_decoder.FrameRate()<<" fps known="<<m_decoder.FrameRateKnown()
@@ -11353,6 +11428,7 @@ private:
         // Ahead of even that: nothing this player can do about the picture is
         // worth reading while its cache cannot be written to.
         if(!m_cacheNotice.empty())text=m_cacheNotice+L" \u00b7 "+text;
+        if(m_addonWorker.joinable())text=T(L"framegen.addon.downloading")+L" \u00b7 "+text;
         return text;
     }
     // An HDR source is decoded tone mapped to SDR (HdrPolicy.h), because the
@@ -11693,6 +11769,7 @@ private:
         case WM_FRAMEGEN_PROGRESS:CompleteFrameGenerationProgress(static_cast<uint64_t>(w));return 0;
         case WM_FRAMEGEN_COMPLETE:CompleteFrameGeneration(static_cast<uint64_t>(w));return 0;
         case WM_UPDATE_CHECKED:CompleteUpdateCheck(static_cast<uint64_t>(w));return 0;
+        case WM_FRAMEGEN_ADDON_INSTALLED:CompleteAddonDownload(static_cast<uint64_t>(w));return 0;
         case WM_TIMELINE_MEDIA:CompleteTimelineMedia();return 0;
         case WM_MEDIA_BUTTON:HandleMediaButton(int(w));return 0;
         case WM_MEDIA_SEEK:if(m_loaded)RequestSeek(double(l)/1000.0);return 0;
@@ -11715,8 +11792,8 @@ private:
             break;
         case WM_SETTINGCHANGE:ReadAnimationPreference();InvalidateRect(h,nullptr,FALSE);break;
         case WM_SHOWWINDOW:SyncActivityFeedback();break;
-        case WM_DESTROY:SaveWindowPlacement();CancelExport();DrainStageExportMessages();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}StopModalTick();CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();CancelSourcePrefetch();CancelUpdateCheck();m_running=false;PostQuitMessage(0);return 0;
-        case WM_CLOSE:CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);CancelSourcePrefetch();CancelUpdateCheck();DestroyWindow(h);return 0;
+        case WM_DESTROY:SaveWindowPlacement();CancelExport();DrainStageExportMessages();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}StopModalTick();CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();CancelSourcePrefetch();CancelUpdateCheck();CancelAddonDownload();m_running=false;PostQuitMessage(0);return 0;
+        case WM_CLOSE:CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);CancelSourcePrefetch();CancelUpdateCheck();CancelAddonDownload();DestroyWindow(h);return 0;
         case WM_GETMINMAXINFO:{
             auto* info=reinterpret_cast<MINMAXINFO*>(l);
             if(info){const UINT dpi=ActiveWindowDpi(h);const POINT minimum=MinimumPlayerWindowTrackSize(h,dpi);info->ptMinTrackSize.x=std::max<LONG>(info->ptMinTrackSize.x,minimum.x);info->ptMinTrackSize.y=std::max<LONG>(info->ptMinTrackSize.y,minimum.y);}
@@ -11961,7 +12038,10 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // runtime refuses.
     std::optional<FrameGenerationCapability> m_frameGenCapability;
     CompletionRegistry<UpdateCheckCompletion> m_updateCompletions;
+    CompletionRegistry<AddonInstallCompletion> m_addonCompletions;
     std::jthread m_updateWorker;
+    // Declared after m_addonCompletions, so it is joined before that is destroyed.
+    std::jthread m_addonWorker;
     std::optional<UpdateNotice> m_updateNotice;
     std::string m_updateLatestTag,m_updateDismissedTag;
     int64_t m_updateLastChecked=0;
