@@ -1,6 +1,6 @@
 # Neural quality benchmark
 
-_Verified against 0.27.0 (2939517) on 2026-10-01._
+_Verified against 0.27.1 (0133b98) on 2026-10-01._
 
 Repeatable corpus, worker driver, metric analysis and blind A/B tooling for the
 isolated `NeuralWorker.exe`. Everything is written

@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-_Verified against 0.27.0 (2939517) on 2026-10-01._
+_Verified against 0.27.1 (0133b98) on 2026-10-01._
 
 The interface is English-only. It does not load external language packs.
 
