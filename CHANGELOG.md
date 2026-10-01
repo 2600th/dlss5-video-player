@@ -7,7 +7,11 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Unreleased
+## 0.27.1 - 2026-10-02
+
+A hotfix for Frame Generation on RTX 20 and 30 cards. The render cache is keyed
+by the player version, so a video rendered with 0.27.0 renders again the first
+time.
 
 ### Fixed
 
