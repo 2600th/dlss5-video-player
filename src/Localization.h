@@ -171,6 +171,15 @@ private:
             {L"framegen.refusal.gpu.short", L"needs an RTX 40 or 50 GPU"},
             {L"framegen.addon_next_step", L"\n\nThe dlssg_sm86 add-on is loaded but could not enable it. Its log is in the dlssg_sm86 folder beside the player."},
             {L"framegen.refusal.addon.short", L"refused with the dlssg_sm86 add-on"},
+            // The offer and its outcomes (FrameGenAddon.h). %u is megabytes; %s a file name or a transport error.
+            {L"framegen.addon.offer", L"\n\nA community add-on, dlssg_sm86, can enable it on this GPU. It is unofficial and not made or supported by NVIDIA or by this player.\n\nDownload it from its author (%u MB) and install it beside the player?"},
+            {L"framegen.addon.downloading", L"Downloading the dlssg_sm86 add-on"},
+            {L"framegen.addon.installed", L"The dlssg_sm86 add-on is installed. It loads when the player starts.\n\nRestart the player now?"},
+            {L"framegen.addon.restart_failed", L"The player could not restart itself. Close it and open it again to use the add-on."},
+            {L"framegen.addon.failed.download", L"The add-on could not be downloaded (%s). Check the connection and try again. Nothing was installed."},
+            {L"framegen.addon.failed.verify", L"The downloaded %s did not match the version this player expects, so nothing was installed."},
+            {L"framegen.addon.failed.conflict", L"A different %s is already beside the player, probably from another mod. Nothing was changed."},
+            {L"framegen.addon.failed.write", L"%s could not be written beside the player. Move the player to a folder you can write to and try again."},
             // %u is the multiplier, then the source and target rates as text so
             // one formatter renders every rate the user sees.
             {L"framegen.confirm", L"Generate %u\u00d7 the frames of this video: %s fps \u2192 %s fps.\n\nThe converted file is kept with the player's converted videos; DLSS > Show converted file opens it. Playback switches to it when the conversion finishes.\n\nStart the conversion?"},

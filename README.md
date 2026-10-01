@@ -282,9 +282,9 @@ not what every source will gain.
   use it for its look, not for detail.
 - **Frame generation writes a new file.** It takes time and disk space, and a
   stream has to be copied locally first. NVIDIA supports it on RTX 40 and 50
-  cards; on RTX 20 and 30 the community
-  [dlssg_sm86 add-on](docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on)
-  is picked up automatically when it sits beside the player.
+  cards; on RTX 20 and 30 the player offers to download the community
+  [dlssg_sm86 add-on](docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on),
+  which is unofficial and not bundled.
 - **Save converted video copies the cached render as it is**: 8-bit at the
   default Standard quality, 10-bit at High or Lossless, without adjustments,
   upscaling or HDR. Use **Export with DLSS stages** to bake in a larger size.
@@ -303,7 +303,9 @@ not what every source will gain.
   for a new release (the menu bar then shows `↑ Update <version>`), and the
   start screen fetches the trailers' thumbnails from `i.ytimg.com`, again only
   when a cached one is a month old. `[Updates] Enabled=0` and
-  `[Start] ThumbnailFetch=0` in `DLSSVideoPlayer.ini` turn these off.
+  `[Start] ThumbnailFetch=0` in `DLSSVideoPlayer.ini` turn these off. On an
+  RTX 20 or 30 card, the dlssg_sm86 add-on is downloaded only if you accept the
+  offer.
 
 ## Building and contributing
 
