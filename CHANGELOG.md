@@ -7,11 +7,21 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## 0.27.1 - 2026-10-02
+## 0.27.2 - 2026-10-02
 
 A hotfix for Frame Generation on RTX 20 and 30 cards. The render cache is keyed
 by the player version, so a video rendered with 0.27.0 renders again the first
-time.
+time. 0.27.1 was tagged but never published; its fixes ship here.
+
+### Added
+
+- **One-click dlssg_sm86 add-on on RTX 20/30.** When Frame Generation is
+  refused on an RTX 20 or 30 card, the dialog offers to download the community
+  add-on from its author (29 MB). The player fetches its files from one pinned
+  commit, checks each against the SHA-256 it expects, writes nothing unless all
+  match, never replaces another mod's `version.dll`, and offers to restart.
+  It is offered rather than bundled: the add-on carries NVIDIA's runtime with
+  recompiled kernels and its source is not published, so the package cannot.
 
 ### Fixed
 

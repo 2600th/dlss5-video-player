@@ -31,12 +31,12 @@ unscaled. [Four more, including one where the model makes the picture worse](doc
 
 ## Download
 
-**v0.27.1** (2026-10-02): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.27.1)
+**v0.27.2** (2026-10-02): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.27.2)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.27.1-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 377 MB |
-| `DLSSVideoPlayer-v0.27.1-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
+| `dlss5-video-player-v0.27.2-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 377 MB |
+| `DLSSVideoPlayer-v0.27.2-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
 
 Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run: it
 has no runtime.
@@ -47,8 +47,8 @@ The checksum shows the file arrived intact; the attestation shows this
 repository built it.
 
 ```sh
-sha256sum -c DLSSVideoPlayer-v0.27.1-core-win64.zip.sha256
-gh attestation verify DLSSVideoPlayer-v0.27.1-core-win64.zip --repo 2600th/dlss5-video-player
+sha256sum -c DLSSVideoPlayer-v0.27.2-core-win64.zip.sha256
+gh attestation verify DLSSVideoPlayer-v0.27.2-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
 Only the core zip has build provenance. CI can't fetch the neural runtime, so
@@ -174,19 +174,23 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   machine can run on it. `--range`, `--encode`, `--report` and the rest are in
   the [usage guide](docs/USAGE.md#from-the-command-line).
 
-## What's new in 0.27.1
+## What's new in 0.27.2
 
-**0.27.1** (2026-10-02). A hotfix for Frame Generation on RTX 20 and 30
+**0.27.2** (2026-10-02). A hotfix for Frame Generation on RTX 20 and 30
 cards. The render cache is keyed by the player version, so a video rendered
 with 0.27.0 renders again the first time.
 
-- **The dlssg_sm86 add-on works again.** 0.27.0 kept the community add-on
-  that runs Frame Generation on RTX 20 and 30 cards from loading. Put its files
-  beside the player and it is picked up automatically; the start screen says
-  so. See [troubleshooting](https://github.com/2600th/dlss5-video-player/blob/main/docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on).
-- **A clearer refusal on RTX 20 and 30.** Without the add-on, Frame
-  Generation now says it needs an RTX 40 or 50 card instead of asking for a
-  driver update that would not help.
+- **Frame Generation on RTX 20 and 30, in one click.** When it is refused on
+  one of these cards, the player now offers to download the community
+  dlssg_sm86 add-on from its author, checks every file before installing it,
+  and restarts with it loaded; the start screen says so. The add-on is
+  unofficial and not bundled. See
+  [troubleshooting](https://github.com/2600th/dlss5-video-player/blob/main/docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on).
+- **The add-on loads again when you add it yourself.** 0.27.0 kept a
+  `version.dll` beside the player from loading at all.
+- **A clearer refusal on RTX 20 and 30.** Frame Generation now says it needs
+  an RTX 40 or 50 card instead of asking for a driver update that would not
+  help.
 
 Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.27.0 added
 `dlss5-convert`, the command-line converter, 0.26.2 fixed GPU decoding of
