@@ -289,6 +289,29 @@ already in the cache from an earlier render is used as-is.
 
 "This GPU and driver admit no generated frames" is the runtime refusing the
 feature outright, which is a driver and hardware question rather than a setting.
+NVIDIA ships Frame Generation for RTX 40 and 50 series GPUs only, so on an RTX
+20 or 30 the dialog says that rather than asking for a driver update, and the
+status line reads "needs an RTX 40 or 50 GPU".
+
+### RTX 20 and 30: the dlssg_sm86 add-on
+
+The community [dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm86)
+add-on runs Frame Generation on RTX 20 and 30 GPUs. It is unofficial and not
+tested here. Put its `dlssg_sm86.ini` and its proxy (`version.dll`, or
+`winmm.dll`, `dbghelp.dll` or `dinput8.dll`) beside `DLSSVideoPlayer.exe`. The
+player loads it automatically at startup and the start screen shows
+**Frame Generation: dlssg_sm86 add-on found and loaded**. Its `dxgi.dll` and
+`d3d12.dll` alternatives are not loaded. Neither is a proxy without the ini
+beside it, and nothing is loaded in safe mode. `dlss5-convert probe <file>
+--capabilities` prints `frame_generation_addon` when it is loaded.
+
+If Frame Generation is still refused with the add-on loaded, the status line
+reads "refused with the dlssg_sm86 add-on". The add-on's own log is in the
+`dlssg_sm86` folder beside the player, and `DLSSVideoPlayer.log` records the
+load (`dlssg_sm86 add-on loaded for Frame Generation`).
+
+0.27.0 loads its imports from System32 only, which kept this add-on out of the
+player entirely (issue #14). The automatic load above replaces that.
 
 ## A neural session keeps stopping to buffer
 

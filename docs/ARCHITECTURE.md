@@ -1010,6 +1010,17 @@ staged beside the player, not in `neural-runtime/` - NGX resolves a feature
 snippet from the directory of the process that creates the feature, and the
 render helper never creates this one.
 
+NVIDIA ships Frame Generation for RTX 40 and 50 only, and the community
+dlssg_for_sm86 add-on runs it on RTX 20 and 30. The add-on is a proxy DLL
+(`version.dll` and others) that hooks the load of `nvngx_dlssg.dll`, and it
+expects the executable's own import of that name to find it beside it. The
+player's imports resolve from System32 only, so `FrameGenAddon.h` loads the
+proxy by full path at the top of `wWinMain`, before any NGX feature exists, and
+Windows admits it as a second module of that name. It does this only when the
+add-on's `dlssg_sm86.ini` is beside it, and never for `dxgi.dll` or `d3d12.dll`
+or in safe mode. The start screen names it, and a runtime refusal on an RTX
+20/30 says the GPU is the limit rather than the driver (issue #14, 0.27.1).
+
 The order is deliberately the opposite of NVIDIA's. NVIDIA's own pipeline
 upscales first and generates frames on the upscaled result; here the pass
 generates at the source's own resolution and the player's live Super Resolution

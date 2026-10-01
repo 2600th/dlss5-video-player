@@ -73,6 +73,7 @@
 #include "DarkModePolicy.h"
 #include "MediaTransportPolicy.h"
 #include "StartScreenPolicy.h"
+#include "FrameGenAddon.h"
 #include "CompareBarPolicy.h"
 #include "CompareViewPolicy.h"
 #include "VsrPolicy.h"
@@ -1276,6 +1277,108 @@ void start_screen_checks_say_what_passed_and_what_failed_test()
     CHECK(CoverageBadge(100000000, 400000000, 300000000, int64_t{1200000000}) == L"Rendered 25%");
     CHECK(CoverageBadge(100000000, 400000000, 300000000, std::nullopt) == L"Rendered 30 s");
     CHECK(CoverageBadge(0, 1199000000, 1199000000, int64_t{1200000000}) == L"Rendered 99%");
+}
+
+// Issue #14: the dlssg_for_sm86 add-on is announced on the start screen, as
+// information rather than a failure, so it never offers safe mode by itself.
+void start_screen_names_a_loaded_frame_generation_addon_test()
+{
+    using namespace start_screen;
+    Facts facts{};
+    facts.gpu = L"NVIDIA GeForce RTX 3060";
+    facts.generation = GpuGeneration::Rtx30Ampere;
+    facts.driverVersion = L"32.0.16.1692";   // 616.92
+    facts.runtime = RuntimeState::Absent;
+    const auto plain = CapabilityLines(facts);
+    CHECK(std::none_of(plain.begin(), plain.end(), [](const Line& line) { return line.label == L"Frame Generation"; }));
+    facts.frameGenAddon = L"version.dll";
+    const auto lines = CapabilityLines(facts);
+    const auto addon = std::find_if(lines.begin(), lines.end(), [](const Line& line) { return line.label == L"Frame Generation"; });
+    REQUIRE(addon != lines.end());
+    CHECK(addon->mark == Mark::Info);
+    CHECK(addon->value.find(L"dlssg_sm86") != std::wstring::npos);
+    CHECK(!OfferSafeMode(lines, false));
+}
+
+// Issue #14: 0.27.0 pins the player's load-time imports to System32, so the
+// dlssg_for_sm86 proxy beside it was never loaded. It is loaded by full path
+// instead - only when its own ini marks it as that add-on, and never under a
+// name the player refuses beside itself (dxgi.dll) or renders through.
+void framegen_addon_picks_the_dlssg_sm86_proxy_beside_the_player_test()
+{
+    using framegen_addon::ProxyToLoad;
+    const auto beside = [](std::initializer_list<std::wstring_view> files) {
+        return [files](std::wstring_view name) {
+            return std::find(files.begin(), files.end(), name) != files.end();
+        };
+    };
+    CHECK(ProxyToLoad(beside({})).empty());
+    // A version.dll alone is not the add-on: nothing loads silently.
+    CHECK(ProxyToLoad(beside({L"version.dll"})).empty());
+    CHECK(ProxyToLoad(beside({L"dlssg_sm86.ini"})).empty());
+    CHECK(ProxyToLoad(beside({L"dlssg_sm86.ini", L"version.dll"})) == L"version.dll");
+    CHECK(ProxyToLoad(beside({L"dlssg_sm86.ini", L"winmm.dll"})) == L"winmm.dll");
+    CHECK(ProxyToLoad(beside({L"dlssg_sm86.ini", L"dinput8.dll", L"version.dll"})) == L"version.dll");
+    CHECK(ProxyToLoad(beside({L"dlssg_sm86.ini", L"dxgi.dll"})).empty());
+    CHECK(ProxyToLoad(beside({L"dlssg_sm86.ini", L"d3d12.dll"})).empty());
+}
+
+// Issue #14: on an RTX 20 or 30 the runtime refuses because NVIDIA ships
+// Frame Generation for RTX 40 and 50 only, and "update the driver" sent the
+// reporter after something no driver changes.
+void framegen_addon_refusal_advice_names_the_gpu_not_the_driver_on_rtx20_and_rtx30_test()
+{
+    using framegen_addon::RefusalAdvice;
+    using framegen_addon::AdviceFor;
+    CHECK(AdviceFor(GpuGeneration::Rtx30Ampere, false) == RefusalAdvice::NeedsRtx40);
+    CHECK(AdviceFor(GpuGeneration::Rtx20Turing, false) == RefusalAdvice::NeedsRtx40);
+    CHECK(AdviceFor(GpuGeneration::Rtx40Ada, false) == RefusalAdvice::UpdateDriver);
+    CHECK(AdviceFor(GpuGeneration::Rtx50Blackwell, false) == RefusalAdvice::UpdateDriver);
+    CHECK(AdviceFor(GpuGeneration::OtherRtx, false) == RefusalAdvice::UpdateDriver);
+    CHECK(AdviceFor(GpuGeneration::Rtx30Ampere, true) == RefusalAdvice::AddonRefused);
+    CHECK(AdviceFor(GpuGeneration::Rtx40Ada, true) == RefusalAdvice::AddonRefused);
+    const Localizer localizer;
+    for (const RefusalAdvice advice : {RefusalAdvice::UpdateDriver, RefusalAdvice::NeedsRtx40, RefusalAdvice::AddonRefused}) {
+        for (const wchar_t* key : {framegen_addon::AdviceKey(advice), framegen_addon::AdviceShortKey(advice)}) {
+            const std::wstring text = localizer.Get(key);
+            CHECK(!text.empty() && text != key);
+        }
+    }
+    CHECK(localizer.Get(framegen_addon::AdviceKey(RefusalAdvice::NeedsRtx40)).find(L"driver") == std::wstring::npos);
+}
+
+// The load itself, against the real loader: a version.dll beside the player
+// must come in as a second module even though System32's VERSION.dll is
+// already loaded by name - which is exactly what an import could not do.
+void framegen_addon_loads_its_proxy_as_a_second_module_beside_system32_test()
+{
+    const HMODULE system = LoadLibraryExW(L"version.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    REQUIRE(system != nullptr);
+    std::error_code error;
+    const auto directory = test_support::FixtureTempRoot() / (L"PolicyTests-framegen-addon-" + std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::remove_all(directory, error);
+    REQUIRE(std::filesystem::create_directories(directory, error));
+    wchar_t systemPath[MAX_PATH]{};
+    REQUIRE(GetModuleFileNameW(system, systemPath, MAX_PATH) != 0);
+    REQUIRE(std::filesystem::copy_file(systemPath, directory / L"version.dll", error));
+
+    // Without its ini the same file is left alone.
+    auto result = framegen_addon::LoadBeside(directory);
+    CHECK(!result.loaded);
+    CHECK(result.proxy.empty());
+
+    { std::ofstream(directory / L"dlssg_sm86.ini") << "[General]\n"; }
+    result = framegen_addon::LoadBeside(directory);
+    CHECK(result.loaded);
+    CHECK(result.proxy == L"version.dll");
+    REQUIRE(result.module != nullptr);
+    CHECK(result.module != system);
+    wchar_t loadedPath[MAX_PATH]{};
+    REQUIRE(GetModuleFileNameW(result.module, loadedPath, MAX_PATH) != 0);
+    CHECK(std::filesystem::equivalent(loadedPath, directory / L"version.dll", error));
+    FreeLibrary(result.module);
+    FreeLibrary(system);
+    std::filesystem::remove_all(directory, error);
 }
 
 void start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test()
@@ -15070,6 +15173,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(media_controls_ask_for_a_state_and_push_the_timeline_sparingly_test),
     TEST_CASE(taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test),
     TEST_CASE(start_screen_checks_say_what_passed_and_what_failed_test),
+    TEST_CASE(start_screen_names_a_loaded_frame_generation_addon_test),
+    TEST_CASE(framegen_addon_picks_the_dlssg_sm86_proxy_beside_the_player_test),
+    TEST_CASE(framegen_addon_refusal_advice_names_the_gpu_not_the_driver_on_rtx20_and_rtx30_test),
+    TEST_CASE(framegen_addon_loads_its_proxy_as_a_second_module_beside_system32_test),
     TEST_CASE(start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),

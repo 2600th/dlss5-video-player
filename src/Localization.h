@@ -165,6 +165,12 @@ private:
             {L"framegen.refusal.no_local_copy.short", L"needs a local copy"},
             {L"framegen.refusal.unchanged", L"\n\nNothing was changed and your video is still playing."},
             {L"framegen.driver_next_step", L"\n\nUpdate the NVIDIA driver and try again."},
+            // FrameGenAddon.h: an RTX 20/30 refusal is the hardware, and with
+            // the dlssg_sm86 add-on loaded it is the add-on's to explain.
+            {L"framegen.gpu_next_step", L"\n\nNVIDIA Frame Generation needs an RTX 40 or 50 series GPU."},
+            {L"framegen.refusal.gpu.short", L"needs an RTX 40 or 50 GPU"},
+            {L"framegen.addon_next_step", L"\n\nThe dlssg_sm86 add-on is loaded but could not enable it. Its log is in the dlssg_sm86 folder beside the player."},
+            {L"framegen.refusal.addon.short", L"refused with the dlssg_sm86 add-on"},
             // %u is the multiplier, then the source and target rates as text so
             // one formatter renders every rate the user sees.
             {L"framegen.confirm", L"Generate %u\u00d7 the frames of this video: %s fps \u2192 %s fps.\n\nThe converted file is kept with the player's converted videos; DLSS > Show converted file opens it. Playback switches to it when the conversion finishes.\n\nStart the conversion?"},

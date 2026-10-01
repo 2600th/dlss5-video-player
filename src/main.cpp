@@ -136,6 +136,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "DarkModePolicy.h"
 #include "MediaTransportPolicy.h"
 #include "StartScreenPolicy.h"
+#include "FrameGenAddon.h"
 #include "CompareBarPolicy.h"
 #include "CompareViewPolicy.h"
 #include "CompareMaskPolicy.h"
@@ -1261,6 +1262,30 @@ enum class StartupResult { Continue, ExitSuccess, ExitFailure };
 
 static std::string WideToUtf8(std::wstring_view value) { return utf8_text::FromWide(value); }
 
+// The dlssg_sm86 add-on loaded at startup, if one was (FrameGenAddon.h). Set
+// once in wWinMain before any thread or NGX feature exists, then only read.
+static framegen_addon::LoadResult& FrameGenAddonState() {
+    static framegen_addon::LoadResult state;
+    return state;
+}
+
+// Ahead of the --render branch, so dlss5-convert's conversions get the add-on
+// too, and never in safe mode, which is the player with nothing added to it.
+static void LoadFrameGenAddon(bool safeMode) {
+    const auto directory=platform_paths::ModuleDirectory();
+    if(!directory)return;
+    if(safeMode){
+        if(!framegen_addon::ProxyToLoad([&](std::wstring_view name){return framegen_addon::RegularFile(*directory/name);}).empty())
+            LOG("dlssg_sm86 add-on found beside the player; not loaded in safe mode.");
+        return;
+    }
+    auto& addon=FrameGenAddonState();
+    addon=framegen_addon::LoadBeside(*directory);
+    if(addon.proxy.empty())return;
+    if(addon.loaded)LOG("dlssg_sm86 add-on loaded for Frame Generation: "<<WideToUtf8((*directory/addon.proxy).wstring()));
+    else LOG("dlssg_sm86 add-on found but its "<<WideToUtf8(addon.proxy)<<" did not load: error "<<addon.error);
+}
+
 static std::wstring Utf8ToWide(std::string_view value) { return utf8_text::ToWide(value); }
 
 // Substitutes into a localized format string. swprintf_s calls the invalid
@@ -1345,7 +1370,7 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
     // GPU, driver and generation on one line: the field verification matrix
     // needs all three, and the driver floor message below only appears when
     // the driver is too old to say anything else.
-    LOG("Isolated neural helper available; player remains hook-free. GPU=" << WideToUtf8(options.detectedGpu.description)
+    LOG("Isolated neural helper available; player remains hook-free" << (FrameGenAddonState().loaded?" except the dlssg_sm86 add-on":"") << ". GPU=" << WideToUtf8(options.detectedGpu.description)
         << " driver=" << WideToUtf8(options.detectedGpu.driverVersion)
         << " generation=" << GpuGenerationPathName(options.detectedGpu.generation));
     switch(ClassifyNeuralDriver(options.detectedGpu.driverVersion)){
@@ -3838,6 +3863,11 @@ private:
         }
         return nullptr;
     }
+    // What the runtime's refusal is told to do next: a driver update, a newer
+    // GPU on an RTX 20/30, or the add-on's log once it is loaded (issue #14).
+    framegen_addon::RefusalAdvice FrameGenerationRefusalAdvice()const{
+        return framegen_addon::AdviceFor(m_opt.detectedGpu.generation,FrameGenAddonState().loaded);
+    }
     std::wstring FrameGenerationRefusalText(frame_rate_policy::FrameGenerationRefusal refusal)const{
         const wchar_t* key=FrameGenerationRefusalKey(refusal);
         return key?T(key):std::wstring{};
@@ -3846,6 +3876,8 @@ private:
     // FrameGenerationRefusalName - the log slug, "no-even-multiple" - while a
     // written sentence for every one of those cases sat unused beside it.
     std::wstring FrameGenerationRefusalShort(frame_rate_policy::FrameGenerationRefusal refusal)const{
+        if(refusal==frame_rate_policy::FrameGenerationRefusal::RuntimeRefused)
+            return T(framegen_addon::AdviceShortKey(FrameGenerationRefusalAdvice()));
         const wchar_t* key=FrameGenerationRefusalKey(refusal);
         return key?T((std::wstring(key)+L".short").c_str()):std::wstring{};
     }
@@ -4006,7 +4038,7 @@ private:
         // offered no next action - not even the driver update the runtime itself
         // was asking for.
         if(refusal==frame_rate_policy::FrameGenerationRefusal::RuntimeRefused){
-            text+=T(L"framegen.driver_next_step");
+            text+=T(framegen_addon::AdviceKey(FrameGenerationRefusalAdvice()));
             if(m_frameGenCapability&&!m_frameGenCapability->detail.empty())
                 LOG("Frame generation runtime refusal detail: "<<WideToUtf8(m_frameGenCapability->detail));
         }
@@ -7667,6 +7699,7 @@ private:
         start_screen::Facts facts{};
         facts.gpu=m_opt.detectedGpu.description;facts.generation=m_opt.detectedGpu.generation;
         facts.driverVersion=m_opt.detectedGpu.driverVersion;facts.safeMode=m_opt.safeMode;
+        if(FrameGenAddonState().loaded)facts.frameGenAddon=FrameGenAddonState().proxy;
         {std::scoped_lock lock(m_startAnswers->mutex);facts.runtime=m_startAnswers->runtime;facts.runtimeVersion=m_startAnswers->runtimeVersion;}
         // The live-session forecast, which is measured on this machine once a
         // session has run and otherwise a measured prior for the generation;
@@ -12498,6 +12531,7 @@ static int RunProbeCommand(const render_command::Command& command,RenderConsole&
             frameGeneration=maxMultiplier>=2?"up to "+std::to_string(maxMultiplier)+"x":"unavailable"+(capability.detail.empty()?std::string():": "+WideToUtf8(capability.detail));
         }
         text("frame_generation",frameGeneration);
+        if(FrameGenAddonState().loaded)text("frame_generation_addon","dlssg_sm86 ("+WideToUtf8(FrameGenAddonState().proxy)+")");
 
         std::vector<std::string> stages;
         if(worker&&!rungs.empty())stages.push_back("sr");
@@ -12685,6 +12719,7 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
     EnablePerMonitorDpiAwareness();
     EnableDarkPopupMenus();
     AppOptions options=ParseArgs();
+    LoadFrameGenAddon(options.safeMode);
     // --render and --help run headless and never reach the player, its
     // bootstrap or a window. ParseRuntimeArguments has already run, so the
     // safe-mode flag means the same thing to both.

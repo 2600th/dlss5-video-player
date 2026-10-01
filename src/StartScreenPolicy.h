@@ -42,6 +42,10 @@ struct Facts {
     // an invented number here is the question the screen exists to answer.
     std::optional<double> fps1080;
     std::optional<double> fps1440;
+    // The dlssg_sm86 proxy loaded at startup (FrameGenAddon.h), by file name;
+    // empty when none was. Said here because it is the one thing beside the
+    // player that loads into it.
+    std::wstring frameGenAddon;
 };
 
 enum class Mark { Pass, Fail, Info, Pending };
@@ -87,6 +91,8 @@ inline std::vector<Line> CapabilityLines(const Facts& facts)
     case RuntimeState::Drifted: lines.push_back(Line{L"Neural runtime", L"Present · a file differs from the lock", Mark::Fail}); break;
     }
     if (facts.safeMode) lines.push_back(Line{L"Mode", L"Safe mode · neural add-on off for this launch", Mark::Info});
+    if (!facts.frameGenAddon.empty())
+        lines.push_back(Line{L"Frame Generation", L"dlssg_sm86 add-on found and loaded · unofficial RTX 20/30 support", Mark::Info});
     if (facts.fps1080 || facts.fps1440) {
         std::wstring value;
         if (facts.fps1080) value = FpsText(*facts.fps1080) + L" at 1080p";

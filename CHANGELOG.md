@@ -7,6 +7,21 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Unreleased
+
+### Fixed
+
+- **RTX 20/30: the dlssg_sm86 Frame Generation add-on loads again** (issue
+  #14). 0.27.0 loaded the player's imports from System32 only, so a
+  `version.dll` from [dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm86)
+  beside it was never used. With the add-on's `dlssg_sm86.ini` and proxy beside
+  `DLSSVideoPlayer.exe`, the player now loads it automatically and says so on
+  the start screen. Safe mode skips it, and `dxgi.dll` stays refused.
+- **Frame Generation refusals on RTX 20/30 name the GPU, not the driver.** The
+  dialog said "Update the NVIDIA driver", which no driver changes. It now says
+  Frame Generation needs an RTX 40 or 50 series GPU, or, with the add-on loaded,
+  points to the add-on's log.
+
 ## 0.27.0 - 2026-10-01
 
 A command-line converter, and the fixes left open by the 25 September audit.

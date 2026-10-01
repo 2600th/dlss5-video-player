@@ -286,7 +286,10 @@ not what every source will gain.
   bicubic on six clips, it scored lower on all of them. It is built for games;
   use it for its look, not for detail.
 - **Frame generation writes a new file.** It takes time and disk space, and a
-  stream has to be copied locally first.
+  stream has to be copied locally first. NVIDIA supports it on RTX 40 and 50
+  cards; on RTX 20 and 30 the community
+  [dlssg_sm86 add-on](docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on)
+  is picked up automatically when it sits beside the player.
 - **Save converted video copies the cached render as it is**: 8-bit at the
   default Standard quality, 10-bit at High or Lossless, without adjustments,
   upscaling or HDR. Use **Export with DLSS stages** to bake in a larger size.

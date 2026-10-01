@@ -950,8 +950,10 @@ streams, the containers it can be written as, the Super Resolution rungs that
 grow it (and to what size), whether the neural runtime is installed and matches
 its lock, and so which stages this machine can run on it. `--capabilities`
 also measures how far frame generation goes on this GPU, which brings up a
-device of its own; `--json` prints one JSON object instead of `key=value`
-lines.
+device of its own, and prints `frame_generation_addon` when the dlssg_sm86
+add-on for RTX 20/30 is loaded
+([troubleshooting](TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on));
+`--json` prints one JSON object instead of `key=value` lines.
 
 #### What dlss5-convert runs
 
