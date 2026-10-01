@@ -342,7 +342,9 @@ Visual C++ Redistributable; `ShippedRuntimeImports` fails the build's tests if
 one imports a runtime DLL again. The player and `dlss5-convert.exe` resolve
 their load-time DLLs from System32 only (`/DEPENDENTLOADFLAG:0x800`, which
 `PlayerDllSearchPinned` checks on the player); the helper does not, because its `dxgi.dll` is the
-proxy beside it. They are linked with
+proxy beside it. The one DLL the player loads from beside itself is the
+dlssg_sm86 Frame Generation add-on, by full path and only with its ini there
+(`src/FrameGenAddon.h`). They are linked with
 `/DEBUG` and `/Brepro`: each has
 a PDB beside it in the build tree, for the minidumps the player and the worker
 write, and a clean rebuild from the same checkout path with the same toolset
