@@ -12,6 +12,7 @@
 #include "RuntimePolicy.h"
 #include "GpuPreference.h"
 #include "HdrPolicy.h"
+#include "CompareViewPolicy.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <atomic>
@@ -486,6 +487,8 @@ cbuffer Compose:register(b1){
                     // z = split, wipe, difference and side by side compare against it
     float4 Hdr;     // x = SDR white in nits, y = 1 when Ref holds PQ BT.2020 (R10G10B10A2),
                     // z = RTX VSR upscaled the one picture shown (VsrPolicy.h PlaybackPicture)
+    float4 Visible; // the part of the backbuffer the window shows, px: xy = top left,
+                    // zw = bottom right. Fill and a cropped 1:1 view show less than all of it.
 }
 Texture2D Mask:register(t3); Texture2D Labels:register(t4); Texture2D Subtitles:register(t5);
 // RTX Video Super Resolution of the original (P2.8, VsrPolicy.h): 8-bit sRGB, made by
@@ -673,7 +676,8 @@ float4 ComposePanes(float2 wuv,int mode,bool swap){
     // A dark two-pixel gutter where panes meet, so four pictures read as four.
     float2 fromMiddle=abs(px-0.5*Target.xy);
     if(fromMiddle.x<1.0||(mode==7&&fromMiddle.y<1.0))o=0.0;
-    if(inside&&Pane.w>0.0)o=LabelOver(o,px,origin*Target.xy+Label.y,kind);
+    // At the pane's corner, or the visible part's where Fill or 1:1 crops the window.
+    if(inside&&Pane.w>0.0)o=LabelOver(o,px,max(origin*Target.xy,Visible.xy)+Label.y,kind);
     return float4(o,1);
 }
 float4 PSPresentScaled(V i):SV_Target{
@@ -721,20 +725,22 @@ float4 PSPresentScaled(V i):SV_Target{
         if(d<Misc.x)c=1.0;
     }
     float3 o=COMPOSE_ENCODE(c);
-    // The tags name what each side of the picture is, pinned to the picture's top
-    // corners and clipped to their own side of the divider, so a divider dragged to
-    // an edge takes its tag with it rather than printing it over the other member.
+    // The tags name what each side of the picture is, pinned to the top corners of the
+    // part of it the window shows (all of it, unless Fill or 1:1 crops it) and clipped to
+    // their own side of the divider, so a divider dragged to an edge takes its tag with
+    // it rather than printing it over the other member.
     if(Pane.w>0.0){
         float2 px=i.uv*Target.xy;
         float inset=Label.y;
+        float2 topLeft=Visible.xy+inset;
         int compared=vsr?4:1;
-        if(mode==1)o=LabelOver(o,px,float2(inset,inset),0);
-        else if(mode==8)o=LabelOver(o,px,float2(inset,inset),4);
-        else if(mode==5)o=LabelOver(o,px,float2(inset,inset),2);
+        if(mode==1)o=LabelOver(o,px,topLeft,0);
+        else if(mode==8)o=LabelOver(o,px,topLeft,4);
+        else if(mode==5)o=LabelOver(o,px,topLeft,2);
         else if(mode==3||mode==4){
             int left=swap?compared:0,right=swap?0:compared;
-            if(px.x<screenSplit*Target.x)o=LabelOver(o,px,float2(inset,inset),left);
-            else o=LabelOver(o,px,float2(Target.x-inset-LabelWidth(right),inset),right);
+            if(px.x<screenSplit*Target.x)o=LabelOver(o,px,topLeft,left);
+            else o=LabelOver(o,px,float2(Visible.z-inset-LabelWidth(right),topLeft.y),right);
         }
     }
     if(Loupe.w>0.0)o=LoupeOver(o,i.uv*Target.xy,swap,vsr);
@@ -2011,6 +2017,8 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     // So does the mask, which blends back to it; and there has to be one uploaded.
     const bool mask=useReference&&cmp.mask&&m_mask;
     const float inset=float(m_labelRowHeight/2u);
+    // The tags' corners: the part of the backbuffer the window shows, or all of it.
+    const RECT visible=compare_view::VisibleInTarget(cmp.visible,targetWidth?targetWidth:m_outputW,targetHeight?targetHeight:m_outputH);
     const float compose[ComposeConstantCount]={
         0,useReference&&cmp.swap?1.0f:0.0f,std::clamp(cmp.secondMix,0.0f,2.0f),labels?std::clamp(cmp.labelFade,0.0f,1.0f):0.0f,
         labels?float(m_labelRowHeight):0.0f,inset,float(m_labelAtlasW),float(m_labelAtlasH),
@@ -2020,7 +2028,8 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
         cmp.loupeLeftX,cmp.loupeLeftY,cmp.loupeRightX,cmp.loupeRightY,
         std::max(cmp.differenceGain,0.0f),cmp.differenceLuma?1.0f:0.0f,mask?1.0f:0.0f,cmp.maskInvert?1.0f:0.0f,
         m_subtitleShown&&m_debugView==DebugView::Final?1.0f:0.0f,vsrFrame?1.0f:0.0f,againstVsr?1.0f:0.0f,0,
-        m_sdrWhiteNits,useReference&&m_referencePq?1.0f:0.0f,playbackVsr?1.0f:0.0f,0};
+        m_sdrWhiteNits,useReference&&m_referencePq?1.0f:0.0f,playbackVsr?1.0f:0.0f,0,
+        float(visible.left),float(visible.top),float(visible.right),float(visible.bottom)};
     cmd->SetGraphicsRoot32BitConstants(RootCompose,ComposeConstantCount,compose,0);
     cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(OverlaySRV));
     cmd->SetGraphicsRootDescriptorTable(RootVsr,SRVGPU(VsrSRV));

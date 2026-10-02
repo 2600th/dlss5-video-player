@@ -236,6 +236,8 @@ struct RendererOwnedSentinel final : D3D12RendererTestOwnedResource {
 };
 
 struct D3D12RendererTestAccess {
+    // How many root constants the renderer sets for the Compose cbuffer.
+    static constexpr uint32_t ComposeConstantCount(){return D3D12Renderer::ComposeConstantCount;}
     // The hooks object exists only once a test installs something.
     static D3D12RendererTestHooks& Hooks(D3D12Renderer& renderer)
     {
@@ -9415,6 +9417,18 @@ void compare_compositor_stays_out_of_the_capture_program_test()
     // RTX VSR (P2.8) is the compositor's too: presentation only, never in the capture,
     // the conversion or the NV12 capture, so no cached render can hold it.
     CHECK(std::find(scaled.begin(),scaled.end(),"Vsr@6")!=scaled.end());
+    // The Compose cbuffer is exactly the root constants the renderer sets: a member added
+    // on one side only would shift every value after it, or read past what was set.
+    {
+        Microsoft::WRL::ComPtr<ID3DBlob> blob;
+        CHECK(D3D12RendererTestAccess::CompilePresentProgram("PSPresentScaled",blob));
+        Microsoft::WRL::ComPtr<ID3D12ShaderReflection> reflection;
+        if(blob&&SUCCEEDED(D3DReflect(blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&reflection)))){
+            D3D12_SHADER_BUFFER_DESC compose{};
+            CHECK(SUCCEEDED(reflection->GetConstantBufferByName("Compose")->GetDesc(&compose)));
+            CHECK_EQ(UINT(D3D12RendererTestAccess::ComposeConstantCount()*4u),compose.Size);
+        }else CHECK(false);
+    }
     for(const char* entry:{"PSPresent","PSConvert","PSConvertDebanded","PSCaptureLuma","PSCaptureChroma","PSCaptureDithered"}){
         const auto bound=present_program_bindings(entry);
         CHECK(std::find(bound.begin(),bound.end(),"Vsr@6")==bound.end());
@@ -10061,6 +10075,36 @@ void compare_loupe_and_one_to_one_placement_test()
     const RECT fitted=compare_view::RenderRect(1600,1000,16.0/9.0,Fit::Fit,0,0);
     r=compare_view::RenderRect(1600,1000,16.0/9.0,Fit::Pixels,0,0);
     CHECK(EqualRect(&r,&fitted)!=FALSE);
+    // The tags go in the corners of the part of the render window the area shows. Fit
+    // shows all of it; Fill and a 1:1 view larger than the area are cropped by it. These
+    // are the screenshots' geometry: a 1900x815 area, a 16:9 picture.
+    RECT v=compare_view::VisibleRect(compare_view::RenderRect(1900,815,16.0/9.0,Fit::Fit,960,540),1900,815);
+    CHECK_EQ(0L,v.left);CHECK_EQ(0L,v.top);CHECK_EQ(1449L,v.right);CHECK_EQ(815L,v.bottom);
+    const RECT filled=compare_view::RenderRect(1900,815,16.0/9.0,Fit::Fill,960,540);
+    CHECK_EQ(1900L,filled.right-filled.left);CHECK_EQ(1069L,filled.bottom-filled.top);CHECK_EQ(-127L,filled.top);
+    v=compare_view::VisibleRect(filled,1900,815);
+    CHECK_EQ(0L,v.left);CHECK_EQ(127L,v.top);CHECK_EQ(1900L,v.right);CHECK_EQ(942L,v.bottom);
+    // 1:1 of a 4K output in a 1600x900 area: cropped on all four sides, centred.
+    v=compare_view::VisibleRect(compare_view::RenderRect(1600,900,16.0/9.0,Fit::Pixels,3840,2160),1600,900);
+    CHECK_EQ(1120L,v.left);CHECK_EQ(630L,v.top);CHECK_EQ(2720L,v.right);CHECK_EQ(1530L,v.bottom);
+    // 1:1 of a smaller output sits inside the area and shows all of itself.
+    v=compare_view::VisibleRect(compare_view::RenderRect(1600,900,16.0/9.0,Fit::Pixels,1280,720),1600,900);
+    CHECK_EQ(0L,v.left);CHECK_EQ(0L,v.top);CHECK_EQ(1280L,v.right);CHECK_EQ(720L,v.bottom);
+    // A window entirely outside the area shows nothing, as an empty rectangle.
+    v=compare_view::VisibleRect(RECT{2000,0,2400,300},1900,815);
+    CHECK(v.right<=v.left);
+    // The compositor clamps the rectangle to the backbuffer it draws, and takes the whole
+    // backbuffer for an empty one (never set, or a resize the swap chain has not reached).
+    RECT t=compare_view::VisibleInTarget(RECT{},1449,815);
+    CHECK_EQ(0L,t.left);CHECK_EQ(0L,t.top);CHECK_EQ(1449L,t.right);CHECK_EQ(815L,t.bottom);
+    t=compare_view::VisibleInTarget(RECT{0,127,1900,942},1900,1069);
+    CHECK_EQ(127L,t.top);CHECK_EQ(942L,t.bottom);CHECK_EQ(1900L,t.right);
+    t=compare_view::VisibleInTarget(RECT{0,127,1900,942},1449,815);
+    CHECK_EQ(127L,t.top);CHECK_EQ(815L,t.bottom);CHECK_EQ(1449L,t.right);
+    t=compare_view::VisibleInTarget(RECT{0,900,1900,1000},1449,815);
+    CHECK_EQ(0L,t.top);CHECK_EQ(815L,t.bottom);
+    // Every comparison starts with none: the whole backbuffer.
+    CHECK(ComparisonSettings{}.visible.right==0&&ComparisonSettings{}.visible.bottom==0);
     // The loupe needs the original, so the neural view uploads one while it is up.
     ComparisonSettings comparison;
     CHECK(!ComparisonReadsReference(comparison));

@@ -217,6 +217,10 @@ struct ComparisonSettings {
     // original, in every view of the neural member. Drawn only once a mask is uploaded.
     bool mask = false;
     bool maskInvert = false;
+    // The part of the backbuffer the window shows, in its pixels (compare_view::
+    // VisibleRect): the tags sit in its corners, so Fill and a cropped 1:1 view keep them
+    // on screen. Empty means all of it. Presentation only, like the tags.
+    RECT visible{};
     // Quad's fourth pane: DLSS 5 at a second Mix, beside the first. Where RTX VSR can
     // run, the pane is RTX VSR instead.
     float secondMix = 0.5f;
@@ -770,9 +774,12 @@ private:
     static constexpr uint32_t RootVsr = 5;
     // 16 present parameters plus the capture pass's source texel size.
     static constexpr uint32_t PresentConstantCount = 20;
-    // Pane, Label, LabelW, Target, Loupe, LoupeAt, Diff, Subs, Hdr; see the Compose
-    // cbuffer in D3D12Renderer.cpp.
-    static constexpr uint32_t ComposeConstantCount = 36;
+    // Pane, Label, LabelW, Target, Loupe, LoupeAt, Diff, Subs, Hdr, Visible; see the
+    // Compose cbuffer in D3D12Renderer.cpp.
+    static constexpr uint32_t ComposeConstantCount = 40;
+    // A root signature holds 64 DWORDs: one per descriptor table (four here) and one per
+    // root constant. With Visible this one is full.
+    static_assert(4 + PresentConstantCount + ComposeConstantCount <= 64, "the root signature is over D3D12's 64 DWORDs");
     // Where Hdr sits in Compose, for the PQ source conversion that sets it alone.
     static constexpr uint32_t ComposeHdrOffset = 32;
     static constexpr uint32_t ReferenceSRV = 6;

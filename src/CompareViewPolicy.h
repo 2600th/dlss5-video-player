@@ -390,6 +390,34 @@ inline RECT RenderRect(int areaW, int areaH, double aspect, Fit fit, uint32_t ou
     return RECT{left, top, left + rw, top + rh};
 }
 
+// The part of the render window `render` (as RenderRect places it in an areaW x
+// areaH area) that the area shows, in the window's own pixels, which are its
+// backbuffer's. Fit shows all of it. Fill, and 1:1 with an output larger than the
+// area, centre a window larger than the area and the area crops it, so the tags pinned
+// to the window's corners were drawn where nobody could see them: they are pinned to
+// this rectangle's corners instead.
+inline RECT VisibleRect(const RECT& render, int areaW, int areaH)
+{
+    const LONG w = std::max<LONG>(0, render.right - render.left);
+    const LONG h = std::max<LONG>(0, render.bottom - render.top);
+    const LONG left = std::clamp<LONG>(-render.left, 0, w);
+    const LONG top = std::clamp<LONG>(-render.top, 0, h);
+    return RECT{left, top, std::clamp<LONG>(LONG(areaW) - render.left, left, w),
+                std::clamp<LONG>(LONG(areaH) - render.top, top, h)};
+}
+
+// The visible rectangle as the compositor uses it, for a backbuffer of width x height:
+// clamped to it, and the whole of it when there is no rectangle or nothing of it is
+// left - none was ever set, or the swap chain has not caught up with a resize yet.
+inline RECT VisibleInTarget(const RECT& visible, uint32_t width, uint32_t height)
+{
+    const LONG w = LONG(width), h = LONG(height);
+    const RECT clamped{std::clamp<LONG>(visible.left, 0, w), std::clamp<LONG>(visible.top, 0, h),
+                       std::clamp<LONG>(visible.right, 0, w), std::clamp<LONG>(visible.bottom, 0, h)};
+    if (clamped.right <= clamped.left || clamped.bottom <= clamped.top) return RECT{0, 0, w, h};
+    return clamped;
+}
+
 } // namespace compare_view
 
 namespace compare_labels {

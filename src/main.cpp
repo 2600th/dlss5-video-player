@@ -5017,6 +5017,7 @@ private:
         if(!VsrUsable())effective.againstVsr=false;
         if(m_peekOriginal)effective.mode=ComparisonMode::Original;
         effective.labelFade=float(m_tagFade.Level(Clock::now()));
+        effective.visible=m_visiblePicture;
         effective.mask=!m_maskFeathered.pixels.empty();effective.maskInvert=m_maskInvert;
         // The loupe exists while the pointer is over the picture. Backbuffer pixels are
         // the render window's client pixels, because the backbuffers follow it.
@@ -7501,6 +7502,9 @@ private:
         const compare_view::Fit fit=m_onePixel?compare_view::Fit::Pixels:(m_fill?compare_view::Fit::Fill:compare_view::Fit::Fit);
         const RECT picture=compare_view::RenderRect(W,areaH,m_dar,fit,m_renderer?m_renderer->OutputW():0u,m_renderer?m_renderer->OutputH():0u);
         SetWindowPos(m_renderWnd,nullptr,picture.left,picture.top,picture.right-picture.left,picture.bottom-picture.top,SWP_NOZORDER|SWP_NOACTIVATE);
+        // Fill and 1:1 can make the window larger than the area, which crops it; the
+        // tags go in the corners of what is left.
+        m_visiblePicture=compare_view::VisibleRect(picture,W,areaH);
         // A zoom step is pixels per output pixel, so its scale follows the window.
         if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateRect(m_viewport,nullptr,FALSE);InvalidateControls();
@@ -11973,6 +11977,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     std::map<int,chrome_motion::Fade> m_compareFades;chrome_motion::Slide m_compareMark;bool m_compareWasMoving=false;
     // The comparison tags' fade-in after a mode change; at rest it is on.
     chrome_motion::Fade m_tagFade=[]{chrome_motion::Fade fade;fade.Reset(true);return fade;}();bool m_tagsWereMoving=false;
+    // The render window's part that the video area shows, in its own pixels (Layout).
+    RECT m_visiblePicture{};
     chrome_motion::Fade m_volumeHot,m_mixHot,m_volumeBubble;std::optional<Clock::time_point> m_volumeBubbleOffAt;bool m_slidersWereMoving=false;
     // Windows' own rule for focus cues: hidden until the keyboard is used to move
     // between controls, hidden again by the mouse. The focused action is always the
