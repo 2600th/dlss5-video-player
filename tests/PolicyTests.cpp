@@ -394,6 +394,15 @@ void runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test()
     }
 }
 
+// A path in %TEMP% that no other PolicyTests process uses. The suite runs as
+// more than one process at once (`ctest -j` runs its registrations side by
+// side), and two of them writing one fixed name read each other's fixtures.
+std::filesystem::path process_temp_path(std::wstring_view name)
+{
+    return std::filesystem::temp_directory_path() /
+        (std::to_wstring(GetCurrentProcessId()) + L"-" + std::wstring(name));
+}
+
 void write_binary_file(const std::filesystem::path& path, std::string_view content)
 {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -7506,7 +7515,7 @@ void reshade_trailing_section_text_uses_reshade_section_boundaries_test()
 
 void configure_neural_addon_is_idempotent_test()
 {
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade.ini";
+    const std::filesystem::path path = process_temp_path(L"PolicyTests-ReShade.ini");
     remove_file_if_present(path);
     constexpr std::string_view input =
         "[GENERAL]\n"
@@ -7547,7 +7556,7 @@ void configure_neural_addon_is_idempotent_test()
 
 void configure_neural_addon_reports_semantic_state_across_text_canonicalization_test()
 {
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-semantic.ini";
+    const std::filesystem::path path = process_temp_path(L"PolicyTests-ReShade-semantic.ini");
     remove_file_if_present(path);
 
     constexpr std::string_view missingAddonInput =
@@ -7576,7 +7585,7 @@ void configure_neural_addon_reports_semantic_state_across_text_canonicalization_
 void configure_neural_addon_safe_then_normal_observes_reshade_state_test()
 {
     const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "PolicyTests-ReShade-safe-normal.ini";
+        process_temp_path(L"PolicyTests-ReShade-safe-normal.ini");
     remove_file_if_present(path);
     constexpr std::string_view legacyInput =
         "[ADDON]\r\n"
@@ -7652,7 +7661,7 @@ void evaluated_config_update_observes_actual_final_bytes_test()
 
 void configure_neural_addon_fails_closed_for_malformed_ini_test()
 {
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-malformed.ini";
+    const std::filesystem::path path = process_temp_path(L"PolicyTests-ReShade-malformed.ini");
     remove_file_if_present(path);
     constexpr char nulContent[] = "[ADDON]\nDisabledAddons=legacy.addon64\0tail";
     const std::string nulInput{nulContent, sizeof(nulContent) - 1};
@@ -7695,7 +7704,7 @@ void configure_neural_addon_fails_closed_for_malformed_ini_test()
 
 void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
 {
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-directory";
+    const std::filesystem::path path = process_temp_path(L"PolicyTests-ReShade-directory");
     std::error_code removeError;
     std::filesystem::remove_all(path, removeError);
     CHECK(!removeError);
@@ -10090,7 +10099,7 @@ void compare_mask_shrinks_feathers_and_is_remembered_per_source_test()
     CHECK_EQ(size_t{16},SourceKey(L"x").size());
     // A mask is read through WIC as grey; its brightness is the mask.
     const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
-    const auto bmp=std::filesystem::temp_directory_path()/L"compare-mask-test.bmp";
+    const auto bmp=process_temp_path(L"compare-mask-test.bmp");
     write_half_white_bmp(bmp,8,4);
     Gray loaded;
     CHECK(SUCCEEDED(compare_image::LoadGray(bmp,loaded)));
@@ -10125,7 +10134,7 @@ void compare_saved_image_carries_its_provenance_test()
     CHECK(compare_provenance::SuggestedName(std::wstring(300,L'a'),L"t").size()==124);
 
     const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
-    const auto png=std::filesystem::temp_directory_path()/L"compare-save-test.png";
+    const auto png=process_temp_path(L"compare-save-test.png");
     std::error_code ignored;std::filesystem::remove(png,ignored);
     // 5x2 BGR, rows padded to 16 bytes: the left pixel black, the right one white.
     constexpr UINT width=5,height=2,stride=16;
@@ -11265,7 +11274,7 @@ void youtube_resolver_requires_duration_metadata_before_acquisition_test()
 void youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test()
 {
     const std::filesystem::path missingDirectory =
-        std::filesystem::temp_directory_path() / L"PolicyTests-resolver-missing";
+        process_temp_path(L"PolicyTests-resolver-missing");
     std::error_code error;
     std::filesystem::remove_all(missingDirectory, error);
     auto missingResolver = YouTubeResolverTestAccess::Create(missingDirectory);
@@ -15585,7 +15594,6 @@ void nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test()
 
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
-    TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
     TEST_CASE(runtime_shutdown_releases_player_before_media_foundation_and_com_test),
     TEST_CASE(runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test),
     TEST_CASE(toolbar_layout_selects_stable_action_sets_for_width_modes_test),
@@ -15678,7 +15686,6 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_stale_and_cancelled_prepared_seek_ownership_is_destroyed_once_test),
     TEST_CASE(youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test),
     TEST_CASE(video_decoder_prefers_video_duration_tag_over_longer_container_test),
-    TEST_CASE(youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test),
     TEST_CASE(youtube_decoder_discards_only_expected_trailing_partial_frame_test),
     TEST_CASE(youtube_decoder_background_seek_trickles_and_cancels_boundedly_test),
     TEST_CASE(video_decoder_close_releases_a_blocked_blocking_read_test),
@@ -15695,11 +15702,9 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(dropped_files_open_the_first_supported_file_and_count_the_rest_test),
     TEST_CASE(status_notes_last_exactly_as_long_as_they_are_true_test),
     TEST_CASE(child_stderr_tail_keeps_the_last_bytes_as_log_lines_test),
-    TEST_CASE(video_decoder_reports_child_stderr_and_a_mid_file_failure_is_not_the_end_test),
     TEST_CASE(video_decoder_seeks_a_source_with_an_unknown_duration_test),
     TEST_CASE(video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test),
     TEST_CASE(video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test),
-    TEST_CASE(video_decoder_tone_maps_hdr_sources_to_sdr_test),
     TEST_CASE(video_decoder_stands_turned_video_up_on_every_path_test),
     TEST_CASE(video_decoder_decodes_hdr_originals_as_pq_on_request_test),
     TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),
@@ -15732,17 +15737,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(bayer_capture_dither_map_is_the_classic_matrix_test),
     TEST_CASE(deband_pre_pass_smooths_bands_and_keeps_edges_test),
     TEST_CASE(deband_pre_pass_reaches_the_conversion_program_test),
-    TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
-    TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
-    TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),
-    TEST_CASE(youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test),
-    TEST_CASE(youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test),
-    TEST_CASE(youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test),
     TEST_CASE(youtube_prepared_handoff_shows_candidate_and_retires_every_old_owner_before_activation_test),
     TEST_CASE(youtube_prepared_handoff_sizes_and_shows_real_candidate_before_owned_retirement_test),
     TEST_CASE(youtube_prepared_window_api_failures_are_reported_before_commit_test),
     TEST_CASE(youtube_destroyed_window_and_visibility_failure_leave_active_state_unchanged_test),
-    TEST_CASE(youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test),
     TEST_CASE(legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test),
     TEST_CASE(eviction_removes_entries_that_can_never_match_a_key_again_test),
     TEST_CASE(eviction_keeps_everything_reusable_while_the_disk_has_room_test),
@@ -15891,9 +15889,6 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test),
     TEST_CASE(resolver_metadata_reports_selected_height_video_bitrate_and_age_limit_test),
     TEST_CASE(youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test),
-    TEST_CASE(youtube_resolver_keeps_stderr_out_of_the_answer_and_logs_it_test),
-    TEST_CASE(youtube_resolver_waits_until_both_selected_streams_are_available_test),
-    TEST_CASE(youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test),
     TEST_CASE(youtube_resolver_waits_for_fractional_stream_availability_test),
     TEST_CASE(resolver_output_validates_stream_availability_metadata_test),
     TEST_CASE(youtube_resolver_requires_duration_metadata_before_acquisition_test),
@@ -15910,7 +15905,6 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_resolver_queued_stop_token_cancels_before_launch_test),
     TEST_CASE(youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test),
     TEST_CASE(youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_test),
-    TEST_CASE(youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test),
     TEST_CASE(ngx_same_device_overlapping_sessions_initialize_and_shutdown_once_test),
     TEST_CASE(ngx_failed_initialization_never_acquires_a_session_test),
     TEST_CASE(ngx_failed_candidate_setup_releases_only_its_overlapping_lease_test),
@@ -15935,15 +15929,12 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
     TEST_CASE(variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test),
     TEST_CASE(variable_frame_rate_is_decided_on_b_frame_decode_order_test),
-    TEST_CASE(constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test),
     TEST_CASE(audio_fade_is_a_raised_cosine_that_starts_and_ends_flat_test),
     TEST_CASE(audio_fade_in_scales_whole_frames_and_stops_once_it_is_open_test),
     TEST_CASE(audio_fade_out_tail_decays_from_the_last_frame_to_silence_test),
     TEST_CASE(audio_stop_waits_are_bounded_and_the_clock_counts_whole_frames_test),
     TEST_CASE(audio_track_selection_skips_the_tracks_nobody_asked_for_test),
     TEST_CASE(audio_track_labels_say_what_distinguishes_the_tracks_test),
-    TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
-    TEST_CASE(audio_track_that_starts_late_is_led_with_silence_test),
     TEST_CASE(video_decoder_swap_keeps_the_frames_the_candidate_read_ahead_test),
     TEST_CASE(every_child_spawn_names_the_handles_it_inherits_test),
     TEST_CASE(local_inputs_reach_files_only_test),
@@ -15989,6 +15980,32 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test),
 };
 
+// Cases that drive real child processes through stalls, timeouts, hand-offs and
+// leak loops: each takes a second or more, and together they are most of this
+// suite's run time. `PolicyTests --tier=quick` (the quick CTest tier, which
+// every pull request runs) leaves them out; the full device-free run, which
+// the nightly and release builds use, runs them as PolicyTestsSlow.
+constexpr test_support::TestCase kSlowCases[] = {
+    TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
+    TEST_CASE(youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test),
+    TEST_CASE(youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test),
+    TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),
+    TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
+    TEST_CASE(constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test),
+    TEST_CASE(youtube_resolver_waits_until_both_selected_streams_are_available_test),
+    TEST_CASE(youtube_resolver_keeps_stderr_out_of_the_answer_and_logs_it_test),
+    TEST_CASE(video_decoder_reports_child_stderr_and_a_mid_file_failure_is_not_the_end_test),
+    TEST_CASE(youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test),
+    TEST_CASE(video_decoder_tone_maps_hdr_sources_to_sdr_test),
+    TEST_CASE(youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test),
+    TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
+    TEST_CASE(youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test),
+    TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
+    TEST_CASE(youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test),
+    TEST_CASE(audio_track_that_starts_late_is_led_with_silence_test),
+    TEST_CASE(youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test),
+};
+
 
 } // namespace
 
@@ -16016,18 +16033,28 @@ int wmain(int argc, wchar_t* argv[])
         test_support::run_cases(kResolverAvailabilityCases, std::size(kResolverAvailabilityCases), {});
         return test_support::failure_count == 0 ? 0 : 1;
     }
-    // `--only=<text>` runs the cases whose name contains the text.
+    // `--only=<text>` runs the cases whose name contains the text, from either
+    // table. `--tier=quick` runs kCases and `--tier=slow` kSlowCases; with
+    // neither, every case runs.
     std::string only;
+    bool quick = true;
+    bool slow = true;
     if (argc == 2 && std::wstring_view(argv[1]).starts_with(L"--only=")) {
         for (const wchar_t character : std::wstring_view(argv[1]).substr(7)) only.push_back(static_cast<char>(character));
         if (only.empty()) {
             std::cerr << "--only= needs part of a case name\n";
             return EXIT_FAILURE;
         }
+    } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=quick") {
+        slow = false;
+    } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=slow") {
+        quick = false;
     } else if (argc > 1) {
         return run_fake_resolver_child(argc, argv);
     }
-    const size_t ran = test_support::run_cases(kCases, std::size(kCases), only).ran;
+    size_t ran = 0;
+    if (quick) ran += test_support::run_cases(kCases, std::size(kCases), only).ran;
+    if (slow) ran += test_support::run_cases(kSlowCases, std::size(kSlowCases), only).ran;
     if (ran == 0) {
         std::cerr << "no case name contains '" << only << "'\n";
         return EXIT_FAILURE;
