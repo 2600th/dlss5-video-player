@@ -73,7 +73,7 @@ struct Plan {
 // old cache then survived until the disk fell below the floor, and only then
 // did it go - oldest first, mixed in with the renders that still worked.
 struct Identity {
-    std::string application;   // DLSS_VIDEO_PLAYER_VERSION
+    std::string application;   // kRenderCacheRevision (NeuralCache.h)
     std::string installation;  // the module directory, lower case
     std::string runtime;       // runtimeDigest
     std::string driver;        // driverVersion

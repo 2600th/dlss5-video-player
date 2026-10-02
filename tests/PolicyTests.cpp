@@ -1345,6 +1345,26 @@ void segment_names_refuse_devices_and_trailing_dots_test()
     CHECK(IsValidSegmentName(L"console.mkv"));
 }
 
+// Renders outlive releases: the cache's application term is a revision moved only
+// when render output changes, and it can never name a release after this one.
+void render_cache_revision_is_a_release_no_later_than_this_one_test()
+{
+    const auto revision = ParseSemanticVersion(kRenderCacheRevision);
+    const auto player = ParseSemanticVersion(DLSS_VIDEO_PLAYER_VERSION);
+    REQUIRE(revision.has_value());
+    REQUIRE(player.has_value());
+    CHECK(!(*player < *revision));
+    // Two identities that differ only in the player that made them are one key.
+    NeuralCacheIdentity a{};
+    a.sourceDigest = std::string(64, 'a');
+    a.width = 1920; a.height = 1080;
+    a.applicationVersion = std::string(kRenderCacheRevision);
+    NeuralCacheIdentity b = a;
+    CHECK(BuildNeuralCacheKey(a) == BuildNeuralCacheKey(b));
+    b.applicationVersion = "0.27.0";
+    CHECK(BuildNeuralCacheKey(a) != BuildNeuralCacheKey(b));
+}
+
 void command_argument_quoting_round_trips_through_argv_test()
 {
     for (const std::wstring argument : {std::wstring(L"C:\\Videos\\clip one.mp4"), std::wstring(L"C:\\dir with space\\"),
@@ -15508,6 +15528,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test),
     TEST_CASE(start_screen_checks_say_what_passed_and_what_failed_test),
     TEST_CASE(start_screen_names_a_loaded_frame_generation_addon_test),
+    TEST_CASE(render_cache_revision_is_a_release_no_later_than_this_one_test),
     TEST_CASE(command_argument_quoting_round_trips_through_argv_test),
     TEST_CASE(segment_names_refuse_devices_and_trailing_dots_test),
     TEST_CASE(framegen_addon_picks_the_dlssg_sm86_proxy_beside_the_player_test),

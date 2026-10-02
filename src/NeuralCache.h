@@ -25,6 +25,18 @@ enum class NeuralCacheState {
     Invalid,
 };
 
+// The "application" term of every cache identity: the release whose render and
+// source-copy output the cache entries were made with. It used to be the player
+// version, so every release - twenty-four in three weeks - discarded every user's
+// renders, although most releases change nothing a render writes. It moves only
+// when one does: a change to what the capture, the encode, the guides, the model
+// input or a source copy produce, and that change's commit sets it to the
+// release that ships it. The other terms (runtime, driver, model store, settings,
+// pipeline) still retire what they always did. 0.27.2 is the last release whose
+// output changed; 0.28.0 reads 0.27.2's renders. A value past the player's own
+// version is refused by PolicyTests.
+inline constexpr std::string_view kRenderCacheRevision = "0.27.2";
+
 struct NeuralCacheIdentity {
     std::string sourceDigest;
     uint32_t width{};
