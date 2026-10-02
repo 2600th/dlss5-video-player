@@ -31,12 +31,12 @@ unscaled. [Four more, including one where the model makes the picture worse](doc
 
 ## Download
 
-**v0.28.0** (2026-10-02): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.28.0)
+**v0.28.1** (2026-10-03): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.28.1)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.28.0-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 377 MB |
-| `DLSSVideoPlayer-v0.28.0-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
+| `dlss5-video-player-v0.28.1-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 377 MB |
+| `DLSSVideoPlayer-v0.28.1-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
 
 Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run: it
 has no runtime.
@@ -47,8 +47,8 @@ The checksum shows the file arrived intact; the attestation shows this
 repository built it.
 
 ```sh
-sha256sum -c DLSSVideoPlayer-v0.28.0-core-win64.zip.sha256
-gh attestation verify DLSSVideoPlayer-v0.28.0-core-win64.zip --repo 2600th/dlss5-video-player
+sha256sum -c DLSSVideoPlayer-v0.28.1-core-win64.zip.sha256
+gh attestation verify DLSSVideoPlayer-v0.28.1-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
 Only the core zip has build provenance. CI can't fetch the neural runtime, so
@@ -227,9 +227,9 @@ published only on its
 re-uploads of DLSS 5 tools under other accounts have been reported carrying
 malware.
 
-## What's new in 0.28.0
+## What's new in 0.28.1
 
-**0.28.0** (2026-10-02). RTX Video Super Resolution becomes the upscaler, in
+**0.28.1** (2026-10-03). RTX Video Super Resolution becomes the upscaler, in
 playback and in exports. Renders made with 0.27.2 are reused, and from now on
 an update keeps your renders unless its notes say otherwise.
 

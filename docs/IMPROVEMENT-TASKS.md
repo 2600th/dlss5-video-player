@@ -296,7 +296,7 @@ the comparison features below are aimed at making those visible.
 
 - **What.** RTX VSR as a display upscaler and export stage after the neural
   pass, not only on the original.
-- **Since 0.28.0.** It beat bicubic on the harness (`vsr-quality-20261002`) and is
+- **Since 0.28.1.** It beat bicubic on the harness (`vsr-quality-20261002`) and is
   the default playback upscaler - in cached playback that includes the render in
   the DLSS 5 view - and the default export upscaler for Super Resolution without
   the model (`VsrUpscalePass`). Left: VSR after the neural pass in an export

@@ -7,11 +7,12 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## 0.28.0 - 2026-10-02
+## 0.28.1 - 2026-10-03
 
 RTX Video Super Resolution becomes the upscaler, in playback and in exports.
 Renders made with 0.27.2 are reused; earlier ones render again once, and from
-now on an update keeps renders unless its notes say otherwise.
+now on an update keeps renders unless its notes say otherwise. 0.28.0 was
+tagged but never published; its changes ship here.
 
 ### Changed
 
@@ -53,7 +54,7 @@ now on an update keeps renders unless its notes say otherwise.
 - **Renders survive updates.** The render cache was keyed by the player version
   since 0.12, so every release rendered every video again once - 0.26.1, 0.26.2
   and 0.27.0 included, whatever their notes said; those notes are corrected. The
-  key now changes only when a release changes what a render writes, so 0.28.0
+  key now changes only when a release changes what a render writes, so 0.28.1
   reuses renders made with 0.27.2 (earlier ones render again once), and a later
   release keeps them unless its notes say otherwise.
 - **Generated frames no longer offers what the GPU cannot do.** Once Frame
@@ -127,7 +128,7 @@ time. 0.27.1 was tagged but never published; its fixes ship here.
 ## 0.27.0 - 2026-10-01
 
 A command-line converter, and the fixes left open by the 25 September audit.
-Renders made with 0.26.2 render again once. (Corrected in 0.28.0: the render cache is keyed by the player version, so every render is made again once on a new version.)
+Renders made with 0.26.2 render again once. (Corrected in 0.28.1: the render cache is keyed by the player version, so every render is made again once on a new version.)
 
 ### Added
 
@@ -201,7 +202,7 @@ Renders made with 0.26.2 render again once. (Corrected in 0.28.0: the render cac
 
 Fixes from re-measuring an RTX 5090 on 0.26.1
 ([record](docs/VERIFICATION-2026-09-26-RTX5090.md)). Renders made with 0.26.1
-render again once. (Corrected in 0.28.0: the render cache is keyed by the player version, so every render is made again once on a new version.)
+render again once. (Corrected in 0.28.1: the render cache is keyed by the player version, so every render is made again once on a new version.)
 
 ### Fixed
 
@@ -223,7 +224,7 @@ render again once. (Corrected in 0.28.0: the render cache is keyed by the player
 
 ## 0.26.1 - 2026-09-25
 
-Fixes from a full audit of 0.26.0. Renders made with 0.26.0 render again once. (Corrected in 0.28.0: the render cache is keyed by the player version, so every render is made again once on a new version.)
+Fixes from a full audit of 0.26.0. Renders made with 0.26.0 render again once. (Corrected in 0.28.1: the render cache is keyed by the player version, so every render is made again once on a new version.)
 
 ### Fixed
 
