@@ -97,6 +97,11 @@ int RunDebugViewProbe();
 // the ladder: every quality at 1080p and 1440p sources, at 1x and into a 2160p window,
 // and prints the table. Registered as VsrGpuSmoke only in a build with -DRTX_VIDEO_SDK.
 int RunVsrProbe(const wchar_t* source);
+// RTX VSR written raw for scoring, the way RenderSuperResolution writes DLSS SR:
+// the clip as the reference the view reads, in a window of the output's size so
+// the network maps texel for pixel, no tags, RGBA as CaptureComposedView reads it.
+//   UpscalingGpuSmoke vsr-capture <clip> <out width> <out height> <quality 1-4> <raw> <frames>
+int RunVsrCapture(const wchar_t* source,uint32_t outW,uint32_t outH,uint32_t quality,const wchar_t* raw,uint32_t maxFrames);
 
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
@@ -114,6 +119,9 @@ int wmain(int argc,wchar_t** argv) {
     if(argc==2&&std::wstring_view(argv[1])==L"subtitle-upload")return RunSubtitleUploadProbe();
     if(argc==2&&std::wstring_view(argv[1])==L"debug-views")return RunDebugViewProbe();
     if(argc==3&&std::wstring_view(argv[1])==L"vsr")return RunVsrProbe(argv[2]);
+    if(argc==8&&std::wstring_view(argv[1])==L"vsr-capture")
+        return RunVsrCapture(argv[2],std::wcstoul(argv[3],nullptr,10),std::wcstoul(argv[4],nullptr,10),
+                             std::wcstoul(argv[5],nullptr,10),argv[6],std::wcstoul(argv[7],nullptr,10));
     if((argc==3||argc==4)&&std::wstring_view(argv[1])==L"hdr-tonemap")return RunHdrToneMapProbe(argv[2],argc==4?argv[3]:nullptr);
     if(argc!=3)return 2; // source path, target height (1440 or 2160)
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
@@ -1044,4 +1052,44 @@ int RunDebugViewProbe()
     }
     DestroyWindow(window);
     return code;
+}
+
+int RunVsrCapture(const wchar_t* source,uint32_t outW,uint32_t outH,uint32_t quality,const wchar_t* raw,uint32_t maxFrames)
+{
+    if(quality<1||quality>4||outW==0||outH==0||maxFrames==0)return 2;
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    int code=1;
+    {
+        VideoDecoder decoder;
+        if(!decoder.Open(source,MediaSourceKind::LocalFile))return 3;
+        const uint32_t w=decoder.Width(),h=decoder.Height();
+        const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(w,h,decoder.FrameRate());
+        HWND window=CreateWindowExW(0,L"STATIC",L"vsr capture",WS_POPUP,0,0,int(outW),int(outH),nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        {
+            auto renderer=MakeD3D12Renderer();
+            renderer->SetPresentFollowsWindow(true);
+            bool ok=renderer->Initialize(window,w,h,w,h,gw,gh,DefaultNeuralCarrierQuality());
+            if(ok)renderer->SetDLSS(false);
+            ok=ok&&renderer->VsrReason()==vsr_policy::Reason::Ready;
+            ComparisonSettings view;view.mode=ComparisonMode::Vsr;view.labels=false;
+            view.vsrQuality=static_cast<vsr_policy::Quality>(quality);
+            if(ok)renderer->SetComparison(view);
+            std::ofstream out(raw,std::ios::binary|std::ios::trunc);
+            VideoFrame frame;uint32_t frames=0;double gpuMs=0.0;
+            std::vector<uint8_t> rgba;uint32_t cw=0,ch=0;
+            while(ok&&frames<maxFrames&&decoder.ReadNext(frame)){
+                if(frames==0)ok=renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),nullptr,0,gw,gh,true,false,33.3f);
+                ok=ok&&renderer->UploadReferenceFrame(frame.bgra.data(),frame.bgra.size())&&renderer->PresentCurrent()&&renderer->VsrShown()&&
+                   renderer->CaptureComposedView(rgba,cw,ch)&&cw==outW&&ch==outH;
+                if(ok){out.write(reinterpret_cast<const char*>(rgba.data()),std::streamsize(rgba.size()));++frames;gpuMs+=renderer->LastVsrGpuMs();}
+            }
+            const bool texelForPixel=renderer->VsrOutputW()==outW&&renderer->VsrOutputH()==outH;
+            std::cout<<"vsr-capture: source="<<w<<"x"<<h<<" output="<<renderer->VsrOutputW()<<"x"<<renderer->VsrOutputH()
+                     <<" quality="<<quality<<" frames="<<frames<<" evaluations="<<renderer->VsrEvaluations()
+                     <<" meanGpuMs="<<(frames?gpuMs/frames:0.0)<<'\n';
+            code=ok&&frames>0&&texelForPixel&&renderer->VsrEvaluations()==frames?0:5;
+        }
+        DestroyWindow(window);
+    }
+    MFShutdown();CoUninitialize();return code;
 }
