@@ -130,6 +130,33 @@ inline Size OutputSize(uint32_t sourceW, uint32_t sourceH, uint32_t targetW, uin
     return {std::max(sourceW, axis(sourceW)), std::max(sourceH, axis(sourceH))};
 }
 
+// The frame VSR writes is a texture of OutputSize, and a new size is a GPU drain and
+// a new texture as large as the window. A window being dragged to a new size presents
+// at every size it passes through, so following each one would drain and allocate
+// per present for sizes nobody stops at. A new size is made only once it has been
+// asked for by kSettlePresents presents in a row over at least kSettleMs; until
+// then the compositor scales the picture as it does without VSR. The first output,
+// with nothing made yet, and the size already made are never held back: an export or
+// a window that opens at its size gets VSR from its first frame.
+inline constexpr uint32_t kSettlePresents = 3;
+inline constexpr double kSettleMs = 100.0;
+
+struct SizeSettle {
+    Size asked{};           // the size the last present asked for
+    uint32_t presents = 0;  // presents in a row that asked for it
+    double sinceMs = 0.0;   // when the first of them did
+};
+
+// One present asking for `wanted` at `nowMs`, with `made` the size of the texture
+// that exists ({} when none does). True when `wanted` may be made, or used, now.
+inline bool SizeSettled(SizeSettle& settle, Size made, Size wanted, double nowMs)
+{
+    if (wanted != settle.asked) settle = {wanted, 0, nowMs};
+    if (settle.presents < kSettlePresents) ++settle.presents;
+    if (made == Size{} || made == wanted) return true;
+    return settle.presents >= kSettlePresents && nowMs - settle.sinceMs >= kSettleMs;
+}
+
 // RTX VSR as the playback upscaler. It beat bicubic and DLSS Super Resolution on
 // every quality measure taken, on clean and compressed input, for a fraction of a
 // millisecond a frame (docs/measurements/vsr-quality-20261002/REPORT.md). So it is on

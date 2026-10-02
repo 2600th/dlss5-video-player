@@ -1035,6 +1035,22 @@ int RunVsrProbe(const wchar_t* source)
                      <<" ownSizeLeftAlone="<<ownSize<<" hdrDisplay="<<hdrDisplay<<" pairViews="<<pairViews<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
             playback=playback&&played==10&&upscaled==10&&afterPlay==10&&paused&&off&&ownSize&&hdrDisplay&&pairViews&&playbackDiff>0.05&&playbackDiff<24.0&&
                      r->VsrOutputW()==ww&&r->VsrOutputH()==wh;
+            // A window being resized: the size it passes through is not made - the
+            // compositor scales that present and leaves it stale, so a paused player
+            // presents again - and once the size has held, VSR is made at it.
+            if(playback){
+                const uint32_t mw=w*3u/2u,mh=h*3u/2u;
+                SetWindowPos(playbackWindow,nullptr,0,0,int(mw),int(mh),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+                const bool held=r->PresentCurrent()&&!r->PlaybackVsrShown()&&r->PresentationStale()&&
+                                r->VsrOutputW()==ww&&r->VsrOutputH()==wh;
+                uint32_t presents=1;bool settled=false;
+                while(held&&!settled&&presents<100){Sleep(10);settled=r->PresentCurrent()&&r->PlaybackVsrShown();++presents;}
+                const auto resized=vsr_policy::OutputSize(w,h,mw,mh);
+                std::cout<<"vsr resize: held="<<held<<" settled="<<settled<<" presents="<<presents
+                         <<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
+                playback=held&&settled&&presents>=vsr_policy::kSettlePresents&&!r->PresentationStale()&&
+                         r->VsrOutputW()==resized.width&&r->VsrOutputH()==resized.height;
+            }
             r.reset();DestroyWindow(playbackWindow);
         }
 

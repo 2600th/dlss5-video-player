@@ -1134,6 +1134,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_vsrOutput;  // R8G8B8A8 UAV, VsrPolicy.h OutputSize
     uint32_t m_vsrOutputW = 0, m_vsrOutputH = 0;
     bool m_vsrOutputInUAV = true;
+    // A new output size waits until the window stops changing (vsr_policy::SizeSettled).
+    // While one waits the present is marked stale, so a paused player presents again
+    // and the frame gets its VSR once the size has settled.
+    vsr_policy::SizeSettle m_vsrSettle{};
+    bool m_vsrSizeHeld = false;
     // Bumped by every reference copy; the VSR frame is made again only when this,
     // its size or its quality moved, so a paused split drag re-presents without it.
     uint64_t m_referenceSerial = 0;
@@ -1150,7 +1155,8 @@ private:
     // Consecutive refused evaluates. The kept-frame rule stops a refusal repeating
     // only while the input holds still, and playback moves it every frame, so a
     // driver that keeps refusing would be asked - and logged - sixty times a second.
-    // Three in a row and playback stops asking for this renderer's life.
+    // Three in a row and neither playback nor a comparison asks again for this
+    // renderer's life (EvaluateVsr).
     uint32_t m_vsrFailures = 0;
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_vsrTimestampHeap;  // 2 per frame slot
     Microsoft::WRL::ComPtr<ID3D12Resource> m_vsrTimestampReadback;

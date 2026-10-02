@@ -2809,7 +2809,9 @@ bool D3D12Renderer::EnsureVsrOutput(uint32_t width,uint32_t height){
     if(m_vsrOutput&&m_vsrOutputW==width&&m_vsrOutputH==height)return true;
     if(m_gpuUnusable||!m_device||!m_srvHeap)return false;
     // The view below replaces one a frame in flight may read. Nothing on the list being
-    // recorded has been submitted, so a drain here waits only for earlier frames.
+    // recorded has been submitted, so a drain here waits only for earlier frames. A
+    // window being resized does not come here at every size it passes through:
+    // EvaluateVsr holds a new size until it settles.
     if(!WaitGPUForContinuedUse())return false;
     auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
     // R8G8B8A8, as the guide's DX12 flow makes it, with the UAV NGX writes through: the
@@ -2850,7 +2852,7 @@ bool D3D12Renderer::PlaybackVsrApplies(const present_scale::Target&target)const{
 }
 
 void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const present_scale::Target&target){
-    m_vsrShown=false;m_playbackVsrShown=false;
+    m_vsrShown=false;m_playbackVsrShown=false;m_vsrSizeHeld=false;
     if(m_debugView!=DebugView::Final||!m_vsr.FeatureCreated()||slot>=FrameCount)return;
     if(PlaybackVsrApplies(target)){
         // The decoded frame is the picture the compositor would have scaled: T is its
@@ -2866,15 +2868,21 @@ void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const 
     // An HDR original compared in HDR is PQ: never RTX VSR's input, which is 8-bit SDR.
     // A view that reads RTX VSR asks for the SDR original (ComparisonCombinesPixels).
     if(!m_hasReference||!m_reference||m_referenceInCopyDest||m_referencePq)return;
-    // The same latch as playback's: cached playback uploads a reference per frame.
-    if(m_vsrFailures>=3)return;
     const auto size=vsr_policy::OutputSize(m_sourceW,m_sourceH,target.width,target.height);
     EvaluateVsr(cmd,slot,m_reference.Get(),1u,m_referenceSerial,size,m_comparison.vsrQuality);
 }
 
 bool D3D12Renderer::EvaluateVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,ID3D12Resource*input,uint32_t inputKind,
                                 uint64_t serial,vsr_policy::Size size,vsr_policy::Quality quality){
-    if(!input||!size.width||!size.height||!EnsureVsrOutput(size.width,size.height))return false;
+    // Three refusals in a row latch VSR off for both callers: playback moves its input
+    // every frame, and cached playback uploads a reference per frame for a comparison.
+    if(m_vsrFailures>=3||!input||!size.width||!size.height)return false;
+    // A size the window is only passing through is not made: the compositor scales this
+    // present as it would without VSR, and nothing here counts as a refusal.
+    const double nowMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const vsr_policy::Size made=m_vsrOutput?vsr_policy::Size{m_vsrOutputW,m_vsrOutputH}:vsr_policy::Size{};
+    if(!vsr_policy::SizeSettled(m_vsrSettle,made,size,nowMs)){m_vsrSizeHeld=true;return false;}
+    if(!EnsureVsrOutput(size.width,size.height))return false;
     // The frame already made from this input at this quality is kept: a paused
     // split drag, a loupe move or a paused playback frame re-presents without
     // running the network again.
@@ -2974,7 +2982,9 @@ void D3D12Renderer::LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult resu
     }
 }
 bool D3D12Renderer::PresentSwapchain(const char*what){
-    m_presentStale=false;
+    // A VSR size still settling leaves the present stale, so a paused player presents
+    // again until the size is made and the picture is VSR's.
+    m_presentStale=m_vsrSizeHeld;
     const auto presented=std::chrono::steady_clock::now();
     const HRESULT hr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
     m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
