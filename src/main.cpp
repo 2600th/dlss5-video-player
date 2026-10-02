@@ -1694,9 +1694,12 @@ static SuperResolutionEngine ReadSuperResolutionEngine(const std::filesystem::pa
 // Whether RTX VSR can run an export here as far as can be told without a device:
 // this build has it, its DLL is beside the player, and the GPU is an RTX one. The
 // pass itself still says so if NGX then refuses.
+// `if constexpr`, not `kBuilt&&...`: in a build without the SDK that is a constant
+// false, which the code analyzer rejects (C6237) as a condition never evaluated.
 static bool VsrExportReady(const std::filesystem::path& helpers,GpuGeneration generation){
-    return VsrEngine::kBuilt&&generation!=GpuGeneration::Unsupported&&generation!=GpuGeneration::OtherNvidia&&
-           framegen_addon::RegularFile(helpers/L"nvngx_vsr.dll");
+    if constexpr(!VsrEngine::kBuilt)return false;
+    else return generation!=GpuGeneration::Unsupported&&generation!=GpuGeneration::OtherNvidia&&
+                framegen_addon::RegularFile(helpers/L"nvngx_vsr.dll");
 }
 
 // The saved [Encoding] CacheQuality rung. A name this build does not know - a newer
