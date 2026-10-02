@@ -460,6 +460,16 @@ int RunFakeWorker(int argc, wchar_t** argv)
         const auto bytes = EncodeResult(neural_worker_detail::WorkerThrewResult(parsed->request.jobId));
         return WriteMessage(handle, WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 14;
     }
+    if (source == L"result-then-exit-nonzero-source.mkv" || source == L"result-then-linger-source.mkv") {
+        // A valid result, and then either a failure only the exit code tells -
+        // the real helper's own `WriteResult(...) ? 0 : 3`, or a crash in
+        // teardown - or a teardown that never finishes.
+        const auto bytes = EncodeResult(ValidFakeResult(parsed->request.jobId));
+        if (!WriteMessage(handle, WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size()))) return 14;
+        if (source == L"result-then-exit-nonzero-source.mkv") return 3;
+        std::this_thread::sleep_for(20s);
+        return 0;
+    }
     if (source == L"progress-then-hang-source.mkv") {
         NeuralRenderProgress progress;
         progress.phase = NeuralRenderPhase::NeuralRendering;
@@ -3275,6 +3285,32 @@ void a_resident_helper_that_throws_while_idle_does_not_fail_the_next_job_test()
     CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
 }
 
+// A single-shot helper's pump stops at its Result, and the process used to be
+// ended there with its exit code assumed to be 0, so a helper that failed after
+// reporting - a short write of its own, a crash in teardown - went unnoticed.
+// It is given a bounded moment to exit and judged on its code; one that does
+// not exit in that moment is still ended promptly and judged on its result.
+void a_helper_that_fails_after_its_result_is_judged_on_its_exit_code_test()
+{
+    const NeuralRenderResult failed = RunNeuralWorker(CurrentExecutable(),
+        TestRequest(L"result-then-exit-nonzero-source.mkv"), {}, {}, {}, 0);
+    CHECK(!failed.ok);
+    CHECK(!failed.cancelled);
+    CHECK(failed.failure == NeuralRenderFailure::RetryExhausted);
+    CHECK(failed.detail.find(L"exited with code 3 after reporting its result") != std::wstring::npos);
+
+    const auto started = std::chrono::steady_clock::now();
+    const NeuralRenderResult lingering = RunNeuralWorker(CurrentExecutable(),
+        TestRequest(L"result-then-linger-source.mkv"));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(lingering.ok);
+    CHECK(lingering.failure == NeuralRenderFailure::None);
+    // The helper sleeps 20 s after its result; anything near that is a wait
+    // on its exit that the grace was meant to bound.
+    CHECK(elapsed < 10s);
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
 // An exception out of the parent's own code while a single-shot helper runs -
 // a progress, segment or timeline callback - unwound past the raw handles the
 // launcher held: the job object leaked, its kill-on-close never fired, and the
@@ -3392,6 +3428,7 @@ int wmain(int argc, wchar_t** argv)
     a_terminal_message_of_the_wrong_kind_is_malformed_on_every_path_test();
     a_helper_that_throws_mid_job_is_relaunched_as_a_crash_test();
     a_resident_helper_that_throws_while_idle_does_not_fail_the_next_job_test();
+    a_helper_that_fails_after_its_result_is_judged_on_its_exit_code_test();
     a_throwing_progress_callback_still_ends_the_helper_test();
     a_throwing_process_created_hook_leaks_no_handles_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -776,6 +776,12 @@ StartOutcome StartHelper(const std::filesystem::path& executable,
 // cancel has always had, and residency is dropped rather than trusted.
 constexpr std::chrono::milliseconds kResidentCancelGrace{2000};
 
+// How long a single-shot helper that has sent its terminal message is given to
+// exit before it is ended. Long enough for an ordinary teardown to finish and
+// its exit code to be read, short enough that a helper hung in teardown costs
+// the job nothing worth noticing.
+constexpr std::chrono::milliseconds kSingleShotExitGrace{500};
+
 struct PumpOutcome {
     bool malformed{};
     bool exited{};
@@ -805,9 +811,9 @@ PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_
         // that writes its result and exits in the same breath is judged below
         // on what it said, not on the fact that it went. A single-shot helper
         // is let go here too: once its terminal message is in there is nothing
-        // left to read, and the caller ends the process with EndHelper either
-        // way, so following it to its exit only waited out its teardown - or,
-        // for a helper that hung in it, waited for nothing.
+        // left to read, and the caller gives it a bounded moment to exit before
+        // ending it, so following it to its exit here would wait out its whole
+        // teardown - or, for a helper that hung in it, wait for nothing.
         if (reader.Complete()) break;
         if (stop.stop_requested() && !outcome.cancelled) {
             outcome.cancelled = true;
@@ -874,12 +880,23 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
     } endOnUnwind{started.helper};
     const PumpOutcome pump = Pump(started.helper, reader, stop, false);
     outcome.cancelled = pump.cancelled;
+    // The pump stops at the terminal message, not at the exit, and a helper
+    // can still fail after it: its own write of the result coming back short,
+    // or a crash in teardown, is said only in its exit code. So a helper that
+    // has reported is given a short, bounded moment to go and is judged on
+    // its code if it does; one still busy after that is ended below and judged
+    // on what it said.
+    bool exited = pump.exited;
+    if (!exited && pump.completed && !pump.cancelled) {
+        exited = WaitForSingleObject(started.helper.process,
+                                     static_cast<DWORD>(kSingleShotExitGrace.count())) == WAIT_OBJECT_0;
+    }
     // Only when the process actually went. GetExitCodeProcess succeeds on a
     // live process and answers STILL_ACTIVE (259), so asking unconditionally
     // reported a helper that was still running as "exited with code 259" - a
     // number that reads like a crash, classifies as WorkerCrashed, and hides
-    // the real diagnosis. The pump already knows which happened.
-    if (pump.exited) {
+    // the real diagnosis. The pump, or the wait above, knows which happened.
+    if (exited) {
         // An unreadable code stays the -1 default: nonzero, so a crash.
         outcome.exitCode = neural_worker_detail::ReadHelperExitCode([&](DWORD* code) {
             return GetExitCodeProcess(started.helper.process, code) != FALSE;
@@ -1043,10 +1060,12 @@ NeuralRenderResult RunHelperOnce(const std::filesystem::path& executable,
         restartRequested = true;
         return result;
     }
+    // A helper that reported and then exited nonzero failed after its result:
+    // the result is not trusted over the exit, and the detail says which.
     if (launch.exitCode != 0) {
         result.failure = NeuralRenderFailure::WorkerCrashed;
         result.detail = L"The isolated neural helper exited with code " + std::to_wstring(launch.exitCode) +
-                        L" before producing a result.";
+                        (reader.Complete() ? L" after reporting its result." : L" before producing a result.");
         return result;
     }
     // An incomplete or malformed stream is refused inside AcceptResult.
