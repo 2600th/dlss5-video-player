@@ -148,6 +148,10 @@ D3D12Renderer::~D3D12Renderer() {
         if (m_cacheReadback[i] && m_cacheReadbackMapped[i]) m_cacheReadback[i]->Unmap(0,nullptr);
         m_cacheReadbackMapped[i]=nullptr;
     }
+    for (ComposedReadback& slot : m_composedReadback) {
+        if (slot.buffer && slot.mapped) slot.buffer->Unmap(0,nullptr);
+        slot.mapped=nullptr;
+    }
     if (m_timestampReadback && m_timestampMapped) m_timestampReadback->Unmap(0,nullptr);
     m_timestampMapped=nullptr;
     if (m_exposureUpload && m_exposureUploadMapped) m_exposureUpload->Unmap(0,nullptr);
@@ -964,6 +968,11 @@ bool D3D12Renderer::CreatePipelines(){
     if(presentScaled){
         p.PS={presentScaled->GetBufferPointer(),presentScaled->GetBufferSize()};
         p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoPresentScaled)),"Create scaled present PSO"))return false;
+        // The same program into B8G8R8A8, for the composed-view readback ring: the
+        // encoder takes BGRA, and a target in that order hands it over unswizzled. A
+        // channel's conversion to 8 bits does not depend on where it is stored, so the
+        // bytes are the RGBA target's with R and B swapped.
+        p.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoPresentScaledBgra)),"Create BGRA scaled present PSO"))return false;
     }
     if(presentHdr){
         p.RTVFormats[0]=DXGI_FORMAT_R10G10B10A2_UNORM;
@@ -2646,7 +2655,7 @@ void D3D12Renderer::PrepareGuideView(ID3D12GraphicsCommandList*cmd){
     }
 }
 
-void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCRIPTOR_HANDLE rtv,const present_scale::Target&target,bool hdrTarget){
+void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCRIPTOR_HANDLE rtv,const present_scale::Target&target,bool hdrTarget,bool bgraTarget){
     // Both callers record on the slot the next signal publishes.
     RecordVsr(cmd,m_frameSlot%FrameCount,target);
     D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};
@@ -2657,7 +2666,7 @@ void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCR
 
     const bool finalView=(m_debugView==DebugView::Final);
     SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
-    ID3D12PipelineState* presentPso=BackbufferProgram(target.scaled,hdrTarget);
+    ID3D12PipelineState* presentPso=bgraTarget?m_psoPresentScaledBgra.Get():BackbufferProgram(target.scaled,hdrTarget);
 
     if(m_debugView==DebugView::MotionVectors||m_debugView==DebugView::Depth)PrepareGuideView(cmd);
     ID3D12Resource* debugPixelResource=nullptr;
@@ -2721,6 +2730,88 @@ bool D3D12Renderer::CaptureComposedView(std::vector<uint8_t>&rgba,uint32_t&width
         memcpy(rgba.data()+tight*y,static_cast<const uint8_t*>(mapped)+fp.Offset+size_t(fp.Footprint.RowPitch)*y,tight);
     const D3D12_RANGE written{0,0};readback->Unmap(0,&written);
     width=target.width;height=target.height;
+    return true;
+}
+
+bool D3D12Renderer::EnsureComposedReadback(uint32_t width,uint32_t height){
+    if(m_composedBgra&&m_composedBgraW==width&&m_composedBgraH==height)return true;
+    // Every slot's copy reads the one target, so a new size waits for all of them.
+    if(m_composedBgra&&!WaitGPUForContinuedUse())return false;
+    for(ComposedReadback&slot:m_composedReadback){
+        if(slot.buffer&&slot.mapped)slot.buffer->Unmap(0,nullptr);
+        slot.buffer.Reset();slot.mapped=nullptr;slot.fence=0;
+    }
+    m_composedBgra.Reset();m_composedBgraW=0;m_composedBgraH=0;
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto desc=Tex2D(DXGI_FORMAT_B8G8R8A8_UNORM,width,height,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    ComPtr<ID3D12Resource> target;
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&target)),"Create composed-view BGRA target"))return false;
+    target->SetName(L"Composed_View_Bgra");
+    m_device->CreateRenderTargetView(target.Get(),nullptr,RTV(ComposedBgraRTV));
+    uint32_t rows=0;uint64_t rowBytes=0,total=0;
+    m_device->GetCopyableFootprints(&desc,0,1,0,&m_composedFootprint,&rows,&rowBytes,&total);
+    D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=total;buffer.Height=1;buffer.DepthOrArraySize=1;buffer.MipLevels=1;buffer.SampleDesc={1,0};buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    auto readbackHeap=HeapProps(D3D12_HEAP_TYPE_READBACK);
+    const D3D12_RANGE readRange{0,static_cast<SIZE_T>(total)};
+    for(ComposedReadback&slot:m_composedReadback){
+        if(!slot.allocator){
+            if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&slot.allocator)),"Create composed-view allocator"))return false;
+            if(!HR(m_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,slot.allocator.Get(),nullptr,IID_PPV_ARGS(&slot.list)),"Create composed-view list"))return false;
+            // Created open; closed so every capture starts from the same Reset.
+            if(!DeviceHR(slot.list->Close(),"Close new composed-view list"))return false;
+        }
+        if(!HR(m_device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&slot.buffer)),"Create composed-view readback ring"))return false;
+        slot.buffer->SetName(L"Composed_View_Readback");
+        void*mapped=nullptr;
+        if(!HR(slot.buffer->Map(0,&readRange,&mapped),"Map composed-view readback ring"))return false;
+        slot.mapped=static_cast<uint8_t*>(mapped);
+    }
+    m_composedBgra=std::move(target);m_composedBgraW=width;m_composedBgraH=height;
+    return true;
+}
+
+bool D3D12Renderer::EnqueueComposedViewCapture(uint32_t slot){
+    if(slot>=ComposedReadbackSlots||m_gpuUnusable||!m_device||!m_queue||!m_fence||!m_swapchain||!m_rootSig||!m_rtvHeap||!m_psoPresentScaledBgra)return false;
+    // The debug views have programs for the backbuffer's format only.
+    if(m_debugView!=DebugView::Final)return false;
+    FollowWindowSize();
+    const present_scale::Target target=CurrentPresentTarget();
+    if(!target.scaled||!target.width||!target.height)return false;
+    ComposedReadback&readback=m_composedReadback[slot];
+    // The slot's last copy has to finish before its list is reset and its buffer
+    // written again. The caller has normally resolved it already, so this rarely waits.
+    if(!WaitForFenceValue(readback.fence))return false;
+    readback.fence=0;
+    if(!EnsureComposedReadback(target.width,target.height))return false;
+    if(!DeviceHR(readback.allocator->Reset(),"Reset composed-view allocator"))return false;
+    auto*cmd=readback.list.Get();
+    if(!DeviceHR(cmd->Reset(readback.allocator.Get(),nullptr),"Reset composed-view list"))return false;
+    ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
+    // SDR whatever the window shows, as CaptureComposedView draws it.
+    RecordViewDraw(cmd,RTV(ComposedBgraRTV),target,false,true);
+    Barrier(cmd,m_composedBgra.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=m_composedBgra.Get();source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=readback.buffer.Get();destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;destination.PlacedFootprint=m_composedFootprint;
+    cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
+    Barrier(cmd,m_composedBgra.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if(!DeviceHR(cmd->Close(),"Close composed-view list"))return false;
+    ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
+    // Signal only: the frames behind this one keep the GPU busy while it is read.
+    const uint64_t value=m_fenceValue+1;
+    if(!DeviceHR(m_queue->Signal(m_fence.Get(),value),"Signal composed-view capture"))return false;
+    m_fenceValue=value;readback.fence=value;
+    return true;
+}
+
+bool D3D12Renderer::ResolveComposedViewCapture(uint32_t slot,ComposedReadbackView&view){
+    view=ComposedReadbackView{};
+    if(slot>=ComposedReadbackSlots)return false;
+    const ComposedReadback&readback=m_composedReadback[slot];
+    if(!readback.fence||!readback.mapped)return false;
+    if(!WaitForFenceValue(readback.fence))return false;
+    view.base=readback.mapped+m_composedFootprint.Offset;
+    view.rowPitch=size_t(m_composedFootprint.Footprint.RowPitch);
+    view.width=m_composedBgraW;view.height=m_composedBgraH;
     return true;
 }
 
@@ -2809,11 +2900,13 @@ bool D3D12Renderer::EnsureVsrOutput(uint32_t width,uint32_t height){
     if(m_vsrOutput&&m_vsrOutputW==width&&m_vsrOutputH==height)return true;
     if(m_gpuUnusable||!m_device||!m_srvHeap)return false;
     // The view below replaces one a frame in flight may read. Nothing on the list being
-    // recorded has been submitted, so a drain here waits only for earlier frames.
+    // recorded has been submitted, so a drain here waits only for earlier frames. A
+    // window being resized does not come here at every size it passes through:
+    // EvaluateVsr holds a new size until it settles.
     if(!WaitGPUForContinuedUse())return false;
     auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-    // R8G8B8A8, as the guide's DX12 flow makes it, with the UAV NGX writes through;
-    // the spike measured it and B8G8R8A8 alike, and RGBA16F refused (0xbad0000e).
+    // R8G8B8A8, as the guide's DX12 flow makes it, with the UAV NGX writes through: the
+    // frame the quality measurement scored (docs/measurements/vsr-quality-20261002/REPORT.md).
     auto desc=Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM,width,height,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     ComPtr<ID3D12Resource> output;
     if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&output)),"Create RTX VSR output"))return false;
@@ -2850,7 +2943,7 @@ bool D3D12Renderer::PlaybackVsrApplies(const present_scale::Target&target)const{
 }
 
 void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const present_scale::Target&target){
-    m_vsrShown=false;m_playbackVsrShown=false;
+    m_vsrShown=false;m_playbackVsrShown=false;m_vsrSizeHeld=false;
     if(m_debugView!=DebugView::Final||!m_vsr.FeatureCreated()||slot>=FrameCount)return;
     if(PlaybackVsrApplies(target)){
         // The decoded frame is the picture the compositor would have scaled: T is its
@@ -2866,15 +2959,21 @@ void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const 
     // An HDR original compared in HDR is PQ: never RTX VSR's input, which is 8-bit SDR.
     // A view that reads RTX VSR asks for the SDR original (ComparisonCombinesPixels).
     if(!m_hasReference||!m_reference||m_referenceInCopyDest||m_referencePq)return;
-    // The same latch as playback's: cached playback uploads a reference per frame.
-    if(m_vsrFailures>=3)return;
     const auto size=vsr_policy::OutputSize(m_sourceW,m_sourceH,target.width,target.height);
     EvaluateVsr(cmd,slot,m_reference.Get(),1u,m_referenceSerial,size,m_comparison.vsrQuality);
 }
 
 bool D3D12Renderer::EvaluateVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,ID3D12Resource*input,uint32_t inputKind,
                                 uint64_t serial,vsr_policy::Size size,vsr_policy::Quality quality){
-    if(!input||!size.width||!size.height||!EnsureVsrOutput(size.width,size.height))return false;
+    // Three refusals in a row latch VSR off for both callers: playback moves its input
+    // every frame, and cached playback uploads a reference per frame for a comparison.
+    if(m_vsrFailures>=3||!input||!size.width||!size.height)return false;
+    // A size the window is only passing through is not made: the compositor scales this
+    // present as it would without VSR, and nothing here counts as a refusal.
+    const double nowMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const vsr_policy::Size made=m_vsrOutput?vsr_policy::Size{m_vsrOutputW,m_vsrOutputH}:vsr_policy::Size{};
+    if(!vsr_policy::SizeSettled(m_vsrSettle,made,size,nowMs)){m_vsrSizeHeld=true;return false;}
+    if(!EnsureVsrOutput(size.width,size.height))return false;
     // The frame already made from this input at this quality is kept: a paused
     // split drag, a loupe move or a paused playback frame re-presents without
     // running the network again.
@@ -2974,7 +3073,9 @@ void D3D12Renderer::LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult resu
     }
 }
 bool D3D12Renderer::PresentSwapchain(const char*what){
-    m_presentStale=false;
+    // A VSR size still settling leaves the present stale, so a paused player presents
+    // again until the size is made and the picture is VSR's.
+    m_presentStale=m_vsrSizeHeld;
     const auto presented=std::chrono::steady_clock::now();
     const HRESULT hr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
     m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(

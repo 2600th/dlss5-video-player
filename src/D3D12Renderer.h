@@ -668,6 +668,24 @@ public:
     // Synchronous: it drains the queue before and after. Call PresentCurrent first so
     // a reference uploaded since the last present is in it.
     bool CaptureComposedView(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height);
+    // The same picture read back without draining the queue, for a caller that reads
+    // every frame (the RTX VSR export). EnqueueComposedViewCapture records the view
+    // into a B8G8R8A8 target with CaptureComposedView's program and constants - so the
+    // bytes are its RGBA with R and B swapped, the order the encoder takes - and its
+    // copy into readback slot `slot`, submits them, signals the queue and returns.
+    // ResolveComposedViewCapture waits for that slot's copy and says where its rows
+    // are; they stay valid, and may be read on any thread, until the slot is enqueued
+    // again. Enqueuing a slot first waits for its previous copy, never for the queue.
+    // Only the final view through the compositor: false for a debug view, and for a
+    // renderer that does not follow its window.
+    static constexpr uint32_t ComposedReadbackSlots = 3;
+    struct ComposedReadbackView {
+        const uint8_t* base = nullptr;  // first byte of row 0
+        size_t rowPitch = 0;            // may exceed width * 4; rows are padded
+        uint32_t width = 0, height = 0;
+    };
+    bool EnqueueComposedViewCapture(uint32_t slot);
+    bool ResolveComposedViewCapture(uint32_t slot, ComposedReadbackView& view);
     // Something the present pass reads - colours, comparison, debug view, the
     // reference - changed since the last present was attempted. A paused player
     // presents only then, instead of re-presenting the same image at 60 Hz.
@@ -787,9 +805,11 @@ private:
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
     // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two
-    // temporal stability slots.
+    // temporal stability slots, [+9] the B8G8R8A8 composed view the readback ring
+    // copies (EnqueueComposedViewCapture).
     static constexpr uint32_t DecodedRTV = FrameCount + 5, ComposedRTV = FrameCount + 6;
-    static constexpr uint32_t TemporalRTV = FrameCount + 7, RTVCount = FrameCount + 9;
+    static constexpr uint32_t TemporalRTV = FrameCount + 7, ComposedBgraRTV = FrameCount + 9;
+    static constexpr uint32_t RTVCount = FrameCount + 10;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
     // at EvaluateFeature time. Debug/presentation passes temporarily transition selected
     // resources to PIXEL_SHADER_RESOURCE and restore them before the frame ends.
@@ -883,8 +903,13 @@ private:
     // Puts the motion and depth guides in the states the guide views read them in,
     // clearing them first when no frame has drawn them yet. See the definition.
     void PrepareGuideView(ID3D12GraphicsCommandList* cmd);
+    // bgraTarget: `rtv` is B8G8R8A8 (the composed-view readback ring), which takes the
+    // same compositor built for that format; the final view through the compositor only.
     void RecordViewDraw(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
-                        const present_scale::Target& target, bool hdrTarget);
+                        const present_scale::Target& target, bool hdrTarget, bool bgraTarget = false);
+    // The composed-view target at this size, its RTV, and the ring's lists and
+    // persistently mapped readback buffers. A size change drains the queue first.
+    bool EnsureComposedReadback(uint32_t width, uint32_t height);
     // The program and view the backbuffer pass binds for the current debug view,
     // shared by the frame path and PresentCurrent so the two cannot disagree about
     // which program an HDR backbuffer takes.
@@ -961,6 +986,22 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoConvert;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresent;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresentScaled; // only when m_followWindow
+    // PSPresentScaled into B8G8R8A8, for the composed-view readback ring.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresentScaledBgra;
+    // The composed-view readback ring (EnqueueComposedViewCapture). One target is
+    // enough for every slot: each slot's draw into it and copy out of it are recorded
+    // on the same queue, so the GPU runs them in order.
+    struct ComposedReadback {
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
+        Microsoft::WRL::ComPtr<ID3D12Resource> buffer;
+        uint8_t* mapped = nullptr;
+        uint64_t fence = 0;  // the copy's signal; 0 when the slot holds none
+    };
+    ComposedReadback m_composedReadback[ComposedReadbackSlots];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_composedBgra;
+    uint32_t m_composedBgraW = 0, m_composedBgraH = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_composedFootprint{};
     // HDR output, only when m_hdrAllowed: PSPresentScaled and the two debug views
     // compiled with HDR_OUTPUT into R10G10B10A2, and the PQ source conversion.
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresentHdr;
@@ -1134,6 +1175,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_vsrOutput;  // R8G8B8A8 UAV, VsrPolicy.h OutputSize
     uint32_t m_vsrOutputW = 0, m_vsrOutputH = 0;
     bool m_vsrOutputInUAV = true;
+    // A new output size waits until the window stops changing (vsr_policy::SizeSettled).
+    // While one waits the present is marked stale, so a paused player presents again
+    // and the frame gets its VSR once the size has settled.
+    vsr_policy::SizeSettle m_vsrSettle{};
+    bool m_vsrSizeHeld = false;
     // Bumped by every reference copy; the VSR frame is made again only when this,
     // its size or its quality moved, so a paused split drag re-presents without it.
     uint64_t m_referenceSerial = 0;
@@ -1150,7 +1196,8 @@ private:
     // Consecutive refused evaluates. The kept-frame rule stops a refusal repeating
     // only while the input holds still, and playback moves it every frame, so a
     // driver that keeps refusing would be asked - and logged - sixty times a second.
-    // Three in a row and playback stops asking for this renderer's life.
+    // Three in a row and neither playback nor a comparison asks again for this
+    // renderer's life (EvaluateVsr).
     uint32_t m_vsrFailures = 0;
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_vsrTimestampHeap;  // 2 per frame slot
     Microsoft::WRL::ComPtr<ID3D12Resource> m_vsrTimestampReadback;

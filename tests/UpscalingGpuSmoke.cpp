@@ -107,9 +107,16 @@ int RunVsrCapture(const wchar_t* source,uint32_t outW,uint32_t outH,uint32_t qua
 // then a one-second range, each frame VSR's and each encoded.
 //   UpscalingGpuSmoke vsr-export <clip> <work dir>
 int RunVsrExportProbe(const wchar_t* source,const wchar_t* work);
+// The same pass timed: the whole clip to the given size, written to <output>, and
+// the frames per second it kept. "lossless" encodes FFV1, so two builds' outputs can
+// be compared frame for frame (ffmpeg -f framemd5).
+//   UpscalingGpuSmoke vsr-export-time <clip> <out width> <out height> <output> [lossless]
+int RunVsrExportTiming(const wchar_t* source,uint32_t outW,uint32_t outH,const wchar_t* output,bool lossless);
 
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
+    if((argc==6||(argc==7&&std::wstring_view(argv[6])==L"lossless"))&&std::wstring_view(argv[1])==L"vsr-export-time")
+        return RunVsrExportTiming(argv[2],std::wcstoul(argv[3],nullptr,10),std::wcstoul(argv[4],nullptr,10),argv[5],argc==7);
     if(argc==4&&std::wstring_view(argv[2])==L"sr-quality")return RunSrQualityProbe(argv[1],argv[3]);
     if(argc==6||(argc==7&&std::wstring_view(argv[6])==L"per-frame")){
         const std::wstring wide(argv[4]);
@@ -1028,6 +1035,22 @@ int RunVsrProbe(const wchar_t* source)
                      <<" ownSizeLeftAlone="<<ownSize<<" hdrDisplay="<<hdrDisplay<<" pairViews="<<pairViews<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
             playback=playback&&played==10&&upscaled==10&&afterPlay==10&&paused&&off&&ownSize&&hdrDisplay&&pairViews&&playbackDiff>0.05&&playbackDiff<24.0&&
                      r->VsrOutputW()==ww&&r->VsrOutputH()==wh;
+            // A window being resized: the size it passes through is not made - the
+            // compositor scales that present and leaves it stale, so a paused player
+            // presents again - and once the size has held, VSR is made at it.
+            if(playback){
+                const uint32_t mw=w*3u/2u,mh=h*3u/2u;
+                SetWindowPos(playbackWindow,nullptr,0,0,int(mw),int(mh),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+                const bool held=r->PresentCurrent()&&!r->PlaybackVsrShown()&&r->PresentationStale()&&
+                                r->VsrOutputW()==ww&&r->VsrOutputH()==wh;
+                uint32_t presents=1;bool settled=false;
+                while(held&&!settled&&presents<100){Sleep(10);settled=r->PresentCurrent()&&r->PlaybackVsrShown();++presents;}
+                const auto resized=vsr_policy::OutputSize(w,h,mw,mh);
+                std::cout<<"vsr resize: held="<<held<<" settled="<<settled<<" presents="<<presents
+                         <<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
+                playback=held&&settled&&presents>=vsr_policy::kSettlePresents&&!r->PresentationStale()&&
+                         r->VsrOutputW()==resized.width&&r->VsrOutputH()==resized.height;
+            }
             r.reset();DestroyWindow(playbackWindow);
         }
 
@@ -1197,6 +1220,26 @@ int RunVsrExportProbe(const wchar_t* source,const wchar_t* work)
                  <<" evaluations="<<whole.evaluations<<" range="<<range.ok<<" frames="<<range.framesWritten<<" of ~"<<second
                  <<" evaluations="<<range.evaluations<<" bytes="<<rangeBytes<<'\n';
         code=wholeOk&&rangeOk?0:5;
+    }
+    MFShutdown();CoUninitialize();return code;
+}
+
+int RunVsrExportTiming(const wchar_t* source,uint32_t outW,uint32_t outH,const wchar_t* output,bool lossless)
+{
+    if(!outW||!outH)return 2;
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    int code=1;
+    {
+        wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
+        VsrUpscaleRequest request{};
+        request.source=source;request.output=output;request.outputWidth=outW;request.outputHeight=outH;
+        if(lossless)request.encode=EncoderQuality::Lossless;
+        const auto begin=std::chrono::steady_clock::now();
+        const VsrUpscaleResult result=RunVsrUpscalePass(std::filesystem::path(module).parent_path(),request,{});
+        const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
+        std::cout<<"vsr-export-time: "<<outW<<"x"<<outH<<(lossless?" ffv1":" hevc")<<" ok="<<result.ok<<" frames="<<result.framesWritten
+                 <<" seconds="<<std::fixed<<std::setprecision(2)<<seconds<<" fps="<<(seconds>0.0?double(result.framesWritten)/seconds:0.0)<<'\n';
+        code=result.ok&&result.framesWritten>0?0:5;
     }
     MFShutdown();CoUninitialize();return code;
 }

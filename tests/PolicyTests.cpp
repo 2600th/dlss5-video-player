@@ -9500,6 +9500,44 @@ void vsr_policy_playback_treats_both_single_picture_views_alike_test()
     CHECK(PlaybackPicture(true, false, false, true, false) == PlaybackInput::None);
 }
 
+void vsr_policy_holds_a_new_output_size_until_the_window_settles_test()
+{
+    using namespace vsr_policy;
+    const Size small{1920, 1080}, mid{2400, 1350}, large{3840, 2160};
+    SizeSettle settle;
+    // Nothing made yet: the first size is made at once, so an export or a window that
+    // opens at its size has VSR on its first frame.
+    CHECK(SizeSettled(settle, Size{}, small, 0.0));
+    // The size already made is used at once, however briefly it has been asked for.
+    CHECK(SizeSettled(settle, small, small, 1.0));
+    // A drag: every present asks for a new size, and none of them is made.
+    CHECK(!SizeSettled(settle, small, mid, 10.0));
+    CHECK(!SizeSettled(settle, small, Size{2500, 1406}, 20.0));
+    CHECK(!SizeSettled(settle, small, large, 30.0));
+    // The drag stops at `large`: three presents are not enough before 100 ms have passed...
+    CHECK(!SizeSettled(settle, small, large, 40.0));
+    CHECK(!SizeSettled(settle, small, large, 50.0));
+    CHECK(!SizeSettled(settle, small, large, 129.0));
+    // ...and 100 ms are not enough before three presents, counted from the first.
+    CHECK(SizeSettled(settle, small, large, 130.0));
+    SizeSettle slow;
+    CHECK(!SizeSettled(slow, small, large, 0.0));
+    CHECK(!SizeSettled(slow, small, large, 500.0));
+    CHECK(SizeSettled(slow, small, large, 501.0));
+    // With `large` made, a drag through `mid` waits again, and coming back to `large`
+    // needs no new texture, so it is used at once.
+    CHECK(!SizeSettled(slow, large, mid, 600.0));
+    CHECK(SizeSettled(slow, large, large, 601.0));
+    // A size asked for, left, and asked for again starts its count over.
+    SizeSettle again;
+    CHECK(!SizeSettled(again, small, large, 0.0));
+    CHECK(!SizeSettled(again, small, large, 60.0));
+    CHECK(!SizeSettled(again, small, mid, 120.0));
+    CHECK(!SizeSettled(again, small, large, 180.0));
+    CHECK(!SizeSettled(again, small, large, 240.0));
+    CHECK(SizeSettled(again, small, large, 300.0));
+}
+
 void vsr_policy_keep_up_guard_steps_down_only_for_sustained_drops_it_explains_test()
 {
     using namespace vsr_policy;
@@ -15713,6 +15751,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(present_scale_follows_the_window_only_where_it_should_test),
     TEST_CASE(compare_compositor_stays_out_of_the_capture_program_test),
     TEST_CASE(vsr_policy_decides_the_view_its_ladder_and_its_size_test),
+    TEST_CASE(vsr_policy_holds_a_new_output_size_until_the_window_settles_test),
     TEST_CASE(vsr_policy_keep_up_guard_steps_down_only_for_sustained_drops_it_explains_test),
     TEST_CASE(vsr_policy_playback_treats_both_single_picture_views_alike_test),
     TEST_CASE(vsr_policy_playback_upscales_only_a_plain_picture_shown_larger_test),
