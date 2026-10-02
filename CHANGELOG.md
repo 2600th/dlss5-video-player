@@ -60,6 +60,13 @@ decisions that still shape the code are in
   and say the GPU's highest, and the confirmation says when the setting was
   lowered. On an RTX 3060 with the dlssg_sm86 add-on, 5x used to convert at 4x
   without a word (issue #14).
+- **Compare labels and the status line keep up while paused.** Changing the
+  compare view on a paused frame could leave its labels invisible, and the
+  status line kept naming the previous upscaler until playback resumed. In
+  Fill the labels sat in the part of the picture the window crops; they now
+  sit in the corners you can see.
+- **The export window's choices read in full.** At 100% scaling the History box
+  showed "Per-frame (recommendec".
 - **A render the neural helper crashed in is retried again.** A helper that
   stopped on an unexpected error mid-render was reported as a refused render
   and the job ended there; it is a crash again, and the render restarts in a
