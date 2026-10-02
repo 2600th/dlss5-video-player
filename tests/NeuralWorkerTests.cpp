@@ -275,6 +275,18 @@ struct FakeResidentRunner {
         if (source == L"resident-threw-once-source.mkv" && RecordFailureInjectionAttempt(L"threw-once") == 1)
             throw std::runtime_error("fake helper threw mid-job");
         if (source == L"resident-threw-when-idle-source.mkv") throwWhenIdle = true;
+        if (source == L"resident-progress-then-slow-source.mkv") {
+            // Progress first, then a second of work before the result, so a
+            // parent that stops reading after the progress leaves this job
+            // still running - and its Result still to come.
+            NeuralRenderProgress progress;
+            progress.phase = NeuralRenderPhase::NeuralRendering;
+            progress.completedFrames = 1;
+            progress.totalFrames = 60;
+            const WireProgress wire = EncodeProgress(progress);
+            if (!Write(WireKind::Progress, &wire, sizeof(wire))) return resident_worker::JobOutcome::WriteFailed;
+            std::this_thread::sleep_for(1s);
+        }
         if (source == L"resident-preflight-answer-source.mkv") {
             // A well-formed preflight receipt where the job's result belongs:
             // the answer to a question this job never asked.
@@ -3329,6 +3341,40 @@ void a_throwing_progress_callback_still_ends_the_helper_test()
     CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
 }
 
+// The resident counterpart. A callback that threw out of the pump left the
+// session in place with its helper still running the abandoned job, so the
+// next job was handed to that same helper and read the abandoned job's
+// Result as its own - a "different job" Identity failure. The session is
+// dropped on the way out, and the next job gets a fresh helper.
+void a_throwing_progress_callback_drops_the_resident_session_test()
+{
+    NeuralJobHooks hooks;
+    hooks.progress = [](const NeuralRenderProgress&) { throw std::runtime_error("progress callback"); };
+    ResidentNeuralHelper helper;
+    bool threw = false;
+    try {
+        helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+                      ResidentRequest(L"resident-progress-then-slow-source.mkv", 61), hooks);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    CHECK(!helper.Resident());
+
+    hooks.progress = {};
+    resident_helper::HelperPlan plan{};
+    const NeuralRenderResult next = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-source.mkv", 62), hooks, {}, &plan);
+    CHECK(next.ok);
+    CHECK(next.failure == NeuralRenderFailure::None);
+    CHECK_EQ(uint64_t{62}, next.jobId);
+    CHECK(plan == resident_helper::HelperPlan::Launch);
+    // Exactly the one helper serving the second job is still alive.
+    CHECK_EQ(size_t{1}, LiveChildProcesses());
+    helper.Release();
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
 // The processCreated hook runs once the suspended helper is in its job, so a
 // hook that throws takes the helper with the job object - but the process and
 // thread handles CreateProcess returned were raw and leaked, two per launch.
@@ -3430,6 +3476,7 @@ int wmain(int argc, wchar_t** argv)
     a_resident_helper_that_throws_while_idle_does_not_fail_the_next_job_test();
     a_helper_that_fails_after_its_result_is_judged_on_its_exit_code_test();
     a_throwing_progress_callback_still_ends_the_helper_test();
+    a_throwing_progress_callback_drops_the_resident_session_test();
     a_throwing_process_created_hook_leaks_no_handles_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

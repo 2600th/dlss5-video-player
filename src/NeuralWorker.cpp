@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <exception>
 #include <fstream>
 #include <future>
 #include <iterator>
@@ -1896,6 +1897,24 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
             StampHelperObservations(reader, judged);
             return judged;
         };
+        // Drops the session when an exception leaves this attempt: a progress,
+        // segment or timeline callback out of the pump, or the accepted hook
+        // after the job frame went out. The helper is then still running a job
+        // nobody is reading, and kept resident it would be reused, and the next
+        // job would read the abandoned one's Result as its own. Ending it
+        // costs the next job a launch; the exception itself carries on to the
+        // caller. Only an unwind does anything here: every ordinary way out
+        // below has already decided whether the session stays.
+        struct DropSessionOnUnwind {
+            std::unique_ptr<Session>& session;
+            const int exceptions = std::uncaught_exceptions();
+            ~DropSessionOnUnwind()
+            {
+                if (std::uncaught_exceptions() <= exceptions || !session) return;
+                session->Drop();
+                session.reset();
+            }
+        } dropOnUnwind{session_};
 
         // Two tries, because a helper that exited while idle is not an error to
         // report: the 30 s timeout, a self-invalidating exit after a failed job
