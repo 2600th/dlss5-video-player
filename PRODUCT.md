@@ -66,6 +66,10 @@ Confirmed from `README.md` and `CHANGELOG.md` at 0.27.2:
 - Export: PNG/JPEG for photos, GIF for animations, MP4/MKV for video; MKV keeps
   source audio, subtitles and chapters without re-encoding. The same export
   runs from a terminal with `dlss5-convert`, on files or whole folders.
+- RTX Video Super Resolution as the playback upscaler, on by default wherever
+  the window shows a video larger than it is, and the default upscaler for
+  Super Resolution exports (unreleased after 0.27.2; measured in
+  `docs/measurements/vsr-quality-20261002/`).
 - Optional DLSS Super Resolution on top, off by default; its output follows the
   display unless a rung is pinned.
 - Neural settings at `Ctrl+N`, re-rendering the paused frame on change.
@@ -93,15 +97,19 @@ Confirmed from `README.md` and `CHANGELOG.md` at 0.27.2:
 Real, in the repository, usable without fabrication:
 
 - `docs/screenshots/current/original-comparison.jpg` / `neural-playback.jpg` -
-  one paused frame, only Neural Rendering switched between the two captures
-  (v0.25.0). Provenance in `docs/screenshots/README.md`.
+  one paused frame at default settings, only Neural Rendering switched between
+  the two captures (RTX 5090, 2 October 2026). Provenance in
+  `docs/screenshots/README.md`.
 - `docs/media/stills/` - five unscaled matched crops of a source frame and the
   player's render of it at default settings (007 First Light, Resident Evil
   Requiem, GTA VI, and one Assassin's Creed Shadows frame where the render is
   worse), each with a `.provenance.json`.
-- `docs/screenshots/current/neural-strength.jpg`, `recent-videos.jpg`,
-  `player-start.jpg` (the current UI: the image adjustments window, the File
-  menu and the start screen).
+- `docs/screenshots/current/player-start.jpg` (the current start screen, with
+  the RTX VSR line and Recent tiles showing render coverage),
+  `vsr-wipe.jpg` and `vsr-wipe-crop.png` (the player's plain scale against RTX
+  VSR on one frame), `export-stages-vsr.jpg` (the export window with the
+  Upscaler row), and `neural-strength.jpg` (the image adjustments window, from
+  24 September 2026).
 - `docs/media/neural-comparison-demo.mp4` (24.8 s, 1080p) with poster and WebP
   preview; `docs/media/social/card-1200x630.jpg` (1200x630 link preview).
 - Eight verification reports under `docs/` and measurement data under
