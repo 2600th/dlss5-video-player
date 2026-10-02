@@ -2812,8 +2812,8 @@ bool D3D12Renderer::EnsureVsrOutput(uint32_t width,uint32_t height){
     // recorded has been submitted, so a drain here waits only for earlier frames.
     if(!WaitGPUForContinuedUse())return false;
     auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-    // R8G8B8A8, as the guide's DX12 flow makes it, with the UAV NGX writes through;
-    // the spike measured it and B8G8R8A8 alike, and RGBA16F refused (0xbad0000e).
+    // R8G8B8A8, as the guide's DX12 flow makes it, with the UAV NGX writes through: the
+    // frame the quality measurement scored (docs/measurements/vsr-quality-20261002/REPORT.md).
     auto desc=Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM,width,height,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     ComPtr<ID3D12Resource> output;
     if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&output)),"Create RTX VSR output"))return false;

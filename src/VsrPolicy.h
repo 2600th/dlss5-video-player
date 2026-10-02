@@ -17,10 +17,8 @@ namespace vsr_policy {
 
 // NGX's own numbers (NVSDK_NGX_VSR_QualityLevel): 0 is bicubic and 1 to 4 the
 // network at rising cost. The ladder offers the four network levels; bicubic is a
-// scaler the compositor already is. High is the default: it scored best on average
-// (docs/measurements/vsr-quality-20261002), and VsrGpuSmoke's ladder timing puts it
-// at 1.5 ms for a 1080p frame and 2.7 ms for a 1440p one on an RTX 5090 (an RTX 4080
-// SUPER spike measured 3.2 and 5.6 ms; its table was never committed).
+// scaler the compositor already is. High is the default: it scored best on average,
+// and Ultra costs more for no better picture (docs/measurements/vsr-quality-20261002/REPORT.md).
 enum class Quality : int { Low = 1, Medium = 2, High = 3, Ultra = 4 };
 inline constexpr Quality kDefaultQuality = Quality::High;
 inline constexpr std::array<Quality, 4> kQualities{Quality::Low, Quality::Medium, Quality::High, Quality::Ultra};
@@ -116,10 +114,9 @@ inline constexpr uint32_t kMaxDimension = 16384;
 // render target, which is what every other member is drawn into), so the
 // compositor draws it texel for pixel. Where it does not, VSR runs at 1x - the
 // source's own size, where it is a compression clean-up - and the compositor
-// minifies it as it minifies every other member. Its cost follows the INPUT: on the
-// spike a 1080p source took 3.0 ms at High whether it wrote 1080p, 1440p or 2160p.
-// The runtime accepted every factor the spike asked for, 1x to 6x; the only bound
-// kept is D3D12's, with the aspect held.
+// minifies it as it minifies every other member. Its cost follows the input, not
+// the size it writes (VsrGpuSmoke's ladder times both), so a large window costs
+// little more than a small one. The only bound kept is D3D12's, with the aspect held.
 inline Size OutputSize(uint32_t sourceW, uint32_t sourceH, uint32_t targetW, uint32_t targetH)
 {
     if (!sourceW || !sourceH) return {};
@@ -133,11 +130,10 @@ inline Size OutputSize(uint32_t sourceW, uint32_t sourceH, uint32_t targetW, uin
     return {std::max(sourceW, axis(sourceW)), std::max(sourceH, axis(sourceH))};
 }
 
-// RTX VSR as the playback upscaler. On an RTX 5090, 960x540 to 1920x1080 over six
-// clips, High scored 87.5 VMAF against bicubic's 80.5 and DLSS Super Resolution's
-// 74.9, 78.5 against 69.5 and 66.1 on H.264 input, and won by VMAF NEG and PSNR
-// too, at 0.45 ms a frame (docs/measurements/vsr-quality-20261002). So it is on by
-// default ([Playback] RtxVsr), at the one quality the comparison view uses.
+// RTX VSR as the playback upscaler. It beat bicubic and DLSS Super Resolution on
+// every quality measure taken, on clean and compressed input, for a fraction of a
+// millisecond a frame (docs/measurements/vsr-quality-20261002/REPORT.md). So it is on
+// by default ([Playback] RtxVsr), at the one quality the comparison view uses.
 inline constexpr bool kPlaybackDefault = true;
 
 // Which texture is the one picture on screen, for VSR to upscale. Without a
@@ -181,13 +177,13 @@ inline bool PlaybackUpscales(const PlaybackState& state)
     return size.width > state.sourceW || size.height > state.sourceH;
 }
 
-// The keep-up guard. RTX VSR was measured on an RTX 5090 (High: 1.5 ms a 1080p
-// frame, 2.7 ms a 1440p one); a slower GPU can spend a real share of a frame on
-// it. Playback that drops more than kKeepUpDropShare of the frames the source asks
-// for, in a window where VSR took at least kKeepUpCostShare of the frame budget,
-// has fallen behind in a way VSR can explain. Two such windows in a row lower the
-// quality for that video, a level at a time, and at Low turn VSR off for it; the
-// saved setting never moves.
+// The keep-up guard. RTX VSR was measured on an RTX 5090
+// (docs/measurements/vsr-quality-20261002/REPORT.md); a slower GPU can spend a real
+// share of a frame on it. Playback that drops more than kKeepUpDropShare of the
+// frames the source asks for, in a window where VSR took at least kKeepUpCostShare
+// of the frame budget, has fallen behind in a way VSR can explain. Two such windows
+// in a row lower the quality for that video, a level at a time, and at Low turn VSR
+// off for it; the saved setting never moves.
 inline constexpr double kKeepUpWindowSeconds = 3.0;
 inline constexpr double kKeepUpDropShare = 0.05;
 inline constexpr double kKeepUpCostShare = 0.2;
