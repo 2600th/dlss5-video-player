@@ -28,7 +28,7 @@ not (see the table). Frame generation here is a separate conversion
 (**DLSS > Generate frames** writes a new file); it is not part of live
 playback.
 
-## The landscape on 2026-09-30
+## The landscape on 2026-10-02
 
 **NVIDIA.** DLSS 5 shipped officially on 2026-09-03 with GeForce Game Ready
 Driver 616.64, on RTX 50 Series GPUs only and in one game (NBA 2K27)
@@ -41,8 +41,9 @@ Reconstruction preset, the second frame-generation pacing options.
 
 | Project | What it is | Relevant to this player |
 | --- | --- | --- |
-| [Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) (Merserk, ~1,130★) | Image and video processor. v13.2 (2026-09-29). A reorderable pipeline of stages (neural pass, DLSS and RTX Video Super Resolution, RTX Video HDR, colour matching and LUTs, NIS or CAS sharpening, scaling from 25% to 200%), Face/Skin Protection, frame generation, 10-bit HDR, masks, shimmer suppression, a Split/2-Up preview, ProRes HQ and FFV1 export (since v11.0), a command-line tool (since v13.0), and a Live mode for local files, network streams, YouTube and Twitch | The most complete converter. Its Live mode shows frames as they are processed, from a 2 to 30 second buffer, and does not keep them; its video previews render and cache a chosen 1 to 30 second range for the Split/2-Up view. Source-available under its own licence, not open source |
+| [Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) (Merserk, ~1,150★) | Image and video processor. v14.0 (2026-10-01). A reorderable pipeline of stages (neural pass, DLSS and RTX Video Super Resolution, RTX Video HDR, colour matching and LUTs, NIS or CAS sharpening, scaling from 25% to 200%), Face/Skin Protection, frame generation, 10-bit HDR, masks, shimmer suppression, a Split/2-Up preview, ProRes HQ and FFV1 export (since v11.0), a command-line tool (since v13.0), and a Live mode for local files, network streams, YouTube and Twitch | The most complete converter. Its Live mode shows frames as they are processed, from a 2 to 30 second buffer, and does not keep them; its video previews render and cache a chosen 1 to 30 second range for the Split/2-Up view. Source-available under its own licence, not open source |
 | [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) (~990★) | Whole-desktop overlay, real time, with a before/after wipe, recording and frame generation, plus file conversion. v2.1.9 (2026-09-29). Since v2.1.4, conversion keeps a video's display matrix, a photo's EXIF orientation and its ICC profile | The overlay applies the model to whatever is on screen, not to a video file, and nothing is rendered ahead or kept; file conversion is a separate offline step. PolyForm Strict licence |
+| [Veyra](https://github.com/Likely7/Veyra-NRVideo) (Likely7, ~410★) | Real-time player for files, images, capture cards and game streams (PS5, Sunshine PC, Xbox). 2.0.0 (2026-10-02). Up to four stacked neural layers, DLSS Super Resolution, RTX Video Super Resolution or FSR, live frame generation up to 6× (DLSS-G, XeSS or FSR), HDR input kept and HEVC Main10 export from its list mode | Renders what is playing and does not keep it; an original/enhanced toggle rather than compare views. Mostly tested on an RTX 5070; RTX 30/40 unverified. GPL-3.0 |
 | [DLSS5Tool](https://github.com/banbanzhige/DLSS5Tool) (banbanzhige, ~112★) | Image and video converter. v2.3.3 (2026-09-24). Three styles, a queue that mixes images and videos with per-item settings, RTX Video 2× and 4× Super Resolution, 2× to 4× frame interpolation, HDR10 and HLG 10-bit output, and optional RAFT or NVOFA optical flow to steady the neural pass between frames. RTX 30, 40 and 50 | A converter with a live preview and split, side-by-side and frame-by-frame comparison before export; not a player. The project's own code is MIT |
 | [DLSS5-Image-Converter](https://github.com/criso2hd-alt/DLSS5-Image-Converter) (criso2hd-alt, ~53★) | Image and video converter. v0.6.2 (2026-09-29). A wipe and a difference view, "Compare styles" (Natural and Cinematic side by side, optionally with the source), tiled Ultra Detail that runs the neural pass over overlapping tiles of a much larger image, depth from Depth Anything V2, H.264 video export with audio, and a 3D tab that turns an image into a Gaussian-splat scene | Stills first. It uses the RenoDX add-on, as this player does; its experimental OptiScaler backend is marked as not working yet. Source-available, not open source |
 | [video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr) (~176★) | CLI converter with a Gradio UI and ComfyUI nodes. v1.4.1 (2026-09-17). GPU-resident: decode, Super Resolution, optical flow, neural rendering and encode without a CPU round trip | A faster offline pipeline than this player's ffmpeg child. No playback or compare view for video. MIT |
@@ -56,6 +57,11 @@ Reconstruction preset, the second frame-generation pacing options.
 | [ComfyUI-DLSS5-NR](https://github.com/lisitskyaa/ComfyUI-DLSS5-NR) (~162★) | ComfyUI nodes (v0.3.1, 2026-09-10), still and temporal modes, the runtime's automatic mask path | Frames go through CPU staging on every upload and readback. MIT |
 | [OptiScaler-DLSSNR-PreSR-Multipass](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass) (~746★) | Game mod built on OptiScaler | [Issue #100](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/issues/100), open, reports its neural pass leaving the output of an offscreen DLAA harness like this one unchanged; DLSS5-Image-Converter reports the same of its OptiScaler backend. RenoDX's add-on remains the only runtime known to work here |
 | [ctype-lab/dlss5-video-player](https://github.com/ctype-lab/dlss5-video-player) | A fork of this project | It no longer lists any releases; its last commit is from 2026-09-14 |
+
+Re-uploads of these projects under other accounts have been reported carrying
+malware ([Visual Enhancer #97](https://github.com/Merserk/dlss5-visual-enhancer/issues/97)
+names a trojanised copy of a ComfyUI node pack). The links on this page go to
+the original repositories; download from those.
 
 Game injectors such as [DLSS 5 Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot)
 (~797★) and [DLSS5-Feeder](https://github.com/jlrouzies-fr/DLSS5-Feeder) bring

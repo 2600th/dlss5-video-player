@@ -23,8 +23,10 @@ ship it. What exists, so that none of it was measured again:
 - [Merserk/dlss5-visual-enhancer#25](https://github.com/Merserk/dlss5-visual-enhancer/issues/25)
   (the request behind this report, from issue #14's reporter): screenshots only.
   DLSS output "a bit blurry", RTX VSR Ultra "restores details better" but "slightly
-  increases the color saturation". The project then made RTX VSR its default
-  upscaler at Ultra (v7.0, [README](https://github.com/Merserk/dlss5-visual-enhancer)).
+  increases the color saturation". v7.0 then built its Upscale mode on RTX VSR. In
+  v14.0 every pipeline stage is off by default and RTX VSR is one of two upscaling
+  stages, at Ultra when on; only its CLI `upscale` command defaults to it
+  ([README](https://github.com/Merserk/dlss5-visual-enhancer)).
 - NVIDIA describes VSR as upscaling and compression-artifact reduction in one pass,
   trained on content at various compression levels
   ([blog](https://blogs.nvidia.com/blog/rtx-video-super-resolution)). Its SDK guide
