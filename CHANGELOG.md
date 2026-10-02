@@ -24,7 +24,7 @@ decisions that still shape the code are in
   press-and-hold peek, so the A/B still compares the models alone, and stands
   aside for DLSS Upscaling, the views that draw both, HDR video and debug views.
   The start screen says whether it is on. It can shimmer
-  slightly on fine moving detail, so **DLSS > RTX VSR upscaling** turns it off.
+  slightly on fine moving detail, so **DLSS > RTX VSR Upscaling** turns it off.
   The status line says when it is the upscaler. It works on HDR displays for SDR
   video, and if playback keeps dropping frames because of it on a slower GPU, it
   lowers its quality for that video, then pauses, and says so.
