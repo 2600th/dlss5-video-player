@@ -87,6 +87,8 @@ private:
             {L"menu.framegen_4x", L"4\u00d7 the frame rate"},
             {L"menu.framegen_5x", L"5\u00d7 the frame rate"},
             {L"menu.framegen_max", L"As many as the display allows"},
+            // Appended to a multiple the measured runtime does not admit; %u is its highest.
+            {L"menu.framegen_beyond_gpu", L" \u2014 this GPU allows up to %u\u00d7"},
             // A checkbox under the multiples. Off by default; FrameRatePolicy.h
             // carries the measurement that made it a setting instead of a rule.
             {L"menu.framegen_even_only", L"Even cadence only"},
@@ -187,6 +189,8 @@ private:
             // two holds are one scan-out apart, which is the same unevenness
             // the source is already being shown with - see FrameRatePolicy.h.
             {L"framegen.confirm.uneven", L"\n\nEach frame is shown for %u or %u refreshes of this display, which is the unevenness this video already plays with."},
+            // %u is the setting's multiple, then the highest the runtime admits.
+            {L"framegen.confirm.lowered", L"\n\nGenerated frames is set to %u\u00d7, but this GPU's Frame Generation allows up to %u\u00d7."},
             {L"framegen.confirm.neural", L"\n\nThe neural render on screen is what will be converted, not the original - upscale first, generate frames on the result, which is the order NVIDIA’s own pipeline uses. Turn Neural Rendering off first to generate frames from the original instead."},
             {L"framegen.exists", L"This video has already been converted:\n%s\n\nPlay that file instead of converting again?\n\nYes plays it. No converts again and replaces it."},
             {L"framegen.worker_failed", L"The conversion could not start. Try again."},
@@ -318,6 +322,9 @@ private:
             {L"neural.failure.preflight", L"The neural runtime preflight failed."},
             {L"neural.failure.identity", L"A frame identity mismatch stopped the neural render."},
             {L"neural.failure.protocol", L"The neural render helper stopped responding correctly."},
+            {L"compare.refused.no_video", L"Open a video to compare it"},
+            {L"compare.refused.neural_off", L"Compare views need Neural Rendering on"},
+            {L"compare.refused.no_render", L"Compare views need a neural render: mark I/O, then Ctrl+R"},
             {L"neural.view.original", L"Original"}, {L"neural.view.rendered", L"Neural rendered"},
             {L"neural.sync.warning", L"The original and neural-rendered streams are out of sync."},
             // A renderer that latched itself unusable is rebuilt once with the

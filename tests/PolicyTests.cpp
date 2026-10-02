@@ -5134,6 +5134,34 @@ void refresh_switch_offer_names_the_mode_that_removes_the_pulldown_test()
 // running at refresh/m is exactly the case m-times generation exists for - it
 // lands on the refresh with one scan-out per frame - so every multiplier the
 // constant admits has to be reachable, and nothing beyond it may be.
+// Issue #14's follow-up: an RTX 3060 whose runtime admits 3 generated frames
+// offered 5x in the menu and quietly converted at 4x. Once the runtime has been
+// measured, the menu greys what it will not admit and the confirmation says
+// when the setting was lowered; before that, nothing is greyed on a guess.
+void frame_generation_menu_follows_the_measured_runtime_cap_test()
+{
+    using frame_rate_policy::GeneratedFramesAdmitted;
+    using frame_rate_policy::RuntimeLoweredPreference;
+    for (uint32_t generated = 1; generated <= 4; ++generated)
+        CHECK(GeneratedFramesAdmitted(generated, std::nullopt));
+    CHECK(GeneratedFramesAdmitted(1, 3u));
+    CHECK(GeneratedFramesAdmitted(3, 3u));
+    CHECK(!GeneratedFramesAdmitted(4, 3u));
+    CHECK(GeneratedFramesAdmitted(1, 1u));
+    CHECK(!GeneratedFramesAdmitted(2, 1u));
+
+    CHECK(!RuntimeLoweredPreference(4, std::nullopt));
+    CHECK(!RuntimeLoweredPreference(3, 3u));
+    CHECK(!RuntimeLoweredPreference(0, 3u));   // "as many as the display allows" asks for no number
+    REQUIRE(RuntimeLoweredPreference(4, 3u).has_value());
+    CHECK_EQ(3u, *RuntimeLoweredPreference(4, 3u));
+    const Localizer localizer;
+    for (const wchar_t* key : {L"menu.framegen_beyond_gpu", L"framegen.confirm.lowered"}) {
+        const std::wstring text = localizer.Get(key);
+        CHECK(!text.empty() && text != key);
+    }
+}
+
 void frame_generation_reaches_every_multiplier_the_verified_ceiling_admits_test()
 {
     using namespace frame_rate_policy;
@@ -8235,7 +8263,13 @@ void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
     }
     {
         auto decoder=VideoDecoderTestAccess::Create(fixture.directory);CHECK(decoder->Open(L"https://media.invalid/exit",MediaSourceKind::YouTube));VideoFrame frame;
-        VideoReadResult result=VideoReadResult::NotReady;for(int i=0;i<50&&result==VideoReadResult::NotReady;++i){result=decoder->ReadNextAvailable(frame);Sleep(5);}CHECK(result==VideoReadResult::EndOfStream||result==VideoReadResult::Error);
+        // A deadline rather than 50 polls of 5 ms: the fake child that exits at
+        // once still has to start, which under AddressSanitizer took longer than
+        // those 250 ms on CI (build-windows on c55d29f). A decoder that never
+        // reports the exit still fails here, only later.
+        VideoReadResult result=VideoReadResult::NotReady;const auto exitDeadline=std::chrono::steady_clock::now()+kChildExitWait;
+        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<exitDeadline){result=decoder->ReadNextAvailable(frame);Sleep(5);}
+        CHECK(result==VideoReadResult::EndOfStream||result==VideoReadResult::Error);
     }
     CHECK(childrenBack("at the end"));
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
@@ -9367,6 +9401,23 @@ void hdr_output_follows_the_display_under_the_window_test()
 }
 
 // Press, drag and hold on the picture are three gestures that share one button.
+// Issue #14's log: twenty compare presses in eighty seconds, every one refused
+// and nothing on screen to say why. A refusal names the missing piece.
+void compare_refusal_names_what_is_missing_test()
+{
+    using compare_availability::RefusalKey;
+    CHECK(RefusalKey(true, true, true) == nullptr);
+    CHECK(std::wstring_view(RefusalKey(false, false, false)) == L"compare.refused.no_video");
+    CHECK(std::wstring_view(RefusalKey(true, false, false)) == L"compare.refused.neural_off");
+    CHECK(std::wstring_view(RefusalKey(true, false, true)) == L"compare.refused.neural_off");
+    CHECK(std::wstring_view(RefusalKey(true, true, false)) == L"compare.refused.no_render");
+    const Localizer localizer;
+    for (const wchar_t* key : {L"compare.refused.no_video", L"compare.refused.neural_off", L"compare.refused.no_render"}) {
+        const std::wstring text = localizer.Get(key);
+        CHECK(!text.empty() && text != key);
+    }
+}
+
 void compare_gesture_tells_press_drag_and_hold_apart_test()
 {
     using namespace compare_gesture;
@@ -15340,6 +15391,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(vsr_policy_decides_the_view_its_ladder_and_its_size_test),
     TEST_CASE(hdr_output_leaves_the_capture_programs_alone_test),
     TEST_CASE(hdr_output_follows_the_display_under_the_window_test),
+    TEST_CASE(compare_refusal_names_what_is_missing_test),
     TEST_CASE(compare_gesture_tells_press_drag_and_hold_apart_test),
     TEST_CASE(compare_settings_migrate_strength_and_blend_to_the_mix_test),
     TEST_CASE(compare_label_premultiply_matches_the_gdi_composite_test),
@@ -15424,6 +15476,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test),
     TEST_CASE(frame_generation_plan_follows_the_panel_not_just_the_source_test),
     TEST_CASE(frame_generation_reaches_every_multiplier_the_verified_ceiling_admits_test),
+    TEST_CASE(frame_generation_menu_follows_the_measured_runtime_cap_test),
     TEST_CASE(display_cadence_spread_is_one_refresh_period_or_nothing_test),
     TEST_CASE(refresh_switch_offer_names_the_mode_that_removes_the_pulldown_test),
     TEST_CASE(neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test),

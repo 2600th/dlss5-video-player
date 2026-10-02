@@ -3919,6 +3919,14 @@ private:
         if(m_frameGenPreference==0u)return measured;
         return std::min(measured,m_frameGenPreference);
     }
+    // The runtime's cap once it has been measured and admits frame generation at
+    // all; empty before that, so nothing is greyed on a guess. A runtime that
+    // refuses outright is the refusal dialog's to explain, not the menu's.
+    std::optional<uint32_t> MeasuredFrameGenerationCap()const{
+        if(!m_frameGenCapability||!m_frameGenCapability->available)return std::nullopt;
+        const uint32_t cap=FrameGenerationCap();
+        return cap?std::optional<uint32_t>(cap):std::nullopt;
+    }
     uint32_t FrameGenerationCap()const{
         if(!m_frameGenCapability||!m_frameGenCapability->available)return 0u;
         return std::min(m_frameGenCapability->multiFrameCountMax,
@@ -4251,6 +4259,7 @@ private:
             const HCURSOR previous=SetCursor(LoadCursorW(nullptr,IDC_WAIT));
             m_frameGenCapability=QueryFrameGenerationCapability();
             SetCursor(previous);
+            SyncFeatureMenuState();
             LOG("Frame generation capability measured on demand: available="<<m_frameGenCapability->available
                 <<" multiFrameCountMax="<<m_frameGenCapability->multiFrameCountMax
                 <<" detail="<<WideToUtf8(m_frameGenCapability->detail));
@@ -4302,6 +4311,8 @@ private:
         // time for it is owed the fact rather than left to see it.
         if(!plan.cadence.even)
             prompt+=Format(T(L"framegen.confirm.uneven"),plan.cadence.shortHold,plan.cadence.longHold);
+        if(const auto lowered=frame_rate_policy::RuntimeLoweredPreference(m_frameGenPreference,MeasuredFrameGenerationCap()))
+            prompt+=Format(T(L"framegen.confirm.lowered"),m_frameGenPreference+1u,*lowered+1u);
         if(input.neural)prompt+=T(L"framegen.confirm.neural");
         LOG("Frame generation offer: output="<<WideToUtf8(output.wstring())
             <<" input="<<(input.neural?"neural":"original"));
@@ -5402,6 +5413,7 @@ private:
     void SetComparisonMode(ComparisonMode mode){
         if(!ComparisonModesAvailable()){
             LOG("Comparison mode refused: loaded="<<m_loaded<<" cachedPair="<<m_cachedPlayback<<" neuralView="<<m_neuralRequested);
+            if(const wchar_t* key=compare_availability::RefusalKey(m_loaded,m_neuralRequested,m_cachedPlayback))ShowToast(T(key));
             return;
         }
         // RTX VSR that cannot run says why, where the key was pressed.
@@ -5830,6 +5842,25 @@ private:
                  :(m_frameGenPreference==3u?IDM_FRAMEGEN_4X
                   :(m_frameGenPreference==2u?IDM_FRAMEGEN_3X:IDM_FRAMEGEN_2X)));
             CheckMenuRadioItem(menu,IDM_FRAMEGEN_2X,IDM_FRAMEGEN_MAX,generatedChecked,MF_BYCOMMAND);
+            // What the runtime admits, once measured: a multiple above it is greyed
+            // and says the GPU's highest, so 5x is not offered and then quietly
+            // converted at 4x. A greyed choice can still be the checked one - a
+            // setting saved before the runtime was asked - and the confirmation
+            // names that.
+            {
+                const auto cap=MeasuredFrameGenerationCap();
+                static constexpr std::array<std::pair<UINT,const wchar_t*>,4> kMultiples{{
+                    {IDM_FRAMEGEN_2X,L"menu.framegen_2x"},{IDM_FRAMEGEN_3X,L"menu.framegen_3x"},
+                    {IDM_FRAMEGEN_4X,L"menu.framegen_4x"},{IDM_FRAMEGEN_5X,L"menu.framegen_5x"}}};
+                for(uint32_t generated=1;generated<=kMultiples.size();++generated){
+                    const auto& [command,key]=kMultiples[generated-1];
+                    const bool admitted=frame_rate_policy::GeneratedFramesAdmitted(generated,cap);
+                    std::wstring label=T(key);
+                    if(!admitted)label+=Format(T(L"menu.framegen_beyond_gpu"),*cap+1u);
+                    app_menu::SetMenuCommandText(menu,command,label);
+                    EnableMenuItem(menu,command,MF_BYCOMMAND|(admitted?MF_ENABLED:MF_GRAYED));
+                }
+            }
             // Outside the radio range above, which CheckMenuRadioItem clears:
             // this is a constraint on the multiple, not one of the choices.
             CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
@@ -6889,6 +6920,7 @@ private:
             const HCURSOR previous=SetCursor(LoadCursorW(nullptr,IDC_WAIT));
             m_frameGenCapability=QueryFrameGenerationCapability();
             SetCursor(previous);
+            SyncFeatureMenuState();
         }
         const ExportPlan plan=CurrentExportPlan();
         if(!plan.valid){MessageBoxW(m_hwnd,T(ExportRefusalKey(plan.refusal)).c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);return;}

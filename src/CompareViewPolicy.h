@@ -16,6 +16,23 @@
 // the one Mix, and how a GDI-drawn tag becomes the premultiplied texel the compositor
 // blends. main.cpp owns the Win32 side of each and PSPresentScaled the pixels.
 
+namespace compare_availability {
+
+// Why a compare view was refused, as a localization key, or nullptr when it is
+// available. The views composite the neural render against its original, so
+// they need a video, Neural Rendering on and a rendered pair playing. A press
+// that arrived without one used to change nothing on screen; issue #14's log
+// held twenty of them in eighty seconds.
+inline const wchar_t* RefusalKey(bool loaded, bool neuralRequested, bool renderedPair)
+{
+    if (!loaded) return L"compare.refused.no_video";
+    if (!neuralRequested) return L"compare.refused.neural_off";
+    if (!renderedPair) return L"compare.refused.no_render";
+    return nullptr;
+}
+
+} // namespace compare_availability
+
 namespace compare_gesture {
 
 // A press on the picture is one of three things, told apart by what the pointer does
