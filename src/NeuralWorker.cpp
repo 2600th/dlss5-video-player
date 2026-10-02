@@ -861,6 +861,17 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
         return outcome;
     }
     outcome.launched = true;
+    // Ends the helper on every way out of here, including an exception from
+    // the pump - a progress, segment or timeline callback of the caller's, or
+    // the reader's own allocation. The handles are plain, so an unwind that
+    // skipped EndHelper would close nothing: the job object would outlive the
+    // call, its kill-on-close would never fire, and the helper would keep the
+    // GPU until the player exits. EndHelper zeroes what it ends, so the
+    // explicit call below leaves this nothing to do on the ordinary path.
+    struct EndOnUnwind {
+        HelperProcess& helper;
+        ~EndOnUnwind() { EndHelper(helper, 0); }
+    } endOnUnwind{started.helper};
     const PumpOutcome pump = Pump(started.helper, reader, stop, false);
     outcome.cancelled = pump.cancelled;
     // Only when the process actually went. GetExitCodeProcess succeeds on a

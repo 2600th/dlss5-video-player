@@ -460,6 +460,16 @@ int RunFakeWorker(int argc, wchar_t** argv)
         const auto bytes = EncodeResult(neural_worker_detail::WorkerThrewResult(parsed->request.jobId));
         return WriteMessage(handle, WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 14;
     }
+    if (source == L"progress-then-hang-source.mkv") {
+        NeuralRenderProgress progress;
+        progress.phase = NeuralRenderPhase::NeuralRendering;
+        progress.completedFrames = 1;
+        progress.totalFrames = 60;
+        const WireProgress wire = EncodeProgress(progress);
+        WriteMessage(handle, WireKind::Progress, &wire, sizeof(wire));
+        std::this_thread::sleep_for(20s);
+        return 0;
+    }
     if (source == L"wrong-job-source.mkv") {
         NeuralRenderResult failed;
         failed.failure = NeuralRenderFailure::Source;
@@ -3265,6 +3275,24 @@ void a_resident_helper_that_throws_while_idle_does_not_fail_the_next_job_test()
     CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
 }
 
+// An exception out of the parent's own code while a single-shot helper runs -
+// a progress, segment or timeline callback - unwound past the raw handles the
+// launcher held: the job object leaked, its kill-on-close never fired, and the
+// helper outlived the call holding the GPU.
+void a_throwing_progress_callback_still_ends_the_helper_test()
+{
+    bool threw = false;
+    try {
+        RunNeuralWorker(CurrentExecutable(), TestRequest(L"progress-then-hang-source.mkv"),
+            [](const NeuralRenderProgress&) { throw std::runtime_error("progress callback"); });
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    // The helper sleeps 20 s; only the launcher ending it gets it out of here.
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
 // The processCreated hook runs once the suspended helper is in its job, so a
 // hook that throws takes the helper with the job object - but the process and
 // thread handles CreateProcess returned were raw and leaked, two per launch.
@@ -3364,6 +3392,7 @@ int wmain(int argc, wchar_t** argv)
     a_terminal_message_of_the_wrong_kind_is_malformed_on_every_path_test();
     a_helper_that_throws_mid_job_is_relaunched_as_a_crash_test();
     a_resident_helper_that_throws_while_idle_does_not_fail_the_next_job_test();
+    a_throwing_progress_callback_still_ends_the_helper_test();
     a_throwing_process_created_hook_leaks_no_handles_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
