@@ -1,6 +1,6 @@
 # Security
 
-_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
+_Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 The player launches its package-local `ffmpeg.exe`, `ffprobe.exe`,
 `yt-dlp.exe`, and `deno.exe` helpers without a command shell. Playback falls
@@ -13,8 +13,11 @@ and `[Start] ThumbnailFetch=0` in `DLSSVideoPlayer.ini` turn them off. On an
 RTX 20/30 it can also fetch the community dlssg_sm86 Frame Generation add-on
 from `raw.githubusercontent.com`, only when the user accepts the offer, from one
 pinned commit, with every file checked against its SHA-256 before it is written.
-The player loads that add-on's `version.dll` from beside itself, by full path,
-only when the add-on's `dlssg_sm86.ini` is there too, and never in safe mode.
+The player loads that add-on's proxy (`version.dll`, `winmm.dll`, `dbghelp.dll`
+or `dinput8.dll`) from beside itself, by full path, only when the add-on's
+`dlssg_sm86.ini` is there too, and never in safe mode. A proxy put there by hand
+loads whether or not it is the pinned build; the log records its SHA-256 and
+says which, and so does the start screen.
 
 Offline neural jobs run in the package-local
 `neural-runtime/NeuralWorker.exe`. The experimental proxy/add-on belongs in

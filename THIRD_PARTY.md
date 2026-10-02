@@ -1,6 +1,6 @@
 # Third-party components
 
-_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
+_Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 The project source is MIT-licensed, but the release interoperates with and may
 redistribute components under separate terms. No upstream endorsement is
@@ -36,8 +36,9 @@ NVIDIA developer login; NVIDIA withdrew the public page at
 https://developer.nvidia.com/rtx-video-sdk in 2026). Terms: the NVIDIA RTX SDKs
 licence and its RTX supplement, `NVIDIA_RTX_Video_SDK_License.pdf` in the archive.
 
-The **RTX VSR** comparison view uses NVIDIA's RTX Video Super Resolution,
-NGX feature 16. It is optional and off by default: a build compiles it only when
+RTX VSR uses NVIDIA's RTX Video Super Resolution, NGX feature 16. It upscales
+playback by default, is the recommended export upscaler and fills the 2 x 2
+fourth pane. It is optional at build time: a build compiles it only when
 CMake finds the SDK (`tools/stage_rtx_video_sdk.ps1` puts it in the ignored
 `external/rtx-video-sdk`, or `-DRTX_VIDEO_SDK=<path>`; docs/BUILDING.md), and only such a build
 carries the NVIDIA-signed feature DLL `nvngx_vsr.dll` (1.6.0.0, from the SDK's

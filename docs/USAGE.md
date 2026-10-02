@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
+_Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 The interface is English-only. It does not load external language packs.
 
@@ -9,7 +9,7 @@ The interface is English-only. It does not load external language packs.
 With nothing open, the window is a start screen. Under the two open buttons it
 checks the machine: the GPU, the driver against the 610.47 minimum that
 neural rendering needs, whether the neural runtime is installed and matches
-its lock, and - once this machine has measured a render, or for a GPU with a
+its lock, whether RTX VSR can upscale playback, and - once this machine has measured a render, or for a GPU with a
 measured prior - the frame rate the live neural render is expected to manage
 at 1080p and 1440p. A failed check is marked and offers **Restart in DLSS SR
 safe mode**. Below that are your recent videos, each with a frame of its
@@ -527,8 +527,8 @@ again instead of rendering the same seconds a second time; replacing a tracked
 render with new settings leaves the old one there too, since it is keyed by
 those settings and a later session may ask for them again. At startup the
 player removes published renders it can prove nothing will ask for again - ones
-made under a different NVIDIA driver or model store, or by an older version of
-this same installation - and, only when the disk has less than 20 GiB free,
+made under a different NVIDIA driver or model store, or under an older render
+revision of this same installation - and, only when the disk has less than 20 GiB free,
 the least recently watched renders until it does. Otherwise **Advanced > Clear
 Neural Cache** is the only thing that removes a published entry. Local
 originals and exported files are never deleted by any of this. Work that was
@@ -686,7 +686,8 @@ dither, both on by default, do:
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,
-runtime binaries, application version, GPU path and source dimensions. Changes
+runtime binaries, the render revision (which a release moves only when it
+changes what a render writes), GPU path and source dimensions. Changes
 to neural settings trigger a new render. A settings change detected between
 render start and completion prevents publication of that result.
 
@@ -1018,7 +1019,8 @@ add-on for RTX 20/30 is loaded
 
 Each conversion is `DLSSVideoPlayer.exe --render <input> [options] --out FILE`,
 and `probe` is `DLSSVideoPlayer.exe --probe <input>`; they can be run directly.
-`--render` takes the render options above, `--out`, and `--quiet`. It prints
+`--render` takes the render options above, `--out`, `--quiet` and
+`--safe-mode`. It prints
 the plan, a progress line per pass at most once a second, and a final `done:`,
 `refused:`, `failed:` or `cancelled` line. The exit code says which: 0 done, 2
 bad arguments, 3 refused (the reason is printed - the same refusals the dialog

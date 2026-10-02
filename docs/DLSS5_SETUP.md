@@ -1,6 +1,6 @@
 # Experimental DLSS 5 neural-rendering mode
 
-_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
+_Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 This is a community experiment built around a separately supplied RenoDX /
 ReShade add-on and modified neural runtime. It is not NVIDIA's official
@@ -92,8 +92,9 @@ See [third-party notices](../THIRD_PARTY.md) and the packaged
 
 At the default 100% processing scale the offline neural helper uses a native
 1:1 DLAA carrier, with upscaling off; the 75% and 50% rungs run it as Super
-Resolution back to the source size, as described above. The player's
-independent runtime SR toggle starts off on a fresh install. Its output target
+Resolution back to the source size, as described above. DLSS Upscaling
+starts off on a fresh install; in a build that has it, **DLSS > RTX VSR
+Upscaling** starts on. Its output target
 is Auto: the largest of the 1080p, 1440p and 2160p rungs that the monitor's
 current mode can scan out, never one above it. Any rung can be pinned from
 **DLSS > Upscaling output**. The backend selects a supported NGX
@@ -178,5 +179,5 @@ runtime SR evaluations appear in the player's separate `DLSSVideoPlayer.log`.
 If the experimental path is unstable, choose **Advanced > Restart in DLSS SR
 safe mode**. Safe mode skips the neural helper for that launch and keeps the
 official NGX path available. A later normal launch on an RTX GPU enables
-neural pre-rendering again. Playback SR starts off on a fresh install
-and subsequently follows the saved preference.
+neural pre-rendering again. DLSS Upscaling starts off and RTX VSR
+Upscaling starts on on a fresh install; both then follow the saved preference.

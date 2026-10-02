@@ -1,6 +1,6 @@
 # Player demonstration
 
-_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
+_Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 [Watch the MP4](neural-comparison-demo.mp4) ·
 [Looping preview](neural-comparison-preview.webp) ·
@@ -39,8 +39,9 @@ There are two kinds of picture, and nothing else:
 - **The player scenes** (0:06.8 onwards). Window captures of the player itself,
   at 150% scaling, cropped (the status row is left out), scaled and pushed in.
   The Difference, Side by side and loupe captures are the ones described in
-  [screenshot provenance](../screenshots/README.md) (frame 1122, after the
-  `f2ae230` playback fix).
+  [screenshot provenance](../screenshots/README.md#24-september-2026-images)
+  (frame 1122, after the `f2ae230` playback fix); the current screenshots of
+  those views were retaken later.
 
 How the inputs are prepared, checked and composed is in
 [the rebuild instructions](../../tools/demo-video/README.md#how-it-fits-together).

@@ -1,6 +1,6 @@
 # Troubleshooting
 
-_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
+_Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
 
@@ -101,8 +101,9 @@ trailer still opens.
 ## A render fails or starts again
 
 The cache is reused only after source/runtime/settings hashes, dimensions,
-timing and neural evidence pass validation. Changed settings or binaries trigger
-a new render. An incomplete, modified or invalid cache is not reusable.
+timing and neural evidence pass validation. Changed settings, neural runtime,
+driver or model store trigger a new render; a player update does so only when
+its notes say it changes what a render writes. An incomplete, modified or invalid cache is not reusable.
 
 Keep neural settings unchanged while rendering. Inspect
 `neural-runtime/NeuralWorker.log` and `neural-runtime/ReShade.log` for worker

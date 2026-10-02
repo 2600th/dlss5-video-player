@@ -1,6 +1,6 @@
 # Architecture
 
-_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
+_Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 ## High-level pipeline
 
@@ -637,8 +637,8 @@ helper job at all, which is correct and is not this measurement. See
 executable, which is the default root; LocalAppData is the legacy fallback used
 only when the portable directory is not writable, or sits so deep that a staging
 path under it would pass the 260-character limit (the root is probed with the
-deepest path the cache writes; an explicit root that fails the probe is refused). Source, application version,
-GPU path, driver version, runtime digest, model-store digest, native
+deepest path the cache writes; an explicit root that fails the probe is refused). Source, render revision
+(`kRenderCacheRevision`, stored as `applicationVersion`), GPU path, driver version, runtime digest, model-store digest, native
 dimensions, quality, upscaling state, the rendered range, the guide
 description, and a canonical neural-settings digest form the render identity -
 thirteen terms. A structured binding beside `BuildNeuralCacheKey`
@@ -716,7 +716,7 @@ failure quotes. `LockPinnedRuntimeFileNames()` is the twelve that
 `packaging/runtime-lock.json` pins and `VerifyRuntimeLock` checks; the worker is
 never pinned, because every build of the player changes it. The worker is in the
 hashed set because otherwise rebuilding it with different guide or cut logic
-leaves `runtimeDigest` unchanged, so only an `applicationVersion` bump retires the
+leaves `runtimeDigest` unchanged, so only a `kRenderCacheRevision` bump retires the
 entries it produced, and between bumps a stale hit masks exactly the change a
 developer is trying to see. `-DropRenderCache` in the session harness remains
 the way to force the issue during a live session.
@@ -757,9 +757,9 @@ whose manifest this build can never serve again — a retired schema, an
 unparsable manifest — are removed unconditionally: the lookup gate already
 refuses them, so keeping them costs space and buys nothing. So are entries
 whose recorded key environment (the manifest's optional `environment` object:
-application version, installation, driver, model-store digest, beside the
+render revision, installation, driver, model-store digest, beside the
 existing `runtimeDigest`) no process sharing the root can rebuild: a different
-driver or model store, or an older version or runtime of this same
+driver or model store, or an older render revision or runtime of this same
 installation. Entries that recorded nothing, and every case where this
 process's own terms cannot be resolved cleanly, are left alone. Everything else
 is removed only when the volume has less than `kDefaultFreeFloorBytes` (20 GiB)
@@ -1173,8 +1173,12 @@ it touches a GPU, a file or a window, so every refusal is covered by
 produce them - including turning stages back off, because a checkbox that only
 latches on is an inert control wearing a hat.
 
-A plan is at most two passes. The first is the neural worker, which carries
-Super Resolution and the neural pass together: `NeuralRenderRequest` takes a
+A plan is at most two passes. Without the model, the Upscaler
+(`ExportSelection::engine`, RTX VSR by default; `--sr-engine vsr|dlss`) decides
+the first: RTX VSR runs `VsrUpscalePass` in the player (refused as
+`VsrUnavailable` where it cannot run), and DLSS Super Resolution runs in the
+neural worker. With the model, the first pass is the neural worker, which
+carries Super Resolution and the neural pass together: `NeuralRenderRequest` takes a
 source size and an output size separately, and a larger output makes the
 carrier DLSS Super Resolution from the source size (`SuperResolutionCarrier`,
 the renderer's preserve-source mode, the same feature the player's playback
@@ -1236,7 +1240,7 @@ the neural pass earlier because doing so is faster, which makes early the
 deviation rather than the reference - and an export has no frame budget to
 defend, so it takes the reference order.
 
-Super Resolution alone is a carrier-only job, and it runs with the add-on
+DLSS Super Resolution alone is a carrier-only job, and it runs with the add-on
 disabled, because an enabled add-on runs the neural pass whatever the job asked
 for. ReShade reads the INI when its proxy loads, so the state has to be right
 before the helper starts: the stage export writes it through

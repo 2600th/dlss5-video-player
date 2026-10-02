@@ -1,6 +1,6 @@
 # Neural quality benchmark
 
-_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
+_Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 The benchmark exists to give quality claims a repeatable test set: measured
 neural time / FPS / VRAM / flicker / OCR / face consistency / colour shift /

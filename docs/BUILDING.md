@@ -1,6 +1,6 @@
 # Building and testing
 
-_Verified against 0.27.2 (ecd7a10) on 2026-10-02._
+_Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
 C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the
@@ -100,7 +100,8 @@ Launch `build-upscaling/Release/DLSSVideoPlayer.exe`. Its neural worker is built
 as `build-upscaling/Release/neural-runtime/NeuralWorker.exe`. Without the
 experimental runtime, a source build uses the native playback path.
 
-The eighteen portable suites cover recent history, settings/cache integrity,
+The nineteen portable tests (PolicyTests is registered twice, as its quick and
+`slow` tiers) cover recent history, settings/cache integrity,
 real-media export and cached comparison playback through the real decoders,
 runtime lock and worker protocols, runtime, upscaling and export policy, range selection,
 frame identity, update checks, the release API surface, prerender, playback and
@@ -117,7 +118,7 @@ neural runtime staged beside the executable: `UpscalingGpuSmoke`,
 `NeuralPreflightSmoke`, `ExportMatrixSmoke`, `DlssgProbeSmoke`,
 `DlssgEvaluateSmoke`, the four `FrameGenerationSmoke` registrations and
 `NetworkPreparedRendererSmoke` (a build with the RTX Video SDK adds
-`VsrGpuSmoke`). That
+`VsrGpuSmoke` and `VsrExportSmoke`). That
 last one is the `--gpu` case set of the `PlayerUiRegressionTests` binary rather
 than a target of its own: it drives the prepared network renderer path - the one
 a YouTube open commits through - which nothing else in the suite reaches.
@@ -183,8 +184,9 @@ you which backend actually came up.
 
 ## RTX Video Super Resolution (optional)
 
-The player's **RTX VSR** comparison view (see [USAGE](USAGE.md)) needs the NVIDIA
-RTX Video SDK 1.1.0. It cannot be in this repository or fetched by a script: the
+RTX VSR - the default playback upscaler, the default export Upscaler and the
+**RTX VSR** comparison view (see [USAGE](USAGE.md)) - needs the NVIDIA RTX Video
+SDK 1.1.0. It cannot be in this repository or fetched by a script: the
 download needs an NVIDIA developer login, and its licence allows it to ship only
 as object code inside an application (see [third-party notices](../THIRD_PARTY.md)).
 NVIDIA withdrew the SDK's public page in 2026 - `developer.nvidia.com/rtx-video-sdk`
@@ -215,14 +217,15 @@ CMake checks for `include/nvsdk_ngx_helpers_vsr.h` and
 `bin/Windows/x64/rel/nvngx_vsr.dll` and reports:
 
 ```
--- NVIDIA RTX Video SDK found at ...; the RTX VSR comparison view is built.
+-- NVIDIA RTX Video SDK found at ...; RTX VSR (the playback and export upscaler, and its comparison view) is built.
 ```
 
 The build then compiles the engine (`DLSS_VIDEO_PLAYER_HAS_RTX_VSR`), copies the
 release `nvngx_vsr.dll` beside the player and registers the `gpu`-labelled
-`VsrGpuSmoke` test. No other library is linked: the DLSS SDK's NGX core creates
-the feature. Left empty, as on CI, `RTX_VIDEO_SDK` compiles the engine out, the
-view says the build does not include it, and everything else builds and tests
+`VsrGpuSmoke` and `VsrExportSmoke` tests. No other library is linked: the DLSS SDK's NGX core creates
+the feature. Left empty, as on CI, `RTX_VIDEO_SDK` compiles the engine out:
+playback scales as before, the RTX VSR menu item and view say the build does not
+include it, export offers DLSS Super Resolution instead, and everything else builds and tests
 exactly as without it. A package made from such a build includes
 `nvngx_vsr.dll`; one made without it does not, and the verifier accepts both.
 
