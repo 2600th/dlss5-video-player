@@ -7,7 +7,11 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Unreleased
+## 0.28.0 - 2026-10-02
+
+RTX Video Super Resolution becomes the upscaler, in playback and in exports.
+Renders made with 0.27.2 are reused; earlier ones render again once, and from
+now on an update keeps renders unless its notes say otherwise.
 
 ### Changed
 
@@ -30,7 +34,9 @@ decisions that still shape the code are in
   lowers its quality for that video, then pauses, and says so.
 - **With the dlssg_sm86 add-on, the 4x limit says how to raise it.** The
   confirmation names `MaxGeneratedFrames=4` in `dlssg_sm86.ini` for 5x.
-
+- **The start screen says when the add-on is not the one the player installs.**
+  A dlssg_sm86 `version.dll` other than the pinned build still loads, and the
+  start screen says so; the log has its SHA-256.
 - **Exports upscale with RTX VSR too.** **Export with DLSS stages** has an
   **Upscaler** row for Super Resolution without the neural model: RTX VSR
   (recommended, the default) or DLSS Super Resolution. RTX VSR runs in the
@@ -38,14 +44,9 @@ decisions that still shape the code are in
   (81.35 VMAF on a clip measured at 81.4; DLSS SR 66.6 on the same clip).
   `--render` and `dlss5-convert` take `--sr-engine vsr|dlss`; `--history`
   alone still means DLSS, so existing scripts keep their output. `probe` lists
-  `sr_engines`, and `sr` is offered wherever either engine can run.
-- **RTX VSR exports are up to three times faster.** The pass reads frames back
-  from the GPU and hands them to the encoder while the next ones render, where
-  it used to stop for each: 1080p to 2160p went from 23 to 70 fps on an RTX 5090,
-  540p to 1080p from 112 to 157. The output is the same, frame for frame.
-- **Resizing the window no longer stalls RTX VSR.** A new size gets its VSR
-  surface once the window has held it for a moment, instead of at every size
-  the drag passes through, each of which waited for the GPU.
+  `sr_engines`, and `sr` is offered wherever either engine can run. The pass
+  renders, reads back and encodes frames side by side: 1080p to 2160p runs at
+  70 fps on an RTX 5090.
 
 ### Fixed
 
@@ -60,25 +61,26 @@ decisions that still shape the code are in
   and say the GPU's highest, and the confirmation says when the setting was
   lowered. On an RTX 3060 with the dlssg_sm86 add-on, 5x used to convert at 4x
   without a word (issue #14).
-- **Compare labels and the status line keep up while paused.** Changing the
-  compare view on a paused frame could leave its labels invisible, and the
-  status line kept naming the previous upscaler until playback resumed. In
-  Fill the labels sat in the part of the picture the window crops; they now
-  sit in the corners you can see.
+- **Compare labels show on a paused frame and in Fill.** Changing the compare
+  view on a paused frame could leave its labels invisible until the next
+  change, and in Fill they sat in the part of the picture the window crops;
+  they now sit in the corners you can see.
 - **The export window's choices read in full.** At 100% scaling the History box
   showed "Per-frame (recommendec".
-- **A render the neural helper crashed in is retried again.** A helper that
-  stopped on an unexpected error mid-render was reported as a refused render
-  and the job ended there; it is a crash again, and the render restarts in a
-  fresh helper as it does after any other crash. A helper that fails after
-  reporting its result is no longer counted as a success, and one the player
-  stops reading is always ended rather than left holding the GPU.
+- **The neural helper is always ended when the player stops reading it.** An
+  error in the player while it followed a render could leave the helper
+  running, holding the GPU, until the player closed.
+- **Clear Neural Cache deletes only what the player made.** With the cache
+  folder set to a directory of your own, it could delete files that were not
+  the player's.
 - **A refused compare key says why.** Pressing a compare view with no neural
   render, with Neural Rendering off or with no video shows a notice naming what
   is missing, where it used to do nothing.
 
 ### Release
 
+- The package's runtime notice and SECURITY.md describe a public release; they
+  no longer tell people to keep the package private.
 - Pull requests build and test a quick configuration: the shipped programs and
   the device-free suites, without the GPU smokes a hosted runner cannot run and
   without link-time optimisation, which re-optimised the whole player once per

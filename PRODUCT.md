@@ -57,7 +57,7 @@ settings all still match.
 
 ## Capabilities and Constraints
 
-Confirmed from `README.md` and `CHANGELOG.md` at 0.27.2:
+Confirmed from `README.md` and `CHANGELOG.md` at 0.28.0:
 
 - Live rendering with seek anywhere, rendered or not; nothing rendered is
   discarded on seek.
@@ -68,7 +68,7 @@ Confirmed from `README.md` and `CHANGELOG.md` at 0.27.2:
   runs from a terminal with `dlss5-convert`, on files or whole folders.
 - RTX Video Super Resolution as the playback upscaler, on by default wherever
   the window shows a video larger than it is, and the default upscaler for
-  Super Resolution exports (unreleased after 0.27.2; measured in
+  Super Resolution exports (since 0.28.0; measured in
   `docs/measurements/vsr-quality-20261002/`).
 - Optional DLSS Super Resolution on top, off by default; its output follows the
   display unless a rung is pinned.
