@@ -190,11 +190,11 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
 
 ## How it compares
 
-Several open-source projects put DLSS 5's neural pass on video. They do
-different jobs, so the right one depends on what you want to do. As of
-2026-10-02, from each project's README, releases and issues (details and more
-projects in [RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md); corrections
-welcome):
+Several open-source projects put DLSS 5's neural pass on video. This one is
+built to watch the result and check it: it renders the whole video while you
+watch, keeps the render, and shows the original beside it on the same frame.
+As of 2026-10-02, from each project's README, releases and issues (details in
+[RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md); corrections welcome):
 
 | | **DLSS 5 Video Player** (this) | [Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) v14.0 | [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) v2.1.9 | [Veyra](https://github.com/Likely7/Veyra-NRVideo) 2.0.0 | [DLSS5Tool](https://github.com/banbanzhige/DLSS5Tool) v2.3.3 |
 | --- | --- | --- | --- | --- | --- |
@@ -211,18 +211,21 @@ welcome):
 | Verifying the download | SHA-256, GitHub attestations, a file manifest and a verifier script | GitHub's per-file digest | SHA256SUMS and a runtime manifest | SHA-256 files | Runtime hashes |
 | Licence | MIT | Source-available, its own terms | PolyForm Strict (non-commercial) | GPL-3.0 (AGPL for its streaming part) | MIT |
 
-Pick this player to watch a video rendered, check exactly what the model
-changed against the original, and keep the render. Pick Visual Enhancer for the
-widest conversion pipeline (ProRes, AV1, HDR export, grading), NeuralScreen for
-games or anything else on screen in real time, Veyra for capture cards,
-console streams or live frame generation, and DLSS5Tool for HDR or
-image-sequence conversion.
+Of the five, only this player keeps the render, so a seek lands on rendered
+frames and a video you come back to is already done. It compares the render
+with the original on the same frame in more ways than any of the others, RTX
+VSR included; only its export keeps subtitles and chapters as well as audio;
+and only its downloads carry GitHub attestations of what this repository
+built. Its upscaler was chosen by measurement, and the
+[report](docs/measurements/vsr-quality-20261002/REPORT.md) is public.
 
-None of these is an NVIDIA product. On most GPUs each runs the neural pass on a
-runtime build NVIDIA has not published for this use - community-modified,
-leaked or architecture-spoofed - so read what each one ships. Download any of
-them from its original repository: re-uploads under other accounts have been
-reported carrying malware.
+None of these projects is an NVIDIA product, and each runs the neural pass on a
+runtime build NVIDIA has not published for this use, this one included (see
+[Check what you downloaded](#check-what-you-downloaded)). This player is
+published only on its
+[releases page](https://github.com/2600th/dlss5-video-player/releases);
+re-uploads of DLSS 5 tools under other accounts have been reported carrying
+malware.
 
 ## What's new in 0.28.0
 

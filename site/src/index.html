@@ -737,8 +737,9 @@
   <div class="section__head">
     <h2 class="section__title">Next to the other projects</h2>
     <p class="section__note">
-      Several open-source projects put DLSS&nbsp;5&rsquo;s neural pass on video, and they do different jobs.
-      As of 2&nbsp;October 2026, from each project&rsquo;s own README, releases and issues; the
+      Several open-source projects put DLSS&nbsp;5&rsquo;s neural pass on video. This one is built to watch the result and
+      check it: it renders the whole video while you watch, keeps the render, and shows the original beside it on the same
+      frame. As of 2&nbsp;October 2026, from each project&rsquo;s own README, releases and issues; the
       <a href="{{REPO_URL}}/blob/main/docs/RELATED_PROJECTS.md" rel="noopener">full list</a> has more, and corrections are welcome.
     </p>
   </div>
@@ -774,14 +775,16 @@
   </div>
 
   <p class="versus__pick">
-    Pick this player to watch a video rendered, see exactly what the model changed against the original, and keep the render.
-    Pick Visual Enhancer for the widest conversion pipeline, NeuralScreen for games or anything else on screen in real time,
-    Veyra for capture cards, console streams or live frame generation, and DLSS5Tool for HDR or image-sequence conversion.
+    Of the five, only this player keeps the render, so a seek lands on rendered frames and a video you come back to is
+    already done. It compares the render with the original on the same frame in more ways than any of the others, RTX VSR
+    included; only its export keeps subtitles and chapters as well as audio; and only its downloads carry GitHub
+    attestations of what this repository built.
   </p>
   <p class="versus__caveat">
-    None of these is an NVIDIA product. On most GPUs each runs the neural pass on a runtime NVIDIA has not published for this
-    use &ndash; modified, leaked or architecture-spoofed &ndash; so read what each one ships, and download it from its original
-    repository: re-uploads under other accounts have been reported carrying malware.
+    None of these projects is an NVIDIA product, and each runs the neural pass on a runtime NVIDIA has not published for this
+    use, this one included. This player is published only on its
+    <a href="{{REPO_URL}}/releases" rel="noopener">releases page</a>; re-uploads of DLSS&nbsp;5 tools under other accounts have
+    been reported carrying malware.
   </p>
 </section>
 
