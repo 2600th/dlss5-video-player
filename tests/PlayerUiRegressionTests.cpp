@@ -1611,6 +1611,34 @@ struct PlayerAppTestAccess {
             DeleteObject(bitmap);
             DeleteDC(dc);
 
+            // Every choice reads in full: a dropdown's longest item fits the box
+            // beside its arrow, in the dialog's own font. The export dialog's
+            // History box showed "Per-frame (recommendec" at 100%.
+            EnumChildWindows(dialog, [](HWND child, LPARAM) -> BOOL {
+                wchar_t kind[32]{};
+                GetClassNameW(child, kind, 32);
+                if (std::wstring_view(kind) != L"ComboBox") return TRUE;
+                COMBOBOXINFO info{sizeof(info)};
+                CHECK(GetComboBoxInfo(child, &info) != FALSE);
+                const int available = int(info.rcItem.right - info.rcItem.left);
+                HDC measure = GetDC(child);
+                const HGDIOBJ oldFont = SelectObject(measure, reinterpret_cast<HFONT>(SendMessageW(child, WM_GETFONT, 0, 0)));
+                const LRESULT count = SendMessageW(child, CB_GETCOUNT, 0, 0);
+                for (LRESULT index = 0; index < count; ++index) {
+                    std::wstring text(size_t(SendMessageW(child, CB_GETLBTEXTLEN, WPARAM(index), 0)), L'\0');
+                    SendMessageW(child, CB_GETLBTEXT, WPARAM(index), reinterpret_cast<LPARAM>(text.data()));
+                    SIZE extent{};
+                    CHECK(GetTextExtentPoint32W(measure, text.c_str(), int(text.size()), &extent) != FALSE);
+                    // The box draws its text inset by a few pixels on each side.
+                    const bool fits = extent.cx + 6 <= available;
+                    if (!fits) std::wcerr << L"  dropdown item does not fit (" << extent.cx << L" + 6 > " << available << L"): " << text << L'\n';
+                    CHECK(fits);
+                }
+                SelectObject(measure, oldFont);
+                ReleaseDC(child, measure);
+                return TRUE;
+            }, 0);
+
             // Moving to a monitor at a higher dpi: the controls, the font and
             // the client all follow, from the dialog's own baseline. 1.5x where
             // the scaled window fits this display, else the largest step that

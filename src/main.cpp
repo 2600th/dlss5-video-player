@@ -6222,9 +6222,9 @@ private:
     // generator so the debug views reflect them without a re-render.
     void ApplyLiveGuideControls(){m_guides.SetControls(m_renderGuides);m_guides.SetSceneCutSensitivity(m_temporalSettings.sceneCuts);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
 
-    void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr,int x=0){
+    void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr,int x=0,int width=160){
         HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116,20);
-        HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132+x,y-3,160,200,id);
+        HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132+x,y-3,width,200,id);
         for(const wchar_t* item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item));
         AddTip(h,label,tipKey);AddTip(h,combo,tipKey);
     }
@@ -6633,18 +6633,21 @@ private:
     void BuildExportStageControls(HWND h){
         CreateSettingsGroupHeading(h,L"export.stages.group_stages",8);
         CreateNeuralCheck(h,IDC_EX_UPSCALE,L"export.stages.upscale",16,32,300,L"export.tip.upscale");
-        CreateNeuralCombo(h,IDC_EX_RESOLUTION,L"export.stages.resolution",70,{L"1080p",L"1440p",L"2160p"});
+        // Wide enough for the longest choice, "Temporal (smooths grain, trails
+        // motion)", and one width for all four so their edges line up.
+        constexpr int kComboW=300;
+        CreateNeuralCombo(h,IDC_EX_RESOLUTION,L"export.stages.resolution",70,{L"1080p",L"1440p",L"2160p"},nullptr,0,kComboW);
         {
             const std::wstring vsr=T(L"export.stages.engine_vsr"),dlss=T(L"export.stages.engine_dlss");
-            CreateNeuralCombo(h,IDC_EX_ENGINE,L"export.stages.engine",104,{vsr.c_str(),dlss.c_str()},L"export.tip.engine");
+            CreateNeuralCombo(h,IDC_EX_ENGINE,L"export.stages.engine",104,{vsr.c_str(),dlss.c_str()},L"export.tip.engine",0,kComboW);
         }
         {
             const std::wstring temporal=T(L"export.stages.history_temporal"),perFrame=T(L"export.stages.history_per_frame");
-            CreateNeuralCombo(h,IDC_EX_HISTORY,L"export.stages.history",138,{temporal.c_str(),perFrame.c_str()},L"export.tip.history");
+            CreateNeuralCombo(h,IDC_EX_HISTORY,L"export.stages.history",138,{temporal.c_str(),perFrame.c_str()},L"export.tip.history",0,kComboW);
         }
         CreateNeuralCheck(h,IDC_EX_NEURAL,L"export.stages.neural",16,180,300,L"export.tip.neural");
         CreateNeuralCheck(h,IDC_EX_FRAMEGEN,L"export.stages.framegen",16,220,300,L"export.tip.framegen");
-        CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",258,{L"2×",L"3×",L"4×",L"5×"});
+        CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",258,{L"2×",L"3×",L"4×",L"5×"},nullptr,0,kComboW);
         CreateSettingsGroupHeading(h,L"export.stages.group_result",298);
         DialogControl(h,L"STATIC",L"",SS_LEFT,16,322,436,34,IDC_EX_SUMMARY);
         DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,356,436,34);
