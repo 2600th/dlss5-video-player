@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <exception>
 #include <fstream>
 #include <future>
 #include <iterator>
@@ -736,31 +737,36 @@ StartOutcome StartHelper(const std::filesystem::path& executable,
         outcome.detail = ErrorDetail(L"Starting the isolated neural helper failed");
         return outcome;
     }
+    // Owned from here, so a callback that throws below closes both rather than
+    // leaving them to the process's lifetime. Declared after `job`, so they
+    // close first and the job's kill-on-close still ends the helper.
+    ScopedHandle processHandle(process.hProcess);
+    ScopedHandle threadHandle(process.hThread);
     // The helper exists from here on, suspended. This is the boundary the
     // player's Launch phase ends at: the process is the parent's last
     // observation before the loader window the helper measures itself. Reported
     // once the helper is in its job, never before: a callback that throws then
     // unwinds through the kill-on-close job and takes the suspended helper
     // with it, where before the assignment it left one suspended outside any job.
-    const bool assigned = AssignProcessToJobObject(job.Get(), process.hProcess) != FALSE;
+    const bool assigned = AssignProcessToJobObject(job.Get(), processHandle.Get()) != FALSE;
     if (assigned && processCreated) processCreated();
-    const DWORD resumed = assigned ? ResumeThread(process.hThread) : static_cast<DWORD>(-1);
-    CloseHandle(process.hThread);
+    const DWORD resumed = assigned ? ResumeThread(threadHandle.Get()) : static_cast<DWORD>(-1);
+    threadHandle = ScopedHandle{};
     if (!assigned || resumed == static_cast<DWORD>(-1)) {
         outcome.detail = assigned ? ErrorDetail(L"Resuming the isolated neural helper failed") :
                                     L"The isolated neural helper could not be assigned to its job.";
-        HelperProcess doomed{process.hProcess, job.Release(), nullptr, nullptr};
+        HelperProcess doomed{processHandle.Release(), job.Release(), nullptr, nullptr};
         EndHelper(doomed, 0);
         return outcome;
     }
     auto metadata = std::make_unique<MetadataPipe>(metadataRead.Release());
     if (!metadata->Valid()) {
         outcome.detail = ErrorDetail(L"Starting the neural helper metadata reader failed");
-        HelperProcess doomed{process.hProcess, job.Release(), std::move(metadata), nullptr};
+        HelperProcess doomed{processHandle.Release(), job.Release(), std::move(metadata), nullptr};
         EndHelper(doomed, 0);
         return outcome;
     }
-    outcome.helper = {process.hProcess, job.Release(), std::move(metadata), commandWrite.Release()};
+    outcome.helper = {processHandle.Release(), job.Release(), std::move(metadata), commandWrite.Release()};
     outcome.helperMetadata = metadataWrite.Get();
     outcome.helperPause = inheritedPause.Get();
     return outcome;
@@ -770,6 +776,12 @@ StartOutcome StartHelper(const std::filesystem::path& executable,
 // cancelled. Beyond it the helper is killed, matching the budget a single-shot
 // cancel has always had, and residency is dropped rather than trusted.
 constexpr std::chrono::milliseconds kResidentCancelGrace{2000};
+
+// How long a single-shot helper that has sent its terminal message is given to
+// exit before it is ended. Long enough for an ordinary teardown to finish and
+// its exit code to be read, short enough that a helper hung in teardown costs
+// the job nothing worth noticing.
+constexpr std::chrono::milliseconds kSingleShotExitGrace{500};
 
 struct PumpOutcome {
     bool malformed{};
@@ -800,9 +812,9 @@ PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_
         // that writes its result and exits in the same breath is judged below
         // on what it said, not on the fact that it went. A single-shot helper
         // is let go here too: once its terminal message is in there is nothing
-        // left to read, and the caller ends the process with EndHelper either
-        // way, so following it to its exit only waited out its teardown - or,
-        // for a helper that hung in it, waited for nothing.
+        // left to read, and the caller gives it a bounded moment to exit before
+        // ending it, so following it to its exit here would wait out its whole
+        // teardown - or, for a helper that hung in it, wait for nothing.
         if (reader.Complete()) break;
         if (stop.stop_requested() && !outcome.cancelled) {
             outcome.cancelled = true;
@@ -856,14 +868,36 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
         return outcome;
     }
     outcome.launched = true;
+    // Ends the helper on every way out of here, including an exception from
+    // the pump - a progress, segment or timeline callback of the caller's, or
+    // the reader's own allocation. The handles are plain, so an unwind that
+    // skipped EndHelper would close nothing: the job object would outlive the
+    // call, its kill-on-close would never fire, and the helper would keep the
+    // GPU until the player exits. EndHelper zeroes what it ends, so the
+    // explicit call below leaves this nothing to do on the ordinary path.
+    struct EndOnUnwind {
+        HelperProcess& helper;
+        ~EndOnUnwind() { EndHelper(helper, 0); }
+    } endOnUnwind{started.helper};
     const PumpOutcome pump = Pump(started.helper, reader, stop, false);
     outcome.cancelled = pump.cancelled;
+    // The pump stops at the terminal message, not at the exit, and a helper
+    // can still fail after it: its own write of the result coming back short,
+    // or a crash in teardown, is said only in its exit code. So a helper that
+    // has reported is given a short, bounded moment to go and is judged on
+    // its code if it does; one still busy after that is ended below and judged
+    // on what it said.
+    bool exited = pump.exited;
+    if (!exited && pump.completed && !pump.cancelled) {
+        exited = WaitForSingleObject(started.helper.process,
+                                     static_cast<DWORD>(kSingleShotExitGrace.count())) == WAIT_OBJECT_0;
+    }
     // Only when the process actually went. GetExitCodeProcess succeeds on a
     // live process and answers STILL_ACTIVE (259), so asking unconditionally
     // reported a helper that was still running as "exited with code 259" - a
     // number that reads like a crash, classifies as WorkerCrashed, and hides
-    // the real diagnosis. The pump already knows which happened.
-    if (pump.exited) {
+    // the real diagnosis. The pump, or the wait above, knows which happened.
+    if (exited) {
         // An unreadable code stays the -1 default: nonzero, so a crash.
         outcome.exitCode = neural_worker_detail::ReadHelperExitCode([&](DWORD* code) {
             return GetExitCodeProcess(started.helper.process, code) != FALSE;
@@ -1027,10 +1061,12 @@ NeuralRenderResult RunHelperOnce(const std::filesystem::path& executable,
         restartRequested = true;
         return result;
     }
+    // A helper that reported and then exited nonzero failed after its result:
+    // the result is not trusted over the exit, and the detail says which.
     if (launch.exitCode != 0) {
         result.failure = NeuralRenderFailure::WorkerCrashed;
         result.detail = L"The isolated neural helper exited with code " + std::to_wstring(launch.exitCode) +
-                        L" before producing a result.";
+                        (reader.Complete() ? L" after reporting its result." : L" before producing a result.");
         return result;
     }
     // An incomplete or malformed stream is refused inside AcceptResult.
@@ -1861,6 +1897,24 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
             StampHelperObservations(reader, judged);
             return judged;
         };
+        // Drops the session when an exception leaves this attempt: a progress,
+        // segment or timeline callback out of the pump, or the accepted hook
+        // after the job frame went out. The helper is then still running a job
+        // nobody is reading, and kept resident it would be reused, and the next
+        // job would read the abandoned one's Result as its own. Ending it
+        // costs the next job a launch; the exception itself carries on to the
+        // caller. Only an unwind does anything here: every ordinary way out
+        // below has already decided whether the session stays.
+        struct DropSessionOnUnwind {
+            std::unique_ptr<Session>& session;
+            const int exceptions = std::uncaught_exceptions();
+            ~DropSessionOnUnwind()
+            {
+                if (std::uncaught_exceptions() <= exceptions || !session) return;
+                session->Drop();
+                session.reset();
+            }
+        } dropOnUnwind{session_};
 
         // Two tries, because a helper that exited while idle is not an error to
         // report: the 30 s timeout, a self-invalidating exit after a failed job

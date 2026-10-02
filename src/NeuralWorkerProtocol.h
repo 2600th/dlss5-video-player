@@ -50,6 +50,16 @@ inline constexpr uint32_t kMaximumJobArguments = 64;
 // read. This code is how the parent tells that apart from a helper that took
 // the job and walked away (a Protocol failure) and dispatches the job again.
 inline constexpr unsigned long kRetiredExitCode = 76;
+// The exit code of a resident helper whose session thread threw. It writes no
+// Result: the exception may have come between jobs, where a Result would be
+// read by the next job as its own, and mid-job it is a crash rather than a
+// verdict on the job. Any nonzero code the parent does not recognise is a
+// crash, so this one is distinct only so the log and the receipt can say which
+// crash it was. It must never equal kRetiredExitCode or the configuration
+// restart's code (neural_worker_detail::kConfigurationChangedExitCode, 75),
+// which the parent answers with a fresh helper instead of its crash recovery.
+inline constexpr unsigned long kWorkerThrewExitCode = 77;
+static_assert(kWorkerThrewExitCode != kRetiredExitCode);
 inline constexpr uint32_t kMaximumJobArgumentBytes = 4 * 1024;
 
 enum class WireKind : uint16_t {
