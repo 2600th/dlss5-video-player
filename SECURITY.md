@@ -31,8 +31,9 @@ modification that extends it to every RTX generation (the universal SF-v2
 build that `packaging/runtime-lock.json` locks). Do not describe it as
 legitimately signed. A hash
 match proves reproducibility only; scan and isolate untrusted binaries before
-execution, and do not upload or redistribute them without authorization.
+execution.
 
-Redistribution permission for the supplied combined experimental runtime set is
-unresolved. Do not publish a package until the applicable upstream terms have
-been reviewed. Report security-sensitive issues privately to the maintainer.
+The combined experimental runtime set is published with the releases as a
+community project. No permission from the upstream owners to redistribute it
+is claimed, and their terms still govern it (THIRD_PARTY.md). Report
+security-sensitive issues privately to the maintainer.
