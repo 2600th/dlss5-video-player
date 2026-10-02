@@ -417,8 +417,19 @@ ResidentExit RunResidentLoop(CommandChannel& channel, Runner& runner,
                 }
                 std::stop_source stop;
                 channel.AttachJobStop(stop);
-                const JobOutcome outcome = runner.Job(command.arguments, stop.get_token());
-                channel.DetachJobStop();
+                // Detached on every way out of the job, a throw included: the
+                // reader thread outlives this frame and the channel, and a
+                // Cancel or a closed pipe after the throw would otherwise stop a
+                // stop source that no longer exists.
+                struct DetachJobStopOnExit {
+                    CommandChannel& channel;
+                    ~DetachJobStopOnExit() { channel.DetachJobStop(); }
+                };
+                JobOutcome outcome{};
+                {
+                    const DetachJobStopOnExit detach{channel};
+                    outcome = runner.Job(command.arguments, stop.get_token());
+                }
                 // The idle budget is "no job for this long", so it runs from the
                 // end of the last one, and so does the sample grace.
                 deadline = std::chrono::steady_clock::now() + idle;
