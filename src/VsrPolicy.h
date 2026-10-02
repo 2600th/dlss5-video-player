@@ -17,10 +17,10 @@ namespace vsr_policy {
 
 // NGX's own numbers (NVSDK_NGX_VSR_QualityLevel): 0 is bicubic and 1 to 4 the
 // network at rising cost. The ladder offers the four network levels; bicubic is a
-// scaler the compositor already is. High is the default: on an RTX 4080 SUPER a
-// 1440p frame measured 5.6 ms there against 7.8 ms at Ultra, and a 1080p frame
-// 3.2 ms against 4.3 ms (the spike's table in the p28 report), so High holds a
-// 1440p 30 fps clip with room left in every frame.
+// scaler the compositor already is. High is the default: it scored best on average
+// (docs/measurements/vsr-quality-20261002), and VsrGpuSmoke's ladder timing puts it
+// at 1.5 ms for a 1080p frame and 2.7 ms for a 1440p one on an RTX 5090 (an RTX 4080
+// SUPER spike measured 3.2 and 5.6 ms; its table was never committed).
 enum class Quality : int { Low = 1, Medium = 2, High = 3, Ultra = 4 };
 inline constexpr Quality kDefaultQuality = Quality::High;
 inline constexpr std::array<Quality, 4> kQualities{Quality::Low, Quality::Medium, Quality::High, Quality::Ultra};

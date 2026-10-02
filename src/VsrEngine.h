@@ -11,7 +11,8 @@
 // the DLSS SDK's nvsdk_ngx_d.lib - the one core this project already links - with
 // nvngx_vsr.dll 1.6.0 beside the executable, in the same session and on the same
 // command list as a DLSS Super Resolution feature, both evaluating without error
-// (RTX 4080 SUPER, driver 610.47; the p28 report has the log). So the engine joins
+// (RTX 4080 SUPER, driver 610.47; that spike's log was never committed - VsrGpuSmoke
+// repeats the same-session check on every hardware run). So the engine joins
 // the session DLSSBackend opened on the device (ngx_session_detail::Registry) and
 // never opens one: the project identity, the log directory and the logging hook
 // that session was started with stay DLSSBackend's, and a device NGX never started

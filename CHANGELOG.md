@@ -29,6 +29,10 @@ decisions that still shape the code are in
 
 ### Fixed
 
+- **Release notes no longer claim renders carry over between versions.** The
+  render cache has been keyed by the player version since 0.12, so 0.26.1, 0.26.2
+  and 0.27.0 rendered every video again once, whatever their notes said. They
+  are corrected, and 0.28.0 renders again once too.
 - **Generated frames no longer offers what the GPU cannot do.** Once Frame
   Generation has been measured, multiples above the runtime's limit are greyed
   and say the GPU's highest, and the confirmation says when the setting was
@@ -70,7 +74,7 @@ time. 0.27.1 was tagged but never published; its fixes ship here.
 ## 0.27.0 - 2026-10-01
 
 A command-line converter, and the fixes left open by the 25 September audit.
-Renders made with 0.26.2 are reused.
+Renders made with 0.26.2 render again once. (Corrected in 0.28.0: the render cache is keyed by the player version, so every render is made again once on a new version.)
 
 ### Added
 
@@ -143,8 +147,8 @@ Renders made with 0.26.2 are reused.
 ## 0.26.2 - 2026-09-26
 
 Fixes from re-measuring an RTX 5090 on 0.26.1
-([record](docs/VERIFICATION-2026-09-26-RTX5090.md)). Renders are reused, except
-those of untagged HD videos made with GPU source conversion turned on.
+([record](docs/VERIFICATION-2026-09-26-RTX5090.md)). Renders made with 0.26.1
+render again once. (Corrected in 0.28.0: the render cache is keyed by the player version, so every render is made again once on a new version.)
 
 ### Fixed
 
@@ -166,8 +170,7 @@ those of untagged HD videos made with GPU source conversion turned on.
 
 ## 0.26.1 - 2026-09-25
 
-Fixes from a full audit of 0.26.0. Renders of videos turned 180 degrees or
-mirrored are made again once; every other render is reused.
+Fixes from a full audit of 0.26.0. Renders made with 0.26.0 render again once. (Corrected in 0.28.0: the render cache is keyed by the player version, so every render is made again once on a new version.)
 
 ### Fixed
 
