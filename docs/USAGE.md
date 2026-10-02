@@ -425,14 +425,14 @@ neural picture) - which do exactly what the matching menu commands do.
 
 ### RTX VSR upscaling
 
-**DLSS > RTX VSR upscaling (recommended)** is on by default. Wherever the window
+**DLSS > RTX VSR Upscaling (recommended)** is on by default. Wherever the window
 shows the video larger than it is - a 1080p video full screen on a 1440p or 4K
 monitor, a 720p stream in a large window - NVIDIA's RTX Video Super Resolution
 makes the picture at the size it is shown, instead of the plain scale the window
 would otherwise apply. It runs on the frame the player decodes, so it needs no
 render and no cache, and nothing it makes in playback reaches a capture or a
 cache key; an export runs it on its own (see the export's **Upscaler**). Its quality is the comparison view's: **Video > Compare > RTX VSR
-quality**, High by default. The status line says `RTX VSR upscaling · <size>`
+quality**, High by default. The status line says `RTX VSR Upscaling on · <width>×<height>`
 while it is the upscaler.
 
 It is the default because it measured best. 960x540 to 1080p over six clips on

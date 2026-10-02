@@ -186,6 +186,8 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   machine can run on it. `--range`, `--encode`, `--report` and the rest are in
   the [usage guide](docs/USAGE.md#from-the-command-line).
 
+![Export with DLSS stages: Super Resolution ticked, output height 2160p, Upscaler RTX VSR (recommended), neural rendering and frame generation unticked, and the result line 3840 × 2160 at 30 fps, 1 pass](docs/screenshots/current/export-stages-vsr.jpg)
+
 ## How it compares
 
 Several open-source projects put DLSS 5's neural pass on video. They do
@@ -280,14 +282,23 @@ and the cache. The trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md
 
 ## Screenshots
 
-The player on an RTX 4080 SUPER, paused on one frame of *007 First Light*
-rendered at default settings. Click any image for full size.
+The player paused on one frame of *007 First Light* rendered at default
+settings: the first four on an RTX 5090 at 100% display scaling, the next three
+on an RTX 4080 SUPER at 150%. Click any image for full size.
+
+![A 1280x720 copy of 007 First Light in Wipe, compared against RTX VSR: the player's plain scale of the original left of a divider down the face, RTX VSR at High right of it, both tags at the top; an unscaled crop of the player's picture](docs/screenshots/current/vsr-wipe-crop.png)
+
+One 720p frame shown at 1.13x: the player's plain scaling left of the divider,
+RTX VSR right, unscaled crop ([whole window](docs/screenshots/current/vsr-wipe.jpg)).
+The measured comparison is the
+[RTX VSR quality report](docs/measurements/vsr-quality-20261002/REPORT.md), not
+this frame.
 
 ![The player in Wipe: the original left of a divider down the face, the DLSS 5 render right of it, with the compare bar below](docs/screenshots/current/compare-wipe.jpg)
 
 ![Difference view: where the model changed the picture, amplified 4x, as brightness](docs/screenshots/current/compare-difference.jpg)
 
-![2 x 2 view: original, DLSS 5, Difference and DLSS 5 at Mix 50%, with the toast confirming a saved comparison image](docs/screenshots/current/compare-2x2-toast.jpg)
+![2 x 2 view: original, DLSS 5, Difference and RTX VSR at High, with the toast confirming a saved comparison image](docs/screenshots/current/compare-2x2-toast.jpg)
 
 The file that save wrote, footer and all:
 [`saved-comparison-2x2.png`](docs/screenshots/current/saved-comparison-2x2.png).
@@ -300,17 +311,16 @@ The file that save wrote, footer and all:
 
 ### Start screen
 
-![Start screen: the capability check, the Open file and Open YouTube URL actions, and the seven game trailers with their thumbnails](docs/screenshots/current/player-start.jpg)
+![Start screen on an RTX 5090: the capability check with its RTX VSR line, the Open file and Open YouTube URL actions, Recent tiles for GTA VI Trailer 2 and 007 First Light each marked Rendered 100%, and the other game trailers with their thumbnails](docs/screenshots/current/player-start.jpg)
 
 ### Neural view on and off
 
-![GTA VI Trailer 2 paused at 1:04 in a live session with the neural view attached](docs/screenshots/current/neural-playback.jpg)
+![GTA VI Trailer 2 paused on frame 1940 with the neural view on, on an RTX 5090](docs/screenshots/current/neural-playback.jpg)
 
 ![The same paused GTA VI frame with neural rendering off](docs/screenshots/current/original-comparison.jpg)
 
-One paused frame with only the view switched, taken with Intensity, Local tone
-and Local structure at 2.0 (the default is 1.0). It shows how the toggle works,
-not what every source will gain.
+One paused frame with only the view switched, at default settings. It shows
+how the toggle works, not what every source will gain.
 
 [Capture details and footage attribution](docs/screenshots/README.md).
 
