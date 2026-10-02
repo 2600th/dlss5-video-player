@@ -901,6 +901,7 @@ private:
     // `cmd` ahead of the draw that reads it and re-binds the SRV heap NGX replaced.
     void RecordVsr(ID3D12GraphicsCommandList* cmd, uint32_t slot, const present_scale::Target& target);
     bool PlaybackVsrApplies(const present_scale::Target& target) const;
+    vsr_policy::PlaybackInput PlaybackVsrInput() const;
     // One evaluate of `input` (8-bit SDR, in PIXEL_SHADER_RESOURCE) into m_vsrOutput,
     // or the frame already made from the same input, serial, size and quality.
     bool EvaluateVsr(ID3D12GraphicsCommandList* cmd, uint32_t slot, ID3D12Resource* input, uint32_t inputKind,
@@ -1146,6 +1147,11 @@ private:
     // reference copy: a paused re-present keeps the playback frame it made.
     uint64_t m_decodedSerial = 0;
     bool m_playbackVsrShown = false;
+    // Consecutive refused evaluates. The kept-frame rule stops a refusal repeating
+    // only while the input holds still, and playback moves it every frame, so a
+    // driver that keeps refusing would be asked - and logged - sixty times a second.
+    // Three in a row and playback stops asking for this renderer's life.
+    uint32_t m_vsrFailures = 0;
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_vsrTimestampHeap;  // 2 per frame slot
     Microsoft::WRL::ComPtr<ID3D12Resource> m_vsrTimestampReadback;
     const uint64_t* m_vsrTimestampMapped = nullptr;

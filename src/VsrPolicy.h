@@ -140,11 +140,27 @@ inline Size OutputSize(uint32_t sourceW, uint32_t sourceH, uint32_t targetW, uin
 // default ([Playback] RtxVsr), at the one quality the comparison view uses.
 inline constexpr bool kPlaybackDefault = true;
 
+// Which texture is the one picture on screen, for VSR to upscale. Without a
+// reference resident there is only the decoded frame. With one (cached playback),
+// the DLSS 5 view at a Mix of 1 with no mask is the decoded frame - the render - and
+// the Original view, and the press-and-hold peek that shows it, is the reference.
+// Both single-picture views get VSR or the A/B would compare a scaler change as
+// well as the model's; every view that draws both members gets neither.
+enum class PlaybackInput { None, Decoded, Reference };
+
+inline PlaybackInput PlaybackPicture(bool hasReference, bool neuralView, bool originalView, bool mixIsOne, bool masked)
+{
+    if (!hasReference) return PlaybackInput::Decoded;
+    if (originalView) return PlaybackInput::Reference;
+    if (neuralView && mixIsOne && !masked) return PlaybackInput::Decoded;
+    return PlaybackInput::None;
+}
+
 struct PlaybackState {
     bool enabled = false;         // the setting
     bool ready = false;           // Decide() said Ready and the feature exists
     bool superResolution = false; // DLSS SR made this frame's picture: it is already upscaled
-    bool comparing = false;       // a comparison, a Mix other than 1 or a mask is drawn
+    bool comparing = false;       // PlaybackPicture found no single picture to upscale
     // An HDR (PQ) frame: VSR's input is 8-bit SDR. An HDR display is not a reason -
     // an SDR video on one is still SDR in, and the compositor brings VSR's frame to
     // linear light and encodes it for the display as it does every other member.

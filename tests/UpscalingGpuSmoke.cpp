@@ -1006,10 +1006,21 @@ int RunVsrProbe(const wchar_t* source)
             for(uint32_t i=0;hdrDisplay&&i<3&&again.ReadNext(next);++i)
                 hdrDisplay=r->RenderFrame(next.bgra.data(),next.bgra.size(),nullptr,0,gw,gh,false,false,frameMs)&&r->PlaybackVsrShown()&&!r->GpuUnusable();
             hdrDisplay=hdrDisplay&&r->VsrEvaluations()==beforeHdr+3;
+            if(r->HdrOutputActive())r->SetHdrOutput(false,203.0f);
+            // A pair resident: the Original view is the reference's VSR, as the DLSS 5
+            // view is the decoded frame's, and Split draws both members plain.
+            bool pairViews=hdrDisplay&&again.ReadNext(next)&&r->UploadReferenceFrame(next.bgra.data(),next.bgra.size());
+            plain.mode=ComparisonMode::Original;r->SetComparison(plain);
+            const uint64_t beforeOriginal=r->VsrEvaluations();
+            pairViews=pairViews&&r->RenderFrame(next.bgra.data(),next.bgra.size(),nullptr,0,gw,gh,false,false,frameMs)&&
+                      r->PlaybackVsrShown()&&r->VsrEvaluations()==beforeOriginal+1;
+            plain.mode=ComparisonMode::SplitVertical;r->SetComparison(plain);
+            pairViews=pairViews&&r->PresentCurrent()&&!r->PlaybackVsrShown();
+            plain.mode=ComparisonMode::Neural;r->SetComparison(plain);
             std::cout<<"vsr playback: frames="<<played<<" upscaled="<<upscaled<<" evaluations="<<afterPlay
                      <<" pausedKept="<<paused<<" offRestoresScale="<<off<<" meanAbsVsScale="<<playbackDiff
-                     <<" ownSizeLeftAlone="<<ownSize<<" hdrDisplay="<<hdrDisplay<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
-            playback=playback&&played==10&&upscaled==10&&afterPlay==10&&paused&&off&&ownSize&&hdrDisplay&&playbackDiff>0.05&&playbackDiff<24.0&&
+                     <<" ownSizeLeftAlone="<<ownSize<<" hdrDisplay="<<hdrDisplay<<" pairViews="<<pairViews<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
+            playback=playback&&played==10&&upscaled==10&&afterPlay==10&&paused&&off&&ownSize&&hdrDisplay&&pairViews&&playbackDiff>0.05&&playbackDiff<24.0&&
                      r->VsrOutputW()==ww&&r->VsrOutputH()==wh;
             r.reset();DestroyWindow(playbackWindow);
         }

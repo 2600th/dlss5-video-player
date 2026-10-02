@@ -9285,6 +9285,30 @@ void vsr_policy_playback_upscales_only_a_plain_picture_shown_larger_test()
 // Playback that falls behind while VSR takes a real share of the frame budget steps
 // it down for that video - a quality at a time, then off - and never on one bad
 // window, nor for drops VSR cannot be the cause of.
+// The press-and-hold A/B and the Original view compare the render with what it was
+// made from. With RTX VSR upscaling one member and the plain scale the other, the A/B
+// would show a scaler change as the model's. So both single-picture views get VSR -
+// the render in the DLSS 5 view, the original in the Original view and the peek - and
+// every view that draws both members gets neither.
+void vsr_policy_playback_treats_both_single_picture_views_alike_test()
+{
+    using vsr_policy::PlaybackPicture;
+    using vsr_policy::PlaybackInput;
+    // No reference: the one picture is the decoded frame, whatever the settings say.
+    CHECK(PlaybackPicture(false, true, false, true, false) == PlaybackInput::Decoded);
+    CHECK(PlaybackPicture(false, false, true, false, true) == PlaybackInput::Decoded);
+    // With a reference: the DLSS 5 view untouched is the decoded (neural) frame...
+    CHECK(PlaybackPicture(true, true, false, true, false) == PlaybackInput::Decoded);
+    // ...but not at another Mix or under a mask, which draw both members.
+    CHECK(PlaybackPicture(true, true, false, false, false) == PlaybackInput::None);
+    CHECK(PlaybackPicture(true, true, false, true, true) == PlaybackInput::None);
+    // The Original view and the peek are the reference, at any Mix.
+    CHECK(PlaybackPicture(true, false, true, true, false) == PlaybackInput::Reference);
+    CHECK(PlaybackPicture(true, false, true, false, true) == PlaybackInput::Reference);
+    // Split, Wipe, Difference, Side by side, 2 x 2 and the VSR view itself: neither.
+    CHECK(PlaybackPicture(true, false, false, true, false) == PlaybackInput::None);
+}
+
 void vsr_policy_keep_up_guard_steps_down_only_for_sustained_drops_it_explains_test()
 {
     using namespace vsr_policy;
@@ -15460,6 +15484,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_compositor_stays_out_of_the_capture_program_test),
     TEST_CASE(vsr_policy_decides_the_view_its_ladder_and_its_size_test),
     TEST_CASE(vsr_policy_keep_up_guard_steps_down_only_for_sustained_drops_it_explains_test),
+    TEST_CASE(vsr_policy_playback_treats_both_single_picture_views_alike_test),
     TEST_CASE(vsr_policy_playback_upscales_only_a_plain_picture_shown_larger_test),
     TEST_CASE(hdr_output_leaves_the_capture_programs_alone_test),
     TEST_CASE(hdr_output_follows_the_display_under_the_window_test),

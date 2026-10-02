@@ -480,7 +480,8 @@ cbuffer Compose:register(b1){
     float4 Diff;    // x = difference gain, y = 1 for grey luma, 0 per channel, z = mask on, w = mask inverted
     float4 Subs;    // x = the subtitle overlay is on, y = an RTX VSR frame is bound at t6,
                     // z = split, wipe, difference and side by side compare against it
-    float4 Hdr;     // x = SDR white in nits, y = 1 when Ref holds PQ BT.2020 (R10G10B10A2)
+    float4 Hdr;     // x = SDR white in nits, y = 1 when Ref holds PQ BT.2020 (R10G10B10A2),
+                    // z = RTX VSR upscaled the one picture shown (VsrPolicy.h PlaybackPicture)
 }
 Texture2D Mask:register(t3); Texture2D Labels:register(t4); Texture2D Subtitles:register(t5);
 // RTX Video Super Resolution of the original (P2.8, VsrPolicy.h): 8-bit sRGB, made by
@@ -687,17 +688,21 @@ float4 PSPresentScaled(V i):SV_Target{
     int mode=int(Compare.x+0.5);
     float strength=ColorB.z;
     bool swap=Pane.y>0.5;
+    // RTX VSR as the playback upscaler: its frame is the DLSS 5 view's render or the
+    // Original view's original, made at the size it is shown, in place of this scale.
+    bool upscaled=Hdr.z>0.5;
+    if(upscaled)c=SampleFootprint(Vsr,uv,footprint,true);
     // RTX VSR is the picture in its own view (mode 8) and the compared member of the
     // modes Subs.z names; the renderer sends neither without a frame bound at t6.
     bool vsr=mode==8||Subs.z>0.5;
     if(mode!=0||strength!=1.0||Diff.z>0.5){
         float3 ref=SampleRefFootprint(uv,footprint);
         if(vsr)c=SampleFootprint(Vsr,uv,footprint,true);
-        else{
+        else if(!upscaled){
             if(strength!=1.0)c=ApplyNeuralStrength(c,ref,strength,max(ColorB.w,1.0));
             c=MaskedNeural(c,ref,uv);
         }
-        if(mode==1)c=ref;
+        if(mode==1&&!upscaled)c=ref;
         else if(mode==2)c=lerp(ref,c,saturate(Compare.y));
         else if(mode==5)c=DifferenceOf(c,ref);
         else if(mode!=0&&mode!=8)c=(uv.x<Compare.y)!=swap?ref:c;
@@ -1967,7 +1972,7 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     // shader samples the frame RecordVsr made in place of T. Never for a capture,
     // which passes no target and must stay byte for byte what it was.
     const bool playbackVsr=m_playbackVsrShown&&m_vsrShown&&targetWidth!=0;
-    ComparisonMode mode=playbackVsr?ComparisonMode::Vsr:useReference?cmp.mode:ComparisonMode::Neural;
+    ComparisonMode mode=useReference?cmp.mode:ComparisonMode::Neural;
     // RTX VSR is drawn only from a frame this present made or kept (RecordVsr). Without
     // one its view is the original it would have been made from, tagged as such, and
     // the compared member stays DLSS 5; nothing is ever shown under a name it is not.
@@ -1991,7 +1996,7 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     // The compositor's constants. Harmless for every other pass, none of which declares
     // b1. The tags need both a reference (they name its two members) and an atlas; the
     // row height is what the shader tests, so 0 draws none.
-    const bool labels=useReference&&!playbackVsr&&cmp.labels&&m_labelAtlas&&m_labelRowHeight;
+    const bool labels=useReference&&cmp.labels&&m_labelAtlas&&m_labelRowHeight;
     // The loupe shows the original, so it needs the reference as much as a split does.
     const bool loupe=useReference&&cmp.loupe&&cmp.loupeRadius>0.0f;
     // So does the mask, which blends back to it; and there has to be one uploaded.
@@ -2006,7 +2011,7 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
         cmp.loupeLeftX,cmp.loupeLeftY,cmp.loupeRightX,cmp.loupeRightY,
         std::max(cmp.differenceGain,0.0f),cmp.differenceLuma?1.0f:0.0f,mask?1.0f:0.0f,cmp.maskInvert?1.0f:0.0f,
         m_subtitleShown&&m_debugView==DebugView::Final?1.0f:0.0f,vsrFrame?1.0f:0.0f,againstVsr?1.0f:0.0f,0,
-        m_sdrWhiteNits,useReference&&m_referencePq?1.0f:0.0f,0,0};
+        m_sdrWhiteNits,useReference&&m_referencePq?1.0f:0.0f,playbackVsr?1.0f:0.0f,0};
     cmd->SetGraphicsRoot32BitConstants(RootCompose,ComposeConstantCount,compose,0);
     cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(OverlaySRV));
     cmd->SetGraphicsRootDescriptorTable(RootVsr,SRVGPU(VsrSRV));
@@ -2822,15 +2827,23 @@ bool D3D12Renderer::EnsureVsrOutput(uint32_t width,uint32_t height){
     return true;
 }
 
+vsr_policy::PlaybackInput D3D12Renderer::PlaybackVsrInput()const{
+    return vsr_policy::PlaybackPicture(m_hasReference,m_comparison.mode==ComparisonMode::Neural,m_comparison.mode==ComparisonMode::Original,
+                                       m_comparison.strength==1.0f,m_comparison.mask&&static_cast<bool>(m_mask));
+}
+
 bool D3D12Renderer::PlaybackVsrApplies(const present_scale::Target&target)const{
     vsr_policy::PlaybackState state{};
     state.enabled=m_comparison.playbackVsr;
-    state.ready=m_vsr.FeatureCreated()&&m_decodedTexture&&!m_sourceInCopyDest;
     state.superResolution=m_lastDLSSUsed&&DLSSEnabled();
     // The one plain picture: with a reference resident, any comparison, a Mix other
     // than 1 or a mask is drawn from both members, and VSR of one would drop the other.
-    state.comparing=m_hasReference&&(m_comparison.mode!=ComparisonMode::Neural||m_comparison.strength!=1.0f||(m_comparison.mask&&m_mask));
-    state.hdr=m_framePq;
+    const vsr_policy::PlaybackInput input=PlaybackVsrInput();
+    state.comparing=input==vsr_policy::PlaybackInput::None;
+    // Ready means the feature exists and the picture's own texture holds a frame.
+    const bool reference=input==vsr_policy::PlaybackInput::Reference;
+    state.ready=m_vsrFailures<3&&m_vsr.FeatureCreated()&&(reference?(m_reference&&!m_referenceInCopyDest):(m_decodedTexture&&!m_sourceInCopyDest));
+    state.hdr=reference?m_referencePq:m_framePq;
     state.finalView=m_debugView==DebugView::Final;
     state.sourceW=m_sourceW;state.sourceH=m_sourceH;state.targetW=target.width;state.targetH=target.height;
     return vsr_policy::PlaybackUpscales(state);
@@ -2841,9 +2854,12 @@ void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const 
     if(m_debugView!=DebugView::Final||!m_vsr.FeatureCreated()||slot>=FrameCount)return;
     if(PlaybackVsrApplies(target)){
         // The decoded frame is the picture the compositor would have scaled: T is its
-        // linearisation and nothing else (PSConvert), so VSR reads the same pixels.
+        // linearisation and nothing else (PSConvert), so VSR reads the same pixels. The
+        // Original view's picture is the reference, the 8-bit original of the pair.
         const auto size=vsr_policy::OutputSize(m_sourceW,m_sourceH,target.width,target.height);
-        m_playbackVsrShown=EvaluateVsr(cmd,slot,m_decodedTexture.Get(),2u,m_decodedSerial,size,m_comparison.playbackVsrQuality);
+        m_playbackVsrShown=PlaybackVsrInput()==vsr_policy::PlaybackInput::Reference
+            ?EvaluateVsr(cmd,slot,m_reference.Get(),1u,m_referenceSerial,size,m_comparison.playbackVsrQuality)
+            :EvaluateVsr(cmd,slot,m_decodedTexture.Get(),2u,m_decodedSerial,size,m_comparison.playbackVsrQuality);
         return;
     }
     if(!ComparisonReadsVsr(m_comparison))return;
@@ -2879,6 +2895,8 @@ bool D3D12Renderer::EvaluateVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,ID3D
     // A refused evaluate is not retried until the input, the size or the quality
     // moves: VsrEngine has logged why, and a retry per present would only repeat it.
     m_vsrInputKind=inputKind;m_vsrSerial=serial;m_vsrQuality=quality;m_vsrValid=evaluated;m_vsrShown=evaluated;
+    if(evaluated)m_vsrFailures=0;
+    else if(++m_vsrFailures==3)LOG("RTX VSR refused three evaluates in a row; playback upscaling stops asking for this renderer.");
     return evaluated;
 }
 
