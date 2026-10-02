@@ -39,13 +39,22 @@ decisions that still shape the code are in
   `--render` and `dlss5-convert` take `--sr-engine vsr|dlss`; `--history`
   alone still means DLSS, so existing scripts keep their output. `probe` lists
   `sr_engines`, and `sr` is offered wherever either engine can run.
+- **RTX VSR exports are up to three times faster.** The pass reads frames back
+  from the GPU and hands them to the encoder while the next ones render, where
+  it used to stop for each: 1080p to 2160p went from 23 to 70 fps on an RTX 5090,
+  540p to 1080p from 112 to 157. The output is the same, frame for frame.
+- **Resizing the window no longer stalls RTX VSR.** A new size gets its VSR
+  surface once the window has held it for a moment, instead of at every size
+  the drag passes through, each of which waited for the GPU.
 
 ### Fixed
 
-- **Release notes no longer claim renders carry over between versions.** The
-  render cache has been keyed by the player version since 0.12, so 0.26.1, 0.26.2
-  and 0.27.0 rendered every video again once, whatever their notes said. They
-  are corrected, and 0.28.0 renders again once too.
+- **Renders survive updates.** The render cache was keyed by the player version
+  since 0.12, so every release rendered every video again once - 0.26.1, 0.26.2
+  and 0.27.0 included, whatever their notes said; those notes are corrected. The
+  key now changes only when a release changes what a render writes, so 0.28.0
+  reuses renders made with 0.27.2 (earlier ones render again once), and a later
+  release keeps them unless its notes say otherwise.
 - **Generated frames no longer offers what the GPU cannot do.** Once Frame
   Generation has been measured, multiples above the runtime's limit are greyed
   and say the GPU's highest, and the confirmation says when the setting was
@@ -54,6 +63,22 @@ decisions that still shape the code are in
 - **A refused compare key says why.** Pressing a compare view with no neural
   render, with Neural Rendering off or with no video shows a notice naming what
   is missing, where it used to do nothing.
+
+### Release
+
+- Pull requests build and test a quick configuration: the shipped programs and
+  the device-free suites, without the GPU smokes a hosted runner cannot run and
+  without link-time optimisation, which re-optimised the whole player once per
+  test program. The slowest child-process cases and the real-media export suite
+  form a `slow` tier that a nightly run on `main`, and every release, add back
+  with code analysis and AddressSanitizer.
+- Two test-order and machine-load dependencies behind the intermittent
+  PolicyTests failure are fixed: leak checks take their baseline after a warm-up
+  run, and waits for a closed child process no longer give up after 500 ms.
+- `tools/publish_release.ps1` finishes a release: it verifies the complete
+  package, names it, writes its checksum and attaches both to the draft, and
+  publishing attests it automatically. A patch release no longer needs every
+  guide re-stamped.
 
 ## 0.27.2 - 2026-10-02
 
