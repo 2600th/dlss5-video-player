@@ -3265,6 +3265,34 @@ void a_resident_helper_that_throws_while_idle_does_not_fail_the_next_job_test()
     CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
 }
 
+// The processCreated hook runs once the suspended helper is in its job, so a
+// hook that throws takes the helper with the job object - but the process and
+// thread handles CreateProcess returned were raw and leaked, two per launch.
+void a_throwing_process_created_hook_leaks_no_handles_test()
+{
+    const auto throwOnCreate = [] {
+        try {
+            RunNeuralWorker(CurrentExecutable(), TestRequest(L"valid-source.mkv"), {}, {}, {},
+                            kDefaultCrashRelaunchLimit,
+                            [] { throw std::runtime_error("processCreated"); });
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    // Once first, so whatever a first launch opens for good is not counted.
+    CHECK(throwOnCreate());
+    DWORD before = 0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &before) != FALSE);
+    constexpr DWORD kLaunches = 8;
+    for (DWORD launch = 0; launch < kLaunches; ++launch) CHECK(throwOnCreate());
+    DWORD after = 0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &after) != FALSE);
+    // A leak is two handles a launch; a little slack for the rest of the process.
+    CHECK(after < before + kLaunches);
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -3336,5 +3364,6 @@ int wmain(int argc, wchar_t** argv)
     a_terminal_message_of_the_wrong_kind_is_malformed_on_every_path_test();
     a_helper_that_throws_mid_job_is_relaunched_as_a_crash_test();
     a_resident_helper_that_throws_while_idle_does_not_fail_the_next_job_test();
+    a_throwing_process_created_hook_leaks_no_handles_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

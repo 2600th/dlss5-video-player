@@ -736,31 +736,36 @@ StartOutcome StartHelper(const std::filesystem::path& executable,
         outcome.detail = ErrorDetail(L"Starting the isolated neural helper failed");
         return outcome;
     }
+    // Owned from here, so a callback that throws below closes both rather than
+    // leaving them to the process's lifetime. Declared after `job`, so they
+    // close first and the job's kill-on-close still ends the helper.
+    ScopedHandle processHandle(process.hProcess);
+    ScopedHandle threadHandle(process.hThread);
     // The helper exists from here on, suspended. This is the boundary the
     // player's Launch phase ends at: the process is the parent's last
     // observation before the loader window the helper measures itself. Reported
     // once the helper is in its job, never before: a callback that throws then
     // unwinds through the kill-on-close job and takes the suspended helper
     // with it, where before the assignment it left one suspended outside any job.
-    const bool assigned = AssignProcessToJobObject(job.Get(), process.hProcess) != FALSE;
+    const bool assigned = AssignProcessToJobObject(job.Get(), processHandle.Get()) != FALSE;
     if (assigned && processCreated) processCreated();
-    const DWORD resumed = assigned ? ResumeThread(process.hThread) : static_cast<DWORD>(-1);
-    CloseHandle(process.hThread);
+    const DWORD resumed = assigned ? ResumeThread(threadHandle.Get()) : static_cast<DWORD>(-1);
+    threadHandle = ScopedHandle{};
     if (!assigned || resumed == static_cast<DWORD>(-1)) {
         outcome.detail = assigned ? ErrorDetail(L"Resuming the isolated neural helper failed") :
                                     L"The isolated neural helper could not be assigned to its job.";
-        HelperProcess doomed{process.hProcess, job.Release(), nullptr, nullptr};
+        HelperProcess doomed{processHandle.Release(), job.Release(), nullptr, nullptr};
         EndHelper(doomed, 0);
         return outcome;
     }
     auto metadata = std::make_unique<MetadataPipe>(metadataRead.Release());
     if (!metadata->Valid()) {
         outcome.detail = ErrorDetail(L"Starting the neural helper metadata reader failed");
-        HelperProcess doomed{process.hProcess, job.Release(), std::move(metadata), nullptr};
+        HelperProcess doomed{processHandle.Release(), job.Release(), std::move(metadata), nullptr};
         EndHelper(doomed, 0);
         return outcome;
     }
-    outcome.helper = {process.hProcess, job.Release(), std::move(metadata), commandWrite.Release()};
+    outcome.helper = {processHandle.Release(), job.Release(), std::move(metadata), commandWrite.Release()};
     outcome.helperMetadata = metadataWrite.Get();
     outcome.helperPause = inheritedPause.Get();
     return outcome;
