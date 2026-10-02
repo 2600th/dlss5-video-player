@@ -317,6 +317,8 @@ add_library(player_app OBJECT
     src/DLSSGBackend.cpp src/DLSSGBackend.h
     src/FrameGenerationPass.cpp src/FrameGenerationPass.h
     src/VsrUpscalePass.cpp src/VsrUpscalePass.h
+    # Export with DLSS stages: the dialog and --render run these passes.
+    src/StageExport.cpp src/StageExport.h
     src/AudioPlayer.cpp src/AudioPlayer.h src/WasapiRenderer.cpp
     src/SubtitleOverlay.cpp src/SubtitleOverlay.h src/SubtitlePolicy.h
     src/RecentMedia.cpp src/RecentMedia.h
