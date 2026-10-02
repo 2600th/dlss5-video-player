@@ -62,6 +62,11 @@ for ($i = $start + 1; $i -lt $lines.Count; $i++) {
 # describe the current tree, which is the opposite of what they are. README is
 # absent too: it is the front page for people deciding whether to download, and
 # its release entry below is already checked against VERSION.
+#
+# A stamp only has to name this release's major.minor: a patch release is a
+# fix, and making every one re-stamp sixteen guides turned the stamp into a
+# sixteen-file commit per hotfix that recorded no re-reading at all. A minor or
+# major release still needs every guide re-read and re-stamped.
 $stampedDocs = @(
     'TECHNICAL_OVERVIEW.md', 'CONTRIBUTING.md', 'SECURITY.md', 'THIRD_PARTY.md',
     'docs/USAGE.md', 'docs/BUILDING.md', 'docs/TROUBLESHOOTING.md', 'docs/ARCHITECTURE.md',
@@ -70,13 +75,16 @@ $stampedDocs = @(
     'external/youtube/README.md'
 )
 $stampPattern = '^_Verified against ([0-9]+\.[0-9]+\.[0-9]+) \(([0-9a-f]{7,40})\) on ([0-9]{4}-[0-9]{2}-[0-9]{2})\._$'
+$minorLine = ($version -split '\.')[0..1] -join '.'
 $stale = @()
 foreach ($doc in $stampedDocs) {
     $path = Join-Path $repositoryRoot $doc
     $stamp = Select-String -LiteralPath $path -Pattern $stampPattern | Select-Object -First 1
     if (-not $stamp) { $stale += "$doc has no '_Verified against <version> (<sha>) on <date>._' line"; continue }
     $stampedVersion = $stamp.Matches[0].Groups[1].Value
-    if ($stampedVersion -ne $version) { $stale += "$doc was last verified against $stampedVersion, not $version" }
+    if ((($stampedVersion -split '\.')[0..1] -join '.') -ne $minorLine) {
+        $stale += "$doc was last verified against $stampedVersion, not a $minorLine.x release"
+    }
 }
 if ($stale.Count) {
     throw ("Re-read these against the code and re-stamp them before tagging {0}:`n  {1}" -f $version, ($stale -join "`n  "))
