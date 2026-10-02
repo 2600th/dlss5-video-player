@@ -8255,16 +8255,27 @@ struct ScopedEnvironmentVariable {
 
 size_t count_named_processes(std::wstring_view executableName);
 bool wait_for_named_process_count(std::wstring_view executableName,size_t expected,std::chrono::milliseconds timeout);
-// How long a child the decoder closed may take to be gone. Under
-// AddressSanitizer the fake ffmpeg/ffprobe are copies of this instrumented
-// executable, whose start and exit are several times slower: on CI's runner a
-// 500 ms wait missed. A leaked child never exits, so the longer wait keeps the
-// leak check and drops only the latency one.
-#if defined(__SANITIZE_ADDRESS__)
+// A handle-leak check takes its baseline after one run of the code under test.
+// The first run in a process creates handles that live until it exits - the
+// thread pool's, the loader's, the first window's - so a check that happened to
+// run first, as `--only=` runs it, counted those as a leak and failed, while
+// the same check passed in the full run only because an earlier case had paid
+// for them.
+template<class WarmUp>
+DWORD handle_count_after_warm_up(WarmUp&& warmUp)
+{
+    warmUp();
+    DWORD count=0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(),&count)!=FALSE);
+    return count;
+}
+// How long a child the decoder closed may take to be gone. A leaked child never
+// exits, so a long wait keeps the leak check and drops only a latency one, and a
+// wait that is met returns at once. It was 500 ms outside AddressSanitizer, and
+// a loaded machine - suites run in parallel by `ctest -j`, or a build beside
+// them - missed it: the fake ffmpeg/ffprobe are copies of this executable, and
+// their start and exit slow down with everything else.
 constexpr std::chrono::milliseconds kChildExitWait{5000};
-#else
-constexpr std::chrono::milliseconds kChildExitWait{500};
-#endif
 
 struct MediaFixture {
     std::filesystem::path directory;
@@ -10681,12 +10692,18 @@ void video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_netwo
 
 void youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test()
 {
-    MediaFixture fixture;const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");DWORD beforeHandles=0,afterHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    MediaFixture fixture;const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");
+    const DWORD beforeHandles=handle_count_after_warm_up([&]{
+        auto audio=AudioPlayerTestAccess::Create(fixture.directory,true,true);
+        CHECK(audio->Start(L"https://media.invalid/audiohold",7.5,AudioStartState::Paused));audio->Stop();
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
+    });
+    DWORD afterHandles=0;
     for(int cycle=0;cycle<8;++cycle){
         auto audio=AudioPlayerTestAccess::Create(fixture.directory,cycle%2==0,cycle%3==0);
         CHECK(audio->Start(L"https://media.invalid/audiohold",7.5,AudioStartState::Paused));CHECK(audio->Paused());CHECK_EQ(7.5,AudioPlayerTestAccess::SeekBase(*audio));CHECK_EQ(uint64_t{0},AudioPlayerTestAccess::SubmittedBuffers(*audio));
         const auto started=std::chrono::steady_clock::now();if(cycle%2==0)audio->Stop();else audio.reset();CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
-        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,std::chrono::milliseconds{500}));
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
     }
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
 }
@@ -10695,7 +10712,11 @@ void youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_l
 {
     MediaFixture fixture;
     const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");
-    DWORD beforeHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    const DWORD beforeHandles=handle_count_after_warm_up([&]{
+        auto audio=AudioPlayerTestAccess::Create(fixture.directory,true,true,true,true,true,true);
+        CHECK(audio->Start(L"https://media.invalid/audiohold",3.0,AudioStartState::Paused));audio->Stop();
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
+    });
     for(int cycle=0;cycle<12;++cycle){
         auto audio=AudioPlayerTestAccess::Create(fixture.directory,true,true,true,true,true,true);
         CHECK(audio->Start(L"https://media.invalid/audiohold",3.0,AudioStartState::Paused));
@@ -10705,7 +10726,7 @@ void youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_l
             audio->Stop();
         }else if(cycle%3==1){audio->Stop();}else{audio.reset();}
         CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
-        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,std::chrono::milliseconds{500}));
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
     }
     const auto handlesDeadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
     DWORD afterHandles=0;
@@ -10974,14 +10995,24 @@ void youtube_candidate_render_failure_releases_window_handle_and_prepared_proces
 
     MediaFixture fixture;
     const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");
-    DWORD beforeHandles=0,afterHandles=0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    const DWORD beforeHandles=handle_count_after_warm_up([&]{
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        auto audio=AudioPlayerTestAccess::Create(fixture.directory);
+        CHECK(decoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));
+        CHECK(audio->Start(L"https://media.invalid/audiohold",9.0,AudioStartState::Paused));
+        HWND window=CreateWindowExW(0,L"STATIC",L"warm-up",0,0,0,1,1,HWND_MESSAGE,nullptr,GetModuleHandleW(nullptr),nullptr);
+        CHECK(window!=nullptr);
+        if(window)DestroyWindow(window);
+        audio.reset();decoder.reset();
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
+    });
+    DWORD afterHandles=0;
     auto preparedDecoder=VideoDecoderTestAccess::Create(fixture.directory);
     auto preparedAudio=AudioPlayerTestAccess::Create(fixture.directory);
     CHECK(preparedDecoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));
     CHECK(preparedAudio->Start(L"https://media.invalid/audiohold",9.0,AudioStartState::Paused));
     CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses+2,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 
     ActivePlayback active;
     const ActivePlayback before=active;
@@ -11011,7 +11042,7 @@ void youtube_candidate_render_failure_releases_window_handle_and_prepared_proces
     preparedAudio.reset();
     preparedDecoder.reset();
     CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
     const auto handlesDeadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
     do{
         CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);
@@ -11304,9 +11335,10 @@ void youtube_resolver_repeated_runs_leave_process_handle_count_stable_test()
 {
     ResolverFixture fixture;
     auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
-    DWORD before = 0;
+    const DWORD before = handle_count_after_warm_up([&] {
+        CHECK(resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", {}).ok);
+    });
     DWORD after = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &before) != FALSE);
     for (int run = 0; run < 20; ++run) {
         const ResolveResult result = resolver->Resolve(
             L"https://youtu.be/dQw4w9WgXcQ?success", {});
@@ -11981,7 +12013,7 @@ void youtube_resolver_holds_verified_helpers_against_replacement_until_completio
         result = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {});
     });
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses + 1,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 
     const std::filesystem::path replacement = fixture.directory / L"replacement-deno.exe";
     write_binary_file(replacement, "replacement");
@@ -12034,7 +12066,7 @@ void youtube_resolver_forces_package_local_deno_cache_over_parent_override_test(
     CHECK(!std::filesystem::exists(callerXdgMarker, error));
     CHECK(!error);
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 
     std::filesystem::remove_all(callerCache, error);
     CHECK(!error);
@@ -12069,7 +12101,7 @@ void youtube_resolver_disables_default_plugin_execution_from_inherited_config_te
     CHECK(!std::filesystem::exists(executionMarker, error));
     CHECK(!error);
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
     std::filesystem::remove_all(callerConfig, error);
     CHECK(!error);
 }
@@ -12127,7 +12159,7 @@ void youtube_resolver_queued_stop_token_cancels_before_launch_test()
     CHECK_EQ(ResolveError::Cancelled, queued.error);
     Sleep(50);
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 }
 
 void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test()
@@ -12145,10 +12177,16 @@ void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test
     };
 
     for (const Case& test : cases) {
-        DWORD beforeHandles = 0;
-        DWORD afterHandles = 0;
-        CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeHandles) != FALSE);
         const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+        const DWORD beforeHandles = handle_count_after_warm_up([&] {
+            auto warmUp = YouTubeResolverTestAccess::Create(
+                fixture.directory, std::chrono::seconds{5}, test.stage);
+            CHECK_EQ(test.expected, warmUp->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {}).error);
+            warmUp.reset();
+            CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                               kChildExitWait));
+        });
+        DWORD afterHandles = 0;
         auto resolver = YouTubeResolverTestAccess::Create(
             fixture.directory, std::chrono::seconds{5}, test.stage);
         const auto started = std::chrono::steady_clock::now();
@@ -12163,7 +12201,7 @@ void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test
         CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterHandles) != FALSE);
         CHECK(afterHandles <= beforeHandles + 2);
         CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                           std::chrono::milliseconds{500}));
+                                           kChildExitWait));
     }
 }
 
@@ -12171,10 +12209,17 @@ void youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_
 {
     ResolverFixture fixture;
     constexpr int repetitions = 16;
-    DWORD beforeHandles = 0;
-    DWORD afterHandles = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeHandles) != FALSE);
     const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+    const DWORD beforeHandles = handle_count_after_warm_up([&] {
+        auto warmUp = YouTubeResolverTestAccess::Create(
+            fixture.directory, std::chrono::seconds{5},
+            YouTubeResolver::FailureStage::PipeHandlesOwned);
+        CHECK_EQ(ResolveError::StartFailed, warmUp->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {}).error);
+        warmUp.reset();
+        CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                           kChildExitWait));
+    });
+    DWORD afterHandles = 0;
 
     for (int repetition = 0; repetition < repetitions; ++repetition) {
         auto resolver = YouTubeResolverTestAccess::Create(
@@ -12187,7 +12232,7 @@ void youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_
         CHECK(elapsed < std::chrono::seconds{2});
         resolver.reset();
         CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                           std::chrono::milliseconds{500}));
+                                           kChildExitWait));
 
         size_t entries = 0;
         std::error_code error;
@@ -12208,24 +12253,13 @@ void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test
     ResolverFixture fixture;
     const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
 
-    DWORD beforeTimeoutHandles = 0;
-    DWORD afterTimeoutHandles = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeTimeoutHandles) != FALSE);
-    for (int cycle = 0; cycle < 4; ++cycle) {
+    const auto timeOut = [&] {
         auto timeoutResolver = YouTubeResolverTestAccess::Create(
             fixture.directory, std::chrono::milliseconds{80});
         CHECK_EQ(ResolveError::TimedOut,
                  timeoutResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {}).error);
-    }
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterTimeoutHandles) != FALSE);
-    CHECK(afterTimeoutHandles <= beforeTimeoutHandles + 2);
-    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
-
-    DWORD beforeCancelHandles = 0;
-    DWORD afterCancelHandles = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeCancelHandles) != FALSE);
-    for (int cycle = 0; cycle < 4; ++cycle) {
+    };
+    const auto cancel = [&] {
         auto cancelResolver = YouTubeResolverTestAccess::Create(
             fixture.directory, std::chrono::seconds{5});
         ResolveResult cancelled;
@@ -12236,25 +12270,37 @@ void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test
         cancelResolver->Cancel();
         worker.join();
         CHECK_EQ(ResolveError::Cancelled, cancelled.error);
-    }
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterCancelHandles) != FALSE);
-    CHECK(afterCancelHandles <= beforeCancelHandles + 2);
-    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
-
-    DWORD beforeOverflowHandles = 0;
-    DWORD afterOverflowHandles = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeOverflowHandles) != FALSE);
-    for (int cycle = 0; cycle < 4; ++cycle) {
+    };
+    const auto overflow = [&] {
         auto overflowResolver = YouTubeResolverTestAccess::Create(fixture.directory);
         CHECK_EQ(ResolveError::OutputTooLarge,
                  overflowResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?cap64plus", {}).error);
-    }
+    };
+
+    const DWORD beforeTimeoutHandles = handle_count_after_warm_up(timeOut);
+    DWORD afterTimeoutHandles = 0;
+    for (int cycle = 0; cycle < 4; ++cycle) timeOut();
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterTimeoutHandles) != FALSE);
+    CHECK(afterTimeoutHandles <= beforeTimeoutHandles + 2);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       kChildExitWait));
+
+    const DWORD beforeCancelHandles = handle_count_after_warm_up(cancel);
+    DWORD afterCancelHandles = 0;
+    for (int cycle = 0; cycle < 4; ++cycle) cancel();
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterCancelHandles) != FALSE);
+    CHECK(afterCancelHandles <= beforeCancelHandles + 2);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       kChildExitWait));
+
+    const DWORD beforeOverflowHandles = handle_count_after_warm_up(overflow);
+    DWORD afterOverflowHandles = 0;
+    for (int cycle = 0; cycle < 4; ++cycle) overflow();
     Sleep(50);
     CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterOverflowHandles) != FALSE);
     CHECK(afterOverflowHandles <= beforeOverflowHandles + 2);
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 }
 
 void ngx_same_device_overlapping_sessions_initialize_and_shutdown_once_test()
