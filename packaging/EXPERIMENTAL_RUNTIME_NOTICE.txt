@@ -1,12 +1,12 @@
 EXPERIMENTAL DLSS NEURAL-RENDERING RUNTIME
 
-PRIVATE LOCAL TEST BUILD - NOT A PUBLIC RELEASE
+COMMUNITY PROJECT - NOT AN NVIDIA PRODUCT - USE AT YOUR OWN RISK
 
-This assembled bundle is intended for private testing and experimentation.
-Third-party components remain the property of their respective owners and are
-governed by their own licenses; the project's MIT license does not relicense
-them. This notice does not grant additional rights or override upstream terms.
-Keep this bundle private while redistribution permission remains unresolved.
+This package bundles third-party components for experimentation. They remain
+the property of their respective owners and are governed by their own
+licenses; the project's MIT license does not relicense them, and this notice
+grants no rights beyond those terms. No permission from those owners to
+redistribute the modified runtime set is claimed. See THIRD_PARTY.md.
 
 This package includes a community-modified NVIDIA neural-rendering DLL
 (ShortFuse's universal 310.8.SF-v2 build). The modification removed its
@@ -18,15 +18,14 @@ The runtime policy enables neural rendering on every detected NVIDIA RTX GPU
 (GeForce RTX 20 through 50 and RTX-branded workstation/laptop parts). NVIDIA's
 official DLSS 5 launch support is RTX 50-only, with RTX 40 announced for
 later; support for anything else here is an unofficial community
-modification, verified in this project on an RTX 4080 SUPER only. DLAA is the
-default native-resolution carrier, so spatial DLSS upscaling remains off until
-the user explicitly selects it.
+modification, verified in this project on an RTX 5090 and an RTX 4080 SUPER.
+DLAA is the default native-resolution carrier, so spatial DLSS upscaling
+remains off until the user explicitly selects it.
 
 If the experimental path misbehaves, choose Advanced > Restart in DLSS SR safe
 mode, or launch `DLSSVideoPlayer.exe --safe-mode`. Safe mode disables the
 experimental add-on without claiming that normal mode successfully evaluated a
 neural workload.
 
-No NVIDIA, ReShade, RenoDX, or Streamline endorsement is claimed. Redistribution
-permission for the supplied modified/runtime binary set is unresolved; review
-the upstream terms and THIRD_PARTY.md before sharing this package.
+No NVIDIA, ReShade, RenoDX, or Streamline endorsement is claimed. Review the
+upstream terms and THIRD_PARTY.md before sharing this package further.

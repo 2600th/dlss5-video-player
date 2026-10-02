@@ -1,5 +1,11 @@
 # Super Resolution history: Temporal against Per-frame — 24 September 2026, RTX 4080 SUPER
 
+> **Later:** the viewer's default became **Per-frame (recommended)** after this
+> report (`kRecommendedUpscalingHistory`, `UpscalingPolicy.h`); jobs that name no
+> history still parse as Temporal. Since 0.28.0 RTX VSR, not DLSS SR, is the
+> playback upscaler by default (`docs/measurements/vsr-quality-20261002`). The
+> text below is the record of 24 September and is left as it was.
+
 **What shipped.** DLSS Upscaling stays off by default, as before. It now has a
 **History** choice: **Temporal (steadier)**, the default and what it always did, or
 **Per-frame (sharper on some clips)**, which resets DLSS's history on every frame so

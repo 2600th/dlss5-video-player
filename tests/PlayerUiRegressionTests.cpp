@@ -214,6 +214,15 @@ struct PlayerAppTestAccess {
         // adjustments it sits with, clamps to the 0..2 the shader composites over, and
         // reads back as 1 (the neural frame untouched) when the key is absent.
         CHECK(std::abs(app.m_comparison.strength - 0.4f) < 0.001f);
+        // RTX VSR's setting persists, and a file without the key is the default.
+        app.m_playbackVsr = false;
+        app.SaveVideoSettings();
+        app.m_playbackVsr = true;
+        app.LoadVideoSettings();
+        CHECK(!app.m_playbackVsr);
+        WritePrivateProfileStringW(L"Playback", L"RtxVsr", nullptr, app.SettingsPath().c_str());
+        app.LoadVideoSettings();
+        CHECK(app.m_playbackVsr);
         // The upscaling target persists as two independent facts, and the split
         // is the whole reason an existing install can reach Auto at all. Every
         // release before this one wrote UpscaleHeight on every save, so a 1440
@@ -419,6 +428,33 @@ struct PlayerAppTestAccess {
         CHECK(!comparisonContent.active);
         CHECK(app.m_neuralRequested);
         CHECK(!app.m_upscalingRequested);
+        // RTX VSR upscales playback by default (docs/measurements/vsr-quality-20261002),
+        // the menu command turns it off and on, and every presentation the player
+        // pushes carries it - the capture never does, since it pushes none.
+        CHECK(app.m_playbackVsr);
+        CHECK(app.EffectiveComparison().playbackVsr);
+        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        CHECK(!app.m_playbackVsr);
+        CHECK(!app.EffectiveComparison().playbackVsr);
+        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        CHECK(app.m_playbackVsr);
+        // The keep-up guard lowers playback's quality for one video and never the
+        // comparison ladder's; a choice made from the menu clears what it did.
+        app.m_vsrSessionQuality=vsr_policy::Quality::Low;
+        CHECK(app.EffectiveComparison().playbackVsrQuality==vsr_policy::Quality::Low);
+        CHECK(app.EffectiveComparison().vsrQuality==app.m_comparison.vsrQuality);
+        app.m_vsrSessionOff=true;
+        CHECK(!app.EffectiveComparison().playbackVsr);
+        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        CHECK(app.EffectiveComparison().playbackVsr);
+        CHECK(!app.m_vsrSessionQuality.has_value());
+        // A quality picked from the menu is the user's too: the guard's lowering ends.
+        app.m_vsrSessionQuality=vsr_policy::Quality::Low;
+        app.SetVsrQuality(vsr_policy::Quality::Ultra);
+        CHECK(!app.m_vsrSessionQuality.has_value());
+        CHECK(app.EffectiveComparison().playbackVsrQuality==vsr_policy::Quality::Ultra);
+        app.SetVsrQuality(vsr_policy::Quality::High);
         // Auto is the fresh default, and it is a state of its own: the manual
         // rung underneath it must not move until a rung is actually picked.
         CHECK(app.m_upscaleAuto);
@@ -1575,6 +1611,34 @@ struct PlayerAppTestAccess {
             DeleteObject(bitmap);
             DeleteDC(dc);
 
+            // Every choice reads in full: a dropdown's longest item fits the box
+            // beside its arrow, in the dialog's own font. The export dialog's
+            // History box showed "Per-frame (recommendec" at 100%.
+            EnumChildWindows(dialog, [](HWND child, LPARAM) -> BOOL {
+                wchar_t kind[32]{};
+                GetClassNameW(child, kind, 32);
+                if (std::wstring_view(kind) != L"ComboBox") return TRUE;
+                COMBOBOXINFO info{sizeof(info)};
+                CHECK(GetComboBoxInfo(child, &info) != FALSE);
+                const int available = int(info.rcItem.right - info.rcItem.left);
+                HDC measure = GetDC(child);
+                const HGDIOBJ oldFont = SelectObject(measure, reinterpret_cast<HFONT>(SendMessageW(child, WM_GETFONT, 0, 0)));
+                const LRESULT count = SendMessageW(child, CB_GETCOUNT, 0, 0);
+                for (LRESULT index = 0; index < count; ++index) {
+                    std::wstring text(size_t(SendMessageW(child, CB_GETLBTEXTLEN, WPARAM(index), 0)), L'\0');
+                    SendMessageW(child, CB_GETLBTEXT, WPARAM(index), reinterpret_cast<LPARAM>(text.data()));
+                    SIZE extent{};
+                    CHECK(GetTextExtentPoint32W(measure, text.c_str(), int(text.size()), &extent) != FALSE);
+                    // The box draws its text inset by a few pixels on each side.
+                    const bool fits = extent.cx + 6 <= available;
+                    if (!fits) std::wcerr << L"  dropdown item does not fit (" << extent.cx << L" + 6 > " << available << L"): " << text << L'\n';
+                    CHECK(fits);
+                }
+                SelectObject(measure, oldFont);
+                ReleaseDC(child, measure);
+                return TRUE;
+            }, 0);
+
             // Moving to a monitor at a higher dpi: the controls, the font and
             // the client all follow, from the dialog's own baseline. 1.5x where
             // the scaled window fits this display, else the largest step that
@@ -1841,6 +1905,17 @@ struct PlayerAppTestAccess {
             CHECK(app.EffectiveComparison().labelFade < 1.0f);
             std::this_thread::sleep_for(chrome_motion::kHoverIn + std::chrono::milliseconds(30));
             CHECK_EQ(1.0f, app.EffectiveComparison().labelFade);
+            // The first timer tick can arrive after the whole fade - a slow
+            // mode change, a busy queue - and must still hand the renderer the
+            // landed level. It used to find nothing moving, now or before, and
+            // a paused frame kept its tags invisible.
+            {
+                const bool seeking = app.m_seeking;
+                app.m_seeking = true; // no present: this renderer has no device
+                app.AnimateTagFade(Clock::now());
+                CHECK_EQ(1.0f, app.m_renderer->GetComparison().labelFade);
+                app.m_seeking = seeking;
+            }
             app.m_activityMotionEnabled = false;
             app.SetComparisonMode(ComparisonMode::Wipe);
             CHECK_EQ(1.0f, app.EffectiveComparison().labelFade);

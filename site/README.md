@@ -113,7 +113,7 @@ the page names into `media/` at build time (the list is `$mediaFiles`). What
 `site/src/assets/` commits is small: the hero's two 1920x1080 plates, and the
 AVIF and WebP variants the page offers first. A built `dist/` is about 16 MB,
 13 MB of it `media/` - the 6 MB demonstration, the five comparison stills as
-PNG (0.6-0.8 MB each) and eleven player screenshots - but a visitor only fetches
+PNG (0.6-0.8 MB each) and thirteen player screenshots - but a visitor only fetches
 the variants and, on request, the video; the full-size files are the
 `<img>` fallbacks and the "full size" links.
 

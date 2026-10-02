@@ -6,20 +6,19 @@
 #include <cstdint>
 
 // RTX Video Super Resolution (P2.8): NVIDIA's video super resolution, trained on
-// compressed video, run live on the original the player already decodes and shown
-// as a comparison view beside DLSS 5. It is presentation only - the window
-// compositor reads it, and nothing that reaches the cache capture, an export or a
-// cache key does - so it needs no render and no cache. The engine itself is
+// compressed video, run live on the frame the player already decodes. It is the
+// playback upscaler wherever the window shows the picture larger than the video,
+// a comparison view beside DLSS 5, and an export's default upscaler
+// (VsrUpscalePass). It never reaches the cache capture or a cache key, so it
+// needs no render and no cache. The engine itself is
 // VsrEngine; this is what can be decided without a GPU: the quality it runs at,
 // whether it can run and what to say when it cannot, and how large a frame it makes.
 namespace vsr_policy {
 
 // NGX's own numbers (NVSDK_NGX_VSR_QualityLevel): 0 is bicubic and 1 to 4 the
 // network at rising cost. The ladder offers the four network levels; bicubic is a
-// scaler the compositor already is. High is the default: on an RTX 4080 SUPER a
-// 1440p frame measured 5.6 ms there against 7.8 ms at Ultra, and a 1080p frame
-// 3.2 ms against 4.3 ms (the spike's table in the p28 report), so High holds a
-// 1440p 30 fps clip with room left in every frame.
+// scaler the compositor already is. High is the default: it scored best on average,
+// and Ultra costs more for no better picture (docs/measurements/vsr-quality-20261002/REPORT.md).
 enum class Quality : int { Low = 1, Medium = 2, High = 3, Ultra = 4 };
 inline constexpr Quality kDefaultQuality = Quality::High;
 inline constexpr std::array<Quality, 4> kQualities{Quality::Low, Quality::Medium, Quality::High, Quality::Ultra};
@@ -115,10 +114,9 @@ inline constexpr uint32_t kMaxDimension = 16384;
 // render target, which is what every other member is drawn into), so the
 // compositor draws it texel for pixel. Where it does not, VSR runs at 1x - the
 // source's own size, where it is a compression clean-up - and the compositor
-// minifies it as it minifies every other member. Its cost follows the INPUT: on the
-// spike a 1080p source took 3.0 ms at High whether it wrote 1080p, 1440p or 2160p.
-// The runtime accepted every factor the spike asked for, 1x to 6x; the only bound
-// kept is D3D12's, with the aspect held.
+// minifies it as it minifies every other member. Its cost follows the input, not
+// the size it writes (VsrGpuSmoke's ladder times both), so a large window costs
+// little more than a small one. The only bound kept is D3D12's, with the aspect held.
 inline Size OutputSize(uint32_t sourceW, uint32_t sourceH, uint32_t targetW, uint32_t targetH)
 {
     if (!sourceW || !sourceH) return {};
@@ -131,5 +129,121 @@ inline Size OutputSize(uint32_t sourceW, uint32_t sourceH, uint32_t targetW, uin
     };
     return {std::max(sourceW, axis(sourceW)), std::max(sourceH, axis(sourceH))};
 }
+
+// The frame VSR writes is a texture of OutputSize, and a new size is a GPU drain and
+// a new texture as large as the window. A window being dragged to a new size presents
+// at every size it passes through, so following each one would drain and allocate
+// per present for sizes nobody stops at. A new size is made only once it has been
+// asked for by kSettlePresents presents in a row over at least kSettleMs; until
+// then the compositor scales the picture as it does without VSR. The first output,
+// with nothing made yet, and the size already made are never held back: an export or
+// a window that opens at its size gets VSR from its first frame.
+inline constexpr uint32_t kSettlePresents = 3;
+inline constexpr double kSettleMs = 100.0;
+
+struct SizeSettle {
+    Size asked{};           // the size the last present asked for
+    uint32_t presents = 0;  // presents in a row that asked for it
+    double sinceMs = 0.0;   // when the first of them did
+};
+
+// One present asking for `wanted` at `nowMs`, with `made` the size of the texture
+// that exists ({} when none does). True when `wanted` may be made, or used, now.
+inline bool SizeSettled(SizeSettle& settle, Size made, Size wanted, double nowMs)
+{
+    if (wanted != settle.asked) settle = {wanted, 0, nowMs};
+    if (settle.presents < kSettlePresents) ++settle.presents;
+    if (made == Size{} || made == wanted) return true;
+    return settle.presents >= kSettlePresents && nowMs - settle.sinceMs >= kSettleMs;
+}
+
+// RTX VSR as the playback upscaler. It beat bicubic and DLSS Super Resolution on
+// every quality measure taken, on clean and compressed input, for a fraction of a
+// millisecond a frame (docs/measurements/vsr-quality-20261002/REPORT.md). So it is on
+// by default ([Playback] RtxVsr), at the one quality the comparison view uses.
+inline constexpr bool kPlaybackDefault = true;
+
+// Which texture is the one picture on screen, for VSR to upscale. Without a
+// reference resident there is only the decoded frame. With one (cached playback),
+// the DLSS 5 view at a Mix of 1 with no mask is the decoded frame - the render - and
+// the Original view, and the press-and-hold peek that shows it, is the reference.
+// Both single-picture views get VSR or the A/B would compare a scaler change as
+// well as the model's; every view that draws both members gets neither.
+enum class PlaybackInput { None, Decoded, Reference };
+
+inline PlaybackInput PlaybackPicture(bool hasReference, bool neuralView, bool originalView, bool mixIsOne, bool masked)
+{
+    if (!hasReference) return PlaybackInput::Decoded;
+    if (originalView) return PlaybackInput::Reference;
+    if (neuralView && mixIsOne && !masked) return PlaybackInput::Decoded;
+    return PlaybackInput::None;
+}
+
+struct PlaybackState {
+    bool enabled = false;         // the setting
+    bool ready = false;           // Decide() said Ready and the feature exists
+    bool superResolution = false; // DLSS SR made this frame's picture: it is already upscaled
+    bool comparing = false;       // PlaybackPicture found no single picture to upscale
+    // An HDR (PQ) frame: VSR's input is 8-bit SDR. An HDR display is not a reason -
+    // an SDR video on one is still SDR in, and the compositor brings VSR's frame to
+    // linear light and encodes it for the display as it does every other member.
+    bool hdr = false;
+    bool finalView = true;        // not a debug view
+    uint32_t sourceW = 0, sourceH = 0;
+    uint32_t targetW = 0, targetH = 0;  // what the picture is fitted into
+};
+
+// Whether this present's picture is RTX VSR's upscale of the decoded frame rather
+// than the compositor's. Only the one plain picture, and only where it grows: at
+// 1x VSR is a compression clean-up nothing here measured.
+inline bool PlaybackUpscales(const PlaybackState& state)
+{
+    if (!state.enabled || !state.ready || state.superResolution || state.comparing || state.hdr || !state.finalView)
+        return false;
+    const Size size = OutputSize(state.sourceW, state.sourceH, state.targetW, state.targetH);
+    return size.width > state.sourceW || size.height > state.sourceH;
+}
+
+// The keep-up guard. RTX VSR was measured on an RTX 5090
+// (docs/measurements/vsr-quality-20261002/REPORT.md); a slower GPU can spend a real
+// share of a frame on it. Playback that drops more than kKeepUpDropShare of the
+// frames the source asks for, in a window where VSR took at least kKeepUpCostShare
+// of the frame budget, has fallen behind in a way VSR can explain. Two such windows
+// in a row lower the quality for that video, a level at a time, and at Low turn VSR
+// off for it; the saved setting never moves.
+inline constexpr double kKeepUpWindowSeconds = 3.0;
+inline constexpr double kKeepUpDropShare = 0.05;
+inline constexpr double kKeepUpCostShare = 0.2;
+
+inline bool WindowFellBehind(double seconds, uint64_t dropped, double sourceFps, double vsrGpuMs)
+{
+    if (seconds <= 0.0 || sourceFps <= 0.0) return false;
+    const double asked = seconds * sourceFps;
+    const double budgetMs = 1000.0 / sourceFps;
+    return double(dropped) > asked * kKeepUpDropShare && vsrGpuMs >= budgetMs * kKeepUpCostShare;
+}
+
+inline Quality LowerQuality(Quality quality)
+{
+    const size_t index = QualityIndex(quality);
+    return index == 0 ? kQualities[0] : kQualities[index - 1];
+}
+
+enum class KeepUpStep { Hold, StepDown, TurnOff };
+
+class KeepUpGuard {
+public:
+    KeepUpStep Observe(bool fellBehind, Quality current)
+    {
+        if (!fellBehind) { behind_ = 0; return KeepUpStep::Hold; }
+        if (++behind_ < 2) return KeepUpStep::Hold;
+        behind_ = 0;
+        return current == kQualities[0] ? KeepUpStep::TurnOff : KeepUpStep::StepDown;
+    }
+    void Reset() { behind_ = 0; }
+
+private:
+    int behind_ = 0;
+};
 
 } // namespace vsr_policy

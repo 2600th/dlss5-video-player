@@ -134,6 +134,25 @@ inline std::optional<UpscalingHistory> ParseUpscalingHistory(std::string_view te
     return std::nullopt;
 }
 
+// The engine an export's Super Resolution runs on when the model does not. RTX VSR
+// is recommended: on video it measured above every plain scaler and DLSS SR
+// (docs/measurements/vsr-quality-20261002), and it runs in the player process
+// (VsrUpscalePass). DLSS SR runs on the helper as it always did; with the model
+// in the same pass the carrier is DLSS's whatever this says. Stable names for the
+// ini and the command line: vsr, dlss.
+enum class SuperResolutionEngine { RtxVsr, Dlss };
+inline constexpr SuperResolutionEngine kRecommendedSuperResolutionEngine = SuperResolutionEngine::RtxVsr;
+
+inline constexpr std::string_view SuperResolutionEngineName(SuperResolutionEngine engine) noexcept {
+    return engine == SuperResolutionEngine::Dlss ? "dlss" : "vsr";
+}
+
+inline std::optional<SuperResolutionEngine> ParseSuperResolutionEngine(std::string_view text) noexcept {
+    if (text == "vsr") return SuperResolutionEngine::RtxVsr;
+    if (text == "dlss") return SuperResolutionEngine::Dlss;
+    return std::nullopt;
+}
+
 // The history a job's carrier runs with: the viewer's choice, unless the
 // neural model runs on the same carrier, which keeps its history (above).
 inline constexpr UpscalingHistory CarrierUpscalingHistory(UpscalingHistory requested,

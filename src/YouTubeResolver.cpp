@@ -888,6 +888,11 @@ std::vector<std::wstring> build_youtube_resolver_arguments(
         L"--get-url",
         L"--print",
         L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s",
+        // End of options, as yt-dlp's own usage line spells it ("[OPTIONS] [--]
+        // URL"). IsSupportedYouTubeUrl only admits https URLs today, so nothing
+        // that starts with '-' reaches here; this keeps it that way should the
+        // URL rule ever loosen.
+        L"--",
         std::wstring(youtubeUrl),
     };
 }

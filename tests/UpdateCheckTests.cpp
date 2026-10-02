@@ -2,6 +2,8 @@
 #include "TrailerThumbnail.h"
 #include "TrailerThumbnailPolicy.h"
 #include "ExampleVideos.h"
+#include "FrameGenAddon.h"
+#include "NeuralCache.h"
 #include "TestSupport.h"
 
 #include <objbase.h>
@@ -509,6 +511,46 @@ void trailer_thumbnails_serve_the_cache_and_keep_stale_pictures()
     std::filesystem::remove_all(root, error);
 }
 
+// The add-on install checked for another mod's file of the same name before the
+// download and never again, so a foreign version.dll that appeared while the
+// files were being fetched was overwritten. It is checked again before each
+// write: here the "download" of the last file is when the foreign one lands.
+void framegen_addon_install_rechecks_for_a_foreign_file_before_each_write()
+{
+    using framegen_addon::InstallStep;
+    using framegen_addon::PinnedFile;
+    const std::string dll = "MZ fake proxy", ini = "[General]\nEnabled=1\n";
+    const std::string dllHash = Sha256Bytes(dll).value(), iniHash = Sha256Bytes(ini).value();
+    const std::array<PinnedFile, 2> pins{{
+        {L"version.dll", dllHash, dll.size(), L"version.dll"},
+        {L"dlssg_sm86.ini", iniHash, ini.size(), L"dlssg_sm86.ini"},
+    }};
+    const auto directory = FreshDirectory(L"framegen-addon-install-race");
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const auto result = framegen_addon::Install(directory, [&](const PinnedFile& file) -> std::optional<std::string> {
+        if (file.name == L"version.dll") return dll;
+        { std::ofstream(directory / L"version.dll", std::ios::binary) << "another mod's proxy"; }
+        return ini;
+    }, pins);
+    CHECK(result.failed == InstallStep::Conflict);
+    CHECK(result.file == L"version.dll");
+    CHECK(read(directory / L"version.dll") == "another mod's proxy");
+    CHECK(!std::filesystem::exists(directory / L"dlssg_sm86.ini"));
+    // The pinned build the install itself wrote is not foreign to it.
+    std::error_code error;
+    std::filesystem::remove(directory / L"version.dll", error);
+    CHECK(framegen_addon::Install(directory, [&](const PinnedFile& file) -> std::optional<std::string> {
+        return file.name == L"version.dll" ? dll : ini;
+    }, pins).failed == InstallStep::None);
+    CHECK(framegen_addon::PinnedBuild(L"version.dll", framegen_addon::kPinnedFiles[0].sha256));
+    CHECK(!framegen_addon::PinnedBuild(L"version.dll", dllHash));
+    CHECK(!framegen_addon::PinnedBuild(L"winmm.dll", framegen_addon::kPinnedFiles[0].sha256));
+    std::filesystem::remove_all(directory, error);
+}
+
 } // namespace
 
 int main()
@@ -526,6 +568,7 @@ int main()
     trailer_thumbnail_decodes_to_a_letterbox_free_tile();
     trailer_thumbnails_offline_or_hung_leave_the_placeholder_without_blocking();
     trailer_thumbnails_serve_the_cache_and_keep_stale_pictures();
+    framegen_addon_install_rechecks_for_a_foreign_file_before_each_write();
     if (test_support::failure_count != 0) return 1;
     std::cout << "Update check tests passed\n";
     return 0;

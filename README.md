@@ -72,7 +72,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_package.ps1
 ## First run
 
 1. Unzip into a **new, empty folder**. Keep `neural-runtime/` next to the exe.
-2. Run `DLSSVideoPlayer.exe`.
+2. Run `DLSSVideoPlayer.exe`. The player is not code-signed, so Windows may
+   say "Windows protected your PC": choose **More info > Run anyway**, after
+   [checking the download](#check-what-you-downloaded) if you want to be sure
+   it is this project's.
 3. Open a file (`Ctrl+O`), paste a public YouTube link (`Ctrl+L`), or pick
    something from **File > Game trailers**.
 4. Press `D`. It buffers for a few seconds, then plays the render.
@@ -116,8 +119,12 @@ the whole video. Press `D` at the start to get one.
   [Save the result](#save-the-result).
 - **Tunes the model.** Change a neural setting (`Ctrl+N`) while paused and that
   frame re-renders. **DLSS > Processing scale** runs the model at 75% or 50% of
-  the source, for speed. DLSS Super Resolution can upscale playback to 1080p,
-  1440p or 2160p; it is off by default (see [Limits](#limits)).
+  the source, for speed. Where the window shows a video larger than it is,
+  NVIDIA's RTX Video Super Resolution upscales it, on by default: it measured
+  well above a plain scaler and DLSS Super Resolution on video
+  ([measurement](docs/measurements/vsr-quality-20261002/REPORT.md)). DLSS Super
+  Resolution can still upscale playback to 1080p, 1440p or 2160p; it is off by
+  default (see [Limits](#limits)).
 - **Plays like a player.** AC-3, E-AC-3 and DTS passthrough to a receiver, and
   Windows media controls with taskbar thumbnail buttons.
 - **Comes with test material.** Seven official game trailers, chosen for faces,
@@ -152,7 +159,9 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   marked and converted with `Ctrl+R`.
 - **Export with DLSS stages** (`Ctrl+S`) renders a new file with any of Super
   Resolution, neural rendering and frame generation (2x to 5x the frame rate),
-  in NVIDIA's order.
+  in NVIDIA's order. Super Resolution on its own runs on RTX VSR by default -
+  the upscaler that measured best - or on DLSS Super Resolution if you choose
+  it under **Upscaler**.
 - **From the command line**, `dlss5-convert` runs the same export without
   opening the player, waits for it and shows its progress. Give it files,
   folders or wildcards; this writes `clip-dlss.mkv` beside the input:
@@ -162,17 +171,58 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   ```
 
   Every stage and Neural setting is an option. Three stacked neural passes of
-  the strong look, frame generation at 3x, and a folder upscaled to 4K:
+  the strong look, frame generation at 3x, a folder upscaled to 4K with RTX VSR
+  (the default upscaler; `--sr-engine dlss` picks DLSS), and a folder rendered
+  and upscaled together:
 
   ```bat
   dlss5-convert clip.mp4 --preset strong --passes 3
   dlss5-convert clip.mp4 --stages fg --multiplier 3
-  dlss5-convert clips -r --stages sr,nr --height 2160 --out-dir clips-4k
+  dlss5-convert clips -r --stages sr --height 2160 --out-dir clips-4k
+  dlss5-convert clips -r --stages sr,nr --height 2160 --out-dir clips-nr-4k
   ```
 
   `dlss5-convert probe clip.mp4` says what a file is and which stages this
   machine can run on it. `--range`, `--encode`, `--report` and the rest are in
   the [usage guide](docs/USAGE.md#from-the-command-line).
+
+![Export with DLSS stages: Super Resolution ticked, output height 2160p, Upscaler RTX VSR (recommended), neural rendering and frame generation unticked, and the result line 3840 × 2160 at 30 fps, 1 pass](docs/screenshots/current/export-stages-vsr.jpg)
+
+## How it compares
+
+Several open-source projects put DLSS 5's neural pass on video. They do
+different jobs, so the right one depends on what you want to do. As of
+2026-10-02, from each project's README, releases and issues (details and more
+projects in [RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md); corrections
+welcome):
+
+| | **DLSS 5 Video Player** (this) | [Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) v14.0 | [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) v2.1.9 | [Veyra](https://github.com/Likely7/Veyra-NRVideo) 2.0.0 | [DLSS5Tool](https://github.com/banbanzhige/DLSS5Tool) v2.3.3 |
+| --- | --- | --- | --- | --- | --- |
+| What it is | A player that renders the whole video in the background, plus export | A converter with a stage pipeline, plus a Live mode | An overlay on the whole desktop, plus file conversion | A real-time player for files, capture cards and game streams | A converter with a preview |
+| Neural render you can keep, seek and re-watch | Yes: rendered frames are cached and reused | No: Live keeps a 2–30 s buffer | No: real time | No: real time | Export only |
+| Compare tools | Split, Wipe, Difference, Side by side, 2×2, loupe, hold for original, against RTX VSR | Split, 2-Up | Before/after wipe | Original/enhanced toggle | Wipe, side by side |
+| Upscaling | RTX VSR by default in playback and export, DLSS SR on request; [measured](docs/measurements/vsr-quality-20261002/REPORT.md) | RTX VSR and DLSS SR stages, off by default | None (by design) | DLSS SR, RTX VSR or FSR | RTX VSR 2× or 4× |
+| Frame generation | DLSS-G 2–5× as a conversion; RTX 20/30 through an offered, hash-checked add-on | DLSS-G as a conversion | DLSS-G 2–4×, live | DLSS-G, XeSS or FSR up to 6×, live | DLSS-G 2×, export |
+| Inputs | Local video, public YouTube, photos, GIFs | Images, video, URLs, YouTube, Twitch | Anything on screen, files | Files, images, capture cards, PS5, PC and Xbox streams | Images, video, image sequences |
+| Keeps audio / subtitles / chapters on export | Yes / yes / yes | Yes / no / yes | Audio yes | Audio and subtitles yes | Audio yes |
+| HDR | HDR shown on HDR displays; exports are SDR | 10-bit HDR export, SDR→HDR | HDR10 recording (experimental capture) | HDR kept, HEVC Main10 export | HDR10/HLG export |
+| Command line | `dlss5-convert`: files, folders, JSON report | `VE_CLI.exe` | No; a GUI queue | Not documented | Not documented |
+| Download | 377 MB (36 MB without the neural runtime) | 726 MB | 230 MB | 409 MB | 580 MB lite |
+| Verifying the download | SHA-256, GitHub attestations, a file manifest and a verifier script | GitHub's per-file digest | SHA256SUMS and a runtime manifest | SHA-256 files | Runtime hashes |
+| Licence | MIT | Source-available, its own terms | PolyForm Strict (non-commercial) | GPL-3.0 (AGPL for its streaming part) | MIT |
+
+Pick this player to watch a video rendered, check exactly what the model
+changed against the original, and keep the render. Pick Visual Enhancer for the
+widest conversion pipeline (ProRes, AV1, HDR export, grading), NeuralScreen for
+games or anything else on screen in real time, Veyra for capture cards,
+console streams or live frame generation, and DLSS5Tool for HDR or
+image-sequence conversion.
+
+None of these is an NVIDIA product. On most GPUs each runs the neural pass on a
+runtime build NVIDIA has not published for this use - community-modified,
+leaked or architecture-spoofed - so read what each one ships. Download any of
+them from its original repository: re-uploads under other accounts have been
+reported carrying malware.
 
 ## What's new in 0.27.2
 
@@ -222,7 +272,8 @@ subtitles, HDR, the render quality ladder and `--render`.
 | Stop | `S` |
 
 Settings persist between launches. A fresh install starts with neural rendering
-on, upscaling off, and upscaling output and YouTube quality on **Auto**: the
+on, RTX VSR Upscaling on, DLSS Upscaling off, and DLSS's output and YouTube
+quality on **Auto**: the
 largest resolution your monitor can show, and the best YouTube stream up to
 1440p.
 
@@ -231,14 +282,23 @@ and the cache. The trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md
 
 ## Screenshots
 
-The player on an RTX 4080 SUPER, paused on one frame of *007 First Light*
-rendered at default settings. Click any image for full size.
+The player paused on one frame of *007 First Light* rendered at default
+settings: the first four on an RTX 5090 at 100% display scaling, the next three
+on an RTX 4080 SUPER at 150%. Click any image for full size.
+
+![A 960x540 copy of 007 First Light in Wipe, compared against RTX VSR: the player's plain scale of the original left of a divider down the face, RTX VSR at High right of it, both tags at the top; an unscaled crop of the player's picture](docs/screenshots/current/vsr-wipe-crop.png)
+
+One 540p frame shown at 1.51x: the player's plain scaling left of the divider,
+RTX VSR right, unscaled crop ([whole window](docs/screenshots/current/vsr-wipe.jpg)).
+The measured comparison is the
+[RTX VSR quality report](docs/measurements/vsr-quality-20261002/REPORT.md), not
+this frame.
 
 ![The player in Wipe: the original left of a divider down the face, the DLSS 5 render right of it, with the compare bar below](docs/screenshots/current/compare-wipe.jpg)
 
 ![Difference view: where the model changed the picture, amplified 4x, as brightness](docs/screenshots/current/compare-difference.jpg)
 
-![2 x 2 view: original, DLSS 5, Difference and DLSS 5 at Mix 50%, with the toast confirming a saved comparison image](docs/screenshots/current/compare-2x2-toast.jpg)
+![2 x 2 view: original, DLSS 5, Difference and RTX VSR at High, with the toast confirming a saved comparison image](docs/screenshots/current/compare-2x2-toast.jpg)
 
 The file that save wrote, footer and all:
 [`saved-comparison-2x2.png`](docs/screenshots/current/saved-comparison-2x2.png).
@@ -251,17 +311,16 @@ The file that save wrote, footer and all:
 
 ### Start screen
 
-![Start screen: the capability check, the Open file and Open YouTube URL actions, and the seven game trailers with their thumbnails](docs/screenshots/current/player-start.jpg)
+![Start screen on an RTX 5090: the capability check with its RTX VSR line, the Open file and Open YouTube URL actions, Recent tiles for GTA VI Trailer 2 and 007 First Light each marked Rendered 100%, and the other game trailers with their thumbnails](docs/screenshots/current/player-start.jpg)
 
 ### Neural view on and off
 
-![GTA VI Trailer 2 paused at 1:04 in a live session with the neural view attached](docs/screenshots/current/neural-playback.jpg)
+![GTA VI Trailer 2 paused on frame 1940 with the neural view on, on an RTX 5090](docs/screenshots/current/neural-playback.jpg)
 
 ![The same paused GTA VI frame with neural rendering off](docs/screenshots/current/original-comparison.jpg)
 
-One paused frame with only the view switched, taken with Intensity, Local tone
-and Local structure at 2.0 (the default is 1.0). It shows how the toggle works,
-not what every source will gain.
+One paused frame with only the view switched, at default settings. It shows
+how the toggle works, not what every source will gain.
 
 [Capture details and footage attribution](docs/screenshots/README.md).
 
@@ -276,14 +335,27 @@ not what every source will gain.
 - **Driver 610.47 or newer.** Older drivers refuse neural rendering on any card,
   and the player tells you up front. See
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
-- **Tested GPUs.** An RTX 5090 (on 0.26.2) and an RTX 4080 SUPER (on 0.26.1).
-  RTX 20 and 30 series cards lack native FP8 and should be several times
-  slower; nobody has tested one yet.
+- **Which GPU does what:**
+
+  | GPU | Neural rendering | RTX VSR upscaling | DLSS Super Resolution | Frame generation |
+  | --- | --- | --- | --- | --- |
+  | RTX 50 | Yes; tested on an RTX 5090 | Yes; measured on an RTX 5090 | Yes | Yes, up to 5x here |
+  | RTX 40 | Yes; tested on an RTX 4080 SUPER | Yes | Yes | Yes, 2x |
+  | RTX 30 | Untested, and expected several times slower without native FP8 | Yes | Yes | Only with the community [dlssg_sm86 add-on](docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on); a user ran 4x on an RTX 3060 ([#14](https://github.com/2600th/dlss5-video-player/issues/14)) |
+  | RTX 20 | As RTX 30, untested | Yes | Yes | Only with the add-on; untested |
+
+  NVIDIA's own DLSS 5 support is RTX 50 only, and this player runs neural
+  rendering on a modified community runtime on every generation, RTX 50
+  included. RTX VSR costs about 1.5 ms for a 1080p frame
+  and 2.7 ms for a 1440p one at High on an RTX 5090; slower cards pay more, and
+  the player lowers its quality for a video it cannot keep up with.
 - **Depth is estimated from the picture**, and so is motion on cards without
   the optical flow engine. Expect some artifacts.
 - **DLSS Super Resolution doesn't beat a plain scaler on video.** Against
   bicubic on six clips, it scored lower on all of them. It is built for games;
-  use it for its look, not for detail.
+  use it for its look, not for detail. RTX VSR, the default upscaler, is the
+  one that adds detail: 87.5 VMAF against bicubic's 80.5 and DLSS's 74.9 over
+  the same kind of test.
 - **Frame generation writes a new file.** It takes time and disk space, and a
   stream has to be copied locally first. NVIDIA supports it on RTX 40 and 50
   cards; on RTX 20 and 30 the player offers to download the community

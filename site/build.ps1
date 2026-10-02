@@ -260,10 +260,10 @@ $tokens = @{
 
 $html = Expand-Token -Text (Read-TextFile -Path (Join-Path $srcRoot 'index.html')) -Values $tokens
 
-# The page marks what is in main but not yet released. v0.26.2 is the last
+# The page marks what is in main but not yet released. v0.27.2 is the last
 # release without those features; a build that offers a newer one drops the
 # marks and the note, because they would then be false.
-$html = Resolve-UnreleasedMarks -Html $html -ReleaseVersion $release.Version -LastWithout '0.26.2'
+$html = Resolve-UnreleasedMarks -Html $html -ReleaseVersion $release.Version -LastWithout '0.27.2'
 
 # --- 4. write -----------------------------------------------------------------
 
@@ -308,6 +308,7 @@ $sitemapImages = @(
     'media/ac-shadows-low-key-limit.png'
     'media/compare-wipe.jpg'
     'media/compare-difference.jpg'
+    'media/vsr-wipe-crop.png'
     'media/photo-wipe.jpg'
     'media/neural-playback.jpg'
 ) | ForEach-Object { "    <image:image><image:loc>$siteUrl$_</image:loc></image:image>" }
@@ -346,7 +347,6 @@ $mediaFiles = @(
     # Player screenshots.
     'docs/screenshots/current/neural-playback.jpg'
     'docs/screenshots/current/original-comparison.jpg'
-    'docs/screenshots/current/recent-videos.jpg'
     'docs/screenshots/current/neural-strength.jpg'
     'docs/screenshots/current/compare-wipe.jpg'
     'docs/screenshots/current/compare-difference.jpg'
@@ -355,6 +355,9 @@ $mediaFiles = @(
     'docs/screenshots/current/neural-settings.jpg'
     'docs/screenshots/current/subtitles.jpg'
     'docs/screenshots/current/player-start.jpg'
+    'docs/screenshots/current/vsr-wipe.jpg'
+    'docs/screenshots/current/vsr-wipe-crop.png'
+    'docs/screenshots/current/export-stages-vsr.jpg'
     # The comparison stills, source and render side by side, unscaled.
     'docs/media/stills/007-first-light-bond.png'
     'docs/media/stills/007-first-light-suit.png'

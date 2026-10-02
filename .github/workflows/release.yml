@@ -55,22 +55,12 @@ jobs:
             throw "Release tag '$actualTag' does not match VERSION '$version' (expected '$expectedTag')."
           }
 
-      - name: Clone NVIDIA DLSS SDK
-        shell: cmd
-        run: |
-          git init external\DLSS
-          git -C external\DLSS remote add origin https://github.com/NVIDIA/DLSS.git
-          git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
-          git -C external\DLSS checkout --detach FETCH_HEAD
-
-      # Always fetched fresh here, never from build.yml's cache: what a release
-      # is built from should not depend on what an earlier run left behind.
-      - name: Fetch pinned UI assets and media helpers
-        shell: powershell
-        run: |
-          .\tools\fetch_ui_assets.ps1
-          .\tools\fetch_youtube_helpers.ps1
-          .\tools\fetch_ffmpeg_helpers.ps1
+      # Always fetched fresh here, never from a cache: what a release is built
+      # from should not depend on what an earlier run left behind.
+      - name: Build dependencies
+        uses: ./.github/actions/build-deps
+        with:
+          fresh: 'true'
 
       # CMakePresets.json pins the generator, the platform and the MSVC toolset.
       - name: Configure
@@ -140,10 +130,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The same code analysis and AddressSanitizer run build.yml gates pull
-  # requests with, on the tagged commit itself (P1.33): a tag pushed without a
-  # green pull-request run - or one moved after it - never had either. Fetched
-  # fresh, like the build above, and publishing waits for it.
+  # The code analysis and AddressSanitizer run nightly.yml does on main, on the
+  # tagged commit itself (P1.33): pull requests no longer run either, so the
+  # tag is the one commit guaranteed to have had both. Fetched fresh, like the
+  # build above, and publishing waits for it.
   quality:
     runs-on: windows-2022
     timeout-minutes: 90
@@ -157,20 +147,10 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
-      - name: Clone NVIDIA DLSS SDK
-        shell: cmd
-        run: |
-          git init external\DLSS
-          git -C external\DLSS remote add origin https://github.com/NVIDIA/DLSS.git
-          git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
-          git -C external\DLSS checkout --detach FETCH_HEAD
-
-      - name: Fetch pinned UI assets and media helpers
-        shell: powershell
-        run: |
-          .\tools\fetch_ui_assets.ps1
-          .\tools\fetch_youtube_helpers.ps1
-          .\tools\fetch_ffmpeg_helpers.ps1
+      - name: Build dependencies
+        uses: ./.github/actions/build-deps
+        with:
+          fresh: 'true'
 
       - name: Code analysis of the shipped targets
         shell: cmd

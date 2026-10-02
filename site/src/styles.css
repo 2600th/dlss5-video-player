@@ -506,6 +506,71 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 .readout__v--prose .data { font-size: 0.86em; color: var(--text); }
 .readout__v--prose code { white-space: nowrap; }
 
+/* --- versus ---------------------------------------------------------------- */
+/* The comparison is the readout ledger widened to five columns: hairline rows,
+   keys in the label voice, values in the body voice, the one ink only on this
+   player's column. It is a real table so a screen reader walks it by row and
+   column; under 60rem it scrolls sideways inside a focusable region with the
+   row keys pinned, rather than collapsing five projects into a stack nobody
+   can compare across. */
+.versus {
+  overflow-x: auto;
+  scrollbar-color: #2b2b30 var(--ground);
+  scrollbar-width: thin;
+  border-top: 1px solid var(--line);
+}
+.versus:focus-visible { outline-offset: 4px; }
+.versus__table {
+  width: 100%;
+  min-width: 56rem;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.versus__table th, .versus__table td {
+  padding: 0.75rem 0.9rem 0.75rem 0;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: left;
+  vertical-align: baseline;
+}
+.versus__table thead th {
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  padding-bottom: 0.9rem;
+}
+.versus__table thead th a { color: inherit; text-decoration-color: var(--line); text-underline-offset: 0.2em; }
+.versus__table thead th a:hover { text-decoration-color: var(--flag); }
+.versus__ver { display: block; margin-top: 0.15rem; font-family: var(--mono); font-size: 0.7rem; font-weight: 400; color: var(--text-meta); }
+.versus__table tbody th {
+  width: 8.5rem;
+  color: var(--flag);
+  font-size: 0.7rem;
+  font-weight: 650;
+  font-variation-settings: 'wdth' 78;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  background: var(--ground);
+}
+.versus__table thead td { width: 8.5rem; }
+.versus__table tbody td {
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.versus__table .data { font-size: 0.86em; color: var(--text); }
+.versus__table code { font-family: var(--mono); font-size: 0.86em; white-space: nowrap; color: var(--text); }
+.versus__table .versus__ours { color: var(--text); background: var(--flag-wash); padding-left: 0.9rem; }
+.versus__table thead .versus__ours { color: var(--flag); }
+.versus__pick { max-width: var(--measure); margin-top: 2rem; color: var(--text); }
+.versus__caveat { max-width: var(--measure); margin-top: 1rem; color: var(--text-dim); font-size: 0.95rem; }
+
+@media (max-width: 60rem) {
+  .versus__table tbody th, .versus__table thead td { position: sticky; left: 0; z-index: 1; width: 7rem; }
+  .versus { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
+            mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); }
+}
+
 /* --- beats ---------------------------------------------------------------- */
 
 .beat {
@@ -913,6 +978,10 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 .screen, .requires__figure { margin: 0; }
 .screen img, .requires__figure img { width: 100%; height: auto; border: 1px solid var(--line-soft); }
 .screen figcaption, .requires__figure figcaption { margin-top: 0.7rem; color: var(--text-meta); font-size: 0.78rem; }
+/* The export window under the export ledger, at its own pixels: a 472 px dialog
+   captured at 100% would only blur if it were stretched to the column. The
+   two extra pixels are the image's hairline border. */
+.export__figure { max-width: 474px; margin-top: clamp(2rem, 4vw, 3rem); }
 .requires__title { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.9rem; }
 .requires__list { color: var(--text-dim); max-width: var(--measure); padding-left: 1.2rem; }
 .requires__list li { margin-bottom: 0.5rem; }

@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -380,6 +381,25 @@ inline RefreshSwitchOffer BetterRefreshForSource(const SourceCadence& source,
                         (!current.cadence.even &&
                          offer.targetFps >= current.targetFps * (1.0 - kRateTolerance));
     return better ? offer : RefreshSwitchOffer{};
+}
+
+// The Generated frames menu against the runtime's measured cap - generated
+// frames per source frame, `runtimeCap` empty until the runtime has been asked
+// (it is asked on the click that needs it, never behind the user's back). An
+// RTX 3060 whose dlssg_sm86 runtime admits 3 used to offer 5x and quietly
+// convert at 4x (issue #14).
+inline bool GeneratedFramesAdmitted(uint32_t generatedFrames, std::optional<uint32_t> runtimeCap)
+{
+    return !runtimeCap || generatedFrames <= *runtimeCap;
+}
+
+// The runtime's cap when it, and not the display, is what lowered the user's
+// setting; empty otherwise, and for "as many as the display allows" (0), which
+// asks for no number.
+inline std::optional<uint32_t> RuntimeLoweredPreference(uint32_t preference, std::optional<uint32_t> runtimeCap)
+{
+    if (preference == 0u || !runtimeCap || preference <= *runtimeCap) return std::nullopt;
+    return runtimeCap;
 }
 
 } // namespace frame_rate_policy

@@ -25,6 +25,18 @@ enum class NeuralCacheState {
     Invalid,
 };
 
+// The "application" term of every cache identity: the release whose render and
+// source-copy output the cache entries were made with. It used to be the player
+// version, so every release - twenty-four in three weeks - discarded every user's
+// renders, although most releases change nothing a render writes. It moves only
+// when one does: a change to what the capture, the encode, the guides, the model
+// input or a source copy produce, and that change's commit sets it to the
+// release that ships it. The other terms (runtime, driver, model store, settings,
+// pipeline) still retire what they always did. 0.27.2 is the last release whose
+// output changed; 0.28.0 reads 0.27.2's renders. A value past the player's own
+// version is refused by PolicyTests.
+inline constexpr std::string_view kRenderCacheRevision = "0.27.2";
+
 struct NeuralCacheIdentity {
     std::string sourceDigest;
     uint32_t width{};
@@ -270,6 +282,13 @@ struct NeuralCacheFailure {
 };
 const char* NeuralCacheFailureCauseName(NeuralCacheFailure::Cause cause);
 
+// Whether `name`, a child of the cache root's `bucket` directory (sources,
+// renders, staging, live, frame-generation, thumbs), has a shape the cache or
+// the player writes there. Clear() deletes nothing else: the root is
+// user-settable, and a user who points it at a folder already holding files
+// must not lose them to "Clear cache".
+bool NeuralCacheCreatesName(std::wstring_view bucket, std::wstring_view name);
+
 class NeuralCacheManager {
 public:
     // An empty root prefers <executable directory>/cache/v1, with LocalAppData
@@ -322,7 +341,9 @@ public:
     bool MarkInvalid(const std::filesystem::path& staging);
     bool Quarantine(const NeuralCacheEntry& entry);
     // Removes only this exact owned cache entry. Missing entries succeed.
-    // Callers must first release playback/jobs referencing the entry.
+    // Callers must first release playback/jobs referencing the entry. Taken
+    // under the root's lock and retired by rename, as eviction does: false when
+    // another instance holds the cache, or when something has the entry open.
     bool RemoveSource(std::string_view key);
     bool RemoveRender(std::string_view key);
 

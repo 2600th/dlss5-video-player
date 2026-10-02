@@ -2,6 +2,7 @@
 
 #include "ExportPipeline.h"
 #include "NeuralPresets.h"
+#include "RenderCliContract.h"
 #include "UpscalingPolicy.h"
 
 #include <cstddef>
@@ -25,15 +26,12 @@
 // caller against them, through the same PlanExport the dialog uses.
 namespace render_command {
 
-// What the process returns. Distinct codes, because a batch script's next
-// step depends on WHICH of these happened: a bad argument is the script's bug,
-// a refusal is this source or this machine, a failure is worth a retry, and a
-// cancel was somebody's decision.
-inline constexpr int kExitOk = 0;
-inline constexpr int kExitBadArguments = 2;
-inline constexpr int kExitRefused = 3;
-inline constexpr int kExitFailed = 4;
-inline constexpr int kExitCancelled = 5;
+// What the process returns: render_cli's codes, which dlss5-convert reads.
+using render_cli::kExitOk;
+using render_cli::kExitBadArguments;
+using render_cli::kExitRefused;
+using render_cli::kExitFailed;
+using render_cli::kExitCancelled;
 
 enum class Mode {
     // No --render and no --help: the player starts exactly as it always has.
@@ -70,6 +68,9 @@ struct Command {
     // Super Resolution's history for sr without nr (UpscalingHistoryName);
     // empty uses the saved choice.
     std::optional<UpscalingHistory> history;
+    // Super Resolution's engine for sr without nr; empty uses the saved choice.
+    // --history alone implies dlss, the engine it belongs to.
+    std::optional<SuperResolutionEngine> engine;
     // One of kProcessingScaleRungs; empty uses the saved processing scale.
     std::optional<uint32_t> processingScale;
     // Stages, output rung and multiplier, in the dialog's own vocabulary so the
@@ -187,7 +188,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     bool seenRender = false, seenRange = false, seenPreset = false, seenStages = false,
          seenHeight = false, seenMultiplier = false, seenOut = false, seenQuiet = false,
          seenScale = false, seenPasses = false, seenIntensity = false, seenTone = false,
-         seenStructure = false, seenColor = false, seenEncode = false, seenHistory = false;
+         seenStructure = false, seenColor = false, seenEncode = false, seenHistory = false, seenEngine = false;
     std::wstring_view presetName;
     // What the dialog opens with: the neural pass alone.
     command.selection = ExportSelection{};
@@ -209,14 +210,10 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             seen = true;
             return true;
         };
-        const bool takesValue = argument == L"--render" || argument == L"--range" ||
-            argument == L"--preset" || argument == L"--stages" || argument == L"--height" ||
-            argument == L"--multiplier" || argument == L"--out" || argument == L"--processing-scale" ||
-            argument == L"--passes" || argument == L"--intensity" || argument == L"--local-tone" ||
-            argument == L"--local-structure" || argument == L"--color-strength" || argument == L"--encode" ||
-            argument == L"--history";
+        // render_cli lists them, so dlss5-convert forwards what this takes.
+        const bool takesValue = render_cli::IsRenderValueOption(argument);
         if (argument == L"--quality")
-            return bad(L"The encode is --encode standard, high or lossless (--quality is an option the player retired).");
+            return bad(std::wstring(render_cli::kRetiredQualityRefusal));
         if (!takesValue) return bad(L"Unknown argument: " + argument);
         if (index + 1 >= userArguments.size() || userArguments[index + 1].empty())
             return bad(argument + L" needs a value.");
@@ -296,6 +293,12 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             if (value != L"standard" && value != L"high" && value != L"lossless")
                 return bad(L"--encode takes standard, high or lossless.");
             command.quality = value == L"standard" ? "standard" : value == L"high" ? "high" : "lossless";
+        } else if (argument == L"--sr-engine") {
+            if (!once(seenEngine)) return bad(L"--sr-engine was given twice.");
+            std::string lower;
+            for (const wchar_t c : value) lower.push_back(c < 0x80 ? static_cast<char>(std::towlower(c)) : '?');
+            command.engine = ParseSuperResolutionEngine(lower);
+            if (!command.engine) return bad(L"--sr-engine takes vsr or dlss.");
         } else if (argument == L"--history") {
             if (!once(seenHistory)) return bad(L"--history was given twice.");
             command.history = ParseUpscalingHistory(value == L"temporal" ? "temporal" : value == L"per-frame" ? "per-frame" : "");
@@ -306,7 +309,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             if (!multiplier || *multiplier < 2 || *multiplier > 5)
                 return bad(L"--multiplier takes 2, 3, 4 or 5.");
             command.selection.multiplier = *multiplier;
-        } else {
+        } else if (argument == L"--out") {
             if (!once(seenOut)) return bad(L"--out was given twice.");
             // The container follows the extension (ExportContainerFor). Which
             // of them this source may be written as is settled once it is
@@ -314,6 +317,10 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             if (!ExportContainerFor(std::filesystem::path(value).extension().wstring()))
                 return bad(L"--out must name a .mkv, .mp4, .gif, .png or .jpg file.");
             command.output = value;
+        } else {
+            // In render_cli's table but not read here: refused, never taken
+            // for another option.
+            return bad(L"Unknown argument: " + argument);
         }
     }
     const ExportSelection& selection = command.selection;
@@ -346,6 +353,11 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     // greys it out the same way).
     if (seenHistory && (!selection.upscale || selection.neural))
         return bad(L"--history needs the sr stage without nr.");
+    if (seenEngine && (!selection.upscale || selection.neural))
+        return bad(L"--sr-engine needs the sr stage without nr: with nr the upscale is the model's carrier.");
+    if (seenHistory && command.engine == SuperResolutionEngine::RtxVsr)
+        return bad(L"--history is DLSS Super Resolution's; RTX VSR has none. Drop it, or use --sr-engine dlss.");
+    if (seenHistory && !command.engine) command.engine = SuperResolutionEngine::Dlss;
     if (seenEncode && !selection.upscale && !selection.neural)
         return bad(L"--encode needs the sr or nr stage: frame generation alone keeps its own encode.");
     // Frame generation converts a whole file and copies the source's audio onto
@@ -403,8 +415,12 @@ inline std::wstring Usage()
         L"                     Neural settings' Look group. Each applies over --preset.\n"
         L"  --encode Q         The encode: standard (8-bit), high (10-bit) or lossless.\n"
         L"                     Default: the player's saved Encoder settings.\n"
-        L"  --history H        Super Resolution's history for sr without nr: temporal or\n"
-        L"                     per-frame. Default: the player's saved choice.\n"
+        L"  --sr-engine E      The upscaler for sr without nr: vsr (RTX Video Super\n"
+        L"                     Resolution, recommended) or dlss (DLSS Super Resolution).\n"
+        L"                     Default: the player's saved choice. With nr it is DLSS.\n"
+        L"  --history H        DLSS Super Resolution's history for sr without nr: temporal\n"
+        L"                     or per-frame; implies --sr-engine dlss. Default: the\n"
+        L"                     player's saved choice.\n"
         L"  --processing-scale N  The resolution the model runs at, as a percentage of\n"
         L"                     the source: 100, 75 or 50, restored to the source size by\n"
         L"                     Super Resolution. For nr without sr. Default: the player's\n"

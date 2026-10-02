@@ -218,7 +218,23 @@ not be created" is a read-only install folder.
 Every refusal is also written to the log, with the cause named, which is what
 to attach to a bug report when YouTube changes something upstream.
 
+## Windows says "Windows protected your PC"
+
+The player and its runtime are not code-signed, so SmartScreen warns the first
+time `DLSSVideoPlayer.exe` runs from a downloaded zip. Check the download first
+if you want to be sure it is this project's (`sha256sum -c` and
+`gh attestation verify`, as the README shows), then choose **More info > Run
+anyway**. Unzipping into a new folder you own, not into Program Files, also
+keeps the cache beside the player writable.
+
 ## Upscaling is off or playback drops frames
+
+Two upscalers, and only one at a time. **RTX VSR Upscaling** is on by default and
+works whenever the window shows the video larger than it is; the status line says
+`RTX VSR Upscaling on` while it does. If playback keeps dropping frames because of
+it, it lowers its own quality for that video, then pauses (`RTX VSR Upscaling
+paused (playback fell behind)`); a lower rung under **Video > Compare > RTX VSR
+quality**, or turning it off in the DLSS menu, settles it for good.
 
 DLSS Upscaling starts off on a fresh installation and then follows the saved
 preference. Enable it from the DLSS menu or bottom bar. The output rung is Auto
@@ -251,10 +267,12 @@ and the notice `R` shows, name the one that is missing:
   the runtime refused it; `DLSSVideoPlayer.log` has the `RTX VSR capability:`
   line with what NGX answered, and the create's result.
 
-Like every compare mode, RTX VSR is live only during cached playback on the
-neural view (`D`). Its cost is logged every 300 frames as `RTX VSR GPU:`; if
+Like every compare mode, the RTX VSR view is live only during cached playback on
+the neural view (`D`). As the playback upscaler (**DLSS > RTX VSR Upscaling**) it
+runs whenever the window shows the video larger than it is; the reasons listed
+above grey that menu item too, and its label names the one that applies. Its cost is logged every 300 frames as `RTX VSR GPU:`; if
 playback drops frames with it on, pick a lower rung under **Video > Compare >
-RTX VSR quality**.
+RTX VSR quality**, or turn **RTX VSR Upscaling** off.
 
 ## Generate frames is unavailable, or refuses
 

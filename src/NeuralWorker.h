@@ -260,6 +260,25 @@ namespace neural_worker_detail {
 // Only its hook-free parent may launch the replacement, at most once.
 inline constexpr unsigned long kConfigurationChangedExitCode = 75;
 
+// What the parent is told when a helper's job or probe thread threw. The
+// helper's own log has the exception's what().
+inline constexpr wchar_t kWorkerThrewDetail[] =
+    L"The helper stopped on an unexpected error; the helper log has the details.";
+
+// The Result a single-shot helper writes when its job thread threw. It is a
+// crash, which the parent relaunches from frame zero exactly as it would a
+// helper that died outright, and never a refusal such as Preflight, which it
+// would not. A resident helper writes no Result for the same event and exits
+// with neural_worker_protocol::kWorkerThrewExitCode instead.
+inline NeuralRenderResult WorkerThrewResult(uint64_t jobId)
+{
+    NeuralRenderResult crashed;
+    crashed.failure = NeuralRenderFailure::WorkerCrashed;
+    crashed.jobId = jobId;
+    crashed.detail = kWorkerThrewDetail;
+    return crashed;
+}
+
 // The exit code of a helper the parent has seen go, or nothing when there is
 // no code to read: `query` is GetExitCodeProcess, which can fail, and which
 // answers STILL_ACTIVE for a process that has not actually gone. Neither is an

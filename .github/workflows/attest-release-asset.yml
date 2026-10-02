@@ -20,11 +20,18 @@ name: attest-release-asset
 # self-computed checksum and strictly less than release.yml gives the core
 # package.
 #
-# The honest fix is for CI to build the complete package, which needs
-# tools/fetch_neural_runtime.ps1 to run on a runner - a redistribution
-# decision, not a CI one.
+# CI cannot build the complete package: it may only be published with a
+# passing hardware-suite report (tools/hardware_report.ps1), which needs an RTX
+# card no hosted runner has.
+#
+# It runs by itself when a player release is published, for the complete
+# package README names - dlss5-video-player-v<version>-win64.zip - and checks
+# it against the .sha256 published beside it. workflow_dispatch is kept for a
+# retry or another asset.
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       release-tag:
@@ -43,6 +50,9 @@ on:
 
 jobs:
   attest:
+    # pages-on-release shares this event; dependency releases (deps-*) carry
+    # no player package.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'dlss5-video-player-v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -54,7 +64,7 @@ jobs:
     # script: an expression is pasted into the script text before bash parses
     # it, so a quote in an input was a way to run commands on the runner.
     env:
-      RELEASE_TAG: ${{ inputs.release-tag }}
+      RELEASE_TAG: ${{ inputs.release-tag || github.event.release.tag_name }}
       ASSET_NAME: ${{ inputs.asset-name }}
       EXPECTED_DIGEST: ${{ inputs.asset-digest }}
 
@@ -64,6 +74,11 @@ jobs:
           if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^dlss5-video-player-v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "release-tag must read dlss5-video-player-v<major.minor.patch>; got '$RELEASE_TAG'." >&2
             exit 1
+          fi
+          # A published release names no asset: it is the complete package.
+          if [ -z "$ASSET_NAME" ]; then
+            ASSET_NAME="dlss5-video-player-v${RELEASE_TAG#dlss5-video-player-v}-win64.zip"
+            echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
           fi
           # No path separators and no glob characters: the name is handed to
           # gh as a download pattern and must match exactly one asset.
@@ -89,6 +104,17 @@ jobs:
             echo "Release $RELEASE_TAG did not yield exactly the asset $ASSET_NAME." >&2
             exit 1
           fi
+          # The checksum published beside it, when there is one, is the digest
+          # the release promises; the attested bytes must match it.
+          mkdir -p "$RUNNER_TEMP/checksum"
+          if [ -z "$EXPECTED_DIGEST" ] && gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET_NAME.sha256" --dir "$RUNNER_TEMP/checksum"; then
+            published=$(cut -d' ' -f1 < "$RUNNER_TEMP/checksum/$ASSET_NAME.sha256")
+            if ! printf '%s' "$published" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "$ASSET_NAME.sha256 does not start with a sha256 digest." >&2
+              exit 1
+            fi
+            echo "EXPECTED_DIGEST=$published" >> "$GITHUB_ENV"
+          fi
 
       - name: Compute the digest
         run: |
@@ -102,7 +128,7 @@ jobs:
       - name: Attest the published asset
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/asset/${{ inputs.asset-name }}
+          subject-path: ${{ runner.temp }}/asset/${{ env.ASSET_NAME }}
 
       - name: Explain what was attested
         run: |

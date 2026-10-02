@@ -6,6 +6,7 @@
 #include "JsonEscape.h"
 #include "Utf8Text.h"
 #include "LiveSessionPolicy.h"
+#include "TrailerThumbnailPolicy.h"
 #include "Log.h"
 
 #include <windows.h>
@@ -111,6 +112,30 @@ bool IsHexDigest(std::string_view value)
         return (character >= '0' && character <= '9') ||
                (character >= 'a' && character <= 'f');
     });
+}
+
+// A manifest is a few hundred bytes; the longest field it can carry is the
+// installation path, which is bounded by the longest Windows path. The root is
+// user-settable and its files are anyone's, so a manifest.json that is really a
+// multi-gigabyte file was read whole into memory by every lookup, Peek and
+// eviction pass. Reads at most one byte past the bound and refuses anything
+// that reaches it, so the size is never trusted from a separate stat.
+constexpr size_t kMaxManifestBytes = 64 * 1024;
+
+std::optional<std::string> ReadManifestBytes(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) return std::nullopt;
+    std::string bytes(kMaxManifestBytes + 1, '\0');
+    input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (input.bad()) return std::nullopt;
+    const size_t got = static_cast<size_t>(input.gcount());
+    if (got > kMaxManifestBytes) {
+        LOG("Neural cache manifest refused: larger than " << kMaxManifestBytes << " bytes.");
+        return std::nullopt;
+    }
+    bytes.resize(got);
+    return bytes;
 }
 
 void AppendField(std::string& output, std::string_view name, std::string_view value)
@@ -600,6 +625,76 @@ bool ParseStagingOwner(const std::wstring& name, DWORD& pid)
     }
     pid = static_cast<DWORD>(value);
     return true;
+}
+
+// `text` is exactly `count` non-empty runs of decimal digits joined by '-';
+// the first run is returned through `first` when it fits a pid.
+bool DecimalRuns(std::wstring_view text, size_t count, DWORD* first = nullptr)
+{
+    size_t runs = 1, digits = 0;
+    uint64_t value = 0;
+    for (const wchar_t character : text) {
+        if (character == L'-') {
+            if (!digits || ++runs > count) return false;
+            digits = 0;
+            continue;
+        }
+        if (character < L'0' || character > L'9' || ++digits > 20) return false;
+        if (runs == 1 && (value = value * 10 + static_cast<uint64_t>(character - L'0')) > MAXDWORD)
+            return false;
+    }
+    if (runs != count || !digits) return false;
+    if (first) *first = static_cast<DWORD>(value);
+    return true;
+}
+
+// The owner of a temporary a writer reserves beside its output and renames or
+// deletes when it finishes: the frame-generation pass's encode target
+// (.dlss-framegen-<pid>-<tick>-<n>.mkv), the export mux's
+// (.dlss-export-<pid>-<tick>-<n>.tmp) and atomic_file's (<name>.tmp-<pid>-<tick>-<n>,
+// which the trailer thumbnails write through).
+std::optional<DWORD> CacheTemporaryOwner(std::wstring_view name)
+{
+    DWORD pid = 0;
+    const auto between = [&](std::wstring_view prefix, std::wstring_view suffix) {
+        return name.size() > prefix.size() + suffix.size() && name.starts_with(prefix) &&
+               name.ends_with(suffix) &&
+               DecimalRuns(name.substr(prefix.size(), name.size() - prefix.size() - suffix.size()), 3, &pid);
+    };
+    if (between(L".dlss-framegen-", L".mkv") || between(L".dlss-export-", L".tmp")) return pid;
+    const size_t marker = name.rfind(L".tmp-");
+    if (marker != std::wstring_view::npos && marker > 0 && DecimalRuns(name.substr(marker + 5), 3, &pid))
+        return pid;
+    return std::nullopt;
+}
+
+// A converted video: "<label>-<multiplier>x<fps>fps.mkv". Every release has
+// ended the name that way - the current one puts an 8-hex source hash and an
+// optional "neural-" between the label and the multiplier, earlier ones put
+// the source's stem there - so the tail is what identifies one.
+bool IsFrameGenerationOutputName(std::wstring_view name)
+{
+    constexpr std::wstring_view suffix = L"fps.mkv";
+    if (!name.ends_with(suffix)) return false;
+    name.remove_suffix(suffix.size());
+    const auto takeDigits = [&] {
+        size_t digits = 0;
+        while (digits < name.size() && name[name.size() - 1 - digits] >= L'0' &&
+               name[name.size() - 1 - digits] <= L'9') ++digits;
+        name.remove_suffix(digits);
+        return digits > 0 && digits <= 6;
+    };
+    if (!takeDigits() || !name.ends_with(L'x')) return false;
+    name.remove_suffix(1);
+    if (!takeDigits() || !name.ends_with(L'-')) return false;
+    return name.size() > 1;
+}
+
+bool IsHexDigestName(std::wstring_view name)
+{
+    return name.size() == 64 && std::ranges::all_of(name, [](wchar_t character) {
+        return (character >= L'0' && character <= L'9') || (character >= L'a' && character <= L'f');
+    });
 }
 
 // Conservative: a process this one may not open is alive, and a reused pid
@@ -1402,11 +1497,9 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::Peek(const std::filesystem::
     const std::filesystem::path directory = root /
         (kind == NeuralCacheEntryKind::Source ? L"sources" : L"renders") /
         std::wstring(key.begin(), key.end());
-    std::ifstream input(directory / L"manifest.json", std::ios::binary);
-    if (!input.is_open()) return std::nullopt;
-    const std::string bytes{std::istreambuf_iterator<char>(input),
-                            std::istreambuf_iterator<char>()};
-    auto manifest = ParseNeuralCacheManifest(bytes);
+    const auto bytes = ReadManifestBytes(directory / L"manifest.json");
+    if (!bytes) return std::nullopt;
+    auto manifest = ParseNeuralCacheManifest(*bytes);
     if (!manifest || manifest->kind != kind) return std::nullopt;
     return NeuralCacheEntry{directory,
                             directory / (kind == NeuralCacheEntryKind::Source ? L"source.mkv" : L"neural.mkv"),
@@ -1437,12 +1530,9 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::Lookup(
         if (!lock.Held()) LOG("Neural cache lookup did not get the cache lock in time; reading unlocked.");
         MarkEntryUsed(directory);
     }
-    const auto manifestPath = directory / L"manifest.json";
-    std::ifstream input(manifestPath, std::ios::binary);
-    if (!input.is_open()) return std::nullopt;
-    const std::string bytes{std::istreambuf_iterator<char>(input),
-                            std::istreambuf_iterator<char>()};
-    const auto manifest = ParseNeuralCacheManifest(bytes);
+    const auto bytes = ReadManifestBytes(directory / L"manifest.json");
+    if (!bytes) return std::nullopt;
+    const auto manifest = ParseNeuralCacheManifest(*bytes);
     if (!manifest || manifest->kind != kind || !IsReusableNeuralCacheManifest(*manifest))
         return std::nullopt;
     if (!manifest->settingsDigest.empty() &&
@@ -1488,8 +1578,15 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
         if (diagnostic) *diagnostic = report;
         return false;
     };
+    // Only a staging directory this process began: the name BeginStaging writes
+    // carries its pid, and anything else under staging/ - another instance's
+    // render in progress, an entry set aside, a directory a user made - is not
+    // this call's to publish or to delete when an existing entry wins.
+    DWORD stagingOwner = 0;
     if (!valid_ || !ValidKey(key) || !OwnsPath(staging) ||
-        staging.parent_path().filename() != L"staging")
+        staging.parent_path().filename() != L"staging" ||
+        !ParseStagingOwner(staging.filename().wstring(), stagingOwner) ||
+        stagingOwner != GetCurrentProcessId())
         return fail(NeuralCachePromotion::Stage::Rejected);
     const auto payload = staging /
         (kind == NeuralCacheEntryKind::Source ? L"source.mkv" : L"neural.mkv");
@@ -1544,10 +1641,8 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     if (!WriteFileDurably(manifestPath, SerializeNeuralCacheManifest(manifest)))
         return fail(NeuralCachePromotion::Stage::ManifestWrite);
     {
-        std::ifstream input(manifestPath, std::ios::binary);
-        const std::string serialized{std::istreambuf_iterator<char>(input),
-                                     std::istreambuf_iterator<char>()};
-        const auto reparsed = ParseNeuralCacheManifest(serialized);
+        const auto serialized = ReadManifestBytes(manifestPath);
+        const auto reparsed = serialized ? ParseNeuralCacheManifest(*serialized) : std::nullopt;
         if (!reparsed || *reparsed != manifest || !IsReusableNeuralCacheManifest(*reparsed))
             return fail(NeuralCachePromotion::Stage::ManifestReread);
     }
@@ -1555,6 +1650,19 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     const auto destination = root_ /
         (kind == NeuralCacheEntryKind::Source ? L"sources" : L"renders") /
         std::wstring(key.begin(), key.end());
+    // An existing entry is authenticated BEFORE the lock: Lookup hashes its
+    // payload, which for an entry another process published is a multi-gigabyte
+    // read, and holding the root's lock across it stalled every other
+    // instance's Clear, eviction and lookup mark for as long. The payload is
+    // stamped either side of the hash and again under the lock; a stamp that
+    // still matches is the same file, unchanged, in the same place (a moved or
+    // retired entry no longer answers at that path, a rewritten payload has a
+    // new change time, a replaced one a new id), so the verdict - reuse it, or
+    // set it aside - still holds. Anything else is decided under the lock.
+    const auto existingPayload = destination / payload.filename();
+    const auto existingStamp = StampPayload(existingPayload);
+    auto existing = existingStamp ? Lookup(kind, key) : std::nullopt;
+    const bool verdictTaken = existingStamp && StampPayload(existingPayload) == existingStamp;
     // From the existing-entry check to the rename, nothing else may restructure
     // the root: another instance's eviction or Clear, or a second promotion of
     // the same key setting this one's entry aside as "existing".
@@ -1562,7 +1670,15 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     if (!lock.Held())
         LOG("Neural cache promotion waited " << kPromoteLockWaitMs
             << " ms for another instance's cache operation; publishing without the lock.");
-    if (auto existing = Lookup(kind, key)) {
+    // Rare: no payload was there to stamp, or it changed between the stamps. A
+    // directory present now is authenticated under the lock, as it always was,
+    // so an entry another promotion published meanwhile is reused rather than
+    // set aside as "existing". With no payload, its lookup fails without hashing.
+    if (!verdictTaken || StampPayload(existingPayload) != existingStamp) {
+        std::error_code presentError;
+        existing = std::filesystem::exists(destination, presentError) ? Lookup(kind, key) : std::nullopt;
+    }
+    if (existing) {
         std::error_code cleanupError;
         std::filesystem::remove_all(staging, cleanupError);
         if (cleanupError) return fail(NeuralCachePromotion::Stage::StagingCleanup);
@@ -1590,10 +1706,8 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     // payload a second time here proved nothing the first pass had not.
     const auto payloadName = payload.filename();
     {
-        std::ifstream input(destination / L"manifest.json", std::ios::binary);
-        const std::string serialized{std::istreambuf_iterator<char>(input),
-                                     std::istreambuf_iterator<char>()};
-        const auto reopened = ParseNeuralCacheManifest(serialized);
+        const auto serialized = ReadManifestBytes(destination / L"manifest.json");
+        const auto reopened = serialized ? ParseNeuralCacheManifest(*serialized) : std::nullopt;
         std::error_code payloadError;
         if (!reopened || *reopened != manifest ||
             !std::filesystem::is_regular_file(destination / payloadName, payloadError) ||
@@ -1650,6 +1764,15 @@ bool NeuralCacheManager::Remove(NeuralCacheEntryKind kind, std::string_view key)
         (kind == NeuralCacheEntryKind::Source ? L"sources" : L"renders") /
         std::wstring(key.begin(), key.end());
     if (!OwnsPath(directory)) return false;
+    // Under the root's lock and by rename, like eviction and Clear: remove_all
+    // unlocked could delete an entry another instance was promoting over or
+    // looking up, and deleting file by file left half an entry - manifest
+    // gone, payload kept - whenever something had the payload open.
+    const CacheRootLock lock(root_, kEvictLockWaitMs);
+    if (!lock.Held()) {
+        LOG("Neural cache remove skipped: another player instance is using the cache.");
+        return false;
+    }
     const DWORD attributes = GetFileAttributesW(directory.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         const DWORD error = GetLastError();
@@ -1657,9 +1780,7 @@ bool NeuralCacheManager::Remove(NeuralCacheEntryKind kind, std::string_view key)
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return false;
     ForgetPublishedPayloads(directory);
-    std::error_code error;
-    std::filesystem::remove_all(directory, error);
-    return !error;
+    return RetireEntryDirectory(root_, directory, L"invalid-removed");
 }
 
 bool NeuralCacheManager::RemoveSource(std::string_view key)
@@ -1730,11 +1851,9 @@ NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
 
         // Unparsable or unreadable manifests count as unreachable: lookup
         // refuses them too, so they are occupying space for nothing.
-        std::string manifestBytes;
-        if (std::ifstream input(child.path() / L"manifest.json", std::ios::binary); input)
-            manifestBytes.assign(std::istreambuf_iterator<char>(input),
-                                 std::istreambuf_iterator<char>());
-        const auto manifest = ParseNeuralCacheManifest(manifestBytes);
+        // An oversized one is refused unread, and lookup refuses it the same way.
+        const auto manifestBytes = ReadManifestBytes(child.path() / L"manifest.json");
+        const auto manifest = manifestBytes ? ParseNeuralCacheManifest(*manifestBytes) : std::nullopt;
         entry.reusable = manifest && IsReusableNeuralCacheManifest(*manifest);
         // A well-formed entry whose recorded key environment nothing sharing
         // this root can rebuild is as unreachable as a retired schema. One that
@@ -1793,7 +1912,11 @@ NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
         const CacheRootLock lock(root_, kEvictLockWaitMs);
         if (!lock.Held()) { ++report.deferred; continue; }
         const auto planned = std::ranges::find(marks, key, &decltype(marks)::value_type::first);
-        if (planned == marks.end() || DirectoryWriteTime(directory) != planned->second) {
+        // An unreadable mark proves nothing: two unreadable times compared equal,
+        // so an entry whose mark could not be read was removed as if no lookup
+        // had touched it. It is left for a pass that can read it.
+        if (planned == marks.end() || !planned->second ||
+            DirectoryWriteTime(directory) != planned->second) {
             ++report.deferred;
             continue;
         }
@@ -1821,6 +1944,34 @@ NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
                " instance held the cache."
             << (plan.floorMet ? "" : " The free-space floor was still not met."));
     return report;
+}
+
+bool NeuralCacheCreatesName(std::wstring_view bucket, std::wstring_view name)
+{
+    if (bucket == L"sources" || bucket == L"renders") return IsHexDigestName(name);
+    if (bucket == L"staging") {
+        DWORD owner = 0;
+        return (name.starts_with(L"source-") || name.starts_with(L"render-") ||
+                name.starts_with(L"invalid")) &&
+               ParseStagingOwner(std::wstring(name), owner);
+    }
+    if (bucket == L"live") {
+        uint32_t owner = 0;
+        return live_session::ParseSessionOwner(name, owner);
+    }
+    if (bucket == L"frame-generation")
+        return IsFrameGenerationOutputName(name) ||
+               ((name.starts_with(L".dlss-framegen-") || name.starts_with(L".dlss-export-")) &&
+                CacheTemporaryOwner(name).has_value());
+    if (bucket == L"thumbs") {
+        // <id>.jpg, or the temporary atomic_file writes it through.
+        const size_t extension = name.find(L".jpg");
+        if (extension == std::wstring_view::npos ||
+            !trailer_thumbnail::ValidVideoId(name.substr(0, extension))) return false;
+        const std::wstring_view rest = name.substr(extension + 4);
+        return rest.empty() || (rest.starts_with(L".tmp-") && CacheTemporaryOwner(name).has_value());
+    }
+    return false;
 }
 
 bool NeuralCacheManager::Clear()
@@ -1867,14 +2018,27 @@ bool NeuralCacheManager::Clear()
              !error && iterator != end; iterator.increment(error))
             children.push_back(iterator->path());
         if (error) return false;
+        size_t foreign = 0;
+        std::wstring firstForeign;
         for (const auto& child : children) {
             const std::wstring childName = child.filename().wstring();
+            // The root is user-settable, so a bucket can hold what the user
+            // put there; only the names this cache writes are its to delete.
+            if (!NeuralCacheCreatesName(bucket, childName)) {
+                if (!foreign++) firstForeign = childName;
+                continue;
+            }
             DWORD owner = 0;
             if (bucket == L"staging" && ParseStagingOwner(childName, owner) && owner != self &&
                 ProcessAlive(owner)) continue;
             uint32_t session = 0;
             if (bucket == L"live" && live_session::ParseSessionOwner(childName, session) &&
                 session != self && ProcessAlive(session)) continue;
+            // A conversion, export or thumbnail another instance is writing.
+            if (bucket == L"frame-generation" || bucket == L"thumbs") {
+                const auto temporary = CacheTemporaryOwner(childName);
+                if (temporary && *temporary != self && ProcessAlive(*temporary)) continue;
+            }
             if (bucket == L"sources" || bucket == L"renders") {
                 if (!RetireEntryDirectory(root_, child, L"invalid-cleared")) complete = false;
                 continue;
@@ -1883,6 +2047,10 @@ bool NeuralCacheManager::Clear()
             std::filesystem::remove_all(child, removeError);
             if (removeError) complete = false;
         }
+        // Left, not counted as a failure: they were never the cache's.
+        if (foreign)
+            LOG("Neural cache clear left " << foreign << " item(s) in " << utf8_text::FromWide(bucket)
+                << " that the cache did not create, e.g. \"" << utf8_text::FromWide(firstForeign) << "\".");
     }
     ForgetPublishedPayloads(root_);
     if (!complete) LOG("Neural cache clear left entries another process still has open.");

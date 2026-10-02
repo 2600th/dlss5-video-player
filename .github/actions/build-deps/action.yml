@@ -1,0 +1,99 @@
+name: Build dependencies
+description: >-
+  The pinned inputs every Windows build of this repository needs and does not
+  commit - the NVIDIA DLSS SDK, the UI icon font, and FFmpeg, FFprobe, yt-dlp
+  and Deno - each held to its pin whether it was fetched or restored.
+
+inputs:
+  fresh:
+    description: >-
+      'true' fetches everything from its source and restores nothing from a
+      cache. The release build uses it: what a release is built from must not
+      depend on what an earlier run left behind.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # The SDK is fetched by commit, so a cache keyed by that commit can hold
+    # only that commit's files, and the check below holds a restored tree to it
+    # exactly as it holds a fresh one. Only what the build reads is checked out
+    # - the headers, the Windows release runtimes and import libraries, and the
+    # licence the packager copies - 208 MB of a 900 MB clone. The commit is
+    # also pinned in build_windows.bat, which checks a maintainer's checkout.
+    - name: Restore the pinned DLSS SDK
+      id: sdk
+      if: inputs.fresh != 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: external/DLSS
+        key: dlss-sdk-sparse-v1-a291cc7d2cc642a51566f3dfd5376f635cd1b284
+
+    - name: Fetch the pinned DLSS SDK
+      if: inputs.fresh == 'true' || steps.sdk.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        rm -rf external/DLSS
+        git init -q external/DLSS
+        git -C external/DLSS remote add origin https://github.com/NVIDIA/DLSS.git
+        git -C external/DLSS sparse-checkout set --cone include lib/Windows_x86_64/x64 lib/Windows_x86_64/rel
+        git -C external/DLSS fetch -q --depth 1 --filter=blob:none origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
+        git -C external/DLSS checkout -q --detach FETCH_HEAD
+
+    - name: Check the DLSS SDK against its pin
+      shell: bash
+      run: |
+        head=$(git -C external/DLSS rev-parse HEAD)
+        if [ "$head" != a291cc7d2cc642a51566f3dfd5376f635cd1b284 ]; then
+          echo "::error::external/DLSS is at $head, not the pinned a291cc7d2cc642a51566f3dfd5376f635cd1b284."
+          exit 1
+        fi
+        if [ -n "$(git -C external/DLSS status --porcelain)" ]; then
+          echo "::error::external/DLSS differs from its pinned commit."
+          git -C external/DLSS status --short | head -20
+          exit 1
+        fi
+        echo "DLSS SDK at the pinned commit, unmodified."
+
+    # FFmpeg, FFprobe, yt-dlp and Deno are the bulk of every run's downloads.
+    # The key is the lock that pins their bytes, and a restored copy is held to
+    # that lock below exactly as a fresh download is by the fetch scripts.
+    - name: Restore the pinned media helpers
+      id: helpers
+      if: inputs.fresh != 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          external/ffmpeg/bin
+          external/youtube/yt-dlp.exe
+          external/youtube/deno.exe
+        key: pinned-helpers-${{ runner.os }}-${{ hashFiles('packaging/tool-lock.json') }}
+
+    - name: Fetch the pinned media helpers
+      if: inputs.fresh == 'true' || steps.helpers.outputs.cache-hit != 'true'
+      shell: powershell
+      run: |
+        .\tools\fetch_youtube_helpers.ps1
+        .\tools\fetch_ffmpeg_helpers.ps1
+
+    - name: Check the restored media helpers against the lock
+      if: inputs.fresh != 'true' && steps.helpers.outputs.cache-hit == 'true'
+      shell: powershell
+      run: |
+        $lock = Get-Content -LiteralPath packaging\tool-lock.json -Raw | ConvertFrom-Json
+        foreach ($entry in $lock.entries) {
+          $folder = if ([string]$entry.name -in @('ffmpeg.exe', 'ffprobe.exe')) { 'external\ffmpeg\bin' } else { 'external\youtube' }
+          $path = Join-Path $folder ([string]$entry.name)
+          if ((Get-Item -LiteralPath $path).Length -ne [int64]$entry.size -or
+              (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne [string]$entry.sha256) {
+            throw "The cached $($entry.name) does not match packaging/tool-lock.json."
+          }
+        }
+        Write-Host "Restored media helpers match the lock."
+
+    # Committed, and re-fetched so a run proves the committed copy is the
+    # pinned upstream package: the packager refuses a tree this step changed.
+    - name: Fetch the pinned UI assets
+      shell: powershell
+      run: .\tools\fetch_ui_assets.ps1

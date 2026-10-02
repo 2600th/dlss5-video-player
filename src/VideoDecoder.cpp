@@ -33,12 +33,9 @@ using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
 
 #include "PrecisionSleeper.h"
+#include "WindowsArgument.h"
 
-static std::wstring Quote(const std::wstring& s) {
-    // Windows filenames cannot contain a literal quote character, so this is
-    // sufficient for the executable and video paths used by this player.
-    return L"\"" + s + L"\"";
-}
+static std::wstring Quote(const std::wstring& s) { return QuoteCommandArgument(s); }
 
 // Bytes of helper stdout a probe may hand back before it is treated as broken:
 // the same bound MediaPipeline's capture keeps.
@@ -166,15 +163,18 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     // description, the acceleration memo key and the NV12 decision used to be
     // enumerated here one by one and were the ones left behind.
     swap(m_source,other.m_source);
-    swap(m_ffmpegExe,other.m_ffmpegExe);swap(m_ffprobeExe,other.m_ffprobeExe);swap(m_ffmpegProcess,other.m_ffmpegProcess);swap(m_ffmpegStdout,other.m_ffmpegStdout);swap(m_ffmpegJob,other.m_ffmpegJob);
+    swap(m_ffmpegExe,other.m_ffmpegExe);swap(m_ffprobeExe,other.m_ffprobeExe);swap(m_ffmpegStdout,other.m_ffmpegStdout);swap(m_ffmpegJob,other.m_ffmpegJob);
+    if(this!=&other){std::scoped_lock processLock(m_frameMutex,other.m_frameMutex);swap(m_ffmpegProcess,other.m_ffmpegProcess);}
     swap(m_ffmpegStderr,other.m_ffmpegStderr);
     if(this!=&other){
         std::scoped_lock errorLock(m_errorOutputMutex,other.m_errorOutputMutex);
         swap(m_lastErrorOutput,other.m_lastErrorOutput);
     }
-    swap(m_ffmpegEmittedFrames,other.m_ffmpegEmittedFrames);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
-    swap(m_hdrPresentation,other.m_hdrPresentation);swap(m_ffmpegPq,other.m_ffmpegPq);
-    swap(m_ffmpegP010,other.m_ffmpegP010);swap(m_lastToneMapGpu,other.m_lastToneMapGpu);swap(m_toneMapTable,other.m_toneMapTable);
+    // Atomics do not swap; both queue threads are stopped, so relaxed exchanges suffice.
+    const auto swapAtomic=[](auto& a,auto& b){b.store(a.exchange(b.load(std::memory_order_relaxed),std::memory_order_relaxed),std::memory_order_relaxed);};
+    swap(m_ffmpegEmittedFrames,other.m_ffmpegEmittedFrames);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swapAtomic(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
+    swapAtomic(m_hdrPresentation,other.m_hdrPresentation);swapAtomic(m_ffmpegPq,other.m_ffmpegPq);
+    swapAtomic(m_ffmpegP010,other.m_ffmpegP010);swapAtomic(m_lastToneMapGpu,other.m_lastToneMapGpu);swap(m_toneMapTable,other.m_toneMapTable);
     swap(m_ffmpegSpawnFirstFrame,other.m_ffmpegSpawnFirstFrame);swap(m_ffmpegFirstSourceFrame,other.m_ffmpegFirstSourceFrame);
     swap(m_restartFirstFrameMs,other.m_restartFirstFrameMs);swap(m_drainMsPerFrame,other.m_drainMsPerFrame);
     swap(m_seekTiming,other.m_seekTiming);swap(m_seekStart,other.m_seekStart);swap(m_seekTargetSeconds,other.m_seekTargetSeconds);swap(m_seekTimingPending,other.m_seekTimingPending);
@@ -832,7 +832,7 @@ static void StopFFmpegChild(HANDLE process,HANDLE job,HANDLE stdoutRead,DWORD wa
 }
 
 bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAcceleration> requested) {
-    FFmpegAcceleration acceleration=requested.value_or(m_ffmpegAcceleration);
+    FFmpegAcceleration acceleration=requested.value_or(m_ffmpegAcceleration.load(std::memory_order_relaxed));
     const unsigned unavailable=AccelerationMemory().Unavailable(m_source.hardwareProfile);
     if(acceleration==FFmpegAcceleration::Cuda&&(unavailable&kCudaUnavailable))
         acceleration=FFmpegAcceleration::D3D11Va;
@@ -855,7 +855,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
             }
         }
     } handedOver{this,m_ffmpegProcess,m_ffmpegJob,m_ffmpegStdout,std::move(m_ffmpegStderr)};
-    m_ffmpegProcess=nullptr;m_ffmpegJob=nullptr;m_ffmpegStdout=nullptr;
+    {std::lock_guard lock(m_frameMutex);m_ffmpegProcess=nullptr;}m_ffmpegJob=nullptr;m_ffmpegStdout=nullptr;
     m_pendingFrame.clear();m_pendingFrameBytes=0;
     seekSeconds = std::max(0.0, seekSeconds);
     // Snap to the constant-frame-rate grid the child is forced to emit. An
@@ -1068,16 +1068,18 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
 
     const double spawnMs=ElapsedMs(spawnStarted);
     CloseHandle(pi.hThread);
-    m_ffmpegProcess = pi.hProcess;
+    // Under the queue lock: DecodingOnCuda reads it from another thread while
+    // this runs on the queue thread for a hardware fallback.
+    {std::lock_guard lock(m_frameMutex);m_ffmpegProcess = pi.hProcess;}
     m_ffmpegStdout = readPipe;
     m_ffmpegJob = job;
     m_ffmpegStderr = std::move(stderrTail);
     m_ffmpegEmittedFrames = 0;
     m_ffmpegSeekBase100ns = static_cast<int64_t>(seekSeconds * 10000000.0);
     m_ffmpegSpawnFirstFrame = m_ffmpegFirstSourceFrame = FirstFrameAtOrAfter(seekSeconds,m_source.fps);
-    m_ffmpegAcceleration = acceleration;
-    m_ffmpegPq = pq;
-    m_ffmpegP010 = p010;
+    m_ffmpegAcceleration.store(acceleration, std::memory_order_relaxed);
+    m_ffmpegPq.store(pq, std::memory_order_relaxed);
+    m_ffmpegP010.store(p010, std::memory_order_relaxed);
     m_pendingFrame.clear();m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
     m_restartDiscontinuity = false;
     if(m_seekTimingPending){
@@ -1094,7 +1096,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
 void VideoDecoder::StopFFmpeg(DWORD waitTimeout) {
     StopFFmpegChild(m_ffmpegProcess,m_ffmpegJob,m_ffmpegStdout,waitTimeout);
     m_ffmpegStderr.reset();
-    m_ffmpegProcess=nullptr;m_ffmpegJob=nullptr;m_ffmpegStdout=nullptr;
+    {std::lock_guard lock(m_frameMutex);m_ffmpegProcess=nullptr;}m_ffmpegJob=nullptr;m_ffmpegStdout=nullptr;
     m_pendingFrame.clear();m_pendingFrameBytes=0;
 }
 
@@ -1238,20 +1240,21 @@ double VideoDecoder::FFmpegHeadSeconds() const {
 }
 
 bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
-    if (exitCode == 0 || exitCode == STILL_ACTIVE || m_ffmpegAcceleration == FFmpegAcceleration::Software)
+    const FFmpegAcceleration current = m_ffmpegAcceleration.load(std::memory_order_relaxed);
+    if (exitCode == 0 || exitCode == STILL_ACTIVE || current == FFmpegAcceleration::Software)
         return false;
     // A path that dies before its first frame cannot decode this codec here, so
     // later opens skip it. One that fails after delivering frames is a stream or
     // position problem and must not disqualify the hardware for everything else.
     if(m_ffmpegEmittedFrames==0)
         AccelerationMemory().Remember(m_source.hardwareProfile,
-            m_ffmpegAcceleration==FFmpegAcceleration::Cuda?kCudaUnavailable:kD3d11Unavailable);
-    const FFmpegAcceleration next = m_ffmpegAcceleration == FFmpegAcceleration::Cuda ?
+            current==FFmpegAcceleration::Cuda?kCudaUnavailable:kD3d11Unavailable);
+    const FFmpegAcceleration next = current == FFmpegAcceleration::Cuda ?
         FFmpegAcceleration::D3D11Va : FFmpegAcceleration::Software;
     const double resumeSeconds = FFmpegHeadSeconds();
     // The hardware path's own stderr is the only record of WHY it could not
     // decode this codec - the memo above remembers that it could not.
-    ReportChildFailure("FFmpeg " + std::string(m_ffmpegAcceleration == FFmpegAcceleration::Cuda ? "CUDA" : "D3D11VA")
+    ReportChildFailure("FFmpeg " + std::string(current == FFmpegAcceleration::Cuda ? "CUDA" : "D3D11VA")
         + " decode exited with code " + std::to_string(exitCode));
     LOG("FFmpeg hardware path exited with code " << exitCode << "; trying " <<
         (next == FFmpegAcceleration::D3D11Va ? "D3D11VA" : "software") << " fallback.");
@@ -1473,7 +1476,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
         if(m_ffmpegEmittedFrames==1||gpu!=m_lastToneMapGpu)
             LOG("HDR tone map: "<<m_source.width<<"x"<<m_source.height<<" P010 to BGRA on the "<<(gpu?"GPU":"CPU")<<" ("
                 <<hdr_policy::ToneMapIdentityTerm(SourceHdrSignal(),m_source.hdrPeakNits,true).substr(1)<<").");
-        m_lastToneMapGpu=gpu;
+        m_lastToneMapGpu.store(gpu,std::memory_order_relaxed);
         out.bgra.swap(bgra);
         // The caller's previous buffer goes back to the pool; the P010 one stays.
         RecycleFrameBuffer(std::move(bgra));

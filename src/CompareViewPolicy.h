@@ -16,6 +16,25 @@
 // the one Mix, and how a GDI-drawn tag becomes the premultiplied texel the compositor
 // blends. main.cpp owns the Win32 side of each and PSPresentScaled the pixels.
 
+namespace compare_availability {
+
+// Why a compare view was refused, as a localization key, or nullptr when it is
+// available. The views composite the neural render against its original, so
+// they need a video, Neural Rendering on and a rendered pair playing. A press
+// that arrived without one used to change nothing on screen; issue #14's log
+// held twenty of them in eighty seconds.
+// `renderStarting`: a neural job or live session is already on its way to a pair,
+// so the press is told to wait rather than to start one.
+inline const wchar_t* RefusalKey(bool loaded, bool neuralRequested, bool renderedPair, bool renderStarting)
+{
+    if (!loaded) return L"compare.refused.no_video";
+    if (!neuralRequested) return L"compare.hint.unavailable";
+    if (!renderedPair) return renderStarting ? L"compare.refused.render_starting" : L"compare.refused.no_render";
+    return nullptr;
+}
+
+} // namespace compare_availability
+
 namespace compare_gesture {
 
 // A press on the picture is one of three things, told apart by what the pointer does
@@ -369,6 +388,34 @@ inline RECT RenderRect(int areaW, int areaH, double aspect, Fit fit, uint32_t ou
     rh = std::max(1, rh);
     const int left = (areaW - rw) / 2, top = (areaH - rh) / 2;
     return RECT{left, top, left + rw, top + rh};
+}
+
+// The part of the render window `render` (as RenderRect places it in an areaW x
+// areaH area) that the area shows, in the window's own pixels, which are its
+// backbuffer's. Fit shows all of it. Fill, and 1:1 with an output larger than the
+// area, centre a window larger than the area and the area crops it, so the tags pinned
+// to the window's corners were drawn where nobody could see them: they are pinned to
+// this rectangle's corners instead.
+inline RECT VisibleRect(const RECT& render, int areaW, int areaH)
+{
+    const LONG w = std::max<LONG>(0, render.right - render.left);
+    const LONG h = std::max<LONG>(0, render.bottom - render.top);
+    const LONG left = std::clamp<LONG>(-render.left, 0, w);
+    const LONG top = std::clamp<LONG>(-render.top, 0, h);
+    return RECT{left, top, std::clamp<LONG>(LONG(areaW) - render.left, left, w),
+                std::clamp<LONG>(LONG(areaH) - render.top, top, h)};
+}
+
+// The visible rectangle as the compositor uses it, for a backbuffer of width x height:
+// clamped to it, and the whole of it when there is no rectangle or nothing of it is
+// left - none was ever set, or the swap chain has not caught up with a resize yet.
+inline RECT VisibleInTarget(const RECT& visible, uint32_t width, uint32_t height)
+{
+    const LONG w = LONG(width), h = LONG(height);
+    const RECT clamped{std::clamp<LONG>(visible.left, 0, w), std::clamp<LONG>(visible.top, 0, h),
+                       std::clamp<LONG>(visible.right, 0, w), std::clamp<LONG>(visible.bottom, 0, h)};
+    if (clamped.right <= clamped.left || clamped.bottom <= clamped.top) return RECT{0, 0, w, h};
+    return clamped;
 }
 
 } // namespace compare_view

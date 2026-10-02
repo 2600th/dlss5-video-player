@@ -3,6 +3,7 @@
 // the portable suite excludes (`ctest -LE gpu`), and run on an RTX machine with
 // `ctest -L gpu` against the demo clip in docs/media.
 #include "D3D12Renderer.h"
+#include "VsrUpscalePass.h"
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "UpscalingPolicy.h"
@@ -97,9 +98,25 @@ int RunDebugViewProbe();
 // the ladder: every quality at 1080p and 1440p sources, at 1x and into a 2160p window,
 // and prints the table. Registered as VsrGpuSmoke only in a build with -DRTX_VIDEO_SDK.
 int RunVsrProbe(const wchar_t* source);
+// RTX VSR written raw for scoring, the way RenderSuperResolution writes DLSS SR:
+// the clip as the reference the view reads, in a window of the output's size so
+// the network maps texel for pixel, no tags, RGBA as CaptureComposedView reads it.
+//   UpscalingGpuSmoke vsr-capture <clip> <out width> <out height> <quality 1-4> <raw> <frames>
+int RunVsrCapture(const wchar_t* source,uint32_t outW,uint32_t outH,uint32_t quality,const wchar_t* raw,uint32_t maxFrames);
+// The export's RTX VSR pass (VsrUpscalePass) end to end: the whole clip to 1440p,
+// then a one-second range, each frame VSR's and each encoded.
+//   UpscalingGpuSmoke vsr-export <clip> <work dir>
+int RunVsrExportProbe(const wchar_t* source,const wchar_t* work);
+// The same pass timed: the whole clip to the given size, written to <output>, and
+// the frames per second it kept. "lossless" encodes FFV1, so two builds' outputs can
+// be compared frame for frame (ffmpeg -f framemd5).
+//   UpscalingGpuSmoke vsr-export-time <clip> <out width> <out height> <output> [lossless]
+int RunVsrExportTiming(const wchar_t* source,uint32_t outW,uint32_t outH,const wchar_t* output,bool lossless);
 
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
+    if((argc==6||(argc==7&&std::wstring_view(argv[6])==L"lossless"))&&std::wstring_view(argv[1])==L"vsr-export-time")
+        return RunVsrExportTiming(argv[2],std::wcstoul(argv[3],nullptr,10),std::wcstoul(argv[4],nullptr,10),argv[5],argc==7);
     if(argc==4&&std::wstring_view(argv[2])==L"sr-quality")return RunSrQualityProbe(argv[1],argv[3]);
     if(argc==6||(argc==7&&std::wstring_view(argv[6])==L"per-frame")){
         const std::wstring wide(argv[4]);
@@ -114,6 +131,10 @@ int wmain(int argc,wchar_t** argv) {
     if(argc==2&&std::wstring_view(argv[1])==L"subtitle-upload")return RunSubtitleUploadProbe();
     if(argc==2&&std::wstring_view(argv[1])==L"debug-views")return RunDebugViewProbe();
     if(argc==3&&std::wstring_view(argv[1])==L"vsr")return RunVsrProbe(argv[2]);
+    if(argc==4&&std::wstring_view(argv[1])==L"vsr-export")return RunVsrExportProbe(argv[2],argv[3]);
+    if(argc==8&&std::wstring_view(argv[1])==L"vsr-capture")
+        return RunVsrCapture(argv[2],std::wcstoul(argv[3],nullptr,10),std::wcstoul(argv[4],nullptr,10),
+                             std::wcstoul(argv[5],nullptr,10),argv[6],std::wcstoul(argv[7],nullptr,10));
     if((argc==3||argc==4)&&std::wstring_view(argv[1])==L"hdr-tonemap")return RunHdrToneMapProbe(argv[2],argc==4?argv[3]:nullptr);
     if(argc!=3)return 2; // source path, target height (1440 or 2160)
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
@@ -952,6 +973,87 @@ int RunVsrProbe(const wchar_t* source)
                            meanAbs>0.05&&meanAbs<24.0&&afterFrames.errors==0&&afterModes.errors==0;
         renderer.reset();DestroyWindow(window);
 
+        // Part 3: RTX VSR as the playback upscaler. The plain playback path - DLSS
+        // off, no reference, the decoded frame uploaded by RenderFrame - in a window
+        // twice the source: every frame is VSR's upscale, a paused present keeps the
+        // frame it made, the picture is not the compositor's scale of the same frame,
+        // and turning it off or showing the video at its own size gives the scale back.
+        bool playback=partOne;
+        if(playback){
+            VideoDecoder again;
+            playback=again.Open(source,MediaSourceKind::LocalFile);
+            const uint32_t ww=w*2u,wh=h*2u;
+            HWND playbackWindow=CreateWindowExW(0,L"STATIC",L"vsr playback",WS_POPUP,0,0,int(ww),int(wh),nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+            auto r=MakeD3D12Renderer();
+            r->SetPresentFollowsWindow(true);
+            r->SetHdrOutputAllowed(true);
+            playback=playback&&r->Initialize(playbackWindow,w,h,w,h,gw,gh,DefaultNeuralCarrierQuality());
+            ComparisonSettings plain;plain.playbackVsr=true;plain.playbackVsrQuality=vsr_policy::Quality::High;
+            if(playback){r->SetDLSS(false);r->SetComparison(plain);}
+            uint32_t played=0,upscaled=0;VideoFrame next;
+            while(playback&&played<10&&again.ReadNext(next)){
+                playback=r->RenderFrame(next.bgra.data(),next.bgra.size(),nullptr,0,gw,gh,true,false,frameMs);
+                if(playback){++played;if(r->PlaybackVsrShown())++upscaled;}
+            }
+            const uint64_t afterPlay=r->VsrEvaluations();
+            std::vector<uint8_t> withVsr,without;uint32_t aw=0,ah=0,bw=0,bh=0;
+            const bool paused=playback&&r->PresentCurrent()&&r->PlaybackVsrShown()&&r->VsrEvaluations()==afterPlay&&
+                              r->CaptureComposedView(withVsr,aw,ah);
+            plain.playbackVsr=false;r->SetComparison(plain);
+            const bool off=paused&&r->PresentCurrent()&&!r->PlaybackVsrShown()&&r->CaptureComposedView(without,bw,bh);
+            double playbackDiff=0.0;
+            if(off&&aw==bw&&ah==bh&&withVsr.size()==without.size()&&!withVsr.empty()){
+                for(size_t i=0;i<withVsr.size();i+=4)for(size_t c=0;c<3;++c)playbackDiff+=std::abs(int(withVsr[i+c])-int(without[i+c]));
+                playbackDiff/=double(withVsr.size()/4*3);
+            }
+            // At the video's own size there is nothing to upscale.
+            plain.playbackVsr=true;r->SetComparison(plain);
+            SetWindowPos(playbackWindow,nullptr,0,0,int(w),int(h),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+            const bool ownSize=off&&r->PresentCurrent()&&!r->PlaybackVsrShown();
+            // An SDR video on an HDR display is still SDR in: VSR upscales it and the
+            // compositor encodes its frame for the HDR swapchain. Forced, whatever the
+            // display is, as the hdr-output probe forces it.
+            SetWindowPos(playbackWindow,nullptr,0,0,int(ww),int(wh),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+            const uint64_t beforeHdr=r->VsrEvaluations();
+            bool hdrDisplay=ownSize&&r->SetHdrOutput(true,203.0f)&&r->HdrOutputActive();
+            for(uint32_t i=0;hdrDisplay&&i<3&&again.ReadNext(next);++i)
+                hdrDisplay=r->RenderFrame(next.bgra.data(),next.bgra.size(),nullptr,0,gw,gh,false,false,frameMs)&&r->PlaybackVsrShown()&&!r->GpuUnusable();
+            hdrDisplay=hdrDisplay&&r->VsrEvaluations()==beforeHdr+3;
+            if(r->HdrOutputActive())r->SetHdrOutput(false,203.0f);
+            // A pair resident: the Original view is the reference's VSR, as the DLSS 5
+            // view is the decoded frame's, and Split draws both members plain.
+            bool pairViews=hdrDisplay&&again.ReadNext(next)&&r->UploadReferenceFrame(next.bgra.data(),next.bgra.size());
+            plain.mode=ComparisonMode::Original;r->SetComparison(plain);
+            const uint64_t beforeOriginal=r->VsrEvaluations();
+            pairViews=pairViews&&r->RenderFrame(next.bgra.data(),next.bgra.size(),nullptr,0,gw,gh,false,false,frameMs)&&
+                      r->PlaybackVsrShown()&&r->VsrEvaluations()==beforeOriginal+1;
+            plain.mode=ComparisonMode::SplitVertical;r->SetComparison(plain);
+            pairViews=pairViews&&r->PresentCurrent()&&!r->PlaybackVsrShown();
+            plain.mode=ComparisonMode::Neural;r->SetComparison(plain);
+            std::cout<<"vsr playback: frames="<<played<<" upscaled="<<upscaled<<" evaluations="<<afterPlay
+                     <<" pausedKept="<<paused<<" offRestoresScale="<<off<<" meanAbsVsScale="<<playbackDiff
+                     <<" ownSizeLeftAlone="<<ownSize<<" hdrDisplay="<<hdrDisplay<<" pairViews="<<pairViews<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
+            playback=playback&&played==10&&upscaled==10&&afterPlay==10&&paused&&off&&ownSize&&hdrDisplay&&pairViews&&playbackDiff>0.05&&playbackDiff<24.0&&
+                     r->VsrOutputW()==ww&&r->VsrOutputH()==wh;
+            // A window being resized: the size it passes through is not made - the
+            // compositor scales that present and leaves it stale, so a paused player
+            // presents again - and once the size has held, VSR is made at it.
+            if(playback){
+                const uint32_t mw=w*3u/2u,mh=h*3u/2u;
+                SetWindowPos(playbackWindow,nullptr,0,0,int(mw),int(mh),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+                const bool held=r->PresentCurrent()&&!r->PlaybackVsrShown()&&r->PresentationStale()&&
+                                r->VsrOutputW()==ww&&r->VsrOutputH()==wh;
+                uint32_t presents=1;bool settled=false;
+                while(held&&!settled&&presents<100){Sleep(10);settled=r->PresentCurrent()&&r->PlaybackVsrShown();++presents;}
+                const auto resized=vsr_policy::OutputSize(w,h,mw,mh);
+                std::cout<<"vsr resize: held="<<held<<" settled="<<settled<<" presents="<<presents
+                         <<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
+                playback=held&&settled&&presents>=vsr_policy::kSettlePresents&&!r->PresentationStale()&&
+                         r->VsrOutputW()==resized.width&&r->VsrOutputH()==resized.height;
+            }
+            r.reset();DestroyWindow(playbackWindow);
+        }
+
         // Part 2: the ladder's cost, the network run on every present because the
         // original is uploaded again before each one. Queue drained between presents,
         // so each timing is one evaluate alone on the GPU.
@@ -986,7 +1088,7 @@ int RunVsrProbe(const wchar_t* source)
             std::cout<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n"<<std::defaultfloat;
             r.reset();DestroyWindow(timing);
         }
-        code=partOne?(timed?0:7):6;
+        code=partOne?(playback?(timed?0:7):8):6;
     }
     MFShutdown();CoUninitialize();return code;
 }
@@ -1044,4 +1146,100 @@ int RunDebugViewProbe()
     }
     DestroyWindow(window);
     return code;
+}
+
+int RunVsrCapture(const wchar_t* source,uint32_t outW,uint32_t outH,uint32_t quality,const wchar_t* raw,uint32_t maxFrames)
+{
+    if(quality<1||quality>4||outW==0||outH==0||maxFrames==0)return 2;
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    int code=1;
+    {
+        VideoDecoder decoder;
+        if(!decoder.Open(source,MediaSourceKind::LocalFile))return 3;
+        const uint32_t w=decoder.Width(),h=decoder.Height();
+        const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(w,h,decoder.FrameRate());
+        HWND window=CreateWindowExW(0,L"STATIC",L"vsr capture",WS_POPUP,0,0,int(outW),int(outH),nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        {
+            auto renderer=MakeD3D12Renderer();
+            renderer->SetPresentFollowsWindow(true);
+            bool ok=renderer->Initialize(window,w,h,w,h,gw,gh,DefaultNeuralCarrierQuality());
+            if(ok)renderer->SetDLSS(false);
+            ok=ok&&renderer->VsrReason()==vsr_policy::Reason::Ready;
+            ComparisonSettings view;view.mode=ComparisonMode::Vsr;view.labels=false;
+            view.vsrQuality=static_cast<vsr_policy::Quality>(quality);
+            if(ok)renderer->SetComparison(view);
+            std::ofstream out(raw,std::ios::binary|std::ios::trunc);
+            VideoFrame frame;uint32_t frames=0;double gpuMs=0.0;
+            std::vector<uint8_t> rgba;uint32_t cw=0,ch=0;
+            while(ok&&frames<maxFrames&&decoder.ReadNext(frame)){
+                if(frames==0)ok=renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),nullptr,0,gw,gh,true,false,33.3f);
+                ok=ok&&renderer->UploadReferenceFrame(frame.bgra.data(),frame.bgra.size())&&renderer->PresentCurrent()&&renderer->VsrShown()&&
+                   renderer->CaptureComposedView(rgba,cw,ch)&&cw==outW&&ch==outH;
+                if(ok){out.write(reinterpret_cast<const char*>(rgba.data()),std::streamsize(rgba.size()));++frames;gpuMs+=renderer->LastVsrGpuMs();}
+            }
+            const bool texelForPixel=renderer->VsrOutputW()==outW&&renderer->VsrOutputH()==outH;
+            std::cout<<"vsr-capture: source="<<w<<"x"<<h<<" output="<<renderer->VsrOutputW()<<"x"<<renderer->VsrOutputH()
+                     <<" quality="<<quality<<" frames="<<frames<<" evaluations="<<renderer->VsrEvaluations()
+                     <<" meanGpuMs="<<(frames?gpuMs/frames:0.0)<<'\n';
+            code=ok&&frames>0&&texelForPixel&&renderer->VsrEvaluations()==frames?0:5;
+        }
+        DestroyWindow(window);
+    }
+    MFShutdown();CoUninitialize();return code;
+}
+
+int RunVsrExportProbe(const wchar_t* source,const wchar_t* work)
+{
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    int code=1;
+    {
+        VideoDecoder decoder;
+        if(!decoder.Open(source,MediaSourceKind::LocalFile))return 3;
+        const auto target=UpscalingTarget(decoder.Width(),decoder.Height(),1440);
+        const double fps=decoder.FrameRate();
+        const uint64_t expected=uint64_t(std::llround(decoder.DurationSeconds()*fps));
+        decoder.Close();
+        if(!target.grows)return 4;
+        std::error_code error;std::filesystem::create_directories(work,error);
+        wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
+        const std::filesystem::path helpers=std::filesystem::path(module).parent_path();
+        VsrUpscaleRequest request{};
+        request.source=source;request.output=std::filesystem::path(work)/L"vsr-export-whole.mkv";
+        request.outputWidth=target.width;request.outputHeight=target.height;
+        const VsrUpscaleResult whole=RunVsrUpscalePass(helpers,request,{});
+        // One second from the first: a range is the frames inside it, not the file.
+        request.output=std::filesystem::path(work)/L"vsr-export-range.mkv";
+        request.range={10'000'000,20'000'000};
+        const VsrUpscaleResult range=RunVsrUpscalePass(helpers,request,{});
+        const uint64_t second=uint64_t(std::llround(fps));
+        const uintmax_t rangeBytes=std::filesystem::file_size(request.output,error);
+        const bool wholeOk=whole.ok&&whole.framesWritten+1>=expected&&whole.framesWritten<=expected+1&&whole.evaluations==whole.framesWritten;
+        const bool rangeOk=range.ok&&range.framesWritten+1>=second&&range.framesWritten<=second+1&&
+                           range.evaluations==range.framesWritten&&!error&&rangeBytes>0;
+        std::cout<<"vsr-export: "<<target.width<<"x"<<target.height<<" whole="<<whole.ok<<" frames="<<whole.framesWritten<<" of ~"<<expected
+                 <<" evaluations="<<whole.evaluations<<" range="<<range.ok<<" frames="<<range.framesWritten<<" of ~"<<second
+                 <<" evaluations="<<range.evaluations<<" bytes="<<rangeBytes<<'\n';
+        code=wholeOk&&rangeOk?0:5;
+    }
+    MFShutdown();CoUninitialize();return code;
+}
+
+int RunVsrExportTiming(const wchar_t* source,uint32_t outW,uint32_t outH,const wchar_t* output,bool lossless)
+{
+    if(!outW||!outH)return 2;
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    int code=1;
+    {
+        wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
+        VsrUpscaleRequest request{};
+        request.source=source;request.output=output;request.outputWidth=outW;request.outputHeight=outH;
+        if(lossless)request.encode=EncoderQuality::Lossless;
+        const auto begin=std::chrono::steady_clock::now();
+        const VsrUpscaleResult result=RunVsrUpscalePass(std::filesystem::path(module).parent_path(),request,{});
+        const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
+        std::cout<<"vsr-export-time: "<<outW<<"x"<<outH<<(lossless?" ffv1":" hevc")<<" ok="<<result.ok<<" frames="<<result.framesWritten
+                 <<" seconds="<<std::fixed<<std::setprecision(2)<<seconds<<" fps="<<(seconds>0.0?double(result.framesWritten)/seconds:0.0)<<'\n';
+        code=result.ok&&result.framesWritten>0?0:5;
+    }
+    MFShutdown();CoUninitialize();return code;
 }

@@ -995,9 +995,25 @@ These controls do not alter the offline DLAA carrier or cache identity.
 RTX Video Super Resolution (NGX feature 16, `VsrEngine.h`) is compiled only
 against the RTX Video SDK: `-DRTX_VIDEO_SDK`, or the SDK staged in
 `external/rtx-video-sdk`. It joins the NGX session `DLSSBackend` opened on the
-device rather than opening its own, and runs on the decoded original for the
-**RTX VSR** compare view only, so it never reaches the capture, the cache or an
-export.
+device rather than opening its own, and runs on the decoded frame for the
+**RTX VSR** compare view, as the playback upscaler and as an export's upscaler,
+never anywhere that reaches the capture or the cache. As the playback upscaler
+(`vsr_policy::PlaybackUpscales`, `ComparisonSettings::playbackVsr`) it reads the
+decoded BGRA texture - T is that texture's linearisation and nothing else - and
+the present draws its output as the VSR view, untagged, wherever DLSS SR did not
+make the picture, nothing is being compared, the frame is SDR (an HDR swapchain
+is fine: the compositor encodes VSR's frame like any other) and the window
+shows it larger than it is. An export whose plan has `vsrStage` (Super Resolution
+without the model, `SuperResolutionEngine::RtxVsr`, the default) runs
+`VsrUpscalePass` in the player instead of the helper: the same renderer path in a
+hidden window of the output's size, the composed view read back and encoded, the
+final mux attaching the source's streams as for every pass. It runs in the player
+because `nvngx_vsr.dll` ships beside it and the runtime lock keeps
+`neural-runtime/` to the files it names. `vsr_policy::KeepUpGuard` lowers its quality
+(`ComparisonSettings::playbackVsrQuality`) for one video, then turns it off, when
+playback keeps dropping frames while VSR takes a fifth of the frame budget. The setting rides on the presentation settings
+every path that builds a renderer already pushes, so a capture, which pushes
+none, cannot pick it up. Measured in `docs/measurements/vsr-quality-20261002`.
 
 Frame Generation is a conversion, not a presentation mode, and the player
 creates it besides Super Resolution and RTX VSR. `FrameGenerationPass`

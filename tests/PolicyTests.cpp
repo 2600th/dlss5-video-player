@@ -44,6 +44,7 @@
 #include "RangeSelection.h"
 #include "ExportPipeline.h"
 #include "RenderCommandLine.h"
+#include "StageExport.h"
 #include "FrameResample.h"
 #include "UntaggedColorPolicy.h"
 #include "DisplayOrientationPolicy.h"
@@ -74,6 +75,8 @@
 #include "MediaTransportPolicy.h"
 #include "StartScreenPolicy.h"
 #include "FrameGenAddon.h"
+#include "WindowsArgument.h"
+#include "NeuralWorkerProtocol.h"
 #include "UpdateCheck.h"
 #include "CompareBarPolicy.h"
 #include "CompareViewPolicy.h"
@@ -233,6 +236,8 @@ struct RendererOwnedSentinel final : D3D12RendererTestOwnedResource {
 };
 
 struct D3D12RendererTestAccess {
+    // How many root constants the renderer sets for the Compose cbuffer.
+    static constexpr uint32_t ComposeConstantCount(){return D3D12Renderer::ComposeConstantCount;}
     // The hooks object exists only once a test installs something.
     static D3D12RendererTestHooks& Hooks(D3D12Renderer& renderer)
     {
@@ -389,6 +394,15 @@ void runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test()
         CHECK_EQ(2, observed[1]);
         CHECK_EQ(3, observed[2]);
     }
+}
+
+// A path in %TEMP% that no other PolicyTests process uses. The suite runs as
+// more than one process at once (`ctest -j` runs its registrations side by
+// side), and two of them writing one fixed name read each other's fixtures.
+std::filesystem::path process_temp_path(std::wstring_view name)
+{
+    return std::filesystem::temp_directory_path() /
+        (std::to_wstring(GetCurrentProcessId()) + L"-" + std::wstring(name));
 }
 
 void write_binary_file(const std::filesystem::path& path, std::string_view content)
@@ -1294,10 +1308,36 @@ void start_screen_names_a_loaded_frame_generation_addon_test()
     CHECK(std::none_of(plain.begin(), plain.end(), [](const Line& line) { return line.label == L"Frame Generation"; }));
     facts.frameGenAddon = L"version.dll";
     const auto lines = CapabilityLines(facts);
+    // RTX VSR says what it does, or why it does not; never a failure that offers safe mode.
+    const auto vsrLine = [&](VsrState state) {
+        Facts copy = facts;
+        copy.rtxVsr = state;
+        const auto all = CapabilityLines(copy);
+        const auto found = std::find_if(all.begin(), all.end(), [](const Line& line) { return line.label == L"RTX VSR"; });
+        return found == all.end() ? std::optional<Line>{} : std::optional<Line>(*found);
+    };
+    CHECK(!vsrLine(VsrState::Unknown));
+    REQUIRE(vsrLine(VsrState::On));
+    CHECK(vsrLine(VsrState::On)->mark == Mark::Pass);
+    for (const VsrState state : {VsrState::Off, VsrState::NotInBuild, VsrState::MissingRuntime}) {
+        REQUIRE(vsrLine(state));
+        CHECK(vsrLine(state)->mark == Mark::Info);
+    }
     const auto addon = std::find_if(lines.begin(), lines.end(), [](const Line& line) { return line.label == L"Frame Generation"; });
     REQUIRE(addon != lines.end());
     CHECK(addon->mark == Mark::Info);
     CHECK(addon->value.find(L"dlssg_sm86") != std::wstring::npos);
+    // A build other than the pinned one loads too - the user put it there - but is named.
+    CHECK(addon->value.find(L"not the build") == std::wstring::npos);
+    {
+        Facts unpinned = facts;
+        unpinned.frameGenAddonPinned = false;
+        const auto all = CapabilityLines(unpinned);
+        const auto found = std::find_if(all.begin(), all.end(), [](const Line& line) { return line.label == L"Frame Generation"; });
+        REQUIRE(found != all.end());
+        CHECK(found->value.find(L"not the build") != std::wstring::npos);
+        CHECK(found->mark == Mark::Info);
+    }
     CHECK(!OfferSafeMode(lines, false));
 }
 
@@ -1305,6 +1345,53 @@ void start_screen_names_a_loaded_frame_generation_addon_test()
 // dlssg_for_sm86 proxy beside it was never loaded. It is loaded by full path
 // instead - only when its own ini marks it as that add-on, and never under a
 // name the player refuses beside itself (dxgi.dll) or renders through.
+// The ffmpeg command lines quote every path; a trailing backslash or a quote must
+// come back out of CommandLineToArgvW as written.
+// A segment name the parent opens inside its staging directory: never a device.
+void segment_names_refuse_devices_and_trailing_dots_test()
+{
+    using neural_worker_protocol::IsValidSegmentName;
+    CHECK(IsValidSegmentName(L"segment-0001.mkv"));
+    for (const std::wstring_view name : {L"CON", L"nul", L"COM1", L"lpt9.mkv", L"aux.txt", L"seg.mkv.", L"seg.mkv ", L"..", L"a\\b"})
+        CHECK(!IsValidSegmentName(name));
+    CHECK(IsValidSegmentName(L"console.mkv"));
+}
+
+// Renders outlive releases: the cache's application term is a revision moved only
+// when render output changes, and it can never name a release after this one.
+void render_cache_revision_is_a_release_no_later_than_this_one_test()
+{
+    const auto revision = ParseSemanticVersion(kRenderCacheRevision);
+    const auto player = ParseSemanticVersion(DLSS_VIDEO_PLAYER_VERSION);
+    REQUIRE(revision.has_value());
+    REQUIRE(player.has_value());
+    CHECK(!(*player < *revision));
+    // Two identities that differ only in the player that made them are one key.
+    NeuralCacheIdentity a{};
+    a.sourceDigest = std::string(64, 'a');
+    a.width = 1920; a.height = 1080;
+    a.applicationVersion = std::string(kRenderCacheRevision);
+    NeuralCacheIdentity b = a;
+    CHECK(BuildNeuralCacheKey(a) == BuildNeuralCacheKey(b));
+    b.applicationVersion = "0.27.0";
+    CHECK(BuildNeuralCacheKey(a) != BuildNeuralCacheKey(b));
+}
+
+void command_argument_quoting_round_trips_through_argv_test()
+{
+    for (const std::wstring argument : {std::wstring(L"C:\\Videos\\clip one.mp4"), std::wstring(L"C:\\dir with space\\"),
+                                        std::wstring(L"a\"b"), std::wstring(L"x\\\"y"), std::wstring(L"")}) {
+        const std::wstring line = L"tool.exe " + QuoteCommandArgument(argument);
+        int count = 0;
+        LPWSTR* argv = CommandLineToArgvW(line.c_str(), &count);
+        REQUIRE(argv != nullptr);
+        CHECK_EQ(2, count);
+        if (count == 2) CHECK(std::wstring(argv[1]) == argument);
+        LocalFree(argv);
+    }
+    CHECK(QuoteCommandArgument(L"C:\\a b\\") == L"\"C:\\a b\\\\\"");
+}
+
 void framegen_addon_picks_the_dlssg_sm86_proxy_beside_the_player_test()
 {
     using framegen_addon::ProxyToLoad;
@@ -5134,6 +5221,34 @@ void refresh_switch_offer_names_the_mode_that_removes_the_pulldown_test()
 // running at refresh/m is exactly the case m-times generation exists for - it
 // lands on the refresh with one scan-out per frame - so every multiplier the
 // constant admits has to be reachable, and nothing beyond it may be.
+// Issue #14's follow-up: an RTX 3060 whose runtime admits 3 generated frames
+// offered 5x in the menu and quietly converted at 4x. Once the runtime has been
+// measured, the menu greys what it will not admit and the confirmation says
+// when the setting was lowered; before that, nothing is greyed on a guess.
+void frame_generation_menu_follows_the_measured_runtime_cap_test()
+{
+    using frame_rate_policy::GeneratedFramesAdmitted;
+    using frame_rate_policy::RuntimeLoweredPreference;
+    for (uint32_t generated = 1; generated <= 4; ++generated)
+        CHECK(GeneratedFramesAdmitted(generated, std::nullopt));
+    CHECK(GeneratedFramesAdmitted(1, 3u));
+    CHECK(GeneratedFramesAdmitted(3, 3u));
+    CHECK(!GeneratedFramesAdmitted(4, 3u));
+    CHECK(GeneratedFramesAdmitted(1, 1u));
+    CHECK(!GeneratedFramesAdmitted(2, 1u));
+
+    CHECK(!RuntimeLoweredPreference(4, std::nullopt));
+    CHECK(!RuntimeLoweredPreference(3, 3u));
+    CHECK(!RuntimeLoweredPreference(0, 3u));   // "as many as the display allows" asks for no number
+    REQUIRE(RuntimeLoweredPreference(4, 3u).has_value());
+    CHECK_EQ(3u, *RuntimeLoweredPreference(4, 3u));
+    const Localizer localizer;
+    for (const wchar_t* key : {L"menu.framegen_beyond_gpu", L"framegen.confirm.lowered", L"framegen.confirm.lowered.addon"}) {
+        const std::wstring text = localizer.Get(key);
+        CHECK(!text.empty() && text != key);
+    }
+}
+
 void frame_generation_reaches_every_multiplier_the_verified_ceiling_admits_test()
 {
     using namespace frame_rate_policy;
@@ -5427,11 +5542,12 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
 {
     const auto plan = [](bool upscale, bool neural, bool framegen, uint32_t rung = 1440,
                          uint32_t multiplier = 2, uint32_t maxMultiplier = 2,
-                         bool still = false) {
+                         bool still = false, SuperResolutionEngine engine = SuperResolutionEngine::Dlss) {
         ExportSelection selection;
         selection.upscale = upscale; selection.neural = neural;
         selection.frameGeneration = framegen;
         selection.targetHeight = rung; selection.multiplier = multiplier;
+        selection.engine = engine;
         return PlanExport(selection, 1280, 720, 30.0, maxMultiplier, still);
     };
 
@@ -5441,7 +5557,7 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
     CHECK_EQ(uint32_t{1280}, n.outputWidth); CHECK_EQ(uint32_t{720}, n.outputHeight);
     CHECK_EQ(uint32_t{1}, ExportStageCount(n));
 
-    // Super Resolution alone: one worker pass at the target size with the
+    // DLSS Super Resolution alone: one worker pass at the target size with the
     // neural verdicts OFF, which is what makes the helper start with the
     // add-on disabled. It was refused while the helper enabled the add-on for
     // every job - an upscale-only and an upscale-plus-neural export of one clip
@@ -5492,6 +5608,35 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
     // A still image may still be upscaled and neural rendered; only generation
     // needs a successor frame.
     CHECK(PlanExport({true, true, false, 1440, 2}, 1280, 720, 30.0, 2, /*still=*/true).valid);
+
+    // RTX VSR is the recommended engine and the selection's default, and it is its
+    // own pass, in the player rather than the helper; DLSS stays the worker's.
+    CHECK(ExportSelection{}.engine == SuperResolutionEngine::RtxVsr);
+    const ExportPlan v = plan(true, false, false, 1440, 2, 2, false, SuperResolutionEngine::RtxVsr);
+    CHECK(v.valid); CHECK(v.vsrStage); CHECK(!v.workerStage); CHECK(!v.requireNeural);
+    CHECK_EQ(uint32_t{2560}, v.outputWidth); CHECK_EQ(uint32_t{1440}, v.outputHeight);
+    CHECK_EQ(uint32_t{1}, ExportStageCount(v));
+    CHECK(!u.vsrStage);
+    const ExportPlan vf = plan(true, false, true, 1440, 2, 2, false, SuperResolutionEngine::RtxVsr);
+    CHECK(vf.valid); CHECK(vf.vsrStage); CHECK(vf.frameGenStage); CHECK_EQ(uint32_t{2}, ExportStageCount(vf));
+    // With the model the upscale is its carrier's, DLSS's, whatever the engine says.
+    const ExportPlan vn = plan(true, true, false, 1440, 2, 2, false, SuperResolutionEngine::RtxVsr);
+    CHECK(vn.valid); CHECK(vn.workerStage); CHECK(!vn.vsrStage); CHECK_EQ(uint32_t{1}, ExportStageCount(vn));
+    // Where RTX VSR cannot run the plan says so rather than failing at the pass;
+    // a neural export does not need it.
+    {
+        ExportSelection selection; selection.upscale = true;
+        CHECK(PlanExport(selection, 1280, 720, 30.0, 2, false, /*vsrReady=*/false).refusal == ExportRefusal::VsrUnavailable);
+        selection.neural = true;
+        CHECK(PlanExport(selection, 1280, 720, 30.0, 2, false, /*vsrReady=*/false).valid);
+        selection.neural = false; selection.engine = SuperResolutionEngine::Dlss;
+        CHECK(PlanExport(selection, 1280, 720, 30.0, 2, false, /*vsrReady=*/false).valid);
+    }
+    CHECK(SuperResolutionEngineName(SuperResolutionEngine::RtxVsr) == "vsr");
+    CHECK(SuperResolutionEngineName(SuperResolutionEngine::Dlss) == "dlss");
+    CHECK(ParseSuperResolutionEngine("vsr") == std::optional<SuperResolutionEngine>(SuperResolutionEngine::RtxVsr));
+    CHECK(ParseSuperResolutionEngine("dlss") == std::optional<SuperResolutionEngine>(SuperResolutionEngine::Dlss));
+    CHECK(!ParseSuperResolutionEngine("bicubic"));
 
     // Blackwell's higher multiples are admitted when the runtime says so.
     const ExportPlan quad = plan(false, false, true, 1440, 4, 4);
@@ -5622,6 +5767,53 @@ void export_container_follows_the_chosen_extension_test()
     CHECK(std::wstring(ExportVideoTag(ExportContainer::Matroska, "hevc")).empty());
 }
 
+// The dialog and --render say what an export will do through StageExport's
+// formatters, and why it will not through ExportRefusalKey: one wording for
+// both, pinned here, and a key for every refusal that the English table holds.
+void stage_export_summaries_are_the_dialogs_and_the_command_lines_test()
+{
+    const Localizer localizer;
+    std::vector<std::wstring> keys;
+    for (const ExportRefusal refusal : {ExportRefusal::NothingSelected, ExportRefusal::SourceGeometryUnknown,
+                                        ExportRefusal::AlreadyAtTarget, ExportRefusal::MultiplierUnsupported,
+                                        ExportRefusal::VsrUnavailable, ExportRefusal::StillImage}) {
+        const std::wstring key = ExportRefusalKey(refusal);
+        CHECK(key.starts_with(L"export.stages.refusal."));
+        CHECK(localizer.Get(key.c_str()) != key);
+        CHECK(std::find(keys.begin(), keys.end(), key) == keys.end());
+        keys.push_back(key);
+    }
+    CHECK(std::wstring(ExportRefusalKey(ExportRefusal::None)) == L"export.stages.refusal.nothing");
+
+    ExportPlan plan;
+    plan.valid = true;
+    plan.workerStage = true;
+    plan.requireNeural = true;
+    plan.outputWidth = 1920;
+    plan.outputHeight = 1080;
+    plan.outputFps = 29.97;
+    CHECK(StageExportResultSummary(plan) == L"1920 \u00d7 1080 at 29.97 fps \u00b7 1 pass");
+    CHECK(StageExportPlanSummary(plan, 1920, 1080, 29.97) == L"1920 x 1080 at 29.97 fps -> 1920 x 1080 at 29.97 fps, 1 pass");
+    // The model at the source size: the rung alone, whatever the history says.
+    CHECK(StageExportEncodeSummary(plan, 1920, EncoderQuality::Lossless, UpscalingHistory::PerFrame) == L"encode: lossless");
+    plan.frameGenStage = true;
+    plan.multiplier = 2;
+    plan.outputFps = 59.94;
+    CHECK(StageExportResultSummary(plan) == L"1920 \u00d7 1080 at 59.94 fps \u00b7 2 passes");
+    CHECK(StageExportPlanSummary(plan, 1280, 720, 29.97) == L"1280 x 720 at 29.97 fps -> 1920 x 1080 at 59.94 fps, 2 passes");
+    // The model on an upscaled carrier keeps its own history; nothing names one.
+    CHECK(StageExportEncodeSummary(plan, 1280, EncoderQuality::High, UpscalingHistory::PerFrame) == L"encode: high");
+    // Super Resolution alone: DLSS in the helper says its history, RTX VSR has none.
+    plan.requireNeural = false;
+    CHECK(StageExportEncodeSummary(plan, 1280, EncoderQuality::Standard, UpscalingHistory::PerFrame) ==
+          L"encode: standard, upscaler DLSS, history per-frame");
+    plan.workerStage = false;
+    plan.vsrStage = true;
+    CHECK(StageExportEncodeSummary(plan, 1280, EncoderQuality::High, UpscalingHistory::Temporal) ==
+          L"encode: high, upscaler RTX VSR");
+    CHECK(StageExportResultSummary(plan) == L"1920 \u00d7 1080 at 59.94 fps \u00b7 2 passes");
+}
+
 // `--render` is parsed before anything else runs, so the one thing it must
 // never do is claim a launch that was meant for the player - a bare file path
 // (dragged onto the exe), --output, --safe-mode - and the one thing it must
@@ -5689,6 +5881,22 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
     const Parsed history = parse({L"--render", L"c.mp4", L"--stages", L"sr", L"--history", L"per-frame", L"--encode", L"high"});
     CHECK(history.mode == Mode::Render);
     CHECK(history.command.history == std::optional<UpscalingHistory>(UpscalingHistory::PerFrame));
+    // --history is DLSS Super Resolution's, so a script that names it keeps DLSS.
+    CHECK(history.command.engine == std::optional<SuperResolutionEngine>(SuperResolutionEngine::Dlss));
+    // --sr-engine picks the upscaler for sr without nr; empty uses the saved choice.
+    CHECK(!parse({L"--render", L"c.mp4", L"--stages", L"sr"}).command.engine);
+    const Parsed vsrEngine = parse({L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"vsr"});
+    CHECK(vsrEngine.mode == Mode::Render);
+    CHECK(vsrEngine.command.engine == std::optional<SuperResolutionEngine>(SuperResolutionEngine::RtxVsr));
+    CHECK(parse({L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"DLSS"}).command.engine ==
+          std::optional<SuperResolutionEngine>(SuperResolutionEngine::Dlss));
+    for (const auto& refusedEngine : std::initializer_list<std::vector<std::wstring>>{
+             {L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"bicubic"},
+             {L"--render", L"c.mp4", L"--stages", L"sr,nr", L"--sr-engine", L"vsr"},
+             {L"--render", L"c.mp4", L"--stages", L"nr", L"--sr-engine", L"dlss"},
+             {L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"vsr", L"--history", L"temporal"},
+             {L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"vsr", L"--sr-engine", L"dlss"}})
+        CHECK(render_command::Parse(refusedEngine).mode == Mode::BadArguments);
 
     CHECK(!plain.command.passes && !plain.command.intensity && plain.command.quality.empty() && !plain.command.history);
 
@@ -7309,7 +7517,7 @@ void reshade_trailing_section_text_uses_reshade_section_boundaries_test()
 
 void configure_neural_addon_is_idempotent_test()
 {
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade.ini";
+    const std::filesystem::path path = process_temp_path(L"PolicyTests-ReShade.ini");
     remove_file_if_present(path);
     constexpr std::string_view input =
         "[GENERAL]\n"
@@ -7350,7 +7558,7 @@ void configure_neural_addon_is_idempotent_test()
 
 void configure_neural_addon_reports_semantic_state_across_text_canonicalization_test()
 {
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-semantic.ini";
+    const std::filesystem::path path = process_temp_path(L"PolicyTests-ReShade-semantic.ini");
     remove_file_if_present(path);
 
     constexpr std::string_view missingAddonInput =
@@ -7379,7 +7587,7 @@ void configure_neural_addon_reports_semantic_state_across_text_canonicalization_
 void configure_neural_addon_safe_then_normal_observes_reshade_state_test()
 {
     const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "PolicyTests-ReShade-safe-normal.ini";
+        process_temp_path(L"PolicyTests-ReShade-safe-normal.ini");
     remove_file_if_present(path);
     constexpr std::string_view legacyInput =
         "[ADDON]\r\n"
@@ -7455,7 +7663,7 @@ void evaluated_config_update_observes_actual_final_bytes_test()
 
 void configure_neural_addon_fails_closed_for_malformed_ini_test()
 {
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-malformed.ini";
+    const std::filesystem::path path = process_temp_path(L"PolicyTests-ReShade-malformed.ini");
     remove_file_if_present(path);
     constexpr char nulContent[] = "[ADDON]\nDisabledAddons=legacy.addon64\0tail";
     const std::string nulInput{nulContent, sizeof(nulContent) - 1};
@@ -7498,7 +7706,7 @@ void configure_neural_addon_fails_closed_for_malformed_ini_test()
 
 void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
 {
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-directory";
+    const std::filesystem::path path = process_temp_path(L"PolicyTests-ReShade-directory");
     std::error_code removeError;
     std::filesystem::remove_all(path, removeError);
     CHECK(!removeError);
@@ -7878,6 +8086,8 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--get-url",
         L"--print",
         L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s",
+        // The end of the options: nothing after it is read as one.
+        L"--",
         std::wstring(url),
     };
 
@@ -8104,16 +8314,27 @@ struct ScopedEnvironmentVariable {
 
 size_t count_named_processes(std::wstring_view executableName);
 bool wait_for_named_process_count(std::wstring_view executableName,size_t expected,std::chrono::milliseconds timeout);
-// How long a child the decoder closed may take to be gone. Under
-// AddressSanitizer the fake ffmpeg/ffprobe are copies of this instrumented
-// executable, whose start and exit are several times slower: on CI's runner a
-// 500 ms wait missed. A leaked child never exits, so the longer wait keeps the
-// leak check and drops only the latency one.
-#if defined(__SANITIZE_ADDRESS__)
+// A handle-leak check takes its baseline after one run of the code under test.
+// The first run in a process creates handles that live until it exits - the
+// thread pool's, the loader's, the first window's - so a check that happened to
+// run first, as `--only=` runs it, counted those as a leak and failed, while
+// the same check passed in the full run only because an earlier case had paid
+// for them.
+template<class WarmUp>
+DWORD handle_count_after_warm_up(WarmUp&& warmUp)
+{
+    warmUp();
+    DWORD count=0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(),&count)!=FALSE);
+    return count;
+}
+// How long a child the decoder closed may take to be gone. A leaked child never
+// exits, so a long wait keeps the leak check and drops only a latency one, and a
+// wait that is met returns at once. It was 500 ms outside AddressSanitizer, and
+// a loaded machine - suites run in parallel by `ctest -j`, or a build beside
+// them - missed it: the fake ffmpeg/ffprobe are copies of this executable, and
+// their start and exit slow down with everything else.
 constexpr std::chrono::milliseconds kChildExitWait{5000};
-#else
-constexpr std::chrono::milliseconds kChildExitWait{500};
-#endif
 
 struct MediaFixture {
     std::filesystem::path directory;
@@ -8235,7 +8456,13 @@ void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
     }
     {
         auto decoder=VideoDecoderTestAccess::Create(fixture.directory);CHECK(decoder->Open(L"https://media.invalid/exit",MediaSourceKind::YouTube));VideoFrame frame;
-        VideoReadResult result=VideoReadResult::NotReady;for(int i=0;i<50&&result==VideoReadResult::NotReady;++i){result=decoder->ReadNextAvailable(frame);Sleep(5);}CHECK(result==VideoReadResult::EndOfStream||result==VideoReadResult::Error);
+        // A deadline rather than 50 polls of 5 ms: the fake child that exits at
+        // once still has to start, which under AddressSanitizer took longer than
+        // those 250 ms on CI (build-windows on c55d29f). A decoder that never
+        // reports the exit still fails here, only later.
+        VideoReadResult result=VideoReadResult::NotReady;const auto exitDeadline=std::chrono::steady_clock::now()+kChildExitWait;
+        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<exitDeadline){result=decoder->ReadNextAvailable(frame);Sleep(5);}
+        CHECK(result==VideoReadResult::EndOfStream||result==VideoReadResult::Error);
     }
     CHECK(childrenBack("at the end"));
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
@@ -9190,6 +9417,18 @@ void compare_compositor_stays_out_of_the_capture_program_test()
     // RTX VSR (P2.8) is the compositor's too: presentation only, never in the capture,
     // the conversion or the NV12 capture, so no cached render can hold it.
     CHECK(std::find(scaled.begin(),scaled.end(),"Vsr@6")!=scaled.end());
+    // The Compose cbuffer is exactly the root constants the renderer sets: a member added
+    // on one side only would shift every value after it, or read past what was set.
+    {
+        Microsoft::WRL::ComPtr<ID3DBlob> blob;
+        CHECK(D3D12RendererTestAccess::CompilePresentProgram("PSPresentScaled",blob));
+        Microsoft::WRL::ComPtr<ID3D12ShaderReflection> reflection;
+        if(blob&&SUCCEEDED(D3DReflect(blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&reflection)))){
+            D3D12_SHADER_BUFFER_DESC compose{};
+            CHECK(SUCCEEDED(reflection->GetConstantBufferByName("Compose")->GetDesc(&compose)));
+            CHECK_EQ(UINT(D3D12RendererTestAccess::ComposeConstantCount()*4u),compose.Size);
+        }else CHECK(false);
+    }
     for(const char* entry:{"PSPresent","PSConvert","PSConvertDebanded","PSCaptureLuma","PSCaptureChroma","PSCaptureDithered"}){
         const auto bound=present_program_bindings(entry);
         CHECK(std::find(bound.begin(),bound.end(),"Vsr@6")==bound.end());
@@ -9212,6 +9451,138 @@ void compare_compositor_stays_out_of_the_capture_program_test()
 
 // RTX VSR (P2.8): when the view can be shown and what it says when it cannot, the
 // ladder, the size of the frame it makes, and which views ask the renderer for it.
+// RTX VSR as the playback upscaler (docs/measurements/vsr-quality-20261002): it
+// takes the picture's upscale from the compositor wherever the window shows the
+// video larger than it is, and stands aside for everything that is not that one
+// plain picture - DLSS Super Resolution's own output, a comparison, an HDR frame,
+// a debug view - and where there is nothing to upscale.
+void vsr_policy_playback_upscales_only_a_plain_picture_shown_larger_test()
+{
+    using vsr_policy::PlaybackState;
+    using vsr_policy::PlaybackUpscales;
+    PlaybackState state{};
+    state.enabled = true;
+    state.ready = true;
+    state.finalView = true;
+    state.sourceW = 960;
+    state.sourceH = 540;
+    state.targetW = 1920;
+    state.targetH = 1080;
+    CHECK(PlaybackUpscales(state));
+    const auto without = [&](auto change) { PlaybackState other = state; change(other); return PlaybackUpscales(other); };
+    CHECK(!without([](PlaybackState& s) { s.enabled = false; }));
+    CHECK(!without([](PlaybackState& s) { s.ready = false; }));
+    CHECK(!without([](PlaybackState& s) { s.superResolution = true; }));
+    CHECK(!without([](PlaybackState& s) { s.comparing = true; }));
+    CHECK(!without([](PlaybackState& s) { s.hdr = true; }));
+    CHECK(!without([](PlaybackState& s) { s.finalView = false; }));
+    // Shown at its own size or smaller: nothing to upscale.
+    CHECK(!without([](PlaybackState& s) { s.targetW = 960; s.targetH = 540; }));
+    CHECK(!without([](PlaybackState& s) { s.targetW = 800; s.targetH = 1080; }));
+    CHECK(!without([](PlaybackState& s) { s.sourceW = 0; }));
+    // One axis larger is enough: the fitted picture grows.
+    CHECK(without([](PlaybackState& s) { s.targetW = 1280; s.targetH = 2000; }));
+    // On by default: it measured above every plain scaler and DLSS SR.
+    CHECK(vsr_policy::kPlaybackDefault);
+}
+
+// RTX VSR was measured on an RTX 5090 only; on a slower GPU High can cost a frame.
+// Playback that falls behind while VSR takes a real share of the frame budget steps
+// it down for that video - a quality at a time, then off - and never on one bad
+// window, nor for drops VSR cannot be the cause of.
+// The press-and-hold A/B and the Original view compare the render with what it was
+// made from. With RTX VSR upscaling one member and the plain scale the other, the A/B
+// would show a scaler change as the model's. So both single-picture views get VSR -
+// the render in the DLSS 5 view, the original in the Original view and the peek - and
+// every view that draws both members gets neither.
+void vsr_policy_playback_treats_both_single_picture_views_alike_test()
+{
+    using vsr_policy::PlaybackPicture;
+    using vsr_policy::PlaybackInput;
+    // No reference: the one picture is the decoded frame, whatever the settings say.
+    CHECK(PlaybackPicture(false, true, false, true, false) == PlaybackInput::Decoded);
+    CHECK(PlaybackPicture(false, false, true, false, true) == PlaybackInput::Decoded);
+    // With a reference: the DLSS 5 view untouched is the decoded (neural) frame...
+    CHECK(PlaybackPicture(true, true, false, true, false) == PlaybackInput::Decoded);
+    // ...but not at another Mix or under a mask, which draw both members.
+    CHECK(PlaybackPicture(true, true, false, false, false) == PlaybackInput::None);
+    CHECK(PlaybackPicture(true, true, false, true, true) == PlaybackInput::None);
+    // The Original view and the peek are the reference, at any Mix.
+    CHECK(PlaybackPicture(true, false, true, true, false) == PlaybackInput::Reference);
+    CHECK(PlaybackPicture(true, false, true, false, true) == PlaybackInput::Reference);
+    // Split, Wipe, Difference, Side by side, 2 x 2 and the VSR view itself: neither.
+    CHECK(PlaybackPicture(true, false, false, true, false) == PlaybackInput::None);
+}
+
+void vsr_policy_holds_a_new_output_size_until_the_window_settles_test()
+{
+    using namespace vsr_policy;
+    const Size small{1920, 1080}, mid{2400, 1350}, large{3840, 2160};
+    SizeSettle settle;
+    // Nothing made yet: the first size is made at once, so an export or a window that
+    // opens at its size has VSR on its first frame.
+    CHECK(SizeSettled(settle, Size{}, small, 0.0));
+    // The size already made is used at once, however briefly it has been asked for.
+    CHECK(SizeSettled(settle, small, small, 1.0));
+    // A drag: every present asks for a new size, and none of them is made.
+    CHECK(!SizeSettled(settle, small, mid, 10.0));
+    CHECK(!SizeSettled(settle, small, Size{2500, 1406}, 20.0));
+    CHECK(!SizeSettled(settle, small, large, 30.0));
+    // The drag stops at `large`: three presents are not enough before 100 ms have passed...
+    CHECK(!SizeSettled(settle, small, large, 40.0));
+    CHECK(!SizeSettled(settle, small, large, 50.0));
+    CHECK(!SizeSettled(settle, small, large, 129.0));
+    // ...and 100 ms are not enough before three presents, counted from the first.
+    CHECK(SizeSettled(settle, small, large, 130.0));
+    SizeSettle slow;
+    CHECK(!SizeSettled(slow, small, large, 0.0));
+    CHECK(!SizeSettled(slow, small, large, 500.0));
+    CHECK(SizeSettled(slow, small, large, 501.0));
+    // With `large` made, a drag through `mid` waits again, and coming back to `large`
+    // needs no new texture, so it is used at once.
+    CHECK(!SizeSettled(slow, large, mid, 600.0));
+    CHECK(SizeSettled(slow, large, large, 601.0));
+    // A size asked for, left, and asked for again starts its count over.
+    SizeSettle again;
+    CHECK(!SizeSettled(again, small, large, 0.0));
+    CHECK(!SizeSettled(again, small, large, 60.0));
+    CHECK(!SizeSettled(again, small, mid, 120.0));
+    CHECK(!SizeSettled(again, small, large, 180.0));
+    CHECK(!SizeSettled(again, small, large, 240.0));
+    CHECK(SizeSettled(again, small, large, 300.0));
+}
+
+void vsr_policy_keep_up_guard_steps_down_only_for_sustained_drops_it_explains_test()
+{
+    using namespace vsr_policy;
+    // 30 fps for 3 s asks for 90 frames: 5 dropped is over 5 %, 4 is not.
+    CHECK(WindowFellBehind(3.0, 5, 30.0, 8.0));
+    CHECK(!WindowFellBehind(3.0, 4, 30.0, 8.0));
+    // VSR at 2 ms of a 33 ms budget is not what is dropping frames.
+    CHECK(!WindowFellBehind(3.0, 30, 30.0, 2.0));
+    CHECK(WindowFellBehind(3.0, 30, 30.0, 6.7));
+    CHECK(!WindowFellBehind(0.0, 30, 30.0, 8.0));
+    CHECK(!WindowFellBehind(3.0, 30, 0.0, 8.0));
+
+    KeepUpGuard guard;
+    CHECK(guard.Observe(true, Quality::High) == KeepUpStep::Hold);
+    CHECK(guard.Observe(false, Quality::High) == KeepUpStep::Hold);   // a good window clears it
+    CHECK(guard.Observe(true, Quality::High) == KeepUpStep::Hold);
+    CHECK(guard.Observe(true, Quality::High) == KeepUpStep::StepDown);
+    // A step starts over: the next quality gets two windows of its own.
+    CHECK(guard.Observe(true, Quality::Medium) == KeepUpStep::Hold);
+    CHECK(guard.Observe(true, Quality::Medium) == KeepUpStep::StepDown);
+    CHECK(guard.Observe(true, Quality::Low) == KeepUpStep::Hold);
+    CHECK(guard.Observe(true, Quality::Low) == KeepUpStep::TurnOff);
+    guard.Reset();
+    CHECK(guard.Observe(true, Quality::Ultra) == KeepUpStep::Hold);
+
+    CHECK(LowerQuality(Quality::Ultra) == Quality::High);
+    CHECK(LowerQuality(Quality::High) == Quality::Medium);
+    CHECK(LowerQuality(Quality::Medium) == Quality::Low);
+    CHECK(LowerQuality(Quality::Low) == Quality::Low);
+}
+
 void vsr_policy_decides_the_view_its_ladder_and_its_size_test()
 {
     using namespace vsr_policy;
@@ -9367,6 +9738,27 @@ void hdr_output_follows_the_display_under_the_window_test()
 }
 
 // Press, drag and hold on the picture are three gestures that share one button.
+// Issue #14's log: twenty compare presses in eighty seconds, every one refused
+// and nothing on screen to say why. A refusal names the missing piece.
+void compare_refusal_names_what_is_missing_test()
+{
+    using compare_availability::RefusalKey;
+    CHECK(RefusalKey(true, true, true, false) == nullptr);
+    CHECK(std::wstring_view(RefusalKey(false, false, false, false)) == L"compare.refused.no_video");
+    // The same words the compare bar already uses for this state.
+    CHECK(std::wstring_view(RefusalKey(true, false, false, false)) == L"compare.hint.unavailable");
+    CHECK(std::wstring_view(RefusalKey(true, false, true, false)) == L"compare.hint.unavailable");
+    CHECK(std::wstring_view(RefusalKey(true, true, false, false)) == L"compare.refused.no_render");
+    // A render already on its way is waited for, not asked for again.
+    CHECK(std::wstring_view(RefusalKey(true, true, false, true)) == L"compare.refused.render_starting");
+    const Localizer localizer;
+    for (const wchar_t* key : {L"compare.refused.no_video", L"compare.hint.unavailable", L"compare.refused.no_render",
+                               L"compare.refused.render_starting"}) {
+        const std::wstring text = localizer.Get(key);
+        CHECK(!text.empty() && text != key);
+    }
+}
+
 void compare_gesture_tells_press_drag_and_hold_apart_test()
 {
     using namespace compare_gesture;
@@ -9683,6 +10075,36 @@ void compare_loupe_and_one_to_one_placement_test()
     const RECT fitted=compare_view::RenderRect(1600,1000,16.0/9.0,Fit::Fit,0,0);
     r=compare_view::RenderRect(1600,1000,16.0/9.0,Fit::Pixels,0,0);
     CHECK(EqualRect(&r,&fitted)!=FALSE);
+    // The tags go in the corners of the part of the render window the area shows. Fit
+    // shows all of it; Fill and a 1:1 view larger than the area are cropped by it. These
+    // are the screenshots' geometry: a 1900x815 area, a 16:9 picture.
+    RECT v=compare_view::VisibleRect(compare_view::RenderRect(1900,815,16.0/9.0,Fit::Fit,960,540),1900,815);
+    CHECK_EQ(0L,v.left);CHECK_EQ(0L,v.top);CHECK_EQ(1449L,v.right);CHECK_EQ(815L,v.bottom);
+    const RECT filled=compare_view::RenderRect(1900,815,16.0/9.0,Fit::Fill,960,540);
+    CHECK_EQ(1900L,filled.right-filled.left);CHECK_EQ(1069L,filled.bottom-filled.top);CHECK_EQ(-127L,filled.top);
+    v=compare_view::VisibleRect(filled,1900,815);
+    CHECK_EQ(0L,v.left);CHECK_EQ(127L,v.top);CHECK_EQ(1900L,v.right);CHECK_EQ(942L,v.bottom);
+    // 1:1 of a 4K output in a 1600x900 area: cropped on all four sides, centred.
+    v=compare_view::VisibleRect(compare_view::RenderRect(1600,900,16.0/9.0,Fit::Pixels,3840,2160),1600,900);
+    CHECK_EQ(1120L,v.left);CHECK_EQ(630L,v.top);CHECK_EQ(2720L,v.right);CHECK_EQ(1530L,v.bottom);
+    // 1:1 of a smaller output sits inside the area and shows all of itself.
+    v=compare_view::VisibleRect(compare_view::RenderRect(1600,900,16.0/9.0,Fit::Pixels,1280,720),1600,900);
+    CHECK_EQ(0L,v.left);CHECK_EQ(0L,v.top);CHECK_EQ(1280L,v.right);CHECK_EQ(720L,v.bottom);
+    // A window entirely outside the area shows nothing, as an empty rectangle.
+    v=compare_view::VisibleRect(RECT{2000,0,2400,300},1900,815);
+    CHECK(v.right<=v.left);
+    // The compositor clamps the rectangle to the backbuffer it draws, and takes the whole
+    // backbuffer for an empty one (never set, or a resize the swap chain has not reached).
+    RECT t=compare_view::VisibleInTarget(RECT{},1449,815);
+    CHECK_EQ(0L,t.left);CHECK_EQ(0L,t.top);CHECK_EQ(1449L,t.right);CHECK_EQ(815L,t.bottom);
+    t=compare_view::VisibleInTarget(RECT{0,127,1900,942},1900,1069);
+    CHECK_EQ(127L,t.top);CHECK_EQ(942L,t.bottom);CHECK_EQ(1900L,t.right);
+    t=compare_view::VisibleInTarget(RECT{0,127,1900,942},1449,815);
+    CHECK_EQ(127L,t.top);CHECK_EQ(815L,t.bottom);CHECK_EQ(1449L,t.right);
+    t=compare_view::VisibleInTarget(RECT{0,900,1900,1000},1449,815);
+    CHECK_EQ(0L,t.top);CHECK_EQ(815L,t.bottom);
+    // Every comparison starts with none: the whole backbuffer.
+    CHECK(ComparisonSettings{}.visible.right==0&&ComparisonSettings{}.visible.bottom==0);
     // The loupe needs the original, so the neural view uploads one while it is up.
     ComparisonSettings comparison;
     CHECK(!ComparisonReadsReference(comparison));
@@ -9759,7 +10181,7 @@ void compare_mask_shrinks_feathers_and_is_remembered_per_source_test()
     CHECK_EQ(size_t{16},SourceKey(L"x").size());
     // A mask is read through WIC as grey; its brightness is the mask.
     const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
-    const auto bmp=std::filesystem::temp_directory_path()/L"compare-mask-test.bmp";
+    const auto bmp=process_temp_path(L"compare-mask-test.bmp");
     write_half_white_bmp(bmp,8,4);
     Gray loaded;
     CHECK(SUCCEEDED(compare_image::LoadGray(bmp,loaded)));
@@ -9794,7 +10216,7 @@ void compare_saved_image_carries_its_provenance_test()
     CHECK(compare_provenance::SuggestedName(std::wstring(300,L'a'),L"t").size()==124);
 
     const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
-    const auto png=std::filesystem::temp_directory_path()/L"compare-save-test.png";
+    const auto png=process_temp_path(L"compare-save-test.png");
     std::error_code ignored;std::filesystem::remove(png,ignored);
     // 5x2 BGR, rows padded to 16 bytes: the left pixel black, the right one white.
     constexpr UINT width=5,height=2,stride=16;
@@ -10409,12 +10831,18 @@ void video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_netwo
 
 void youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test()
 {
-    MediaFixture fixture;const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");DWORD beforeHandles=0,afterHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    MediaFixture fixture;const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");
+    const DWORD beforeHandles=handle_count_after_warm_up([&]{
+        auto audio=AudioPlayerTestAccess::Create(fixture.directory,true,true);
+        CHECK(audio->Start(L"https://media.invalid/audiohold",7.5,AudioStartState::Paused));audio->Stop();
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
+    });
+    DWORD afterHandles=0;
     for(int cycle=0;cycle<8;++cycle){
         auto audio=AudioPlayerTestAccess::Create(fixture.directory,cycle%2==0,cycle%3==0);
         CHECK(audio->Start(L"https://media.invalid/audiohold",7.5,AudioStartState::Paused));CHECK(audio->Paused());CHECK_EQ(7.5,AudioPlayerTestAccess::SeekBase(*audio));CHECK_EQ(uint64_t{0},AudioPlayerTestAccess::SubmittedBuffers(*audio));
         const auto started=std::chrono::steady_clock::now();if(cycle%2==0)audio->Stop();else audio.reset();CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
-        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,std::chrono::milliseconds{500}));
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
     }
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
 }
@@ -10423,7 +10851,11 @@ void youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_l
 {
     MediaFixture fixture;
     const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");
-    DWORD beforeHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    const DWORD beforeHandles=handle_count_after_warm_up([&]{
+        auto audio=AudioPlayerTestAccess::Create(fixture.directory,true,true,true,true,true,true);
+        CHECK(audio->Start(L"https://media.invalid/audiohold",3.0,AudioStartState::Paused));audio->Stop();
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
+    });
     for(int cycle=0;cycle<12;++cycle){
         auto audio=AudioPlayerTestAccess::Create(fixture.directory,true,true,true,true,true,true);
         CHECK(audio->Start(L"https://media.invalid/audiohold",3.0,AudioStartState::Paused));
@@ -10433,7 +10865,7 @@ void youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_l
             audio->Stop();
         }else if(cycle%3==1){audio->Stop();}else{audio.reset();}
         CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
-        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,std::chrono::milliseconds{500}));
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
     }
     const auto handlesDeadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
     DWORD afterHandles=0;
@@ -10702,14 +11134,24 @@ void youtube_candidate_render_failure_releases_window_handle_and_prepared_proces
 
     MediaFixture fixture;
     const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");
-    DWORD beforeHandles=0,afterHandles=0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    const DWORD beforeHandles=handle_count_after_warm_up([&]{
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        auto audio=AudioPlayerTestAccess::Create(fixture.directory);
+        CHECK(decoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));
+        CHECK(audio->Start(L"https://media.invalid/audiohold",9.0,AudioStartState::Paused));
+        HWND window=CreateWindowExW(0,L"STATIC",L"warm-up",0,0,0,1,1,HWND_MESSAGE,nullptr,GetModuleHandleW(nullptr),nullptr);
+        CHECK(window!=nullptr);
+        if(window)DestroyWindow(window);
+        audio.reset();decoder.reset();
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,kChildExitWait));
+    });
+    DWORD afterHandles=0;
     auto preparedDecoder=VideoDecoderTestAccess::Create(fixture.directory);
     auto preparedAudio=AudioPlayerTestAccess::Create(fixture.directory);
     CHECK(preparedDecoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));
     CHECK(preparedAudio->Start(L"https://media.invalid/audiohold",9.0,AudioStartState::Paused));
     CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses+2,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 
     ActivePlayback active;
     const ActivePlayback before=active;
@@ -10739,7 +11181,7 @@ void youtube_candidate_render_failure_releases_window_handle_and_prepared_proces
     preparedAudio.reset();
     preparedDecoder.reset();
     CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
     const auto handlesDeadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
     do{
         CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);
@@ -10914,7 +11356,7 @@ void youtube_resolver_requires_duration_metadata_before_acquisition_test()
 void youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test()
 {
     const std::filesystem::path missingDirectory =
-        std::filesystem::temp_directory_path() / L"PolicyTests-resolver-missing";
+        process_temp_path(L"PolicyTests-resolver-missing");
     std::error_code error;
     std::filesystem::remove_all(missingDirectory, error);
     auto missingResolver = YouTubeResolverTestAccess::Create(missingDirectory);
@@ -11032,9 +11474,10 @@ void youtube_resolver_repeated_runs_leave_process_handle_count_stable_test()
 {
     ResolverFixture fixture;
     auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
-    DWORD before = 0;
+    const DWORD before = handle_count_after_warm_up([&] {
+        CHECK(resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", {}).ok);
+    });
     DWORD after = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &before) != FALSE);
     for (int run = 0; run < 20; ++run) {
         const ResolveResult result = resolver->Resolve(
             L"https://youtu.be/dQw4w9WgXcQ?success", {});
@@ -11417,7 +11860,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
             }
         }
     }
-    if (argc != 17 || std::wstring_view(argv[1]) != L"--no-config" ||
+    if (argc != 18 || std::wstring_view(argv[1]) != L"--no-config" ||
         std::wstring_view(argv[2]) != L"--no-cache-dir" ||
         std::wstring_view(argv[3]) != L"--no-plugin-dirs" ||
         std::wstring_view(argv[4]) != L"--no-playlist" ||
@@ -11431,7 +11874,8 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         std::wstring_view(argv[12]) != L"height,vbr,abr" ||
         std::wstring_view(argv[13]) != L"--get-url" ||
         std::wstring_view(argv[14]) != L"--print" ||
-        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s") {
+        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s" ||
+        std::wstring_view(argv[16]) != L"--") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
@@ -11443,7 +11887,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         return 92;
     }
 
-    const std::wstring_view url = argv[16];
+    const std::wstring_view url = argv[17];
     if (url.find(L"stderrnoise") != std::wstring_view::npos) {
         // What a Python interpreter prints around a run that works: warnings
         // on stderr, far more of them than stdout's whole cap, with the real
@@ -11708,7 +12152,7 @@ void youtube_resolver_holds_verified_helpers_against_replacement_until_completio
         result = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {});
     });
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses + 1,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 
     const std::filesystem::path replacement = fixture.directory / L"replacement-deno.exe";
     write_binary_file(replacement, "replacement");
@@ -11761,7 +12205,7 @@ void youtube_resolver_forces_package_local_deno_cache_over_parent_override_test(
     CHECK(!std::filesystem::exists(callerXdgMarker, error));
     CHECK(!error);
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 
     std::filesystem::remove_all(callerCache, error);
     CHECK(!error);
@@ -11796,7 +12240,7 @@ void youtube_resolver_disables_default_plugin_execution_from_inherited_config_te
     CHECK(!std::filesystem::exists(executionMarker, error));
     CHECK(!error);
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
     std::filesystem::remove_all(callerConfig, error);
     CHECK(!error);
 }
@@ -11854,7 +12298,7 @@ void youtube_resolver_queued_stop_token_cancels_before_launch_test()
     CHECK_EQ(ResolveError::Cancelled, queued.error);
     Sleep(50);
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 }
 
 void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test()
@@ -11872,10 +12316,16 @@ void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test
     };
 
     for (const Case& test : cases) {
-        DWORD beforeHandles = 0;
-        DWORD afterHandles = 0;
-        CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeHandles) != FALSE);
         const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+        const DWORD beforeHandles = handle_count_after_warm_up([&] {
+            auto warmUp = YouTubeResolverTestAccess::Create(
+                fixture.directory, std::chrono::seconds{5}, test.stage);
+            CHECK_EQ(test.expected, warmUp->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {}).error);
+            warmUp.reset();
+            CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                               kChildExitWait));
+        });
+        DWORD afterHandles = 0;
         auto resolver = YouTubeResolverTestAccess::Create(
             fixture.directory, std::chrono::seconds{5}, test.stage);
         const auto started = std::chrono::steady_clock::now();
@@ -11890,7 +12340,7 @@ void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test
         CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterHandles) != FALSE);
         CHECK(afterHandles <= beforeHandles + 2);
         CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                           std::chrono::milliseconds{500}));
+                                           kChildExitWait));
     }
 }
 
@@ -11898,10 +12348,17 @@ void youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_
 {
     ResolverFixture fixture;
     constexpr int repetitions = 16;
-    DWORD beforeHandles = 0;
-    DWORD afterHandles = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeHandles) != FALSE);
     const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+    const DWORD beforeHandles = handle_count_after_warm_up([&] {
+        auto warmUp = YouTubeResolverTestAccess::Create(
+            fixture.directory, std::chrono::seconds{5},
+            YouTubeResolver::FailureStage::PipeHandlesOwned);
+        CHECK_EQ(ResolveError::StartFailed, warmUp->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {}).error);
+        warmUp.reset();
+        CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                           kChildExitWait));
+    });
+    DWORD afterHandles = 0;
 
     for (int repetition = 0; repetition < repetitions; ++repetition) {
         auto resolver = YouTubeResolverTestAccess::Create(
@@ -11914,7 +12371,7 @@ void youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_
         CHECK(elapsed < std::chrono::seconds{2});
         resolver.reset();
         CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                           std::chrono::milliseconds{500}));
+                                           kChildExitWait));
 
         size_t entries = 0;
         std::error_code error;
@@ -11935,24 +12392,13 @@ void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test
     ResolverFixture fixture;
     const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
 
-    DWORD beforeTimeoutHandles = 0;
-    DWORD afterTimeoutHandles = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeTimeoutHandles) != FALSE);
-    for (int cycle = 0; cycle < 4; ++cycle) {
+    const auto timeOut = [&] {
         auto timeoutResolver = YouTubeResolverTestAccess::Create(
             fixture.directory, std::chrono::milliseconds{80});
         CHECK_EQ(ResolveError::TimedOut,
                  timeoutResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {}).error);
-    }
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterTimeoutHandles) != FALSE);
-    CHECK(afterTimeoutHandles <= beforeTimeoutHandles + 2);
-    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
-
-    DWORD beforeCancelHandles = 0;
-    DWORD afterCancelHandles = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeCancelHandles) != FALSE);
-    for (int cycle = 0; cycle < 4; ++cycle) {
+    };
+    const auto cancel = [&] {
         auto cancelResolver = YouTubeResolverTestAccess::Create(
             fixture.directory, std::chrono::seconds{5});
         ResolveResult cancelled;
@@ -11963,25 +12409,37 @@ void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test
         cancelResolver->Cancel();
         worker.join();
         CHECK_EQ(ResolveError::Cancelled, cancelled.error);
-    }
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterCancelHandles) != FALSE);
-    CHECK(afterCancelHandles <= beforeCancelHandles + 2);
-    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
-
-    DWORD beforeOverflowHandles = 0;
-    DWORD afterOverflowHandles = 0;
-    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeOverflowHandles) != FALSE);
-    for (int cycle = 0; cycle < 4; ++cycle) {
+    };
+    const auto overflow = [&] {
         auto overflowResolver = YouTubeResolverTestAccess::Create(fixture.directory);
         CHECK_EQ(ResolveError::OutputTooLarge,
                  overflowResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?cap64plus", {}).error);
-    }
+    };
+
+    const DWORD beforeTimeoutHandles = handle_count_after_warm_up(timeOut);
+    DWORD afterTimeoutHandles = 0;
+    for (int cycle = 0; cycle < 4; ++cycle) timeOut();
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterTimeoutHandles) != FALSE);
+    CHECK(afterTimeoutHandles <= beforeTimeoutHandles + 2);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       kChildExitWait));
+
+    const DWORD beforeCancelHandles = handle_count_after_warm_up(cancel);
+    DWORD afterCancelHandles = 0;
+    for (int cycle = 0; cycle < 4; ++cycle) cancel();
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterCancelHandles) != FALSE);
+    CHECK(afterCancelHandles <= beforeCancelHandles + 2);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       kChildExitWait));
+
+    const DWORD beforeOverflowHandles = handle_count_after_warm_up(overflow);
+    DWORD afterOverflowHandles = 0;
+    for (int cycle = 0; cycle < 4; ++cycle) overflow();
     Sleep(50);
     CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterOverflowHandles) != FALSE);
     CHECK(afterOverflowHandles <= beforeOverflowHandles + 2);
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
-                                       std::chrono::milliseconds{500}));
+                                       kChildExitWait));
 }
 
 void ngx_same_device_overlapping_sessions_initialize_and_shutdown_once_test()
@@ -15218,7 +15676,6 @@ void nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test()
 
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
-    TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
     TEST_CASE(runtime_shutdown_releases_player_before_media_foundation_and_com_test),
     TEST_CASE(runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test),
     TEST_CASE(toolbar_layout_selects_stable_action_sets_for_width_modes_test),
@@ -15255,6 +15712,9 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test),
     TEST_CASE(start_screen_checks_say_what_passed_and_what_failed_test),
     TEST_CASE(start_screen_names_a_loaded_frame_generation_addon_test),
+    TEST_CASE(render_cache_revision_is_a_release_no_later_than_this_one_test),
+    TEST_CASE(command_argument_quoting_round_trips_through_argv_test),
+    TEST_CASE(segment_names_refuse_devices_and_trailing_dots_test),
     TEST_CASE(framegen_addon_picks_the_dlssg_sm86_proxy_beside_the_player_test),
     TEST_CASE(framegen_addon_refusal_advice_names_the_gpu_not_the_driver_on_rtx20_and_rtx30_test),
     TEST_CASE(framegen_addon_loads_its_proxy_as_a_second_module_beside_system32_test),
@@ -15308,7 +15768,6 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_stale_and_cancelled_prepared_seek_ownership_is_destroyed_once_test),
     TEST_CASE(youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test),
     TEST_CASE(video_decoder_prefers_video_duration_tag_over_longer_container_test),
-    TEST_CASE(youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test),
     TEST_CASE(youtube_decoder_discards_only_expected_trailing_partial_frame_test),
     TEST_CASE(youtube_decoder_background_seek_trickles_and_cancels_boundedly_test),
     TEST_CASE(video_decoder_close_releases_a_blocked_blocking_read_test),
@@ -15325,11 +15784,9 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(dropped_files_open_the_first_supported_file_and_count_the_rest_test),
     TEST_CASE(status_notes_last_exactly_as_long_as_they_are_true_test),
     TEST_CASE(child_stderr_tail_keeps_the_last_bytes_as_log_lines_test),
-    TEST_CASE(video_decoder_reports_child_stderr_and_a_mid_file_failure_is_not_the_end_test),
     TEST_CASE(video_decoder_seeks_a_source_with_an_unknown_duration_test),
     TEST_CASE(video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test),
     TEST_CASE(video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test),
-    TEST_CASE(video_decoder_tone_maps_hdr_sources_to_sdr_test),
     TEST_CASE(video_decoder_stands_turned_video_up_on_every_path_test),
     TEST_CASE(video_decoder_decodes_hdr_originals_as_pq_on_request_test),
     TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),
@@ -15338,8 +15795,13 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(present_scale_follows_the_window_only_where_it_should_test),
     TEST_CASE(compare_compositor_stays_out_of_the_capture_program_test),
     TEST_CASE(vsr_policy_decides_the_view_its_ladder_and_its_size_test),
+    TEST_CASE(vsr_policy_holds_a_new_output_size_until_the_window_settles_test),
+    TEST_CASE(vsr_policy_keep_up_guard_steps_down_only_for_sustained_drops_it_explains_test),
+    TEST_CASE(vsr_policy_playback_treats_both_single_picture_views_alike_test),
+    TEST_CASE(vsr_policy_playback_upscales_only_a_plain_picture_shown_larger_test),
     TEST_CASE(hdr_output_leaves_the_capture_programs_alone_test),
     TEST_CASE(hdr_output_follows_the_display_under_the_window_test),
+    TEST_CASE(compare_refusal_names_what_is_missing_test),
     TEST_CASE(compare_gesture_tells_press_drag_and_hold_apart_test),
     TEST_CASE(compare_settings_migrate_strength_and_blend_to_the_mix_test),
     TEST_CASE(compare_label_premultiply_matches_the_gdi_composite_test),
@@ -15358,17 +15820,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(bayer_capture_dither_map_is_the_classic_matrix_test),
     TEST_CASE(deband_pre_pass_smooths_bands_and_keeps_edges_test),
     TEST_CASE(deband_pre_pass_reaches_the_conversion_program_test),
-    TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
-    TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
-    TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),
-    TEST_CASE(youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test),
-    TEST_CASE(youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test),
-    TEST_CASE(youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test),
     TEST_CASE(youtube_prepared_handoff_shows_candidate_and_retires_every_old_owner_before_activation_test),
     TEST_CASE(youtube_prepared_handoff_sizes_and_shows_real_candidate_before_owned_retirement_test),
     TEST_CASE(youtube_prepared_window_api_failures_are_reported_before_commit_test),
     TEST_CASE(youtube_destroyed_window_and_visibility_failure_leave_active_state_unchanged_test),
-    TEST_CASE(youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test),
     TEST_CASE(legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test),
     TEST_CASE(eviction_removes_entries_that_can_never_match_a_key_again_test),
     TEST_CASE(eviction_keeps_everything_reusable_while_the_disk_has_room_test),
@@ -15424,6 +15879,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test),
     TEST_CASE(frame_generation_plan_follows_the_panel_not_just_the_source_test),
     TEST_CASE(frame_generation_reaches_every_multiplier_the_verified_ceiling_admits_test),
+    TEST_CASE(frame_generation_menu_follows_the_measured_runtime_cap_test),
     TEST_CASE(display_cadence_spread_is_one_refresh_period_or_nothing_test),
     TEST_CASE(refresh_switch_offer_names_the_mode_that_removes_the_pulldown_test),
     TEST_CASE(neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test),
@@ -15438,6 +15894,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(export_container_follows_the_chosen_extension_test),
     TEST_CASE(live_forecast_scales_by_the_processing_rung_test),
     TEST_CASE(render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test),
+    TEST_CASE(stage_export_summaries_are_the_dialogs_and_the_command_lines_test),
     TEST_CASE(neural_zero_motion_test_ships_on_and_is_a_cache_key_term_test),
     TEST_CASE(upscaling_history_defaults_to_temporal_and_never_reaches_the_model_test),
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
@@ -15515,9 +15972,6 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test),
     TEST_CASE(resolver_metadata_reports_selected_height_video_bitrate_and_age_limit_test),
     TEST_CASE(youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test),
-    TEST_CASE(youtube_resolver_keeps_stderr_out_of_the_answer_and_logs_it_test),
-    TEST_CASE(youtube_resolver_waits_until_both_selected_streams_are_available_test),
-    TEST_CASE(youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test),
     TEST_CASE(youtube_resolver_waits_for_fractional_stream_availability_test),
     TEST_CASE(resolver_output_validates_stream_availability_metadata_test),
     TEST_CASE(youtube_resolver_requires_duration_metadata_before_acquisition_test),
@@ -15534,7 +15988,6 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_resolver_queued_stop_token_cancels_before_launch_test),
     TEST_CASE(youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test),
     TEST_CASE(youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_test),
-    TEST_CASE(youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test),
     TEST_CASE(ngx_same_device_overlapping_sessions_initialize_and_shutdown_once_test),
     TEST_CASE(ngx_failed_initialization_never_acquires_a_session_test),
     TEST_CASE(ngx_failed_candidate_setup_releases_only_its_overlapping_lease_test),
@@ -15559,15 +16012,12 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
     TEST_CASE(variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test),
     TEST_CASE(variable_frame_rate_is_decided_on_b_frame_decode_order_test),
-    TEST_CASE(constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test),
     TEST_CASE(audio_fade_is_a_raised_cosine_that_starts_and_ends_flat_test),
     TEST_CASE(audio_fade_in_scales_whole_frames_and_stops_once_it_is_open_test),
     TEST_CASE(audio_fade_out_tail_decays_from_the_last_frame_to_silence_test),
     TEST_CASE(audio_stop_waits_are_bounded_and_the_clock_counts_whole_frames_test),
     TEST_CASE(audio_track_selection_skips_the_tracks_nobody_asked_for_test),
     TEST_CASE(audio_track_labels_say_what_distinguishes_the_tracks_test),
-    TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
-    TEST_CASE(audio_track_that_starts_late_is_led_with_silence_test),
     TEST_CASE(video_decoder_swap_keeps_the_frames_the_candidate_read_ahead_test),
     TEST_CASE(every_child_spawn_names_the_handles_it_inherits_test),
     TEST_CASE(local_inputs_reach_files_only_test),
@@ -15613,6 +16063,32 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test),
 };
 
+// Cases that drive real child processes through stalls, timeouts, hand-offs and
+// leak loops: each takes a second or more, and together they are most of this
+// suite's run time. `PolicyTests --tier=quick` (the quick CTest tier, which
+// every pull request runs) leaves them out; the full device-free run, which
+// the nightly and release builds use, runs them as PolicyTestsSlow.
+constexpr test_support::TestCase kSlowCases[] = {
+    TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
+    TEST_CASE(youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test),
+    TEST_CASE(youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test),
+    TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),
+    TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
+    TEST_CASE(constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test),
+    TEST_CASE(youtube_resolver_waits_until_both_selected_streams_are_available_test),
+    TEST_CASE(youtube_resolver_keeps_stderr_out_of_the_answer_and_logs_it_test),
+    TEST_CASE(video_decoder_reports_child_stderr_and_a_mid_file_failure_is_not_the_end_test),
+    TEST_CASE(youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test),
+    TEST_CASE(video_decoder_tone_maps_hdr_sources_to_sdr_test),
+    TEST_CASE(youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test),
+    TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
+    TEST_CASE(youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test),
+    TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
+    TEST_CASE(youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test),
+    TEST_CASE(audio_track_that_starts_late_is_led_with_silence_test),
+    TEST_CASE(youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test),
+};
+
 
 } // namespace
 
@@ -15640,18 +16116,28 @@ int wmain(int argc, wchar_t* argv[])
         test_support::run_cases(kResolverAvailabilityCases, std::size(kResolverAvailabilityCases), {});
         return test_support::failure_count == 0 ? 0 : 1;
     }
-    // `--only=<text>` runs the cases whose name contains the text.
+    // `--only=<text>` runs the cases whose name contains the text, from either
+    // table. `--tier=quick` runs kCases and `--tier=slow` kSlowCases; with
+    // neither, every case runs.
     std::string only;
+    bool quick = true;
+    bool slow = true;
     if (argc == 2 && std::wstring_view(argv[1]).starts_with(L"--only=")) {
         for (const wchar_t character : std::wstring_view(argv[1]).substr(7)) only.push_back(static_cast<char>(character));
         if (only.empty()) {
             std::cerr << "--only= needs part of a case name\n";
             return EXIT_FAILURE;
         }
+    } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=quick") {
+        slow = false;
+    } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=slow") {
+        quick = false;
     } else if (argc > 1) {
         return run_fake_resolver_child(argc, argv);
     }
-    const size_t ran = test_support::run_cases(kCases, std::size(kCases), only).ran;
+    size_t ran = 0;
+    if (quick) ran += test_support::run_cases(kCases, std::size(kCases), only).ran;
+    if (slow) ran += test_support::run_cases(kSlowCases, std::size(kSlowCases), only).ran;
     if (ran == 0) {
         std::cerr << "no case name contains '" << only << "'\n";
         return EXIT_FAILURE;

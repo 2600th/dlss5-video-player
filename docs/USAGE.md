@@ -224,7 +224,9 @@ still, the modes fold into one button that opens a menu of them:
 - **RTX VSR** (`R`) shows NVIDIA's RTX Video Super Resolution of the original:
   a second engine, trained on compressed video, made live from the original
   frame the player already decodes - it needs no render and no cache, and it
-  never reaches the cache, an export or a saved render's identity. Where the
+  never reaches the cache or a saved render's identity. It is also the
+  playback upscaler (see [RTX VSR upscaling](#rtx-vsr-upscaling)) and the
+  default upscaler of **Export with DLSS stages**. Where the
   window shows the picture larger than the video, RTX VSR makes it at the size
   it is shown; otherwise it runs at the video's own size, where it cleans up
   compression. Its tag names the quality, e.g. `RTX VSR · HIGH`.
@@ -421,6 +423,47 @@ taskbar button shows three buttons under the thumbnail - play/pause, Neural
 Rendering on/off and side-by-side compare (**Side by side**, and back to the
 neural picture) - which do exactly what the matching menu commands do.
 
+### RTX VSR upscaling
+
+**DLSS > RTX VSR Upscaling (recommended)** is on by default. Wherever the window
+shows the video larger than it is - a 1080p video full screen on a 1440p or 4K
+monitor, a 720p stream in a large window - NVIDIA's RTX Video Super Resolution
+makes the picture at the size it is shown, instead of the plain scale the window
+would otherwise apply. It runs on the frame the player decodes, so it needs no
+render and no cache, and nothing it makes in playback reaches a capture or a
+cache key; an export runs it on its own (see the export's **Upscaler**). Its quality is the comparison view's: **Video > Compare > RTX VSR
+quality**, High by default. The status line says `RTX VSR Upscaling on · <width>×<height>`
+while it is the upscaler.
+
+It is the default because it measured best. 960x540 to 1080p over six clips on
+an RTX 5090, at High: 87.5 VMAF against 80.5 for bicubic and 74.9 for DLSS Super
+Resolution, 78.5 against 69.5 and 66.1 on H.264-compressed input, and ahead by
+VMAF NEG (which does not reward sharpening) and PSNR too, at 0.45 ms for a 540p frame;
+a 1080p frame takes about 1.5 ms and a 1440p one 2.7 ms on that GPU
+([docs/measurements/vsr-quality-20261002](measurements/vsr-quality-20261002/REPORT.md)).
+Its error does change more from one frame to the next than a plain scaler's, so
+fine moving detail can shimmer slightly; turn it off from the same menu if you
+see that.
+
+It stands aside wherever it does not apply: while **DLSS Upscaling** is on, in
+the comparison views (which show it as a member of their own), at a Mix other
+than 100% or with a mask, for an HDR video (it takes 8-bit SDR; an SDR video
+on an HDR display is upscaled as anywhere else), in a debug view, and wherever
+the video is shown at its own size or smaller.
+
+It watches that it keeps up. RTX VSR was measured on an RTX 5090; a slower GPU
+can spend a real share of each frame on it. If playback drops more than 5% of
+the video's frames for two 3-second windows in a row while RTX VSR takes at
+least a fifth of the frame time, the player lowers its quality one level for
+that video, and at Low pauses it for that video, with a notice each time. Your
+setting does not change, and the next video starts at it again; choosing the
+menu item again also starts over. It needs what the **RTX VSR** view needs (see
+[RTX VSR is grey](TROUBLESHOOTING.md#rtx-vsr-is-grey)); without it the item is
+grey and the window scales as before. `[Playback] RtxVsr` in
+`DLSSVideoPlayer.ini` holds the setting.
+
+### DLSS Upscaling
+
 **DLSS Upscaling** is independent and starts off on a fresh installation. Its
 output is **Auto** by default: the player takes the largest rung the monitor's
 current mode can scan out - 1080p, 1440p or 2160p - and never one above it,
@@ -434,8 +477,8 @@ target: a 4K source reports "source meets output" and stays off, and so does a
 "display below 1080 lines", which is a different refusal from the first and says
 so. Neural rendering itself preserves source resolution.
 
-**Upscaling is off by default because, on video, it does not beat a plain
-scaler.** DLSS Super Resolution is built for rendered games: jittered, aliased,
+**DLSS Upscaling is off by default because, on video, it does not beat a plain
+scaler**, and RTX VSR does. DLSS Super Resolution is built for rendered games: jittered, aliased,
 noise-free samples. Decoded video is none of those. Measured 960x540 to 1080p on
 six clips, a bicubic upscale scored higher VMAF than DLSS on every one
 (`docs/measurements/sr-quality-20260924` and `sr-history-20260924`). Turn it on if
@@ -449,6 +492,8 @@ earlier frames: its picture changes less from frame to frame than the source,
 which calms grain and also trails motion. The greyed
 line at the top of the submenu and each item's right-hand column give the measured
 range. The same choice is the **History** row of **Export with DLSS stages**.
+
+### YouTube source quality
 
 **Video > YouTube source quality** selects 1080p, 1440p or 2160p. At the selected
 resolution, the player chooses the highest advertised video bitrate across
@@ -519,7 +564,7 @@ export.
 ## Saved settings and reproducibility
 
 `DLSSVideoPlayer.ini` beside the executable stores volume, mute, fit/fill,
-original/neural view, upscaling preference and output size, YouTube quality,
+original/neural view, RTX VSR Upscaling (`[Playback] RtxVsr`), DLSS Upscaling (`[Playback] SuperResolution`) and its output size, YouTube quality,
 image adjustments, comparison mode and Mix, neural settings, processing scale and
 guide switches. It
 also keeps `[NeuralPace]`: one measured steady-state render pace per source
@@ -813,15 +858,26 @@ Refusals are named rather than generic, and they appear as you tick:
 - *Open a local video first* - a stream has to finish copying before it can be
   exported.
 
-**Super Resolution on its own runs without the neural model.** Tick it with
-Neural rendering unticked and the helper starts with the neural add-on
-disabled, so the file is DLSS Super Resolution alone. The render is refused
-rather than written if the add-on turns out to have run anyway. With Neural
-rendering ticked, the pass uses the look set in **Neural settings**.
+**Super Resolution on its own runs without the neural model**, on the
+**Upscaler** chosen under the output height:
 
-**History** (under the output height) is the same choice as **DLSS > Upscaling
+- **RTX VSR (recommended)**, the default: the playback upscaler, run in the
+  player on every frame of the source or the marked range, at the quality set
+  under **Video > Compare > RTX VSR quality**. Measured 960x540 to 1080p over
+  six clips it scored 87.5 VMAF against bicubic's 80.5 and DLSS Super
+  Resolution's 74.9, and an export reproduces that: a clip that measured 81.4
+  exported at 81.35. It needs an RTX GPU and the complete download; where it
+  cannot run the summary says so and offers DLSS instead.
+- **DLSS Super Resolution**: the helper starts with the neural add-on disabled,
+  so the file is DLSS Super Resolution alone. The render is refused rather than
+  written if the add-on turns out to have run anyway.
+
+With Neural rendering ticked the Upscaler is greyed: the upscale is the model's
+carrier, DLSS's, and the pass uses the look set in **Neural settings**.
+
+**History** (under the Upscaler) is the same choice as **DLSS > Upscaling
 history**: Temporal or Per-frame, with the measured VMAF and steadiness in its
-tooltip. It applies only to Super Resolution on its own. With Neural rendering
+tooltip. It applies only to DLSS Super Resolution on its own; RTX VSR has none. With Neural rendering
 ticked it is greyed and the pass keeps Temporal, because the model runs on the same
 frames. Cached renders are therefore never affected. `--render` uses the saved
 choice unless `--history` names one.
@@ -889,9 +945,11 @@ What to render, as the dialog's ticks and settings choose it:
 - `--processing-scale` is `100`, `75` or `50`, the rungs of **DLSS >
   Processing scale**, for `nr` without `sr`. Without it, the saved rung.
 - `--encode` is the **Encoder settings** quality ladder: `standard` (8-bit
-  HEVC), `high` (10-bit HEVC) or `lossless` (10-bit FFV1). `--history` is Super
-  Resolution's history, `temporal` or `per-frame`, for `sr` without `nr`.
-  Without them, the saved choices. The render prints the neural settings and
+  HEVC), `high` (10-bit HEVC) or `lossless` (10-bit FFV1). `--sr-engine` is the
+  upscaler for `sr` without `nr`: `vsr` (RTX VSR, recommended) or `dlss`.
+  `--history` is DLSS Super Resolution's history, `temporal` or `per-frame`,
+  and implies `--sr-engine dlss`; with `--sr-engine vsr` it is refused, since
+  RTX VSR has none. Without them, the saved choices. The render prints the neural settings and
   the encode it will use, whichever of these, the preset and the saved settings
   each came from.
 - `--range` renders part of each source, in the timecode forms **Go to
@@ -948,9 +1006,10 @@ cancelled; with several files the worst decides, and a cancel always wins.
 size, display aspect, frame rate, length, codec, HDR signal, audio and subtitle
 streams, the containers it can be written as, the Super Resolution rungs that
 grow it (and to what size), whether the neural runtime is installed and matches
-its lock, and so which stages this machine can run on it. `--capabilities`
+its lock, `sr_engines` (`vsr`, `dlss`, both or none: the upscalers `sr` can
+run on here), and so which stages this machine can run on it. `--capabilities`
 also measures how far frame generation goes on this GPU, which brings up a
-device of its own, and prints `frame_generation_addon` when the dlssg_sm86
+device of its own, and prints `frame_generation_addon` whenever the dlssg_sm86
 add-on for RTX 20/30 is loaded
 ([troubleshooting](TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on));
 `--json` prints one JSON object instead of `key=value` lines.

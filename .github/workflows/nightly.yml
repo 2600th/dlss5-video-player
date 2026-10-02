@@ -1,0 +1,118 @@
+name: nightly
+
+# Everything build-windows leaves out to stay quick, once a day, on main:
+#
+#   full     the shipping configuration (vs2022 preset: link-time code
+#            generation, every target including the GPU and audio smokes, so
+#            an API change that breaks one still fails a build) and every
+#            device-free suite, the `slow` tier included.
+#   quality  the MSVC code analyzer over the shipped targets and
+#            AddressSanitizer over every device-free suite - two more full
+#            builds that used to run on every pull request.
+#
+# release.yml runs the same full and quality jobs on the tagged commit before
+# anything is published, so a release never depends on the last nightly. A day
+# with no commit on main runs nothing.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.recent.outputs.run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 50
+
+      # A dispatched run always runs; a scheduled one only when main moved in
+      # the last day (25 h, so a late schedule does not skip a commit).
+      - name: Did main change since the last nightly?
+        id: recent
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != schedule ] || [ -n "$(git log -1 --since='25 hours ago' --format=%H)" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No commit on main in the last 25 hours; nothing to build."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  full:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build dependencies
+        uses: ./.github/actions/build-deps
+
+      - name: Configure
+        shell: cmd
+        run: cmake --preset vs2022
+
+      - name: Build Release
+        shell: cmd
+        run: cmake --build --preset vs2022 --parallel
+
+      - name: Test every device-free suite
+        shell: cmd
+        run: ctest --preset portable
+
+  quality:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build dependencies
+        uses: ./.github/actions/build-deps
+
+      - name: Code analysis of the shipped targets
+        shell: cmd
+        run: |
+          cmake --preset analyze
+          if errorlevel 1 exit /b 1
+          cmake --build --preset analyze --parallel
+
+      - name: Build the device-free suites with AddressSanitizer
+        shell: cmd
+        run: |
+          cmake --preset asan
+          if errorlevel 1 exit /b 1
+          cmake --build --preset asan --parallel
+
+      - name: Run the device-free suites under AddressSanitizer
+        shell: cmd
+        run: ctest --preset asan

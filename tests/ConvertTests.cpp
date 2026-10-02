@@ -9,6 +9,8 @@
 // cancelled (5), anything else writes its output and is done.
 
 #include "ConvertCommandLine.h"
+#include "RenderCliContract.h"
+#include "RenderCommandLine.h"
 #include "InheritedHandles.h"
 #include "KillOnCloseJob.h"
 #include "TestSupport.h"
@@ -89,6 +91,8 @@ void planner_test()
     CHECK((tuned.renderOptions == std::vector<std::wstring>{L"--passes", L"3", L"--intensity", L"1.5",
                                                            L"--encode", L"high", L"--color-strength", L"0.8"}));
     CHECK(ParseLine({L"a.mp4", L"--stages", L"sr", L"--history", L"per-frame"}).renderOptions.back() == L"per-frame");
+    CHECK((ParseLine({L"a.mp4", L"--stages", L"sr", L"--sr-engine", L"dlss"}).renderOptions ==
+           std::vector<std::wstring>{L"--stages", L"sr", L"--sr-engine", L"dlss"}));
     CHECK(ParseLine({}).mode == Mode::BadArguments);
     CHECK(ParseLine({L"a.mp4", L"--bogus"}).mode == Mode::BadArguments);
     CHECK(ParseLine({L"a.mp4", L"--format", L"avi"}).mode == Mode::BadArguments);
@@ -131,6 +135,130 @@ void planner_test()
     CHECK_EQ(kExitBadArguments, BatchExitCode(std::vector<O>{O::BadArguments}));
     CHECK_EQ(kExitRefused, BatchExitCode(std::vector<O>{O::Refused, O::NotStarted}));
     CHECK_EQ(kExitOk, BatchExitCode(std::vector<O>{}));
+}
+
+// ---- the contract with the player ---------------------------------------
+
+// The `--x` words a help text names, in order of first mention.
+std::vector<std::wstring> OptionsNamedIn(std::wstring_view text)
+{
+    std::vector<std::wstring> names;
+    for (size_t at = text.find(L"--"); at != std::wstring_view::npos; at = text.find(L"--", at + 2)) {
+        size_t end = at + 2;
+        while (end < text.size() && ((text[end] >= L'a' && text[end] <= L'z') || text[end] == L'-')) ++end;
+        if (end == at + 2) continue;
+        const std::wstring name(text.substr(at, end - at));
+        if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+    }
+    return names;
+}
+
+// dlss5-convert runs `DLSSVideoPlayer.exe --render` once per file, so the two
+// parsers have to agree on what --render takes and what its exit codes mean.
+// render_cli is the one table both read; this holds each parser to it, so an
+// option added to the player without its forwarding - or the other way round -
+// is a failure here rather than a batch that refuses a flag the player takes.
+void render_contract_test()
+{
+    namespace render = render_command;
+    const auto renderLine = [](std::vector<std::wstring> arguments) { return render::Parse(arguments); };
+    const auto unknownToRender = [&](const std::wstring& option, std::vector<std::wstring> arguments) {
+        const render::Parsed parsed = renderLine(std::move(arguments));
+        return parsed.mode == render::Mode::BadArguments && parsed.error == L"Unknown argument: " + option;
+    };
+
+    // Every forwarded value option: the player reads it (whatever it makes of
+    // this value), and convert hands it over as given, once.
+    for (const std::wstring_view forwarded : render_cli::kForwardedValueOptions) {
+        const std::wstring option(forwarded);
+        CHECK(!unknownToRender(option, {L"--render", L"a.mp4", option, L"1"}));
+        CHECK(render_cli::IsRenderValueOption(option));
+        const Options converted = ParseLine({L"a.mp4", option, L"1"});
+        CHECK(converted.mode == Mode::Convert);
+        CHECK((converted.renderOptions == std::vector<std::wstring>{option, L"1"}));
+        CHECK(ParseLine({L"a.mp4", option, L"1", option, L"2"}).mode == Mode::BadArguments);
+        CHECK(ParseLine({L"a.mp4", option}).mode == Mode::BadArguments);
+    }
+    // And every forwarded flag.
+    for (const std::wstring_view forwarded : render_cli::kForwardedFlags) {
+        const std::wstring flag(forwarded);
+        CHECK(renderLine({L"--render", L"a.mp4", flag}).mode == render::Mode::Render);
+        CHECK((ParseLine({L"a.mp4", flag}).renderOptions == std::vector<std::wstring>{flag}));
+    }
+    // What convert sets itself is never passed through from its own line:
+    // --render is not one of its options, and its --out and -q are its own.
+    CHECK(ParseLine({L"a.mp4", L"--render", L"b.mp4"}).mode == Mode::BadArguments);
+    const Options owned = ParseLine({L"a.mp4", L"--out", L"b.mkv", L"--quiet"});
+    CHECK(owned.mode == Mode::Convert && owned.renderOptions.empty() && owned.out == L"b.mkv" && owned.quiet);
+    // ...and what it then hands the player, the player takes as meant.
+    Options everything = ParseLine({L"a.mp4", L"--stages", L"sr,nr,fg", L"--height", L"2160", L"--multiplier", L"3",
+                                    L"--preset", L"gentle", L"--passes", L"2", L"--intensity", L"1.5",
+                                    L"--local-tone", L"0.5", L"--local-structure", L"1", L"--color-strength", L"0.8",
+                                    L"--encode", L"high", L"--range", L"0:01-0:02", L"--safe-mode", L"-q"});
+    CHECK(everything.mode == Mode::Convert);
+    const render::Parsed handed = render::Parse(PlayerArguments(everything, L"C:/v/a.mp4", L"C:/v/a-dlss.mkv"));
+    CHECK(handed.mode == render::Mode::Render);
+    CHECK(handed.command.input == L"C:/v/a.mp4" && handed.command.output == L"C:/v/a-dlss.mkv");
+    CHECK(handed.command.quiet && handed.command.safeMode && handed.command.hasRange);
+    CHECK(handed.command.selection.upscale && handed.command.selection.neural && handed.command.selection.frameGeneration);
+    CHECK(handed.command.selection.targetHeight == 2160 && handed.command.selection.multiplier == 3);
+    CHECK(handed.command.passes == 2 && handed.command.quality == "high");
+    const render::Parsed engine = render::Parse(PlayerArguments(
+        ParseLine({L"a.mp4", L"--stages", L"sr", L"--sr-engine", L"dlss", L"--history", L"per-frame"}), L"a.mp4", L"b.mkv"));
+    CHECK(engine.mode == render::Mode::Render && engine.command.engine == SuperResolutionEngine::Dlss &&
+          engine.command.history == UpscalingHistory::PerFrame);
+    CHECK(render::Parse(PlayerArguments(ParseLine({L"a.mp4", L"--processing-scale", L"75"}), L"a.mp4", L"b.mkv"))
+              .command.processingScale == 75u);
+
+    // Every option the player's help names is one --render reads - forwarded,
+    // set by convert, or one of the player's own (--help, and --probe's) - and
+    // every forwarded value option is in convert's help too.
+    const std::vector<std::wstring> playerOwn{L"--help", L"--probe", L"--json", L"--capabilities"};
+    for (const std::wstring& named : OptionsNamedIn(render::Usage())) {
+        const bool listed = render_cli::IsRenderValueOption(named) || render_cli::IsForwardedFlag(named) ||
+                            render_cli::Listed(std::wstring_view(named), render_cli::kConvertOwnedFlags) ||
+                            std::find(playerOwn.begin(), playerOwn.end(), named) != playerOwn.end();
+        if (!listed) std::wcerr << L"  --render help names an option render_cli does not list: " << named << L'\n';
+        CHECK(listed);
+    }
+    const std::vector<std::wstring> convertHelp = OptionsNamedIn(convert_command::Usage());
+    const std::vector<std::wstring> renderHelp = OptionsNamedIn(render::Usage());
+    for (const std::wstring_view forwarded : render_cli::kForwardedValueOptions) {
+        const bool both = std::find(convertHelp.begin(), convertHelp.end(), forwarded) != convertHelp.end() &&
+                          std::find(renderHelp.begin(), renderHelp.end(), forwarded) != renderHelp.end();
+        if (!both) std::wcerr << L"  a forwarded option is missing from a help text: " << forwarded << L'\n';
+        CHECK(both);
+    }
+
+    // One set of exit codes: the player's are the batch's, a batch reads each
+    // the way the player meant it, and both help texts say the same numbers.
+    CHECK_EQ(render::kExitOk, convert_command::kExitOk);
+    CHECK_EQ(render::kExitBadArguments, convert_command::kExitBadArguments);
+    CHECK_EQ(render::kExitRefused, convert_command::kExitRefused);
+    CHECK_EQ(render::kExitFailed, convert_command::kExitFailed);
+    CHECK_EQ(render::kExitCancelled, convert_command::kExitCancelled);
+    const int codes[] = {render::kExitOk, render::kExitBadArguments, render::kExitRefused, render::kExitFailed,
+                         render::kExitCancelled};
+    for (size_t i = 0; i < std::size(codes); ++i)
+        for (size_t j = i + 1; j < std::size(codes); ++j) CHECK(codes[i] != codes[j]);
+    CHECK(OutcomeOf(render::kExitOk) == Outcome::Done);
+    CHECK(OutcomeOf(render::kExitBadArguments) == Outcome::BadArguments);
+    CHECK(OutcomeOf(render::kExitRefused) == Outcome::Refused);
+    CHECK(OutcomeOf(render::kExitFailed) == Outcome::Failed);
+    CHECK(OutcomeOf(render::kExitCancelled) == Outcome::Cancelled);
+    for (const auto& [code, word] : {std::pair{render::kExitBadArguments, L" bad arguments"},
+                                     std::pair{render::kExitRefused, L" refused"},
+                                     std::pair{render::kExitFailed, L" failed"},
+                                     std::pair{render::kExitCancelled, L" cancelled"}}) {
+        const std::wstring said = std::to_wstring(code) + word;
+        CHECK(render::Usage().find(said) != std::wstring::npos);
+        CHECK(convert_command::Usage().find(said) != std::wstring::npos);
+    }
+
+    // The retired --quality is refused in the same words by both.
+    const Options retired = ParseLine({L"a.mp4", L"--quality", L"high"});
+    CHECK(retired.mode == Mode::BadArguments);
+    CHECK(retired.error == renderLine({L"--render", L"a.mp4", L"--quality", L"high"}).error);
 }
 
 // ---- the real front end -------------------------------------------------
@@ -290,6 +418,7 @@ int wmain(int argc, wchar_t** argv)
     if (!arguments.empty() && (arguments[0] == L"--render" || arguments[0] == L"--probe")) return FakePlayer(arguments);
     test_support::ContainChildProcesses();
     planner_test();
+    render_contract_test();
     wchar_t self[MAX_PATH]{};
     GetModuleFileNameW(nullptr, self, MAX_PATH);
     const fs::path convert = (argc > 1 ? fs::path(argv[1]) : fs::path(self).parent_path()) / L"dlss5-convert.exe";

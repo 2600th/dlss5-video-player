@@ -1742,6 +1742,151 @@ void clear_keeps_what_another_running_instance_owns_test()
         CHECK(std::filesystem::is_directory(manager.Root() / bucket));
 }
 
+// The cache root is user-settable, and Clear() emptied every child of each
+// bucket whatever it was called: a user who pointed the cache at a folder that
+// already held a frame-generation/ or thumbs/ of their own lost it. Only the
+// names the cache writes go now; anything else stays and is logged.
+void clear_deletes_only_the_names_the_cache_creates_test()
+{
+    const std::wstring hex(64, L'c');
+    CHECK(NeuralCacheCreatesName(L"renders", hex));
+    CHECK(NeuralCacheCreatesName(L"sources", hex));
+    CHECK(!NeuralCacheCreatesName(L"renders", std::wstring(64, L'C')));
+    CHECK(!NeuralCacheCreatesName(L"renders", L"holiday"));
+    CHECK(NeuralCacheCreatesName(L"staging", L"render-" + hex + L"-1234-5"));
+    CHECK(NeuralCacheCreatesName(L"staging", L"source-" + hex + L"-1234-5"));
+    CHECK(NeuralCacheCreatesName(L"staging", L"invalid-cleared-1234-5"));
+    CHECK(!NeuralCacheCreatesName(L"staging", L"backup-1234-5"));
+    CHECK(!NeuralCacheCreatesName(L"staging", L"render-notes"));
+    CHECK(NeuralCacheCreatesName(L"live", L"pid1234"));
+    CHECK(!NeuralCacheCreatesName(L"live", L"pid01234"));
+    CHECK(!NeuralCacheCreatesName(L"live", L"session"));
+    CHECK(NeuralCacheCreatesName(L"frame-generation", L"Trailer-66beb8c7-4x120fps.mkv"));
+    CHECK(NeuralCacheCreatesName(L"frame-generation", L"Trailer-66beb8c7-neural-4x120fps.mkv"));
+    CHECK(NeuralCacheCreatesName(L"frame-generation", L"old.release.stem-2x48fps.mkv"));
+    CHECK(NeuralCacheCreatesName(L"frame-generation", L".dlss-framegen-1234-99-0.mkv"));
+    CHECK(NeuralCacheCreatesName(L"frame-generation", L".dlss-export-1234-99-0.tmp"));
+    CHECK(!NeuralCacheCreatesName(L"frame-generation", L"-4x120fps.mkv"));
+    CHECK(!NeuralCacheCreatesName(L"frame-generation", L"holiday.mkv"));
+    CHECK(!NeuralCacheCreatesName(L"frame-generation", L"Trailer-x120fps.mkv"));
+    CHECK(!NeuralCacheCreatesName(L"frame-generation", L".dlss-export-1234-99.tmp"));
+    CHECK(!NeuralCacheCreatesName(L"frame-generation", L".dlss-export-12a4-99-0.tmp"));
+    CHECK(NeuralCacheCreatesName(L"thumbs", L"dQw4w9WgXcQ.jpg"));
+    CHECK(NeuralCacheCreatesName(L"thumbs", L"dQw4w9WgXcQ.jpg.tmp-1234-99-0"));
+    CHECK(!NeuralCacheCreatesName(L"thumbs", L"cover.jpg"));
+    CHECK(!NeuralCacheCreatesName(L"thumbs", L"dQw4w9WgXcQ.jpg.bak"));
+    CHECK(!NeuralCacheCreatesName(L"unknown", hex));
+
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const LiveChildProcess other;
+    REQUIRE(other.Pid() != 0);
+    const auto root = manager.Root();
+    REQUIRE(PublishRender(manager, std::string(64, 'a'), {}));
+    const std::filesystem::path foreign[] = {
+        root / L"renders" / L"holiday", root / L"sources" / L"notes.txt",
+        root / L"staging" / L"backup-1-2", root / L"live" / L"session",
+        root / L"frame-generation" / L"holiday.mkv", root / L"thumbs" / L"cover.jpg"};
+    for (const auto& path : foreign) {
+        std::filesystem::create_directories(path.parent_path());
+        WriteBytes(path, "user file");
+    }
+    const auto converted = root / L"frame-generation" / L"Trailer-66beb8c7-4x120fps.mkv";
+    const auto thumbnail = root / L"thumbs" / L"dQw4w9WgXcQ.jpg";
+    const auto otherConversion = root / L"frame-generation" /
+        (L".dlss-framegen-" + std::to_wstring(other.Pid()) + L"-99-0.mkv");
+    for (const auto& path : {converted, thumbnail, otherConversion}) WriteBytes(path, "cache file");
+
+    CHECK(manager.Clear());
+    for (const auto& path : foreign) CHECK_EQ(std::string("user file"), ReadBytes(path));
+    CHECK(!std::filesystem::exists(converted));
+    CHECK(!std::filesystem::exists(thumbnail));
+    CHECK(std::filesystem::is_regular_file(otherConversion));
+    CHECK(!std::filesystem::exists(RenderDirectory(manager, std::string(64, 'a'))));
+}
+
+// Every reader slurped manifest.json whole, so a multi-gigabyte file named
+// manifest.json in a user-settable root was read into memory by every lookup,
+// Peek and eviction pass. The bound refuses it unread; the same manifest under
+// the bound still parses, so the refusal is the bound's and not the parser's.
+void a_manifest_larger_than_its_bound_is_refused_unread_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    auto manifest = CompleteRenderManifest();
+    const auto write = [&](const std::string& key, size_t installation) {
+        manifest.environment = {"0.28.0", std::string(installation, 'x'), "32.0.16.1047", std::string(64, 'd')};
+        const std::string bytes = SerializeNeuralCacheManifest(manifest);
+        CHECK(ParseNeuralCacheManifest(bytes).has_value());
+        std::filesystem::create_directories(RenderDirectory(manager, key));
+        WriteBytes(RenderDirectory(manager, key) / L"manifest.json", bytes);
+        return bytes.size();
+    };
+    const std::string smallKey(64, '1'), largeKey(64, '2');
+    CHECK(write(smallKey, 60 * 1024) < 64u * 1024u);
+    CHECK(write(largeKey, 70 * 1024) > 64u * 1024u);
+    CHECK(NeuralCacheManager::Peek(manager.Root(), NeuralCacheEntryKind::Render, smallKey).has_value());
+    CHECK(!NeuralCacheManager::Peek(manager.Root(), NeuralCacheEntryKind::Render, largeKey).has_value());
+}
+
+// Remove() deleted with remove_all and no root lock: another instance's Clear,
+// eviction or promotion could be restructuring the same entry, and an open
+// payload left half an entry behind. It now waits for the lock, gives up when
+// another holder keeps it, and retires the entry by rename.
+void remove_takes_the_root_lock_and_retires_by_rename_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const std::string key(64, 'e');
+    REQUIRE(PublishRender(manager, key, {}));
+    const std::wstring name = NeuralCacheRootLockName(manager.Root());
+    std::promise<void> taken;
+    std::promise<void> release;
+    std::thread holder([&] {
+        const HANDLE mutex = CreateMutexW(nullptr, FALSE, name.c_str());
+        WaitForSingleObject(mutex, INFINITE);
+        taken.set_value();
+        release.get_future().wait();
+        ReleaseMutex(mutex);
+        CloseHandle(mutex);
+    });
+    taken.get_future().wait();
+    CHECK(!manager.RemoveRender(key));
+    CHECK(std::filesystem::is_regular_file(RenderDirectory(manager, key) / L"neural.mkv"));
+    release.set_value();
+    holder.join();
+    CHECK(manager.RemoveRender(key));
+    CHECK(!std::filesystem::exists(RenderDirectory(manager, key)));
+    CHECK(!manager.LookupRender(key).has_value());
+    CHECK(manager.RemoveRender(key));
+}
+
+// Promote accepted any directory under staging/, so one process could publish
+// - or, when an existing entry won, delete - another instance's render in
+// progress. Only a staging directory this process began is promotable.
+void promotion_refuses_a_staging_directory_another_process_began_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const LiveChildProcess other;
+    REQUIRE(other.Pid() != 0);
+    const std::string key(64, '9');
+    const auto foreign = manager.Root() / L"staging" /
+        (L"render-" + std::wstring(key.begin(), key.end()) + L"-" + std::to_wstring(other.Pid()) + L"-1");
+    std::filesystem::create_directories(foreign);
+    WriteBytes(foreign / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(foreign);
+    NeuralCachePromotion promotion{};
+    CHECK(!manager.PromoteRender(key, foreign, CompleteRenderManifest(), &promotion));
+    CHECK(promotion.stage == NeuralCachePromotion::Stage::Rejected);
+    CHECK(std::filesystem::is_regular_file(foreign / L"neural.mkv"));
+    CHECK(!manager.LookupRender(key).has_value());
+}
+
 // A crash during a live session left its live/pid<N> - gigabytes of segments -
 // and only the current process's own directory was ever removed.
 void startup_sweep_removes_live_sessions_whose_process_is_gone_test()
@@ -3989,6 +4134,23 @@ void synchronized_playback_starts_original_and_switches_same_timestamp_test()
     CHECK(playback.VisibleFrame()!=nullptr);if(playback.VisibleFrame())CHECK_EQ(int64_t{0},playback.VisibleFrame()->timestamp100ns);
 }
 
+// The defaulted move assignment destroyed the replaced playback's state without
+// Close(), so its sources were left open where the destructor would have
+// closed them.
+void move_assigning_a_synchronized_playback_closes_what_it_replaces_test()
+{
+    FakeSynchronizedSource original({0,333333});FakeSynchronizedSource neural({0,333333});
+    FakeSynchronizedSource nextOriginal({0,333333});FakeSynchronizedSource nextNeural({0,333333});
+    SynchronizedPlayback playback(original,neural);
+    CHECK(playback.Open(L"o",L"n",{}));
+    const int originalCloses=original.closes,neuralCloses=neural.closes;
+    playback=SynchronizedPlayback(nextOriginal,nextNeural);
+    CHECK(original.closes>originalCloses);
+    CHECK(neural.closes>neuralCloses);
+    // The moved-from temporary owns nothing, so its destructor closes nothing.
+    CHECK_EQ(0,nextOriginal.closes);
+}
+
 void synchronized_playback_advances_both_streams_under_one_clock_test()
 {
     FakeSynchronizedSource original({0,333333,666666});FakeSynchronizedSource neural({0,333333,666666});
@@ -5889,6 +6051,10 @@ int wmain(int argc, wchar_t* argv[])
     lookup_marks_the_entry_used_test();
     cache_operations_yield_to_another_holder_of_the_root_lock_test();
     clear_keeps_what_another_running_instance_owns_test();
+    clear_deletes_only_the_names_the_cache_creates_test();
+    a_manifest_larger_than_its_bound_is_refused_unread_test();
+    remove_takes_the_root_lock_and_retires_by_rename_test();
+    promotion_refuses_a_staging_directory_another_process_began_test();
     startup_sweep_removes_live_sessions_whose_process_is_gone_test();
     lookup_reuses_its_own_published_digest_only_for_the_same_file_test();
     quarantined_entries_are_kept_for_inspection_then_reaped_test();
@@ -5952,6 +6118,7 @@ int wmain(int argc, wchar_t* argv[])
     reshade_evidence_rejects_a_later_feature18_failure_in_the_same_job_segment_test();
     reshade_evidence_rejects_any_failure_or_passthrough_in_the_job_segment_test();
     synchronized_playback_starts_original_and_switches_same_timestamp_test();
+    move_assigning_a_synchronized_playback_closes_what_it_replaces_test();
     synchronized_playback_advances_both_streams_under_one_clock_test();
     synchronized_playback_seek_commits_only_after_both_streams_reach_target_test();
     synchronized_seek_waits_for_decoder_startup_and_preserves_comparison_test();

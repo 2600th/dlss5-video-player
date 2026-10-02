@@ -73,6 +73,7 @@
 #include "PlaybackTickPolicy.h"
 #include "NeuralJobPolicy.h"
 #include "FrameGenerationPass.h"
+#include "VsrUpscalePass.h"
 #include "NeuralCache.h"
 #include "SourceDigestMemo.h"
 
@@ -118,6 +119,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "UpscalingPolicy.h"
 #include "NeuralMotionPolicy.h"
 #include "ExportPipeline.h"
+#include "StageExport.h"
 #include "RenderCommandLine.h"
 #include "UpdateCheck.h"
 #include "TrailerThumbnail.h"
@@ -410,6 +412,7 @@ static constexpr int IDC_EX_SUMMARY = 7506;
 static constexpr int IDC_EX_RUN = 7507;
 static constexpr int IDC_EX_CLOSE = 7508;
 static constexpr int IDC_EX_HISTORY = 7509;
+static constexpr int IDC_EX_ENGINE = 7510;
 
 static constexpr int IDC_TIMECODE_EDIT = 7501;
 static constexpr int IDC_TIMECODE_SET_IN = 7502;
@@ -1290,7 +1293,10 @@ static void LoadFrameGenAddon(bool safeMode) {
     auto& addon=FrameGenAddonState();
     addon=framegen_addon::LoadBeside(*directory);
     if(addon.proxy.empty())return;
-    if(addon.loaded)LOG("dlssg_sm86 add-on loaded for Frame Generation: "<<WideToUtf8((*directory/addon.proxy).wstring()));
+    // The digest says which build loaded: the pinned one the offer installs, or
+    // another a user put there by hand, which loads too but is named as such.
+    if(addon.loaded)LOG("dlssg_sm86 add-on loaded for Frame Generation: "<<WideToUtf8((*directory/addon.proxy).wstring())
+                        <<" sha256="<<addon.sha256<<(addon.pinned?" (the pinned 0.3.5 build)":" (not the build the player installs)"));
     else LOG("dlssg_sm86 add-on found but its "<<WideToUtf8(addon.proxy)<<" did not load: error "<<addon.error);
 }
 
@@ -1609,7 +1615,7 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
     }
     NeuralCacheIdentity sourceIdentity{};
     sourceIdentity.sourceDigest="youtube="+videoId+"|quality="+std::to_string(static_cast<int>(sourceQuality))+"|"+streamIdentity;
-    sourceIdentity.applicationVersion=DLSS_VIDEO_PLAYER_VERSION;sourceIdentity.quality=kCompleteSourcePolicy;
+    sourceIdentity.applicationVersion=std::string(kRenderCacheRevision);sourceIdentity.quality=kCompleteSourcePolicy;
     result.key=BuildNeuralCacheKey(sourceIdentity);
     LOG("Checking source cache key="<<result.key);
     if(const auto cached=cache.LookupSource(result.key,stop)){
@@ -1664,18 +1670,6 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
     return result;
 }
 
-static const wchar_t* ExportRefusalKey(ExportRefusal refusal){
-    switch(refusal){
-    case ExportRefusal::NothingSelected:return L"export.stages.refusal.nothing";
-    case ExportRefusal::SourceGeometryUnknown:return L"export.stages.refusal.geometry";
-    case ExportRefusal::AlreadyAtTarget:return L"export.stages.refusal.target";
-    case ExportRefusal::MultiplierUnsupported:return L"export.stages.refusal.multiplier";
-    case ExportRefusal::StillImage:return L"export.stages.refusal.still";
-    case ExportRefusal::None:break;
-    }
-    return L"export.stages.refusal.nothing";
-}
-
 // The saved processing scale, or the default for a value that is not a rung -
 // a hand-edited 60 is not a choice this player offers, so it is not honoured.
 static uint32_t ReadProcessingScale(const std::filesystem::path& settings){
@@ -1690,6 +1684,21 @@ static UpscalingHistory ReadUpscalingHistory(const std::filesystem::path& settin
     return ParseUpscalingHistory(WideToUtf8(saved)).value_or(kRecommendedUpscalingHistory);
 }
 
+// The saved export upscaler ([Export] SrEngine), by name; anything else is RTX VSR.
+static SuperResolutionEngine ReadSuperResolutionEngine(const std::filesystem::path& settings){
+    wchar_t saved[16]{};
+    GetPrivateProfileStringW(L"Export",L"SrEngine",L"",saved,static_cast<DWORD>(std::size(saved)),settings.c_str());
+    return ParseSuperResolutionEngine(WideToUtf8(saved)).value_or(kRecommendedSuperResolutionEngine);
+}
+
+// Whether RTX VSR can run an export here as far as can be told without a device:
+// this build has it, its DLL is beside the player, and the GPU is an RTX one. The
+// pass itself still says so if NGX then refuses.
+static bool VsrExportReady(const std::filesystem::path& helpers,GpuGeneration generation){
+    return VsrEngine::kBuilt&&generation!=GpuGeneration::Unsupported&&generation!=GpuGeneration::OtherNvidia&&
+           framegen_addon::RegularFile(helpers/L"nvngx_vsr.dll");
+}
+
 // The saved [Encoding] CacheQuality rung. A name this build does not know - a newer
 // player's rung - reads as Standard.
 static EncoderQuality ReadCacheQuality(const std::filesystem::path& settings){
@@ -1699,268 +1708,6 @@ static EncoderQuality ReadCacheQuality(const std::filesystem::path& settings){
     EncoderQuality quality=EncoderQuality::Standard;
     ParseEncoderQuality(narrow,quality);
     return quality;
-}
-
-// Everything a neural render writes into the add-on's [RenoDX.DLSS5]: the
-// Neural settings, and the model's place against the carrier's upscale that
-// the processing scale needs (PreUpscaleOverride says when that is written).
-static std::vector<NeuralAddonOverride> RenderAddonOverrides(const std::filesystem::path& ini,
-                                                             const NeuralSettings& settings,
-                                                             uint32_t processingScale){
-    std::vector<NeuralAddonOverride> overrides=NeuralAddonOverridesFor(settings);
-    std::string current;
-    if(const auto snapshot=ReadNeuralAddonSettingsSnapshot(ini)){
-        // The snapshot is canonical: one exact-case key per line.
-        constexpr std::string_view kKey="\nNRPreUpscale=";
-        if(const size_t at=snapshot->find(kKey);at!=std::string::npos){
-            const size_t begin=at+kKey.size();
-            current=snapshot->substr(begin,snapshot->find('\n',begin)-begin);
-        }
-    }
-    if(const auto order=PreUpscaleOverride(processingScale,current))
-        overrides.emplace_back("NRPreUpscale",std::string(*order));
-    return overrides;
-}
-
-// ---- What refuses a neural pass before a helper is asked for one --------
-//
-// Shared by the live render (NeuralJobRun) and the stage export, in the words
-// the live path has always used, so a runtime one of them refuses is never
-// rendered with by the other. The export used to check neither: it wrote the
-// settings and ran the helper against whatever the directory held, and a
-// drifted runtime the live path refused still produced a file called neural.
-
-// Empty when every locked file matches.
-static std::wstring RuntimeLockRefusal(std::span<const RuntimeLockCheck> checks){
-    if(RuntimeLockSatisfied(checks))return {};
-    return L"The neural runtime does not match the locked stack: "+DescribeRuntimeLockDrift(checks);
-}
-
-// Empty when the directory holds no module the lock does not name, and when it
-// cannot be listed: the helper refuses that itself, with its own reason.
-static std::wstring UnlockedRuntimeModulesRefusal(const std::filesystem::path& runtimeDirectory,const RuntimeLock& lock){
-    const auto unlocked=FindUnlockedRuntimeModules(runtimeDirectory,lock);
-    return unlocked?runtime_modules::UnlockedModulesRefusal(*unlocked):std::wstring{};
-}
-
-// Both, the lock first, which is the order a live render meets them in. Empty
-// when neither refuses. A cancelled check leaves hashes unverified and so
-// reads as drift; the caller asks its stop token before believing it.
-static std::wstring StageExportRuntimeRefusal(const std::filesystem::path& runtimeDirectory,const RuntimeLock& lock,std::stop_token stop){
-    const auto checks=VerifyRuntimeLock(runtimeDirectory,lock,stop);
-    if(std::wstring refusal=RuntimeLockRefusal(checks);!refusal.empty())return refusal;
-    return UnlockedRuntimeModulesRefusal(runtimeDirectory,lock);
-}
-
-// ---- Export with DLSS stages, the passes themselves --------------------
-//
-// Shared by the dialog and by `--render`, so a script gets the file the dialog
-// would have written rather than a second implementation of it that drifts.
-// Everything the two callers differ in - where progress goes, how the outcome
-// is shown, whether a range was asked for - is a parameter.
-struct StageExportJob {
-    ExportPlan plan;
-    std::filesystem::path source;
-    std::filesystem::path destination;
-    // Where the intermediate passes are written: the cache root's
-    // export-stages directory, beside the other derived carriers.
-    std::filesystem::path scratch;
-    // The player's directory: ffmpeg beside it, the helper in neural-runtime.
-    std::filesystem::path helpers;
-    uint32_t sourceWidth{},sourceHeight{};
-    double fps{},duration{};
-    // ExportDisplayAspect of the source; empty for square pixels.
-    std::wstring displayAspect;
-    // FrameGenerationRequest::holdDuplicates for the frame-generation pass.
-    bool holdDuplicates{};
-    // Whole for the dialog. A range reaches the worker pass only; frame
-    // generation then reads that pass's carrier, which covers just the range.
-    NeuralRenderRange range{};
-    uint32_t nvencPreset{5};
-    // The model's resolution for a neural pass at the source size. An export
-    // that upscales runs the model on the upscaled frame, as it always has,
-    // whatever this says: a reduced model input and a Super Resolution output
-    // are one carrier's two jobs, and it can only do one of them.
-    uint32_t processingScale{kDefaultProcessingScale};
-    // Super Resolution's history for an upscaling pass without the model; a pass
-    // that runs the model keeps Temporal (CarrierUpscalingHistory).
-    UpscalingHistory upscalingHistory{kRecommendedUpscalingHistory};
-    // Written to the add-on before a neural pass. The dialog's tooltip has
-    // always said the neural stage "runs the neural model with the settings
-    // from Neural settings", but nothing wrote them: the export used whatever
-    // the last live render had left in ReShade.ini.
-    NeuralSettings neuralSettings{};
-    // The capture-quality switches of Encoder settings, so the export's neural pass
-    // writes the same way the cache does.
-    bool captureDither{true};
-    EncoderQuality quality{EncoderQuality::Standard};
-    bool sourceDeband{false};
-    bool suppliedExposure{false};
-    // Ends the player's idle resident helper before this export's helper
-    // starts in the same runtime directory. Empty for `--render`, which runs in
-    // a process of its own and has none.
-    std::function<void()> releaseResidentHelper;
-    // The lock the runtime directory is held to before any worker pass; empty
-    // is the embedded one. Tests only, which have no runtime that satisfies it.
-    std::optional<RuntimeLock> runtimeLock;
-};
-
-// `passKey` null is the end of the passes, when the finished file is moved
-// into place.
-struct StageExportUpdate {
-    uint32_t pass{},passes{};
-    const wchar_t* passKey{};
-    uint64_t completedFrames{},totalFrames{};
-};
-
-enum class StageExportStatus { Done, Refused, Failed, Cancelled };
-
-struct StageExportOutcome {
-    StageExportStatus status{StageExportStatus::Failed};
-    std::wstring detail;
-};
-
-static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop,
-                                         const std::function<void(const StageExportUpdate&)>& progress){
-    const ExportPlan& plan=job.plan;
-    const uint64_t tag=GetTickCount64();
-    const auto stageOne=job.scratch/(L"stage1-"+std::to_wstring(tag)+L".mkv");
-    const auto stageTwo=job.scratch/(L"stage2-"+std::to_wstring(tag)+L".mkv");
-    std::filesystem::path produced=job.source;
-    // Both intermediates, always: the last step writes the destination from
-    // them rather than renaming one into place, so the one it read is as
-    // spent as the other. The guard that used to keep `produced` also kept
-    // the first pass's carrier when frame generation failed after it.
-    const auto sweep=[&]{std::error_code ec;
-        std::filesystem::remove(stageOne,ec);
-        std::filesystem::remove(stageTwo,ec);};
-    const auto report=[&](StageExportUpdate update){if(progress)progress(update);};
-    // Asked before the passes rather than by the last step after them: the
-    // file is replaced, and a source replaced by its own export is gone.
-    {std::error_code sameError;
-        if(std::filesystem::equivalent(job.source,job.destination,sameError)&&!sameError)
-            return {StageExportStatus::Refused,L"The export cannot replace its own source. Choose a new filename."};}
-    const uint32_t passes=ExportStageCount(plan);
-    if(plan.workerStage){
-        NeuralRenderRequest request{};
-        request.sourcePath=produced;request.stagingVideoPath=stageOne;
-        request.width=job.sourceWidth;request.height=job.sourceHeight;
-        request.fps=job.fps;request.durationSeconds=job.duration;
-        request.range=job.range;
-        request.nvencPreset=job.nvencPreset;
-        request.captureDither=job.captureDither;
-        // The stage export writes at the same rung the cache does.
-        request.quality=job.quality;
-        request.sourceDeband=job.sourceDeband;
-        request.suppliedExposure=job.suppliedExposure;
-        request.requireNeural=plan.requireNeural;
-        const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;
-        if(upscales){
-            request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
-        }
-        if(plan.requireNeural&&!upscales)request.processingScale=job.processingScale;
-        if(upscales)request.upscalingHistory=CarrierUpscalingHistory(job.upscalingHistory,plan.requireNeural);
-        const wchar_t* passKey=plan.requireNeural
-            ?(plan.outputWidth!=job.sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
-            :L"export.progress.pass_sr";
-        const auto runtimeDirectory=job.helpers/L"neural-runtime";
-        // Refused on what refuses a live render, before anything is written:
-        // a file that drifted from the lock, or a module the lock does not
-        // name beside feature 18. A Super Resolution-only pass too (P1.33): it
-        // is not presented as neural, but its helper loads the same proxy and
-        // Streamline modules from this directory, and the helper's own check
-        // of stray modules at startup came after the settings were written.
-        {
-            const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,job.runtimeLock?*job.runtimeLock:EmbeddedRuntimeLock(),stop);
-            if(stop.stop_requested())return {StageExportStatus::Cancelled,{}};
-            if(!refusal.empty()){
-                LOG("Stage export refused before the helper: "<<WideToUtf8(refusal));
-                return {StageExportStatus::Refused,refusal};
-            }
-        }
-        // One writer at a time, exactly as a live render: the settings written
-        // below and the helper's proxy log are shared per runtime directory, and
-        // `--render` can run beside a player that is rendering.
-        NeuralRuntimeLease runtimeLease(runtimeDirectory);
-        if(!runtimeLease.Held())
-            return {StageExportStatus::Refused,L"Another neural render is using the experimental runtime. Wait for it to finish, then try again."};
-        // An idle resident helper from an earlier live job still holds the
-        // device, its feature-18 workset and the runtime's ReShade.log. A
-        // second helper beside it risks the VRAM a small card does not have,
-        // and moves the proxy's log to ReShade.log1 where the evidence reader
-        // may not look. It goes first, as it does before a preflight probe -
-        // under the lease, which every job thread that uses it also holds.
-        if(job.releaseResidentHelper)job.releaseResidentHelper();
-        // The add-on state the job needs, with the neural settings when it runs
-        // the model. The helper checks the same state itself and relaunches when
-        // it had to change it; writing it here first saves that relaunch.
-        const auto overrides=plan.requireNeural
-            ?RenderAddonOverrides(runtimeDirectory/L"ReShade.ini",job.neuralSettings,request.processingScale)
-            :std::vector<NeuralAddonOverride>{};
-        const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",plan.requireNeural,overrides);
-        if(!configured.ok){
-            LOG("Stage export could not prepare the neural add-on: "<<WideToUtf8(configured.error));
-            return {StageExportStatus::Failed,L"The neural settings could not be prepared."};
-        }
-        report({1,passes,passKey,0,0});
-        const NeuralRenderResult result=RunNeuralWorker(job.helpers/L"neural-runtime"/L"NeuralWorker.exe",request,
-            [&](const NeuralRenderProgress& p){report({1,passes,passKey,p.completedFrames,p.totalFrames});},stop);
-        if(!result.ok){
-            sweep();
-            return {result.cancelled?StageExportStatus::Cancelled:StageExportStatus::Failed,result.detail};
-        }
-        produced=stageOne;
-    }
-    if(plan.frameGenStage){
-        FrameGenerationRequest request{};
-        request.source=produced;
-        // Video only: the last step below attaches the original's streams to
-        // whatever the passes produced, trimmed to the range.
-        request.carryStreams=false;
-        request.output=stageTwo;
-        request.multiplier=plan.multiplier;
-        request.nvencPreset=job.nvencPreset;
-        request.holdDuplicates=job.holdDuplicates;
-        const uint32_t generatePass=plan.workerStage?2u:1u;
-        report({generatePass,passes,L"export.progress.pass_framegen",0,0});
-        const FrameGenerationResult result=FrameGenerationPass(job.helpers).Run(request,stop,
-            [&](const FrameGenerationProgress& p){report({generatePass,passes,L"export.progress.pass_framegen",p.sourceFramesRead,p.sourceFramesTotal});});
-        if(!result.ok){
-            sweep();
-            return {result.error==FrameGenerationError::Cancelled?StageExportStatus::Cancelled:StageExportStatus::Failed,result.detail};
-        }
-        produced=stageTwo;
-    }
-    // Every pass writes Matroska. This used to be renamed onto the chosen name
-    // whatever it was, so "clip.mp4" was a Matroska file under an MP4 name;
-    // the last step now writes the container the name asks for, keeping the
-    // video bitstream as the passes encoded it.
-    //
-    // It is also where the original's audio, subtitles and chapters come in,
-    // for every combination of stages. The neural worker writes its carrier
-    // video-only, so an export without frame generation used to be silent,
-    // and so was one with a range, because frame generation copied streams
-    // from that carrier. Every pass keeps the length of what it read, so the
-    // streams need no retime - only the trim a ranged carrier needs, which
-    // is the cached-range export's.
-    StageExportMuxRequest finish{produced,job.source,job.destination};
-    finish.displayAspect=job.displayAspect;
-    if(!job.range.Whole()){
-        finish.rangeStartSeconds=double(job.range.start100ns)*1e-7;
-        if(job.range.end100ns>job.range.start100ns)finish.rangeDurationSeconds=double(job.range.end100ns-job.range.start100ns)*1e-7;
-    }
-    report({});
-    const MaterializeResult finished=MuxStageExport(job.helpers,finish,stop);
-    sweep();
-    if(!finished.ok){
-        if(finished.error==MaterializeError::Cancelled)return {StageExportStatus::Cancelled,{}};
-        LOG("Stage export could not write "<<WideToUtf8(job.destination.wstring())<<": "<<WideToUtf8(finished.detail));
-        return {StageExportStatus::Failed,finished.detail};
-    }
-    LOG("Stage export wrote "<<WideToUtf8(job.destination.wstring())<<(finished.detail.empty()?"":" - ")<<WideToUtf8(finished.detail));
-    // The note (what the container left out) goes to the dialog and to
-    // --render's console, not only the log (P1.33).
-    return {StageExportStatus::Done,finished.detail};
 }
 
 // How a neural job relates to what is on screen: an offline job replaces
@@ -2578,7 +2325,7 @@ private:
             <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{})
             <<(modelStore.trustedRewrites?" trustedRewrites="+std::to_string(modelStore.trustedRewrites):std::string{})
             <<(modelStore.reads>1?" reads="+std::to_string(modelStore.reads)+" waited="+std::to_string(modelStore.waited.count())+"ms on "+WideToUtf8(modelStore.youngestFile):std::string{}));
-        identity_=NeuralCacheIdentity{*sourceDigest_,width_,height_,DLSS_VIDEO_PLAYER_VERSION,GpuGenerationPathName(in_.gpu),*runtimeDigest_,NeuralRenderPipelineIdentity(in_.gpuSourceConversion,KeyedNvencPreset(in_.nvencPreset,in_.cacheQuality),KeyedGpuColorConversion(in_.gpuColorConversion,in_.cacheQuality))+ProcessingScaleIdentityTerm(in_.processingScale)+UntaggedColorIdentityTerm(untaggedBt709_,in_.gpuSourceConversion)+toneMapTerm_+orientationTerm_+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({in_.captureDither,in_.cacheQuality,in_.sourceDeband,in_.suppliedExposure}),false,*settingsDigest_,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(in_.driverVersion),modelStore.digest};renderKey_=BuildNeuralCacheKey(identity_);completion_->renderKey=renderKey_;completion_->range=range;completion_->settings=settings;completion_->guides=guides;completion_->temporal=temporal;
+        identity_=NeuralCacheIdentity{*sourceDigest_,width_,height_,std::string(kRenderCacheRevision),GpuGenerationPathName(in_.gpu),*runtimeDigest_,NeuralRenderPipelineIdentity(in_.gpuSourceConversion,KeyedNvencPreset(in_.nvencPreset,in_.cacheQuality),KeyedGpuColorConversion(in_.gpuColorConversion,in_.cacheQuality))+ProcessingScaleIdentityTerm(in_.processingScale)+UntaggedColorIdentityTerm(untaggedBt709_,in_.gpuSourceConversion)+toneMapTerm_+orientationTerm_+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({in_.captureDither,in_.cacheQuality,in_.sourceDeband,in_.suppliedExposure}),false,*settingsDigest_,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(in_.driverVersion),modelStore.digest};renderKey_=BuildNeuralCacheKey(identity_);completion_->renderKey=renderKey_;completion_->range=range;completion_->settings=settings;completion_->guides=guides;completion_->temporal=temporal;
         LOG("Checking neural cache key="<<renderKey_<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
         if(const auto cached=cache_.LookupRender(renderKey_,stop_)){
             // LookupRender already verifies the full payload hash and
@@ -3032,7 +2779,7 @@ public:
                 // 5 s apart are the store.
                 RememberAgreedNeuralModelStores(models,confirm);
                 if(runtime&&NeuralModelStoresAgree(models,confirm))
-                    current=cache_eviction::Identity{DLSS_VIDEO_PLAYER_VERSION,NeuralCacheInstallation(),*runtime,WideToUtf8(driverVersion),models.digest};
+                    current=cache_eviction::Identity{std::string(kRenderCacheRevision),NeuralCacheInstallation(),*runtime,WideToUtf8(driverVersion),models.digest};
                 else LOG("Cache eviction is not judging entries by identity: runtime="<<(runtime?"resolved":"unavailable")
                          <<" modelStore="<<(!NeuralModelStoreSettled(models)?"unsettled":
                                             !NeuralModelStoreSettled(confirm)?"unsettled on the second read":"changed between reads")
@@ -3121,6 +2868,7 @@ public:
         // all - was the quietest: one measured session logged a single line
         // covering 132 s and two presented frames.
         ReportPlaybackHealth();
+        GuardPlaybackVsr();
         if(playback_tick::ReadsCachedAhead(TickNow())){
             if(!ReadNextCachedFrame())return;
         }
@@ -3612,6 +3360,7 @@ private:
         job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
         job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
         job.upscalingHistory=m_upscalingHistory;
+        job.vsrQuality=m_comparison.vsrQuality;
         job.captureDither=m_captureDither;job.quality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
         job.holdDuplicates=m_frameGenHoldDuplicates;
         // Called on the export thread, which is safe for a helper that is not
@@ -3918,6 +3667,14 @@ private:
                                                     :frame_rate_policy::kPhaseVerifiedMultiFrameCount;
         if(m_frameGenPreference==0u)return measured;
         return std::min(measured,m_frameGenPreference);
+    }
+    // The runtime's cap once it has been measured and admits frame generation at
+    // all; empty before that, so nothing is greyed on a guess. A runtime that
+    // refuses outright is the refusal dialog's to explain, not the menu's.
+    std::optional<uint32_t> MeasuredFrameGenerationCap()const{
+        if(!m_frameGenCapability||!m_frameGenCapability->available)return std::nullopt;
+        const uint32_t cap=FrameGenerationCap();
+        return cap?std::optional<uint32_t>(cap):std::nullopt;
     }
     uint32_t FrameGenerationCap()const{
         if(!m_frameGenCapability||!m_frameGenCapability->available)return 0u;
@@ -4251,6 +4008,7 @@ private:
             const HCURSOR previous=SetCursor(LoadCursorW(nullptr,IDC_WAIT));
             m_frameGenCapability=QueryFrameGenerationCapability();
             SetCursor(previous);
+            SyncFeatureMenuState();
             LOG("Frame generation capability measured on demand: available="<<m_frameGenCapability->available
                 <<" multiFrameCountMax="<<m_frameGenCapability->multiFrameCountMax
                 <<" detail="<<WideToUtf8(m_frameGenCapability->detail));
@@ -4302,6 +4060,13 @@ private:
         // time for it is owed the fact rather than left to see it.
         if(!plan.cadence.even)
             prompt+=Format(T(L"framegen.confirm.uneven"),plan.cadence.shortHold,plan.cadence.longHold);
+        if(const auto lowered=frame_rate_policy::RuntimeLoweredPreference(m_frameGenPreference,MeasuredFrameGenerationCap()))
+        {
+            prompt+=Format(T(L"framegen.confirm.lowered"),m_frameGenPreference+1u,*lowered+1u);
+            // With the dlssg_sm86 add-on the cap is its own MaxGeneratedFrames, which
+            // ships at 3 (4x); its bundled runtime goes higher (issue #14).
+            if(FrameGenAddonState().loaded)prompt+=T(L"framegen.confirm.lowered.addon");
+        }
         if(input.neural)prompt+=T(L"framegen.confirm.neural");
         LOG("Frame generation offer: output="<<WideToUtf8(output.wstring())
             <<" input="<<(input.neural?"neural":"original"));
@@ -5017,6 +4782,7 @@ private:
         m_fill=ReadIniFloat(L"Playback",L"Fill",0.0f)==1.0f;
         m_neuralRequested=ReadIniFloat(L"Playback",L"NeuralView",1.0f)!=0.0f;
         m_upscalingRequested=ReadIniFloat(L"Playback",L"SuperResolution",0.0f)==1.0f;
+        m_playbackVsr=ReadIniFloat(L"Playback",L"RtxVsr",vsr_policy::kPlaybackDefault?1.0f:0.0f)!=0.0f;
         // Auto and the rung are separate keys on purpose. Every earlier version
         // persisted UpscaleHeight on every save, so a stored 1440 is the old
         // default rather than evidence of a choice, and keying Auto off that
@@ -5067,6 +4833,7 @@ private:
         m_nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,SettingsPath().c_str())),1,7);
         m_processingScale=ReadProcessingScale(SettingsPath());
         m_upscalingHistory=ReadUpscalingHistory(SettingsPath());
+        m_exportSelection.engine=ReadSuperResolutionEngine(SettingsPath());
         m_captureDither=GetPrivateProfileIntW(L"Encoding",L"CaptureDither",1,SettingsPath().c_str())!=0;
         m_cacheQuality=ReadCacheQuality(SettingsPath());
         m_sourceDeband=GetPrivateProfileIntW(L"Encoding",L"SourceDeband",0,SettingsPath().c_str())!=0;
@@ -5173,6 +4940,7 @@ private:
         WriteIniFloat(L"Playback",L"Fill",m_fill?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"NeuralView",m_neuralRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"SuperResolution",m_upscalingRequested?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"RtxVsr",m_playbackVsr?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleAuto",m_upscaleAuto?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
         WriteIniFloat(L"Playback",L"FrameGenerationGenerated",static_cast<float>(m_frameGenPreference));
@@ -5236,6 +5004,8 @@ private:
     // without changing the mode; see compare_gesture.
     ComparisonSettings EffectiveComparison()const{
         ComparisonSettings effective=m_comparison;
+        effective.playbackVsr=m_playbackVsr&&!m_vsrSessionOff;
+        effective.playbackVsrQuality=m_vsrSessionQuality.value_or(m_comparison.vsrQuality);
         const int viewW=ZoomViewWidth();const uint32_t outputW=ZoomOutputWidth();
         effective.zoomScale=compare_zoom::ScaleForStep(m_zoomStep,outputW,viewW);
         if(effective.zoomScale<=1.0f){effective.zoomCenterX=0.5f;effective.zoomCenterY=0.5f;}
@@ -5247,6 +5017,7 @@ private:
         if(!VsrUsable())effective.againstVsr=false;
         if(m_peekOriginal)effective.mode=ComparisonMode::Original;
         effective.labelFade=float(m_tagFade.Level(Clock::now()));
+        effective.visible=m_visiblePicture;
         effective.mask=!m_maskFeathered.pixels.empty();effective.maskInvert=m_maskInvert;
         // The loupe exists while the pointer is over the picture. Backbuffer pixels are
         // the render window's client pixels, because the backbuffers follow it.
@@ -5377,7 +5148,9 @@ private:
             SyncMaskToSource();
             m_renderer->SetComparison(EffectiveComparison());
             if(ComparisonModesAvailable()){EnsureLabelAtlas();EnsureMask();}
-            if(refreshPaused&&!m_playing&&!m_seeking){UploadPausedComparisonReference();if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
+            // The status line names the upscaler the present just used, and
+            // only playback's tick rebuilds it, so a paused change says so here.
+            if(refreshPaused&&!m_playing&&!m_seeking){UploadPausedComparisonReference();if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();UpdateCachedStatus();}
             // The RTX VSR feature is created the first time a view reads it; a refusal
             // there greys the view, and the tags that name it are drawn again.
             const vsr_policy::Reason vsr=m_renderer->VsrReason();
@@ -5402,6 +5175,7 @@ private:
     void SetComparisonMode(ComparisonMode mode){
         if(!ComparisonModesAvailable()){
             LOG("Comparison mode refused: loaded="<<m_loaded<<" cachedPair="<<m_cachedPlayback<<" neuralView="<<m_neuralRequested);
+            if(const wchar_t* key=compare_availability::RefusalKey(m_loaded,m_neuralRequested,m_cachedPlayback,NeuralJobActive()))ShowToast(T(key));
             return;
         }
         // RTX VSR that cannot run says why, where the key was pressed.
@@ -5413,7 +5187,10 @@ private:
         StartCompareMarkSlide(SelectedComparisonMode(),mode);
         // The tags name the new arrangement; they fade in with it rather than
         // printing at once over a picture that has just changed shape.
-        if(mode!=m_comparison.mode){m_tagFade.Reset(false);m_tagFade.Set(true,Clock::now(),m_activityMotionEnabled);if(m_activityMotionEnabled)EnsureHoverTimer();}
+        // m_tagsWereMoving too: the first timer tick can come after the whole
+        // fade (a slow mode change, a busy queue), and must still present the
+        // landed level rather than find nothing moving and leave the tags out.
+        if(mode!=m_comparison.mode){m_tagFade.Reset(false);m_tagFade.Set(true,Clock::now(),m_activityMotionEnabled);m_tagsWereMoving=true;if(m_activityMotionEnabled)EnsureHoverTimer();}
         m_comparison.mode=mode;ApplyComparison();
         LOG("Comparison mode="<<static_cast<int>(mode)<<" splitX="<<m_comparison.splitX<<" zoomStep="<<m_zoomStep
             <<" reference="<<m_havePresentedPair);
@@ -5454,9 +5231,59 @@ private:
         m_comparison.againstVsr=!m_comparison.againstVsr;++m_labelTextRevision;ApplyComparison();
         LOG("Comparison against="<<(m_comparison.againstVsr?"RTX VSR":"DLSS 5"));
     }
-    // The ladder is named in the RTX VSR tag, so a change redraws the atlas.
+    // The keep-up guard (VsrPolicy.h). Measures only while VSR is the upscaler and
+    // the video plays; a new video starts it over at the chosen quality.
+    void GuardPlaybackVsr(){
+        if(m_path!=m_vsrGuardSource){
+            m_vsrGuardSource=m_path;m_vsrGuard.Reset();m_vsrSessionQuality.reset();m_vsrSessionOff=false;m_vsrGuardAt={};
+        }
+        if(!m_loaded||!m_playing||!m_renderer||!m_renderer->PlaybackVsrShown()){m_vsrGuardAt={};return;}
+        const auto now=Clock::now();
+        if(m_vsrGuardAt==Clock::time_point{}||m_droppedFrames<m_vsrGuardDropped){
+            m_vsrGuardAt=now;m_vsrGuardDropped=m_droppedFrames;m_vsrGuardMsSum=0.0;m_vsrGuardMsSamples=0;return;
+        }
+        if(const double ms=m_renderer->LastVsrGpuMs();ms>0.0){m_vsrGuardMsSum+=ms;++m_vsrGuardMsSamples;}
+        const double seconds=std::chrono::duration<double>(now-m_vsrGuardAt).count();
+        if(seconds<vsr_policy::kKeepUpWindowSeconds)return;
+        const uint64_t dropped=m_droppedFrames-m_vsrGuardDropped;
+        const double vsrMs=m_vsrGuardMsSamples?m_vsrGuardMsSum/double(m_vsrGuardMsSamples):0.0;
+        m_vsrGuardAt=now;m_vsrGuardDropped=m_droppedFrames;m_vsrGuardMsSum=0.0;m_vsrGuardMsSamples=0;
+        const vsr_policy::Quality current=m_vsrSessionQuality.value_or(m_comparison.vsrQuality);
+        const bool behind=vsr_policy::WindowFellBehind(seconds,dropped,m_decoder.FrameRate(),vsrMs);
+        const vsr_policy::KeepUpStep step=m_vsrGuard.Observe(behind,current);
+        if(step==vsr_policy::KeepUpStep::Hold)return;
+        LOG("RTX VSR keep-up: dropped "<<dropped<<" of "<<seconds*m_decoder.FrameRate()<<" frames with VSR at "<<vsrMs
+            <<" ms (quality "<<static_cast<int>(current)<<"); "<<(step==vsr_policy::KeepUpStep::TurnOff?"off":"stepping down")<<" for this video.");
+        if(step==vsr_policy::KeepUpStep::TurnOff){
+            m_vsrSessionOff=true;ShowToast(T(L"vsr.keep_up.off"));
+        }else{
+            m_vsrSessionQuality=vsr_policy::LowerQuality(current);
+            ShowToast(Format(T(L"vsr.keep_up.lowered"),T(QualityNameKey(*m_vsrSessionQuality)).c_str()));
+        }
+        ApplyComparison(false);UpdateCachedStatus();
+    }
+    static const wchar_t* QualityNameKey(vsr_policy::Quality quality){
+        switch(quality){
+            case vsr_policy::Quality::Low:return L"vsr.quality.low";
+            case vsr_policy::Quality::Medium:return L"vsr.quality.medium";
+            case vsr_policy::Quality::High:return L"vsr.quality.high";
+            case vsr_policy::Quality::Ultra:break;
+        }
+        return L"vsr.quality.ultra";
+    }
+    void TogglePlaybackVsr(){
+        m_playbackVsr=!m_playbackVsr;
+        // A choice made now is the user's, not the guard's.
+        m_vsrSessionOff=false;m_vsrSessionQuality.reset();m_vsrGuard.Reset();
+        LOG("RTX VSR playback upscaling "<<(m_playbackVsr?"on":"off"));
+        SaveVideoSettings();ApplyComparison();SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
+    }
+    // The ladder is named in the RTX VSR tag, so a change redraws the atlas. A pick
+    // from the menu is the user's, so whatever the keep-up guard lowered ends here.
     void SetVsrQuality(vsr_policy::Quality quality){
-        if(quality==m_comparison.vsrQuality)return;
+        const bool guarded=m_vsrSessionQuality.has_value()||m_vsrSessionOff;
+        m_vsrSessionQuality.reset();m_vsrSessionOff=false;m_vsrGuard.Reset();
+        if(quality==m_comparison.vsrQuality){if(guarded)ApplyComparison();return;}
         m_comparison.vsrQuality=quality;++m_labelTextRevision;ApplyComparison();
         LOG("RTX VSR quality="<<static_cast<int>(quality));
     }
@@ -5830,6 +5657,36 @@ private:
                  :(m_frameGenPreference==3u?IDM_FRAMEGEN_4X
                   :(m_frameGenPreference==2u?IDM_FRAMEGEN_3X:IDM_FRAMEGEN_2X)));
             CheckMenuRadioItem(menu,IDM_FRAMEGEN_2X,IDM_FRAMEGEN_MAX,generatedChecked,MF_BYCOMMAND);
+            // What the runtime admits, once measured: a multiple above it is greyed
+            // and says the GPU's highest, so 5x is not offered and then quietly
+            // converted at 4x. A greyed choice can still be the checked one - a
+            // setting saved before the runtime was asked - and the confirmation
+            // names that.
+            {
+                const auto cap=MeasuredFrameGenerationCap();
+                static constexpr std::array<std::pair<UINT,const wchar_t*>,4> kMultiples{{
+                    {IDM_FRAMEGEN_2X,L"menu.framegen_2x"},{IDM_FRAMEGEN_3X,L"menu.framegen_3x"},
+                    {IDM_FRAMEGEN_4X,L"menu.framegen_4x"},{IDM_FRAMEGEN_5X,L"menu.framegen_5x"}}};
+                for(uint32_t generated=1;generated<=kMultiples.size();++generated){
+                    const auto& [command,key]=kMultiples[generated-1];
+                    const bool admitted=frame_rate_policy::GeneratedFramesAdmitted(generated,cap);
+                    std::wstring label=T(key);
+                    if(!admitted)label+=Format(T(L"menu.framegen_beyond_gpu"),*cap+1u);
+                    app_menu::SetMenuCommandText(menu,command,label);
+                    EnableMenuItem(menu,command,MF_BYCOMMAND|(admitted?MF_ENABLED:MF_GRAYED));
+                }
+            }
+            // RTX VSR Upscaling: checked as set, greyed only where a renderer has said
+            // it cannot run here - nothing loaded is no reason to refuse the setting -
+            // and then labelled with why, as the compare segment's tooltip is.
+            {
+                const bool usable=!m_renderer||VsrUsable();
+                std::wstring label=T(L"menu.rtx_vsr_upscaling");
+                if(!usable)label+=Format(T(L"menu.rtx_vsr_unavailable"),VsrReasonText().c_str());
+                app_menu::SetMenuCommandText(menu,IDM_RTX_VSR_UPSCALING,label);
+                CheckMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(m_playbackVsr?MF_CHECKED:MF_UNCHECKED));
+                EnableMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(usable?MF_ENABLED:MF_GRAYED));
+            }
             // Outside the radio range above, which CheckMenuRadioItem clears:
             // this is a constraint on the multiple, not one of the choices.
             CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
@@ -5858,7 +5715,11 @@ private:
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
             app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(SelectedComparisonMode()),m_zoomStep>0,m_comparison.swap,m_loupe,m_comparison.differenceLuma,
                                            VsrUsable(),m_comparison.againstVsr);
-            app_menu::UpdateVsrQualityMenu(menu,ComparisonModesAvailable()&&VsrUsable(),UINT(vsr_policy::QualityIndex(m_comparison.vsrQuality)));
+            // The ladder is the comparison view's and playback upscaling's, so it is
+            // live for either; the radio marks the rung in use, which the keep-up guard
+            // may have lowered for this video.
+            app_menu::UpdateVsrQualityMenu(menu,VsrUsable()&&(m_playbackVsr||ComparisonModesAvailable()),
+                                           UINT(vsr_policy::QualityIndex(m_vsrSessionQuality.value_or(m_comparison.vsrQuality))));
             app_menu::UpdateMaskMenu(menu,m_loaded,!m_maskSource.pixels.empty(),m_maskInvert,MaskFeatherIndex());
             app_menu::UpdateSecondMixMenu(menu,ComparisonModesAvailable(),SecondMixIndex());
             EnableMenuItem(menu,IDM_SAVE_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
@@ -6367,9 +6228,9 @@ private:
     // generator so the debug views reflect them without a re-render.
     void ApplyLiveGuideControls(){m_guides.SetControls(m_renderGuides);m_guides.SetSceneCutSensitivity(m_temporalSettings.sceneCuts);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
 
-    void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr,int x=0){
+    void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr,int x=0,int width=160){
         HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116,20);
-        HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132+x,y-3,160,200,id);
+        HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132+x,y-3,width,200,id);
         for(const wchar_t* item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item));
         AddTip(h,label,tipKey);AddTip(h,combo,tipKey);
     }
@@ -6735,7 +6596,7 @@ private:
     // the settings, while this is a one-off at a size and a rate the viewer
     // picked. "Save converted video" remains the way to keep the render you are
     // already watching.
-    static constexpr int kExportDesignW=470,kExportDesignH=402;
+    static constexpr int kExportDesignW=470,kExportDesignH=436;
 
     uint32_t ExportMaxMultiplier()const{
         // 1 + the runtime's generated-frames-per-pair. Unmeasured reads as 2, the
@@ -6747,7 +6608,8 @@ private:
 
     ExportPlan CurrentExportPlan()const{
         return PlanExport(m_exportSelection,m_decoder.Width(),m_decoder.Height(),
-                          m_decoder.FrameRate(),ExportMaxMultiplier(),m_decoder.IsStillImage());
+                          m_decoder.FrameRate(),ExportMaxMultiplier(),m_decoder.IsStillImage(),
+                          VsrExportReady(ExecutableDirectory(),m_opt.detectedGpu.generation));
     }
 
     // The file this export reads. A stream has to have finished copying first:
@@ -6777,19 +6639,26 @@ private:
     void BuildExportStageControls(HWND h){
         CreateSettingsGroupHeading(h,L"export.stages.group_stages",8);
         CreateNeuralCheck(h,IDC_EX_UPSCALE,L"export.stages.upscale",16,32,300,L"export.tip.upscale");
-        CreateNeuralCombo(h,IDC_EX_RESOLUTION,L"export.stages.resolution",70,{L"1080p",L"1440p",L"2160p"});
+        // Wide enough for the longest choice, "Temporal (smooths grain, trails
+        // motion)", and one width for all four so their edges line up.
+        constexpr int kComboW=300;
+        CreateNeuralCombo(h,IDC_EX_RESOLUTION,L"export.stages.resolution",70,{L"1080p",L"1440p",L"2160p"},nullptr,0,kComboW);
+        {
+            const std::wstring vsr=T(L"export.stages.engine_vsr"),dlss=T(L"export.stages.engine_dlss");
+            CreateNeuralCombo(h,IDC_EX_ENGINE,L"export.stages.engine",104,{vsr.c_str(),dlss.c_str()},L"export.tip.engine",0,kComboW);
+        }
         {
             const std::wstring temporal=T(L"export.stages.history_temporal"),perFrame=T(L"export.stages.history_per_frame");
-            CreateNeuralCombo(h,IDC_EX_HISTORY,L"export.stages.history",104,{temporal.c_str(),perFrame.c_str()},L"export.tip.history");
+            CreateNeuralCombo(h,IDC_EX_HISTORY,L"export.stages.history",138,{temporal.c_str(),perFrame.c_str()},L"export.tip.history",0,kComboW);
         }
-        CreateNeuralCheck(h,IDC_EX_NEURAL,L"export.stages.neural",16,146,300,L"export.tip.neural");
-        CreateNeuralCheck(h,IDC_EX_FRAMEGEN,L"export.stages.framegen",16,186,300,L"export.tip.framegen");
-        CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",224,{L"2×",L"3×",L"4×",L"5×"});
-        CreateSettingsGroupHeading(h,L"export.stages.group_result",264);
-        DialogControl(h,L"STATIC",L"",SS_LEFT,16,288,436,34,IDC_EX_SUMMARY);
-        DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,322,436,34);
-        DialogButton(h,L"export.stages.run",IDC_EX_RUN,232,364,120,30,true);
-        DialogButton(h,L"export.stages.close",IDC_EX_CLOSE,362,364,90,30);
+        CreateNeuralCheck(h,IDC_EX_NEURAL,L"export.stages.neural",16,180,300,L"export.tip.neural");
+        CreateNeuralCheck(h,IDC_EX_FRAMEGEN,L"export.stages.framegen",16,220,300,L"export.tip.framegen");
+        CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",258,{L"2×",L"3×",L"4×",L"5×"},nullptr,0,kComboW);
+        CreateSettingsGroupHeading(h,L"export.stages.group_result",298);
+        DialogControl(h,L"STATIC",L"",SS_LEFT,16,322,436,34,IDC_EX_SUMMARY);
+        DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,356,436,34);
+        DialogButton(h,L"export.stages.run",IDC_EX_RUN,232,398,120,30,true);
+        DialogButton(h,L"export.stages.close",IDC_EX_CLOSE,362,398,90,30);
         SyncExportStageControls(h);
         CaptureSettingsDesignLayout(h);
     }
@@ -6804,23 +6673,20 @@ private:
         select(IDC_EX_RESOLUTION,rung);
         select(IDC_EX_MULTIPLIER,std::clamp(int(m_exportSelection.multiplier),2,5)-2);
         select(IDC_EX_HISTORY,m_upscalingHistory==UpscalingHistory::PerFrame?1:0);
+        select(IDC_EX_ENGINE,m_exportSelection.engine==SuperResolutionEngine::Dlss?1:0);
         // A rung you cannot choose and a rate you cannot reach are greyed, not
         // hidden: the control staying visible is what tells the user the stage
         // exists and why it is unavailable here.
         if(HWND c=GetDlgItem(h,IDC_EX_RESOLUTION))EnableWindow(c,m_exportSelection.upscale);
-        // Only Super Resolution on its own has a history to choose: with the model
-        // on the same carrier the pass keeps Temporal, and the tooltip says why.
-        if(HWND c=GetDlgItem(h,IDC_EX_HISTORY))EnableWindow(c,m_exportSelection.upscale&&!m_exportSelection.neural);
+        // Only Super Resolution on its own has an engine to choose: with the model on
+        // the same carrier the upscale is DLSS's. And only DLSS has a history: with the
+        // model the pass keeps Temporal, and RTX VSR has none. The tooltips say why.
+        const bool srAlone=m_exportSelection.upscale&&!m_exportSelection.neural;
+        if(HWND c=GetDlgItem(h,IDC_EX_ENGINE))EnableWindow(c,srAlone);
+        if(HWND c=GetDlgItem(h,IDC_EX_HISTORY))EnableWindow(c,srAlone&&m_exportSelection.engine==SuperResolutionEngine::Dlss);
         if(HWND c=GetDlgItem(h,IDC_EX_MULTIPLIER))EnableWindow(c,m_exportSelection.frameGeneration&&ExportMaxMultiplier()>2);
         const ExportPlan plan=CurrentExportPlan();
-        std::wstring summary;
-        if(!plan.valid)summary=T(ExportRefusalKey(plan.refusal));
-        else{
-            wchar_t line[256];
-            swprintf_s(line,L"%u × %u at %.4g fps · %u pass%s",plan.outputWidth,plan.outputHeight,
-                       plan.outputFps,ExportStageCount(plan),ExportStageCount(plan)==1?L"":L"es");
-            summary=line;
-        }
+        const std::wstring summary=plan.valid?StageExportResultSummary(plan):T(ExportRefusalKey(plan.refusal));
         SetDlgItemTextW(h,IDC_EX_SUMMARY,summary.c_str());
         if(HWND run=GetDlgItem(h,IDC_EX_RUN))EnableWindow(run,plan.valid&&!ExportStagesBusy());
     }
@@ -6833,6 +6699,13 @@ private:
         m_exportSelection.frameGeneration=checked(IDC_EX_FRAMEGEN);
         m_exportSelection.targetHeight=kUpscaleRungHeights[std::clamp(sel(IDC_EX_RESOLUTION,1),0,int(std::size(kUpscaleRungHeights))-1)];
         m_exportSelection.multiplier=uint32_t(std::clamp(sel(IDC_EX_MULTIPLIER,0),0,3)+2);
+        {
+            const SuperResolutionEngine engine=sel(IDC_EX_ENGINE,0)==1?SuperResolutionEngine::Dlss:SuperResolutionEngine::RtxVsr;
+            if(engine!=m_exportSelection.engine){
+                m_exportSelection.engine=engine;
+                WritePrivateProfileStringW(L"Export",L"SrEngine",Utf8ToWide(std::string(SuperResolutionEngineName(engine))).c_str(),SettingsPath().c_str());
+            }
+        }
         // One choice for playback and the export, so the menu and this row agree.
         const UpscalingHistory history=sel(IDC_EX_HISTORY,0)==1?UpscalingHistory::PerFrame:UpscalingHistory::Temporal;
         if(history!=m_upscalingHistory){SetUpscalingHistory(history);return;}
@@ -6858,7 +6731,7 @@ private:
             // drawn, movable and inert - the exact failure the neural settings
             // dialog shipped with when stacking was added.
             if(((id==IDC_EX_UPSCALE||id==IDC_EX_NEURAL||id==IDC_EX_FRAMEGEN)&&code==BN_CLICKED)||
-               ((id==IDC_EX_RESOLUTION||id==IDC_EX_MULTIPLIER||id==IDC_EX_HISTORY)&&code==CBN_SELCHANGE)){ReadExportStageControls(h);return 0;}
+               ((id==IDC_EX_RESOLUTION||id==IDC_EX_MULTIPLIER||id==IDC_EX_HISTORY||id==IDC_EX_ENGINE)&&code==CBN_SELCHANGE)){ReadExportStageControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -6889,6 +6762,7 @@ private:
             const HCURSOR previous=SetCursor(LoadCursorW(nullptr,IDC_WAIT));
             m_frameGenCapability=QueryFrameGenerationCapability();
             SetCursor(previous);
+            SyncFeatureMenuState();
         }
         const ExportPlan plan=CurrentExportPlan();
         if(!plan.valid){MessageBoxW(m_hwnd,T(ExportRefusalKey(plan.refusal)).c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);return;}
@@ -6900,7 +6774,7 @@ private:
         const std::filesystem::path destination=PickStageExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());
         if(destination.empty())return;
 
-        LOG("Stage export starting: upscale="<<m_exportSelection.upscale
+        LOG("Stage export starting: upscale="<<m_exportSelection.upscale<<" engine="<<SuperResolutionEngineName(m_exportSelection.engine)
             <<" history="<<UpscalingHistoryName(CarrierUpscalingHistory(m_upscalingHistory,m_exportSelection.neural))
             <<" neural="<<m_exportSelection.neural<<" framegen="<<m_exportSelection.frameGeneration
             <<" output="<<plan.outputWidth<<"x"<<plan.outputHeight<<" fps="<<plan.outputFps
@@ -7134,6 +7008,11 @@ private:
         if(!m_upscalingError.empty())return m_upscalingError;
         if(UpscalingActive())return L"DLSS Upscaling on \u00b7 "+std::to_wstring(m_renderer->OutputW())+L"×"+std::to_wstring(m_renderer->OutputH())+
             (m_upscaleAuto?L" (auto)":L"");
+        // RTX VSR is the upscaler whenever DLSS Upscaling is off and the picture is
+        // shown larger than the video; the line names it and the size it made.
+        if(m_loaded&&m_renderer&&m_renderer->PlaybackVsrShown())
+            return L"RTX VSR Upscaling on \u00b7 "+std::to_wstring(m_renderer->VsrOutputW())+L"×"+std::to_wstring(m_renderer->VsrOutputH());
+        if(m_loaded&&m_playbackVsr&&m_vsrSessionOff)return L"RTX VSR Upscaling paused (playback fell behind)";
         if(m_loaded&&m_decoder.Width()&&m_decoder.Height()&&!UpscalingTarget(m_decoder.Width(),m_decoder.Height(),EffectiveUpscaleHeight()).grows){
             // Two different answers the old text collapsed into one. A 4K source
             // on a 4K panel has nothing to gain; a panel below 1080 lines has
@@ -7221,6 +7100,9 @@ private:
         UpdateCachedStatus();InvalidateControls();return ready;
     }
     void RestoreUpscaling(){
+        // Every load comes through here, including a reload of the same file, which
+        // the guard's path check alone would not notice.
+        m_vsrGuardSource.clear();
         const uint32_t height=EffectiveUpscaleHeight();
         if(m_upscalingRequested&&UpscalingTarget(m_decoder.Width(),m_decoder.Height(),height).grows)
             EnableUpscaling(height);
@@ -7620,6 +7502,9 @@ private:
         const compare_view::Fit fit=m_onePixel?compare_view::Fit::Pixels:(m_fill?compare_view::Fit::Fill:compare_view::Fit::Fit);
         const RECT picture=compare_view::RenderRect(W,areaH,m_dar,fit,m_renderer?m_renderer->OutputW():0u,m_renderer?m_renderer->OutputH():0u);
         SetWindowPos(m_renderWnd,nullptr,picture.left,picture.top,picture.right-picture.left,picture.bottom-picture.top,SWP_NOZORDER|SWP_NOACTIVATE);
+        // Fill and 1:1 can make the window larger than the area, which crops it; the
+        // tags go in the corners of what is left.
+        m_visiblePicture=compare_view::VisibleRect(picture,W,areaH);
         // A zoom step is pixels per output pixel, so its scale follows the window.
         if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateRect(m_viewport,nullptr,FALSE);InvalidateControls();
@@ -7774,7 +7659,10 @@ private:
         start_screen::Facts facts{};
         facts.gpu=m_opt.detectedGpu.description;facts.generation=m_opt.detectedGpu.generation;
         facts.driverVersion=m_opt.detectedGpu.driverVersion;facts.safeMode=m_opt.safeMode;
-        if(FrameGenAddonState().loaded)facts.frameGenAddon=FrameGenAddonState().proxy;
+        if(FrameGenAddonState().loaded){facts.frameGenAddon=FrameGenAddonState().proxy;facts.frameGenAddonPinned=FrameGenAddonState().pinned;}
+        facts.rtxVsr=!VsrEngine::kBuilt?start_screen::VsrState::NotInBuild
+                    :!framegen_addon::RegularFile(ExecutableDirectory()/L"nvngx_vsr.dll")?start_screen::VsrState::MissingRuntime
+                    :m_playbackVsr?start_screen::VsrState::On:start_screen::VsrState::Off;
         {std::scoped_lock lock(m_startAnswers->mutex);facts.runtime=m_startAnswers->runtime;facts.runtimeVersion=m_startAnswers->runtimeVersion;}
         // The live-session forecast, which is measured on this machine once a
         // session has run and otherwise a measured prior for the generation;
@@ -10645,6 +10533,15 @@ private:
     }
     void OpenRenderReceipt(){
         if(m_cachedReceiptPath.empty())return;
+        // Handed to the shell, which opens it with whatever claims the extension -
+        // so only the cache's own receipt, never another file under a cache root
+        // the user may have pointed anywhere.
+        std::error_code canonicalError;
+        const auto relative=std::filesystem::weakly_canonical(m_cachedReceiptPath,canonicalError).lexically_relative(std::filesystem::weakly_canonical(m_cacheRoot,canonicalError));
+        const bool insideCache=!canonicalError&&!relative.empty()&&*relative.begin()!=L"..";
+        if(_wcsicmp(m_cachedReceiptPath.extension().c_str(),L".json")!=0||!insideCache){
+            LOG("Render receipt not opened: not the cache's own receipt: "<<WideToUtf8(m_cachedReceiptPath.wstring()));return;
+        }
         const auto result=reinterpret_cast<INT_PTR>(ShellExecuteW(m_hwnd,L"open",m_cachedReceiptPath.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
         if(result<=32)LOG("Opening the render receipt failed: code="<<result<<" path="<<WideToUtf8(m_cachedReceiptPath.wstring()));
     }
@@ -11532,7 +11429,7 @@ private:
         // deletes the staging file and the output from under the running pass.
         if(ActivityBusy()||m_exportWorker.joinable()||m_frameGenWorker.joinable()){MessageBoxW(m_hwnd,L"Finish or cancel rendering, saving and frame generation before clearing the cache.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONINFORMATION);return;}
         NeuralCacheManager cache(m_cacheRoot);if(!cache.Valid()){MessageBoxW(m_hwnd,CacheFailureText().DescribeRoot(cache.LastFailure()).c_str(),T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);return;}
-        const uintmax_t bytes=cache.SizeBytes();const std::wstring prompt=L"Close playback and delete "+std::to_wstring(bytes/(1024*1024))+L" MiB of neural cache data? Local original files will be kept.";
+        const uintmax_t bytes=cache.SizeBytes();const std::wstring prompt=L"Close playback and delete the neural cache - renders, copied streams and converted videos, up to "+std::to_wstring(bytes/(1024*1024))+L" MiB? Your original files, and anything in the cache folder the player did not create, are kept.";
         if(MessageBoxW(m_hwnd,prompt.c_str(),T(L"menu.clear_neural_cache").c_str(),MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return;
         Unload();
         if(!cache.Clear())MessageBoxW(m_hwnd,L"The neural cache could not be fully cleared.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);
@@ -11909,6 +11806,7 @@ private:
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_NEURAL_RENDERING:ToggleNeuralRendering();break;
         case IDM_DLSS_UPSCALING:ToggleUpscaling();break;
+        case IDM_RTX_VSR_UPSCALING:TogglePlaybackVsr();break;
         case IDM_UPSCALE_AUTO:SetUpscaleTarget(0);break;
         case IDM_PROCESSING_SCALE_FIRST:case IDM_PROCESSING_SCALE_FIRST+1:case IDM_PROCESSING_SCALE_LAST:
             if(const auto percent=app_menu::ProcessingScaleForCommand(id))SetProcessingScale(*percent);
@@ -12079,6 +11977,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     std::map<int,chrome_motion::Fade> m_compareFades;chrome_motion::Slide m_compareMark;bool m_compareWasMoving=false;
     // The comparison tags' fade-in after a mode change; at rest it is on.
     chrome_motion::Fade m_tagFade=[]{chrome_motion::Fade fade;fade.Reset(true);return fade;}();bool m_tagsWereMoving=false;
+    // The render window's part that the video area shows, in its own pixels (Layout).
+    RECT m_visiblePicture{};
     chrome_motion::Fade m_volumeHot,m_mixHot,m_volumeBubble;std::optional<Clock::time_point> m_volumeBubbleOffAt;bool m_slidersWereMoving=false;
     // Windows' own rule for focus cues: hidden until the keyboard is used to move
     // between controls, hidden again by the mouse. The focused action is always the
@@ -12167,6 +12067,21 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // claiming history against a frame that is not its predecessor.
     bool m_guidesSkipped=false,m_layoutMismatchLogged=false;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
     bool m_upscalingRequested=false;
+    // RTX VSR as the playback upscaler ([Playback] RtxVsr). Rides on every
+    // EffectiveComparison() the player pushes; the renderer decides each present
+    // whether the picture is one it applies to (VsrPolicy.h PlaybackUpscales).
+    bool m_playbackVsr=vsr_policy::kPlaybackDefault;
+    // The keep-up guard's state for the video on screen: what it lowered VSR to, or
+    // that it turned it off, and the window it is measuring. Never saved.
+    vsr_policy::KeepUpGuard m_vsrGuard;
+    std::optional<vsr_policy::Quality> m_vsrSessionQuality;
+    bool m_vsrSessionOff=false;
+    std::wstring m_vsrGuardSource;
+    Clock::time_point m_vsrGuardAt{};
+    uint64_t m_vsrGuardDropped=0;
+    // VSR's GPU time over the window, sampled every tick: one frame's cost at the
+    // window's edge let a single spike step the quality down.
+    double m_vsrGuardMsSum=0.0;uint32_t m_vsrGuardMsSamples=0;
     UINT_PTR m_activityTimer=0;
     // The status chips as last painted, what each last flashed on, and the
     // repaint timer that runs only while one is still fading.
@@ -12613,8 +12528,12 @@ static int RunProbeCommand(const render_command::Command& command,RenderConsole&
         text("frame_generation",frameGeneration);
         if(FrameGenAddonState().loaded)text("frame_generation_addon","dlssg_sm86 ("+WideToUtf8(FrameGenAddonState().proxy)+")");
 
+        // sr runs on RTX VSR in the player wherever that can run, and on DLSS in the
+        // helper otherwise; either makes the stage available.
+        const bool vsrReady=VsrExportReady(helpers,DetectHighPerformanceGpu().generation);
+        text("sr_engines",vsrReady?(worker?"vsr,dlss":"vsr"):(worker?"dlss":"none"));
         std::vector<std::string> stages;
-        if(worker&&!rungs.empty())stages.push_back("sr");
+        if((worker||vsrReady)&&!rungs.empty())stages.push_back("sr");
         if(worker)stages.push_back("nr");
         if(!still&&(!command.capabilities||maxMultiplier>=2))stages.push_back("fg");
         list("stages",stages);
@@ -12699,12 +12618,15 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
             const FrameGenerationCapability capability=QueryFrameGenerationCapability();
             maxMultiplier=capability.available?1u+capability.multiFrameCountMax:0u;
         }
-        const ExportPlan plan=PlanExport(command.selection,width,height,fps,maxMultiplier,still);
+        ExportSelection selection=command.selection;
+        selection.engine=command.engine?*command.engine:ReadSuperResolutionEngine(settings);
+        const ExportPlan plan=PlanExport(selection,width,height,fps,maxMultiplier,still,
+                                         VsrExportReady(helpers,DetectHighPerformanceGpu().generation));
         if(!plan.valid)return refuse(loc.Get(ExportRefusalKey(plan.refusal)));
 
         NeuralRenderRange range{};
         if(command.hasRange){
-            if(!plan.workerStage)return refuse(L"--range needs the sr or nr stage.");
+            if(!plan.workerStage&&!plan.vsrStage)return refuse(L"--range needs the sr or nr stage.");
             const auto in=ParseTimecode(command.rangeStart,fps);
             const auto out=ParseTimecode(command.rangeEnd,fps);
             if(!in||!out){console.Err(L"error: --range holds a timecode this source cannot read.");return kExitBadArguments;}
@@ -12739,23 +12661,20 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         job.neuralSettings=neuralSettings;
         job.processingScale=command.processingScale?*command.processingScale:ReadProcessingScale(settings);
         job.upscalingHistory=command.history?*command.history:ReadUpscalingHistory(settings);
+        job.vsrQuality=vsr_policy::LoadQuality(int(GetPrivateProfileIntW(L"Comparison",L"VsrQuality",static_cast<int>(vsr_policy::kDefaultQuality),settings.c_str())));
         job.captureDither=GetPrivateProfileIntW(L"Encoding",L"CaptureDither",1,settings.c_str())!=0;
         job.quality=ReadCacheQuality(settings);
         if(!command.quality.empty())ParseEncoderQuality(command.quality,job.quality);
         job.sourceDeband=GetPrivateProfileIntW(L"Encoding",L"SourceDeband",0,settings.c_str())!=0;
         job.suppliedExposure=GetPrivateProfileIntW(L"Encoding",L"SuppliedExposure",0,settings.c_str())!=0;
 
-        wchar_t summary[256];
-        swprintf_s(summary,L"%u x %u at %.4g fps -> %u x %u at %.4g fps, %u pass%s",width,height,fps,
-                   plan.outputWidth,plan.outputHeight,plan.outputFps,ExportStageCount(plan),ExportStageCount(plan)==1?L"":L"es");
-        say(summary);
+        say(StageExportPlanSummary(plan,width,height,fps));
         // What the render will look like and how it is encoded, whichever of
         // the command line, the preset and the saved settings each came from.
         if(plan.requireNeural)say(L"neural: "+Utf8ToWide(CanonicalNeuralSettings(neuralSettings)));
-        say(L"encode: "+Utf8ToWide(std::string(EncoderQualityName(job.quality)))+
-            (plan.outputWidth!=width&&!plan.requireNeural?L", history "+Utf8ToWide(std::string(UpscalingHistoryName(job.upscalingHistory))):std::wstring()));
+        say(StageExportEncodeSummary(plan,width,job.quality,job.upscalingHistory));
         say(L"writing "+output.wstring());
-        LOG("--render plan: upscale="<<command.selection.upscale<<" neural="<<command.selection.neural
+        LOG("--render plan: upscale="<<command.selection.upscale<<" engine="<<SuperResolutionEngineName(selection.engine)<<" neural="<<command.selection.neural
             <<" framegen="<<command.selection.frameGeneration<<" output="<<plan.outputWidth<<"x"<<plan.outputHeight
             <<" fps="<<plan.outputFps<<" range=["<<range.start100ns<<","<<range.end100ns<<") preset="
             <<(command.preset?std::string(neural_presets::kPresets[*command.preset].key):std::string("saved")));

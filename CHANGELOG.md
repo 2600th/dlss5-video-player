@@ -7,6 +7,92 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Unreleased
+
+### Changed
+
+- **RTX Video Super Resolution upscales playback by default.** Wherever the
+  window shows a video larger than it is, RTX VSR makes the picture at that size
+  instead of the window's plain scale, on the frame the player already decodes.
+  Measured 960x540 to 1080p over six clips on an RTX 5090, at High: 87.5 VMAF
+  against 80.5 for bicubic and 74.9 for DLSS Super Resolution, 78.5 against 69.5
+  and 66.1 on H.264 input, and ahead by VMAF NEG and PSNR too. It costs 0.45 ms
+  for a 540p frame, 1.5 ms for 1080p and 2.7 ms for 1440p on that GPU, and more
+  on slower ones ([report](docs/measurements/vsr-quality-20261002/REPORT.md)). Nobody had
+  published such numbers; the report lists what had been. It upscales the
+  render in the DLSS 5 view and the original in the Original view and the
+  press-and-hold peek, so the A/B still compares the models alone, and stands
+  aside for DLSS Upscaling, the views that draw both, HDR video and debug views.
+  The start screen says whether it is on. It can shimmer
+  slightly on fine moving detail, so **DLSS > RTX VSR Upscaling** turns it off.
+  The status line says when it is the upscaler. It works on HDR displays for SDR
+  video, and if playback keeps dropping frames because of it on a slower GPU, it
+  lowers its quality for that video, then pauses, and says so.
+- **With the dlssg_sm86 add-on, the 4x limit says how to raise it.** The
+  confirmation names `MaxGeneratedFrames=4` in `dlssg_sm86.ini` for 5x.
+
+- **Exports upscale with RTX VSR too.** **Export with DLSS stages** has an
+  **Upscaler** row for Super Resolution without the neural model: RTX VSR
+  (recommended, the default) or DLSS Super Resolution. RTX VSR runs in the
+  player on the same path playback uses, so an export scores what was measured
+  (81.35 VMAF on a clip measured at 81.4; DLSS SR 66.6 on the same clip).
+  `--render` and `dlss5-convert` take `--sr-engine vsr|dlss`; `--history`
+  alone still means DLSS, so existing scripts keep their output. `probe` lists
+  `sr_engines`, and `sr` is offered wherever either engine can run.
+- **RTX VSR exports are up to three times faster.** The pass reads frames back
+  from the GPU and hands them to the encoder while the next ones render, where
+  it used to stop for each: 1080p to 2160p went from 23 to 70 fps on an RTX 5090,
+  540p to 1080p from 112 to 157. The output is the same, frame for frame.
+- **Resizing the window no longer stalls RTX VSR.** A new size gets its VSR
+  surface once the window has held it for a moment, instead of at every size
+  the drag passes through, each of which waited for the GPU.
+
+### Fixed
+
+- **Renders survive updates.** The render cache was keyed by the player version
+  since 0.12, so every release rendered every video again once - 0.26.1, 0.26.2
+  and 0.27.0 included, whatever their notes said; those notes are corrected. The
+  key now changes only when a release changes what a render writes, so 0.28.0
+  reuses renders made with 0.27.2 (earlier ones render again once), and a later
+  release keeps them unless its notes say otherwise.
+- **Generated frames no longer offers what the GPU cannot do.** Once Frame
+  Generation has been measured, multiples above the runtime's limit are greyed
+  and say the GPU's highest, and the confirmation says when the setting was
+  lowered. On an RTX 3060 with the dlssg_sm86 add-on, 5x used to convert at 4x
+  without a word (issue #14).
+- **Compare labels and the status line keep up while paused.** Changing the
+  compare view on a paused frame could leave its labels invisible, and the
+  status line kept naming the previous upscaler until playback resumed. In
+  Fill the labels sat in the part of the picture the window crops; they now
+  sit in the corners you can see.
+- **The export window's choices read in full.** At 100% scaling the History box
+  showed "Per-frame (recommendec".
+- **A render the neural helper crashed in is retried again.** A helper that
+  stopped on an unexpected error mid-render was reported as a refused render
+  and the job ended there; it is a crash again, and the render restarts in a
+  fresh helper as it does after any other crash. A helper that fails after
+  reporting its result is no longer counted as a success, and one the player
+  stops reading is always ended rather than left holding the GPU.
+- **A refused compare key says why.** Pressing a compare view with no neural
+  render, with Neural Rendering off or with no video shows a notice naming what
+  is missing, where it used to do nothing.
+
+### Release
+
+- Pull requests build and test a quick configuration: the shipped programs and
+  the device-free suites, without the GPU smokes a hosted runner cannot run and
+  without link-time optimisation, which re-optimised the whole player once per
+  test program. The slowest child-process cases and the real-media export suite
+  form a `slow` tier that a nightly run on `main`, and every release, add back
+  with code analysis and AddressSanitizer.
+- Two test-order and machine-load dependencies behind the intermittent
+  PolicyTests failure are fixed: leak checks take their baseline after a warm-up
+  run, and waits for a closed child process no longer give up after 500 ms.
+- `tools/publish_release.ps1` finishes a release: it verifies the complete
+  package, names it, writes its checksum and attaches both to the draft, and
+  publishing attests it automatically. A patch release no longer needs every
+  guide re-stamped.
+
 ## 0.27.2 - 2026-10-02
 
 A hotfix for Frame Generation on RTX 20 and 30 cards. The render cache is keyed
@@ -39,7 +125,7 @@ time. 0.27.1 was tagged but never published; its fixes ship here.
 ## 0.27.0 - 2026-10-01
 
 A command-line converter, and the fixes left open by the 25 September audit.
-Renders made with 0.26.2 are reused.
+Renders made with 0.26.2 render again once. (Corrected in 0.28.0: the render cache is keyed by the player version, so every render is made again once on a new version.)
 
 ### Added
 
@@ -112,8 +198,8 @@ Renders made with 0.26.2 are reused.
 ## 0.26.2 - 2026-09-26
 
 Fixes from re-measuring an RTX 5090 on 0.26.1
-([record](docs/VERIFICATION-2026-09-26-RTX5090.md)). Renders are reused, except
-those of untagged HD videos made with GPU source conversion turned on.
+([record](docs/VERIFICATION-2026-09-26-RTX5090.md)). Renders made with 0.26.1
+render again once. (Corrected in 0.28.0: the render cache is keyed by the player version, so every render is made again once on a new version.)
 
 ### Fixed
 
@@ -135,8 +221,7 @@ those of untagged HD videos made with GPU source conversion turned on.
 
 ## 0.26.1 - 2026-09-25
 
-Fixes from a full audit of 0.26.0. Renders of videos turned 180 degrees or
-mirrored are made again once; every other render is reused.
+Fixes from a full audit of 0.26.0. Renders made with 0.26.0 render again once. (Corrected in 0.28.0: the render cache is keyed by the player version, so every render is made again once on a new version.)
 
 ### Fixed
 

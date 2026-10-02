@@ -305,9 +305,17 @@ struct ChildProcess {
             // Fires immediately if stop was already requested before this was
             // constructed, which is the case the old loop caught on its first
             // timeout.
-            std::stop_callback wake(stop, [cancelEvent] { SetEvent(cancelEvent); });
-            const HANDLE waited[2] = { process, cancelEvent };
-            const DWORD wait = WaitForMultipleObjects(2, waited, FALSE, INFINITE);
+            //
+            // Scoped to the wait, so the callback is unregistered before any
+            // path below closes the event: the early return used to close it
+            // with `wake` still live, and a stop arriving then signalled a
+            // closed - possibly reused - handle.
+            DWORD wait = WAIT_FAILED;
+            {
+                std::stop_callback wake(stop, [cancelEvent] { SetEvent(cancelEvent); });
+                const HANDLE waited[2] = { process, cancelEvent };
+                wait = WaitForMultipleObjects(2, waited, FALSE, INFINITE);
+            }
             if (wait == WAIT_OBJECT_0 + 1) {
                 cancelled = true;
                 if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);

@@ -50,6 +50,16 @@ inline constexpr uint32_t kMaximumJobArguments = 64;
 // read. This code is how the parent tells that apart from a helper that took
 // the job and walked away (a Protocol failure) and dispatches the job again.
 inline constexpr unsigned long kRetiredExitCode = 76;
+// The exit code of a resident helper whose session thread threw. It writes no
+// Result: the exception may have come between jobs, where a Result would be
+// read by the next job as its own, and mid-job it is a crash rather than a
+// verdict on the job. Any nonzero code the parent does not recognise is a
+// crash, so this one is distinct only so the log and the receipt can say which
+// crash it was. It must never equal kRetiredExitCode or the configuration
+// restart's code (neural_worker_detail::kConfigurationChangedExitCode, 75),
+// which the parent answers with a fresh helper instead of its crash recovery.
+inline constexpr unsigned long kWorkerThrewExitCode = 77;
+static_assert(kWorkerThrewExitCode != kRetiredExitCode);
 inline constexpr uint32_t kMaximumJobArgumentBytes = 4 * 1024;
 
 enum class WireKind : uint16_t {
@@ -232,12 +242,33 @@ inline bool IsKnownEncoder(uint8_t encoder) noexcept
 inline bool IsBooleanByte(uint8_t value) noexcept { return value == 0 || value == 1; }
 
 // A segment file name must be usable exactly as written inside the staging
-// directory: no directory component, no traversal, no NUL.
+// directory: no directory component, no traversal, no NUL - and nothing Windows
+// reads as something else: a device (CON, NUL, COM1, LPT9, with or without an
+// extension) or a name it would silently trim (a trailing dot or space).
 inline bool IsValidSegmentName(std::wstring_view name) noexcept
 {
-    return !name.empty() && name.find_first_of(L"\\/:") == std::wstring_view::npos &&
-           name.find(L'\0') == std::wstring_view::npos &&
-           name.find(L"..") == std::wstring_view::npos;
+    if (name.empty() || name.find_first_of(L"\\/:") != std::wstring_view::npos ||
+        name.find(L'\0') != std::wstring_view::npos || name.find(L"..") != std::wstring_view::npos)
+        return false;
+    if (name.back() == L'.' || name.back() == L' ') return false;
+    const std::wstring_view stem = name.substr(0, name.find(L'.'));
+    const auto is = [&](std::wstring_view device) {
+        if (stem.size() != device.size()) return false;
+        for (size_t i = 0; i < stem.size(); ++i)
+            if ((stem[i] | 0x20) != (device[i] | 0x20)) return false;
+        return true;
+    };
+    if (is(L"con") || is(L"prn") || is(L"aux") || is(L"nul")) return false;
+    if (stem.size() == 4 && stem[3] >= L'1' && stem[3] <= L'9') {
+        const std::wstring_view head = stem.substr(0, 3);
+        const auto headIs = [&](std::wstring_view device) {
+            for (size_t i = 0; i < 3; ++i)
+                if ((head[i] | 0x20) != device[i]) return false;
+            return true;
+        };
+        if (headIs(L"com") || headIs(L"lpt")) return false;
+    }
+    return true;
 }
 
 inline bool WriteAll(HANDLE handle, const void* data, size_t bytes)

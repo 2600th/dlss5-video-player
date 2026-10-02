@@ -30,6 +30,11 @@ enum class RuntimeState {
     Drifted,      // present, but a file differs from the lock
 };
 
+// RTX VSR as the start screen can tell it before anything is open: whether this
+// build has it and its DLL is beside the player, and whether the setting is on.
+// Unknown says nothing - the line only appears with a fact behind it.
+enum class VsrState { Unknown, On, Off, NotInBuild, MissingRuntime };
+
 struct Facts {
     std::wstring gpu;
     GpuGeneration generation{GpuGeneration::Unsupported};
@@ -46,6 +51,10 @@ struct Facts {
     // empty when none was. Said here because it is the one thing beside the
     // player that loads into it.
     std::wstring frameGenAddon;
+    // Whether that proxy is the build the player's download installs. Another
+    // build loads too - a user put it there - and the line says so.
+    bool frameGenAddonPinned{true};
+    VsrState rtxVsr{VsrState::Unknown};
 };
 
 enum class Mark { Pass, Fail, Info, Pending };
@@ -91,8 +100,17 @@ inline std::vector<Line> CapabilityLines(const Facts& facts)
     case RuntimeState::Drifted: lines.push_back(Line{L"Neural runtime", L"Present · a file differs from the lock", Mark::Fail}); break;
     }
     if (facts.safeMode) lines.push_back(Line{L"Mode", L"Safe mode · neural add-on off for this launch", Mark::Info});
+    switch (facts.rtxVsr) {
+    case VsrState::Unknown: break;
+    case VsrState::On: lines.push_back(Line{L"RTX VSR", L"Upscales playback shown larger than the video", Mark::Pass}); break;
+    case VsrState::Off: lines.push_back(Line{L"RTX VSR", L"Off · DLSS > RTX VSR Upscaling turns it on", Mark::Info}); break;
+    case VsrState::NotInBuild: lines.push_back(Line{L"RTX VSR", L"Not in this build · the complete download has it", Mark::Info}); break;
+    case VsrState::MissingRuntime: lines.push_back(Line{L"RTX VSR", L"nvngx_vsr.dll is missing beside the player", Mark::Info}); break;
+    }
     if (!facts.frameGenAddon.empty())
-        lines.push_back(Line{L"Frame Generation", L"dlssg_sm86 add-on found and loaded · unofficial RTX 20/30 support", Mark::Info});
+        lines.push_back(Line{L"Frame Generation", facts.frameGenAddonPinned
+            ? std::wstring(L"dlssg_sm86 add-on found and loaded · unofficial RTX 20/30 support")
+            : std::wstring(L"dlssg_sm86 add-on loaded · not the build the player installs (its digest is in the log)"), Mark::Info});
     if (facts.fps1080 || facts.fps1440) {
         std::wstring value;
         if (facts.fps1080) value = FpsText(*facts.fps1080) + L" at 1080p";

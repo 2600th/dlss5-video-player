@@ -18,15 +18,19 @@ and the canonical `build-upscaling` commands.
 
 ## Before opening a pull request
 
-For code changes, build Release x64 and run the eighteen portable CTest suites
-(`ctest -LE "gpu|audio"`). FFmpeg and FFprobe must be staged so the real-media suite runs
-rather than reporting itself skipped. For rendering, timing or decoding changes
+For code changes, build Release x64 and run the device-free suites. The quick
+tier pull requests run is `cmake --preset ci`, `cmake --build --preset ci
+--parallel` and `ctest --preset quick`; before a release, or when touching the
+decoder, audio or YouTube child-process code, run every device-free suite
+(`ctest --preset portable`, which adds the `slow` tier). FFmpeg and FFprobe must
+be staged so the real-media suite runs rather than reporting itself skipped. For rendering, timing or decoding changes
 also run the hardware smokes on an RTX card with an audio endpoint
 (`ctest -L "gpu|audio"`); for
 renderer, swapchain or helper changes `NeuralRangeRenderSmoke` is the one that
-catches a dead neural path. CI also runs the MSVC code analyzer on the shipped
-targets and the portable suites under AddressSanitizer; `cmake --preset analyze`
-and `cmake --preset asan` reproduce those builds (see
+catches a dead neural path. The nightly workflow, and every release on its
+tag, also run the MSVC code analyzer on the shipped targets and the portable
+suites under AddressSanitizer; `cmake --preset analyze` and
+`cmake --preset asan` reproduce those builds (see
 [Building and testing](docs/BUILDING.md)). Keep automated results
 separate from GPU and visual-quality claims.
 
