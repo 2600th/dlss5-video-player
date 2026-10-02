@@ -226,6 +226,13 @@ struct ComparisonSettings {
     bool againstVsr = false;
     // The RTX VSR ladder (VsrPolicy.h). Presentation only, like everything here.
     vsr_policy::Quality vsrQuality = vsr_policy::kDefaultQuality;
+    // RTX VSR as the playback upscaler (VsrPolicy.h PlaybackUpscales): where the
+    // window shows the one plain picture larger than the video, VSR makes it from the
+    // decoded frame at vsrQuality, at the size it is shown at, in place of the
+    // compositor's scale. Here rather than a setter of its own because every path
+    // that builds or refreshes a renderer already pushes these settings, and a
+    // capture, which passes none, can never pick it up.
+    bool playbackVsr = false;
 };
 
 // Whether the present shows RTX VSR anywhere: its own view, the 2x2 (whose fourth
@@ -700,6 +707,9 @@ public:
     const vsr_policy::Capabilities& VsrCapabilities() const { return m_vsr.Capabilities(); }
     NVSDK_NGX_Result VsrLastResult() const { return m_vsr.LastResult(); }
     uint64_t VsrEvaluations() const { return m_vsr.EvaluationCount(); }
+    // Whether the last present's picture was RTX VSR's upscale (ComparisonSettings
+    // playbackVsr).
+    bool PlaybackVsrShown() const { return m_playbackVsrShown; }
     // Whether the last present drew an RTX VSR frame, and the size it was made at.
     bool VsrShown() const { return m_vsrShown; }
     uint32_t VsrOutputW() const { return m_vsrOutputW; }
@@ -887,6 +897,11 @@ private:
     // reference, the size or the quality changed since the last one. Records onto
     // `cmd` ahead of the draw that reads it and re-binds the SRV heap NGX replaced.
     void RecordVsr(ID3D12GraphicsCommandList* cmd, uint32_t slot, const present_scale::Target& target);
+    bool PlaybackVsrApplies(const present_scale::Target& target) const;
+    // One evaluate of `input` (8-bit SDR, in PIXEL_SHADER_RESOURCE) into m_vsrOutput,
+    // or the frame already made from the same input, serial, size and quality.
+    bool EvaluateVsr(ID3D12GraphicsCommandList* cmd, uint32_t slot, ID3D12Resource* input, uint32_t inputKind,
+                     uint64_t serial, vsr_policy::Size size, vsr_policy::Quality quality);
     bool EnsureVsrFeature();
     bool EnsureVsrOutput(uint32_t width, uint32_t height);
     void HarvestVsrTimings();
@@ -1122,6 +1137,12 @@ private:
     vsr_policy::Quality m_vsrQuality = vsr_policy::kDefaultQuality;
     bool m_vsrShown = false;
     bool m_vsrValid = false;  // the last evaluate (m_vsrSerial, m_vsrQuality) succeeded
+    // Which texture the kept frame was made from: 1 the reference, 2 the decoded frame.
+    uint32_t m_vsrInputKind = 0;
+    // Bumped by every decoded frame the upload writes, as m_referenceSerial is by a
+    // reference copy: a paused re-present keeps the playback frame it made.
+    uint64_t m_decodedSerial = 0;
+    bool m_playbackVsrShown = false;
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_vsrTimestampHeap;  // 2 per frame slot
     Microsoft::WRL::ComPtr<ID3D12Resource> m_vsrTimestampReadback;
     const uint64_t* m_vsrTimestampMapped = nullptr;

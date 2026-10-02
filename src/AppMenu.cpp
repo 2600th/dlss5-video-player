@@ -234,6 +234,11 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
                 localizer.Get(L"menu.processing_scale").c_str());
     AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
 
+    // --- RTX VSR: the playback upscaler, on by default. ---------------------
+    // It replaces the compositor's scale wherever the window shows the video
+    // larger than it is, and stands aside while DLSS Upscaling is on. Its quality
+    // is the comparison view's (Video > Compare > RTX VSR quality).
+    add(dlss, IDM_RTX_VSR_UPSCALING, L"menu.rtx_vsr_upscaling");
     // --- DLSS Super Resolution: the toggle and the size it targets. --------
     add(dlss, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
     HMENU upscaleOutput=CreatePopupMenu();

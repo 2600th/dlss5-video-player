@@ -65,6 +65,7 @@ private:
             {L"menu.depth", L"Depth\t4"}, {L"menu.fullscreen", L"Fullscreen\tF11"},
             {L"menu.dlss", L"DLSS"}, {L"menu.neural_rendering", L"Neural Rendering\tD"},
         {L"menu.dlss_upscaling", L"DLSS Upscaling"},
+        {L"menu.rtx_vsr_upscaling", L"RTX VSR upscaling (recommended)"},
             {L"menu.upscale_output", L"Upscaling output"},
             {L"menu.upscale_auto", L"Auto (match display)"},
             {L"menu.upscale_1080", L"1080p"}, {L"menu.upscale_1440", L"1440p"}, {L"menu.upscale_2160", L"2160p (4K)"},

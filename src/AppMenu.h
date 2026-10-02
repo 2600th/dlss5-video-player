@@ -178,6 +178,8 @@ inline constexpr UINT IDM_PROCESSING_SCALE_LAST = 482;
 // (the recommended default).
 inline constexpr UINT IDM_UPSCALE_HISTORY_TEMPORAL = 484;
 inline constexpr UINT IDM_UPSCALE_HISTORY_PER_FRAME = 485;
+// RTX VSR as the playback upscaler (VsrPolicy.h PlaybackUpscales).
+inline constexpr UINT IDM_RTX_VSR_UPSCALING = 486;
 // Right-justified affordance appended to the menu bar itself, not a submenu.
 inline constexpr UINT IDM_UPDATE_AVAILABLE = 461;
 // Help > Keyboard shortcuts, the menu route to the ? / F1 cheat sheet.

@@ -7,6 +7,33 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Unreleased
+
+### Changed
+
+- **RTX Video Super Resolution upscales playback by default.** Wherever the
+  window shows a video larger than it is, RTX VSR makes the picture at that size
+  instead of the window's plain scale, on the frame the player already decodes.
+  Measured 960x540 to 1080p over six clips on an RTX 5090, at High: 87.5 VMAF
+  against 80.5 for bicubic and 74.9 for DLSS Super Resolution, 78.5 against 69.5
+  and 66.1 on H.264 input, and ahead by VMAF NEG and PSNR too, at 0.45 ms a
+  frame ([report](docs/measurements/vsr-quality-20261002/REPORT.md)). Nobody had
+  published such numbers; the report lists what had been. It stands aside for
+  DLSS Upscaling, the compare views, HDR and debug views, and can shimmer
+  slightly on fine moving detail, so **DLSS > RTX VSR upscaling** turns it off.
+  The status line says when it is the upscaler.
+
+### Fixed
+
+- **Generated frames no longer offers what the GPU cannot do.** Once Frame
+  Generation has been measured, multiples above the runtime's limit are greyed
+  and say the GPU's highest, and the confirmation says when the setting was
+  lowered. On an RTX 3060 with the dlssg_sm86 add-on, 5x used to convert at 4x
+  without a word (issue #14).
+- **A refused compare key says why.** Pressing a compare view with no neural
+  render, with Neural Rendering off or with no video shows a notice naming what
+  is missing, where it used to do nothing.
+
 ## 0.27.2 - 2026-10-02
 
 A hotfix for Frame Generation on RTX 20 and 30 cards. The render cache is keyed

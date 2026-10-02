@@ -251,10 +251,12 @@ and the notice `R` shows, name the one that is missing:
   the runtime refused it; `DLSSVideoPlayer.log` has the `RTX VSR capability:`
   line with what NGX answered, and the create's result.
 
-Like every compare mode, RTX VSR is live only during cached playback on the
-neural view (`D`). Its cost is logged every 300 frames as `RTX VSR GPU:`; if
+Like every compare mode, the RTX VSR view is live only during cached playback on
+the neural view (`D`). As the playback upscaler (**DLSS > RTX VSR upscaling**) it
+runs whenever the window shows the video larger than it is; the same conditions
+grey that menu item. Its cost is logged every 300 frames as `RTX VSR GPU:`; if
 playback drops frames with it on, pick a lower rung under **Video > Compare >
-RTX VSR quality**.
+RTX VSR quality**, or turn **RTX VSR upscaling** off.
 
 ## Generate frames is unavailable, or refuses
 

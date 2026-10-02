@@ -6,8 +6,9 @@
 #include <cstdint>
 
 // RTX Video Super Resolution (P2.8): NVIDIA's video super resolution, trained on
-// compressed video, run live on the original the player already decodes and shown
-// as a comparison view beside DLSS 5. It is presentation only - the window
+// compressed video, run live on the frame the player already decodes. It is the
+// playback upscaler wherever the window shows the picture larger than the video,
+// and a comparison view beside DLSS 5. It is presentation only - the window
 // compositor reads it, and nothing that reaches the cache capture, an export or a
 // cache key does - so it needs no render and no cache. The engine itself is
 // VsrEngine; this is what can be decided without a GPU: the quality it runs at,
@@ -130,6 +131,35 @@ inline Size OutputSize(uint32_t sourceW, uint32_t sourceH, uint32_t targetW, uin
         return static_cast<uint32_t>(std::clamp<long long>(std::llround(double(source) * scale), 1, kMaxDimension));
     };
     return {std::max(sourceW, axis(sourceW)), std::max(sourceH, axis(sourceH))};
+}
+
+// RTX VSR as the playback upscaler. On an RTX 5090, 960x540 to 1920x1080 over six
+// clips, High scored 87.5 VMAF against bicubic's 80.5 and DLSS Super Resolution's
+// 74.9, 78.5 against 69.5 and 66.1 on H.264 input, and won by VMAF NEG and PSNR
+// too, at 0.45 ms a frame (docs/measurements/vsr-quality-20261002). So it is on by
+// default ([Playback] RtxVsr), at the one quality the comparison view uses.
+inline constexpr bool kPlaybackDefault = true;
+
+struct PlaybackState {
+    bool enabled = false;         // the setting
+    bool ready = false;           // Decide() said Ready and the feature exists
+    bool superResolution = false; // DLSS SR made this frame's picture: it is already upscaled
+    bool comparing = false;       // a comparison, a Mix other than 1 or a mask is drawn
+    bool hdr = false;             // a PQ frame or an HDR swapchain: VSR's input is 8-bit SDR
+    bool finalView = true;        // not a debug view
+    uint32_t sourceW = 0, sourceH = 0;
+    uint32_t targetW = 0, targetH = 0;  // what the picture is fitted into
+};
+
+// Whether this present's picture is RTX VSR's upscale of the decoded frame rather
+// than the compositor's. Only the one plain picture, and only where it grows: at
+// 1x VSR is a compression clean-up nothing here measured.
+inline bool PlaybackUpscales(const PlaybackState& state)
+{
+    if (!state.enabled || !state.ready || state.superResolution || state.comparing || state.hdr || !state.finalView)
+        return false;
+    const Size size = OutputSize(state.sourceW, state.sourceH, state.targetW, state.targetH);
+    return size.width > state.sourceW || size.height > state.sourceH;
 }
 
 } // namespace vsr_policy

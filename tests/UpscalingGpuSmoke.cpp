@@ -960,6 +960,50 @@ int RunVsrProbe(const wchar_t* source)
                            meanAbs>0.05&&meanAbs<24.0&&afterFrames.errors==0&&afterModes.errors==0;
         renderer.reset();DestroyWindow(window);
 
+        // Part 3: RTX VSR as the playback upscaler. The plain playback path - DLSS
+        // off, no reference, the decoded frame uploaded by RenderFrame - in a window
+        // twice the source: every frame is VSR's upscale, a paused present keeps the
+        // frame it made, the picture is not the compositor's scale of the same frame,
+        // and turning it off or showing the video at its own size gives the scale back.
+        bool playback=partOne;
+        if(playback){
+            VideoDecoder again;
+            playback=again.Open(source,MediaSourceKind::LocalFile);
+            const uint32_t ww=w*2u,wh=h*2u;
+            HWND playbackWindow=CreateWindowExW(0,L"STATIC",L"vsr playback",WS_POPUP,0,0,int(ww),int(wh),nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+            auto r=MakeD3D12Renderer();
+            r->SetPresentFollowsWindow(true);
+            playback=playback&&r->Initialize(playbackWindow,w,h,w,h,gw,gh,DefaultNeuralCarrierQuality());
+            ComparisonSettings plain;plain.playbackVsr=true;plain.vsrQuality=vsr_policy::Quality::High;
+            if(playback){r->SetDLSS(false);r->SetComparison(plain);}
+            uint32_t played=0,upscaled=0;VideoFrame next;
+            while(playback&&played<10&&again.ReadNext(next)){
+                playback=r->RenderFrame(next.bgra.data(),next.bgra.size(),nullptr,0,gw,gh,true,false,frameMs);
+                if(playback){++played;if(r->PlaybackVsrShown())++upscaled;}
+            }
+            const uint64_t afterPlay=r->VsrEvaluations();
+            std::vector<uint8_t> withVsr,without;uint32_t aw=0,ah=0,bw=0,bh=0;
+            const bool paused=playback&&r->PresentCurrent()&&r->PlaybackVsrShown()&&r->VsrEvaluations()==afterPlay&&
+                              r->CaptureComposedView(withVsr,aw,ah);
+            plain.playbackVsr=false;r->SetComparison(plain);
+            const bool off=paused&&r->PresentCurrent()&&!r->PlaybackVsrShown()&&r->CaptureComposedView(without,bw,bh);
+            double playbackDiff=0.0;
+            if(off&&aw==bw&&ah==bh&&withVsr.size()==without.size()&&!withVsr.empty()){
+                for(size_t i=0;i<withVsr.size();i+=4)for(size_t c=0;c<3;++c)playbackDiff+=std::abs(int(withVsr[i+c])-int(without[i+c]));
+                playbackDiff/=double(withVsr.size()/4*3);
+            }
+            // At the video's own size there is nothing to upscale.
+            plain.playbackVsr=true;r->SetComparison(plain);
+            SetWindowPos(playbackWindow,nullptr,0,0,int(w),int(h),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+            const bool ownSize=off&&r->PresentCurrent()&&!r->PlaybackVsrShown();
+            std::cout<<"vsr playback: frames="<<played<<" upscaled="<<upscaled<<" evaluations="<<afterPlay
+                     <<" pausedKept="<<paused<<" offRestoresScale="<<off<<" meanAbsVsScale="<<playbackDiff
+                     <<" ownSizeLeftAlone="<<ownSize<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
+            playback=playback&&played==10&&upscaled==10&&afterPlay==10&&paused&&off&&ownSize&&playbackDiff>0.05&&playbackDiff<24.0&&
+                     r->VsrOutputW()==ww&&r->VsrOutputH()==wh;
+            r.reset();DestroyWindow(playbackWindow);
+        }
+
         // Part 2: the ladder's cost, the network run on every present because the
         // original is uploaded again before each one. Queue drained between presents,
         // so each timing is one evaluate alone on the GPU.
@@ -994,7 +1038,7 @@ int RunVsrProbe(const wchar_t* source)
             std::cout<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n"<<std::defaultfloat;
             r.reset();DestroyWindow(timing);
         }
-        code=partOne?(timed?0:7):6;
+        code=partOne?(playback?(timed?0:7):8):6;
     }
     MFShutdown();CoUninitialize();return code;
 }

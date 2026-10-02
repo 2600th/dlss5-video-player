@@ -1453,6 +1453,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         pre->SetGraphicsRootDescriptorTable(RootView,SRVGPU(SourceLumaSRV));pre->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(SourceChromaSRV));
         const float none[4]={0,0,0,0};pre->SetGraphicsRoot32BitConstants(RootConstants,4,none,0);pre->DrawInstanced(3,1,0,0);
         Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
+        ++m_decodedSerial;
     }else if(pqSource){
         // Byte for byte the BGRA upload, into the R10G10B10A2 texture: the footprint
         // only has to name the format the bytes are.
@@ -1462,6 +1463,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     }else{
         if(!m_sourceInCopyDest)Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
         d.pResource=m_decodedTexture.Get();s.PlacedFootprint=m_uploadFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
+        ++m_decodedSerial;
     }
 
     if(m_exposureTexture&&m_exposureUpload){
@@ -1961,11 +1963,15 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     // One target pixel in UV, which is what the wipe divider is drawn in. The capture
     // passes draw at the output's size and pass nothing.
     const uint32_t dividerWidth=targetWidth?targetWidth:m_outputW;
-    ComparisonMode mode=useReference?cmp.mode:ComparisonMode::Neural;
+    // RTX VSR as the playback upscaler draws the one picture as the VSR view: the
+    // shader samples the frame RecordVsr made in place of T. Never for a capture,
+    // which passes no target and must stay byte for byte what it was.
+    const bool playbackVsr=m_playbackVsrShown&&m_vsrShown&&targetWidth!=0;
+    ComparisonMode mode=playbackVsr?ComparisonMode::Vsr:useReference?cmp.mode:ComparisonMode::Neural;
     // RTX VSR is drawn only from a frame this present made or kept (RecordVsr). Without
     // one its view is the original it would have been made from, tagged as such, and
     // the compared member stays DLSS 5; nothing is ever shown under a name it is not.
-    const bool vsrFrame=useReference&&m_vsrShown;
+    const bool vsrFrame=(useReference||playbackVsr)&&m_vsrShown;
     if(mode==ComparisonMode::Vsr&&!vsrFrame)mode=ComparisonMode::Original;
     const bool againstVsr=vsrFrame&&ComparisonComparesAgainstVsr(cmp);
     const float select=(mode==ComparisonMode::Blend)?cmp.amount:cmp.splitX;
@@ -1985,7 +1991,7 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     // The compositor's constants. Harmless for every other pass, none of which declares
     // b1. The tags need both a reference (they name its two members) and an atlas; the
     // row height is what the shader tests, so 0 draws none.
-    const bool labels=useReference&&cmp.labels&&m_labelAtlas&&m_labelRowHeight;
+    const bool labels=useReference&&!playbackVsr&&cmp.labels&&m_labelAtlas&&m_labelRowHeight;
     // The loupe shows the original, so it needs the reference as much as a split does.
     const bool loupe=useReference&&cmp.loupe&&cmp.loupeRadius>0.0f;
     // So does the mask, which blends back to it; and there has to be one uploaded.
@@ -2758,7 +2764,7 @@ void D3D12Renderer::HarvestVsrTimings(){
 
 void D3D12Renderer::SetComparison(const ComparisonSettings&settings){
     m_comparison=settings;m_presentStale=true;
-    if(ComparisonReadsVsr(settings)&&!m_vsr.FeatureCreated()&&m_vsr.Reason()==vsr_policy::Reason::Ready)EnsureVsrFeature();
+    if((ComparisonReadsVsr(settings)||settings.playbackVsr)&&!m_vsr.FeatureCreated()&&m_vsr.Reason()==vsr_policy::Reason::Ready)EnsureVsrFeature();
 }
 
 // The feature is created on its own submission and waited for, as the upload of a
@@ -2816,24 +2822,51 @@ bool D3D12Renderer::EnsureVsrOutput(uint32_t width,uint32_t height){
     return true;
 }
 
+bool D3D12Renderer::PlaybackVsrApplies(const present_scale::Target&target)const{
+    vsr_policy::PlaybackState state{};
+    state.enabled=m_comparison.playbackVsr;
+    state.ready=m_vsr.FeatureCreated()&&m_decodedTexture&&!m_sourceInCopyDest;
+    state.superResolution=m_lastDLSSUsed&&DLSSEnabled();
+    // The one plain picture: with a reference resident, any comparison, a Mix other
+    // than 1 or a mask is drawn from both members, and VSR of one would drop the other.
+    state.comparing=m_hasReference&&(m_comparison.mode!=ComparisonMode::Neural||m_comparison.strength!=1.0f||(m_comparison.mask&&m_mask));
+    state.hdr=m_framePq||m_hdrOutput;
+    state.finalView=m_debugView==DebugView::Final;
+    state.sourceW=m_sourceW;state.sourceH=m_sourceH;state.targetW=target.width;state.targetH=target.height;
+    return vsr_policy::PlaybackUpscales(state);
+}
+
 void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const present_scale::Target&target){
-    m_vsrShown=false;
-    if(m_debugView!=DebugView::Final||!m_vsr.FeatureCreated()||!ComparisonReadsVsr(m_comparison))return;
+    m_vsrShown=false;m_playbackVsrShown=false;
+    if(m_debugView!=DebugView::Final||!m_vsr.FeatureCreated()||slot>=FrameCount)return;
+    if(PlaybackVsrApplies(target)){
+        // The decoded frame is the picture the compositor would have scaled: T is its
+        // linearisation and nothing else (PSConvert), so VSR reads the same pixels.
+        const auto size=vsr_policy::OutputSize(m_sourceW,m_sourceH,target.width,target.height);
+        m_playbackVsrShown=EvaluateVsr(cmd,slot,m_decodedTexture.Get(),2u,m_decodedSerial,size,m_comparison.vsrQuality);
+        return;
+    }
+    if(!ComparisonReadsVsr(m_comparison))return;
     // An HDR original compared in HDR is PQ: never RTX VSR's input, which is 8-bit SDR.
     // A view that reads RTX VSR asks for the SDR original (ComparisonCombinesPixels).
-    if(!m_hasReference||!m_reference||m_referenceInCopyDest||m_referencePq||slot>=FrameCount)return;
+    if(!m_hasReference||!m_reference||m_referenceInCopyDest||m_referencePq)return;
     const auto size=vsr_policy::OutputSize(m_sourceW,m_sourceH,target.width,target.height);
-    if(!size.width||!size.height||!EnsureVsrOutput(size.width,size.height))return;
-    const vsr_policy::Quality quality=m_comparison.vsrQuality;
-    // The frame already made from this reference at this quality is kept: a paused
-    // split drag or a loupe move re-presents without running the network again.
-    if(m_vsrSerial==m_referenceSerial&&m_vsrQuality==quality){m_vsrShown=m_vsrValid;return;}
-    Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    EvaluateVsr(cmd,slot,m_reference.Get(),1u,m_referenceSerial,size,m_comparison.vsrQuality);
+}
+
+bool D3D12Renderer::EvaluateVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,ID3D12Resource*input,uint32_t inputKind,
+                                uint64_t serial,vsr_policy::Size size,vsr_policy::Quality quality){
+    if(!input||!size.width||!size.height||!EnsureVsrOutput(size.width,size.height))return false;
+    // The frame already made from this input at this quality is kept: a paused
+    // split drag, a loupe move or a paused playback frame re-presents without
+    // running the network again.
+    if(m_vsrInputKind==inputKind&&m_vsrSerial==serial&&m_vsrQuality==quality){m_vsrShown=m_vsrValid;return m_vsrValid;}
+    Barrier(cmd,input,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     if(!m_vsrOutputInUAV)Barrier(cmd,m_vsrOutput.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     m_vsrOutputInUAV=true;
     const bool timed=m_vsrTimestampHeap&&m_vsrTimestampMapped;
     if(timed)cmd->EndQuery(m_vsrTimestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u);
-    const bool evaluated=m_vsr.Evaluate(cmd,m_reference.Get(),m_sourceW,m_sourceH,m_vsrOutput.Get(),size.width,size.height,quality);
+    const bool evaluated=m_vsr.Evaluate(cmd,input,m_sourceW,m_sourceH,m_vsrOutput.Get(),size.width,size.height,quality);
     // NGX leaves its own descriptor heaps bound, as DLSS's evaluate does.
     ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
     if(timed&&evaluated){
@@ -2842,10 +2875,11 @@ void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const 
         m_vsrTimingPending[slot]=true;
     }
     Barrier(cmd,m_vsrOutput.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_vsrOutputInUAV=false;
-    Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    // A refused evaluate is not retried until the reference, the size or the quality
+    Barrier(cmd,input,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    // A refused evaluate is not retried until the input, the size or the quality
     // moves: VsrEngine has logged why, and a retry per present would only repeat it.
-    m_vsrSerial=m_referenceSerial;m_vsrQuality=quality;m_vsrValid=evaluated;m_vsrShown=evaluated;
+    m_vsrInputKind=inputKind;m_vsrSerial=serial;m_vsrQuality=quality;m_vsrValid=evaluated;m_vsrShown=evaluated;
+    return evaluated;
 }
 
 void D3D12Renderer::SampleLocalVideoMemory(){

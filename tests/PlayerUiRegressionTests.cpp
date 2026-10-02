@@ -214,6 +214,15 @@ struct PlayerAppTestAccess {
         // adjustments it sits with, clamps to the 0..2 the shader composites over, and
         // reads back as 1 (the neural frame untouched) when the key is absent.
         CHECK(std::abs(app.m_comparison.strength - 0.4f) < 0.001f);
+        // RTX VSR's setting persists, and a file without the key is the default.
+        app.m_playbackVsr = false;
+        app.SaveVideoSettings();
+        app.m_playbackVsr = true;
+        app.LoadVideoSettings();
+        CHECK(!app.m_playbackVsr);
+        WritePrivateProfileStringW(L"Playback", L"RtxVsr", nullptr, app.SettingsPath().c_str());
+        app.LoadVideoSettings();
+        CHECK(app.m_playbackVsr);
         // The upscaling target persists as two independent facts, and the split
         // is the whole reason an existing install can reach Auto at all. Every
         // release before this one wrote UpscaleHeight on every save, so a 1440
@@ -419,6 +428,16 @@ struct PlayerAppTestAccess {
         CHECK(!comparisonContent.active);
         CHECK(app.m_neuralRequested);
         CHECK(!app.m_upscalingRequested);
+        // RTX VSR upscales playback by default (docs/measurements/vsr-quality-20261002),
+        // the menu command turns it off and on, and every presentation the player
+        // pushes carries it - the capture never does, since it pushes none.
+        CHECK(app.m_playbackVsr);
+        CHECK(app.EffectiveComparison().playbackVsr);
+        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        CHECK(!app.m_playbackVsr);
+        CHECK(!app.EffectiveComparison().playbackVsr);
+        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        CHECK(app.m_playbackVsr);
         // Auto is the fresh default, and it is a state of its own: the manual
         // rung underneath it must not move until a rung is actually picked.
         CHECK(app.m_upscaleAuto);

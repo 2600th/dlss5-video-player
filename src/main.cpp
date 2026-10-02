@@ -5028,6 +5028,7 @@ private:
         m_fill=ReadIniFloat(L"Playback",L"Fill",0.0f)==1.0f;
         m_neuralRequested=ReadIniFloat(L"Playback",L"NeuralView",1.0f)!=0.0f;
         m_upscalingRequested=ReadIniFloat(L"Playback",L"SuperResolution",0.0f)==1.0f;
+        m_playbackVsr=ReadIniFloat(L"Playback",L"RtxVsr",vsr_policy::kPlaybackDefault?1.0f:0.0f)!=0.0f;
         // Auto and the rung are separate keys on purpose. Every earlier version
         // persisted UpscaleHeight on every save, so a stored 1440 is the old
         // default rather than evidence of a choice, and keying Auto off that
@@ -5184,6 +5185,7 @@ private:
         WriteIniFloat(L"Playback",L"Fill",m_fill?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"NeuralView",m_neuralRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"SuperResolution",m_upscalingRequested?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"RtxVsr",m_playbackVsr?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleAuto",m_upscaleAuto?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
         WriteIniFloat(L"Playback",L"FrameGenerationGenerated",static_cast<float>(m_frameGenPreference));
@@ -5247,6 +5249,7 @@ private:
     // without changing the mode; see compare_gesture.
     ComparisonSettings EffectiveComparison()const{
         ComparisonSettings effective=m_comparison;
+        effective.playbackVsr=m_playbackVsr;
         const int viewW=ZoomViewWidth();const uint32_t outputW=ZoomOutputWidth();
         effective.zoomScale=compare_zoom::ScaleForStep(m_zoomStep,outputW,viewW);
         if(effective.zoomScale<=1.0f){effective.zoomCenterX=0.5f;effective.zoomCenterY=0.5f;}
@@ -5467,6 +5470,11 @@ private:
         LOG("Comparison against="<<(m_comparison.againstVsr?"RTX VSR":"DLSS 5"));
     }
     // The ladder is named in the RTX VSR tag, so a change redraws the atlas.
+    void TogglePlaybackVsr(){
+        m_playbackVsr=!m_playbackVsr;
+        LOG("RTX VSR playback upscaling "<<(m_playbackVsr?"on":"off"));
+        SaveVideoSettings();ApplyComparison();SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
+    }
     void SetVsrQuality(vsr_policy::Quality quality){
         if(quality==m_comparison.vsrQuality)return;
         m_comparison.vsrQuality=quality;++m_labelTextRevision;ApplyComparison();
@@ -5863,6 +5871,10 @@ private:
             }
             // Outside the radio range above, which CheckMenuRadioItem clears:
             // this is a constraint on the multiple, not one of the choices.
+            // RTX VSR upscaling: checked as set, greyed only where a renderer has said
+            // it cannot run here - nothing loaded is no reason to refuse the setting.
+            CheckMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(m_playbackVsr?MF_CHECKED:MF_UNCHECKED));
+            EnableMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(!m_renderer||VsrUsable()?MF_ENABLED:MF_GRAYED));
             CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
                           MF_BYCOMMAND|(m_evenCadenceOnly?MF_CHECKED:MF_UNCHECKED));
             CheckMenuItem(menu,IDM_AUDIO_PASSTHROUGH,
@@ -7166,6 +7178,10 @@ private:
         if(!m_upscalingError.empty())return m_upscalingError;
         if(UpscalingActive())return L"DLSS Upscaling on \u00b7 "+std::to_wstring(m_renderer->OutputW())+L"×"+std::to_wstring(m_renderer->OutputH())+
             (m_upscaleAuto?L" (auto)":L"");
+        // RTX VSR is the upscaler whenever DLSS Upscaling is off and the picture is
+        // shown larger than the video; the line names it and the size it made.
+        if(m_loaded&&m_renderer&&m_renderer->PlaybackVsrShown())
+            return L"RTX VSR upscaling \u00b7 "+std::to_wstring(m_renderer->VsrOutputW())+L"×"+std::to_wstring(m_renderer->VsrOutputH());
         if(m_loaded&&m_decoder.Width()&&m_decoder.Height()&&!UpscalingTarget(m_decoder.Width(),m_decoder.Height(),EffectiveUpscaleHeight()).grows){
             // Two different answers the old text collapsed into one. A 4K source
             // on a 4K panel has nothing to gain; a panel below 1080 lines has
@@ -11941,6 +11957,7 @@ private:
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_NEURAL_RENDERING:ToggleNeuralRendering();break;
         case IDM_DLSS_UPSCALING:ToggleUpscaling();break;
+        case IDM_RTX_VSR_UPSCALING:TogglePlaybackVsr();break;
         case IDM_UPSCALE_AUTO:SetUpscaleTarget(0);break;
         case IDM_PROCESSING_SCALE_FIRST:case IDM_PROCESSING_SCALE_FIRST+1:case IDM_PROCESSING_SCALE_LAST:
             if(const auto percent=app_menu::ProcessingScaleForCommand(id))SetProcessingScale(*percent);
@@ -12199,6 +12216,10 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // claiming history against a frame that is not its predecessor.
     bool m_guidesSkipped=false,m_layoutMismatchLogged=false;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
     bool m_upscalingRequested=false;
+    // RTX VSR as the playback upscaler ([Playback] RtxVsr). Rides on every
+    // EffectiveComparison() the player pushes; the renderer decides each present
+    // whether the picture is one it applies to (VsrPolicy.h PlaybackUpscales).
+    bool m_playbackVsr=vsr_policy::kPlaybackDefault;
     UINT_PTR m_activityTimer=0;
     // The status chips as last painted, what each last flashed on, and the
     // repaint timer that runs only while one is still fading.

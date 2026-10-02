@@ -32,7 +32,8 @@ streams. The cache prefers
 `cache/v1` beside the EXE and falls back to LocalAppData when unwritable.
 Fullscreen hides controls until the mouse moves; see [usage](docs/USAGE.md).
 
-Fresh-install defaults are Neural Rendering on, playback DLSS Upscaling off,
+Fresh-install defaults are Neural Rendering on, RTX VSR upscaling on wherever the
+window shows a video larger than it is, playback DLSS Upscaling off,
 upscaling output on Auto (the largest rung the monitor can show), and YouTube Auto taking the tallest rung up to
 1440p at the highest bitrate, or up to 2160p when a source offers nothing lower.
 Player preferences persist after that. Manual YouTube choices are 1080p,

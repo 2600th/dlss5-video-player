@@ -9246,6 +9246,41 @@ void compare_compositor_stays_out_of_the_capture_program_test()
 
 // RTX VSR (P2.8): when the view can be shown and what it says when it cannot, the
 // ladder, the size of the frame it makes, and which views ask the renderer for it.
+// RTX VSR as the playback upscaler (docs/measurements/vsr-quality-20261002): it
+// takes the picture's upscale from the compositor wherever the window shows the
+// video larger than it is, and stands aside for everything that is not that one
+// plain picture - DLSS Super Resolution's own output, a comparison, an HDR frame,
+// a debug view - and where there is nothing to upscale.
+void vsr_policy_playback_upscales_only_a_plain_picture_shown_larger_test()
+{
+    using vsr_policy::PlaybackState;
+    using vsr_policy::PlaybackUpscales;
+    PlaybackState state{};
+    state.enabled = true;
+    state.ready = true;
+    state.finalView = true;
+    state.sourceW = 960;
+    state.sourceH = 540;
+    state.targetW = 1920;
+    state.targetH = 1080;
+    CHECK(PlaybackUpscales(state));
+    const auto without = [&](auto change) { PlaybackState other = state; change(other); return PlaybackUpscales(other); };
+    CHECK(!without([](PlaybackState& s) { s.enabled = false; }));
+    CHECK(!without([](PlaybackState& s) { s.ready = false; }));
+    CHECK(!without([](PlaybackState& s) { s.superResolution = true; }));
+    CHECK(!without([](PlaybackState& s) { s.comparing = true; }));
+    CHECK(!without([](PlaybackState& s) { s.hdr = true; }));
+    CHECK(!without([](PlaybackState& s) { s.finalView = false; }));
+    // Shown at its own size or smaller: nothing to upscale.
+    CHECK(!without([](PlaybackState& s) { s.targetW = 960; s.targetH = 540; }));
+    CHECK(!without([](PlaybackState& s) { s.targetW = 800; s.targetH = 1080; }));
+    CHECK(!without([](PlaybackState& s) { s.sourceW = 0; }));
+    // One axis larger is enough: the fitted picture grows.
+    CHECK(without([](PlaybackState& s) { s.targetW = 1280; s.targetH = 2000; }));
+    // On by default: it measured above every plain scaler and DLSS SR.
+    CHECK(vsr_policy::kPlaybackDefault);
+}
+
 void vsr_policy_decides_the_view_its_ladder_and_its_size_test()
 {
     using namespace vsr_policy;
@@ -15389,6 +15424,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(present_scale_follows_the_window_only_where_it_should_test),
     TEST_CASE(compare_compositor_stays_out_of_the_capture_program_test),
     TEST_CASE(vsr_policy_decides_the_view_its_ladder_and_its_size_test),
+    TEST_CASE(vsr_policy_playback_upscales_only_a_plain_picture_shown_larger_test),
     TEST_CASE(hdr_output_leaves_the_capture_programs_alone_test),
     TEST_CASE(hdr_output_follows_the_display_under_the_window_test),
     TEST_CASE(compare_refusal_names_what_is_missing_test),

@@ -995,9 +995,16 @@ These controls do not alter the offline DLAA carrier or cache identity.
 RTX Video Super Resolution (NGX feature 16, `VsrEngine.h`) is compiled only
 against the RTX Video SDK: `-DRTX_VIDEO_SDK`, or the SDK staged in
 `external/rtx-video-sdk`. It joins the NGX session `DLSSBackend` opened on the
-device rather than opening its own, and runs on the decoded original for the
-**RTX VSR** compare view only, so it never reaches the capture, the cache or an
-export.
+device rather than opening its own, and runs on the decoded frame for the
+**RTX VSR** compare view and as the playback upscaler, never anywhere that
+reaches the capture, the cache or an export. As the upscaler
+(`vsr_policy::PlaybackUpscales`, `ComparisonSettings::playbackVsr`) it reads the
+decoded BGRA texture - T is that texture's linearisation and nothing else - and
+the present draws its output as the VSR view, untagged, wherever DLSS SR did not
+make the picture, nothing is being compared, the frame is SDR and the window
+shows it larger than it is. The setting rides on the presentation settings
+every path that builds a renderer already pushes, so a capture, which pushes
+none, cannot pick it up. Measured in `docs/measurements/vsr-quality-20261002`.
 
 Frame Generation is a conversion, not a presentation mode, and the player
 creates it besides Super Resolution and RTX VSR. `FrameGenerationPass`

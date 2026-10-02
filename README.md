@@ -116,8 +116,12 @@ the whole video. Press `D` at the start to get one.
   [Save the result](#save-the-result).
 - **Tunes the model.** Change a neural setting (`Ctrl+N`) while paused and that
   frame re-renders. **DLSS > Processing scale** runs the model at 75% or 50% of
-  the source, for speed. DLSS Super Resolution can upscale playback to 1080p,
-  1440p or 2160p; it is off by default (see [Limits](#limits)).
+  the source, for speed. Where the window shows a video larger than it is,
+  NVIDIA's RTX Video Super Resolution upscales it, on by default: it measured
+  well above a plain scaler and DLSS Super Resolution on video
+  ([measurement](docs/measurements/vsr-quality-20261002/REPORT.md)). DLSS Super
+  Resolution can still upscale playback to 1080p, 1440p or 2160p; it is off by
+  default (see [Limits](#limits)).
 - **Plays like a player.** AC-3, E-AC-3 and DTS passthrough to a receiver, and
   Windows media controls with taskbar thumbnail buttons.
 - **Comes with test material.** Seven official game trailers, chosen for faces,
@@ -283,7 +287,9 @@ not what every source will gain.
   the optical flow engine. Expect some artifacts.
 - **DLSS Super Resolution doesn't beat a plain scaler on video.** Against
   bicubic on six clips, it scored lower on all of them. It is built for games;
-  use it for its look, not for detail.
+  use it for its look, not for detail. RTX VSR, the default upscaler, is the
+  one that adds detail: 87.5 VMAF against bicubic's 80.5 and DLSS's 74.9 over
+  the same kind of test.
 - **Frame generation writes a new file.** It takes time and disk space, and a
   stream has to be copied locally first. NVIDIA supports it on RTX 40 and 50
   cards; on RTX 20 and 30 the player offers to download the community

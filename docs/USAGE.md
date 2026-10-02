@@ -224,7 +224,8 @@ still, the modes fold into one button that opens a menu of them:
 - **RTX VSR** (`R`) shows NVIDIA's RTX Video Super Resolution of the original:
   a second engine, trained on compressed video, made live from the original
   frame the player already decodes - it needs no render and no cache, and it
-  never reaches the cache, an export or a saved render's identity. Where the
+  never reaches the cache, an export or a saved render's identity. It is also
+  the playback upscaler (see [RTX VSR upscaling](#rtx-vsr-upscaling)). Where the
   window shows the picture larger than the video, RTX VSR makes it at the size
   it is shown; otherwise it runs at the video's own size, where it cleans up
   compression. Its tag names the quality, e.g. `RTX VSR · HIGH`.
@@ -421,6 +422,39 @@ taskbar button shows three buttons under the thumbnail - play/pause, Neural
 Rendering on/off and side-by-side compare (**Side by side**, and back to the
 neural picture) - which do exactly what the matching menu commands do.
 
+### RTX VSR upscaling
+
+**DLSS > RTX VSR upscaling (recommended)** is on by default. Wherever the window
+shows the video larger than it is - a 1080p video full screen on a 1440p or 4K
+monitor, a 720p stream in a large window - NVIDIA's RTX Video Super Resolution
+makes the picture at the size it is shown, instead of the plain scale the window
+would otherwise apply. It runs on the frame the player decodes, so it needs no
+render and no cache, and nothing it makes reaches a capture, an export or a
+cache key. Its quality is the comparison view's: **Video > Compare > RTX VSR
+quality**, High by default. The status line says `RTX VSR upscaling · <size>`
+while it is the upscaler.
+
+It is the default because it measured best. 960x540 to 1080p over six clips on
+an RTX 5090, at High: 87.5 VMAF against 80.5 for bicubic and 74.9 for DLSS Super
+Resolution, 78.5 against 69.5 and 66.1 on H.264-compressed input, and ahead by
+VMAF NEG (which does not reward sharpening) and PSNR too, at 0.45 ms a frame;
+a 1080p frame takes about 1.5 ms and a 1440p one 2.7 ms on that GPU
+([docs/measurements/vsr-quality-20261002](measurements/vsr-quality-20261002/REPORT.md)).
+Its error does change more from one frame to the next than a plain scaler's, so
+fine moving detail can shimmer slightly; turn it off from the same menu if you
+see that.
+
+It stands aside wherever it does not apply: while **DLSS Upscaling** is on, in
+the comparison views (which show it as a member of their own), at a Mix other
+than 100% or with a mask, for an HDR video or on an HDR display (it takes 8-bit
+SDR), in a debug view, and wherever the video is shown at its own size or
+smaller. It needs what the **RTX VSR** view needs (see
+[RTX VSR is grey](TROUBLESHOOTING.md#rtx-vsr-is-grey)); without it the item is
+grey and the window scales as before. `[Playback] RtxVsr` in
+`DLSSVideoPlayer.ini` holds the setting.
+
+### DLSS Upscaling
+
 **DLSS Upscaling** is independent and starts off on a fresh installation. Its
 output is **Auto** by default: the player takes the largest rung the monitor's
 current mode can scan out - 1080p, 1440p or 2160p - and never one above it,
@@ -434,8 +468,8 @@ target: a 4K source reports "source meets output" and stays off, and so does a
 "display below 1080 lines", which is a different refusal from the first and says
 so. Neural rendering itself preserves source resolution.
 
-**Upscaling is off by default because, on video, it does not beat a plain
-scaler.** DLSS Super Resolution is built for rendered games: jittered, aliased,
+**DLSS Upscaling is off by default because, on video, it does not beat a plain
+scaler**, and RTX VSR does. DLSS Super Resolution is built for rendered games: jittered, aliased,
 noise-free samples. Decoded video is none of those. Measured 960x540 to 1080p on
 six clips, a bicubic upscale scored higher VMAF than DLSS on every one
 (`docs/measurements/sr-quality-20260924` and `sr-history-20260924`). Turn it on if
