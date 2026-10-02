@@ -422,7 +422,7 @@ set_target_properties(NeuralWorker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_
 # --probe (ConvertCommandLine.h). A console program, so a shell waits for it,
 # shows its progress and hands it Ctrl+C; it runs DLSSVideoPlayer.exe from its
 # own folder for every conversion, so there is still one pipeline.
-add_executable(dlss5-convert src/ConvertMain.cpp src/ConvertCommandLine.h)
+add_executable(dlss5-convert src/ConvertMain.cpp src/ConvertCommandLine.h src/RenderCliContract.h)
 target_link_libraries(dlss5-convert PRIVATE dlss_video_player_common dlss_video_player_shipped_code)
 dlss_video_player_harden(dlss5-convert)
 dlss_video_player_symbols(dlss5-convert)
