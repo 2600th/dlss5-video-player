@@ -221,6 +221,11 @@ std::wstring UnlockedRuntimeModules(const std::filesystem::path& moduleDirectory
     return runtime_modules::UnlockedModulesRefusal(*unlocked);
 }
 
+static_assert(kWorkerThrewExitCode != neural_worker_detail::kConfigurationChangedExitCode);
+
+// A refusal before or between renders: the runtime, its configuration, the
+// session's invariants. A job thread that threw is not one of these; it is a
+// crash, reported by neural_worker_detail::WorkerThrewResult.
 NeuralRenderResult FailedResult(std::wstring detail, uint64_t jobId)
 {
     NeuralRenderResult failed;
@@ -235,10 +240,11 @@ NeuralRenderResult FailedResult(std::wstring detail, uint64_t jobId)
 // its whole session in one of these rather than one per job: the window and the
 // device that outlive a job need the pump to outlive it too.
 //
-// An exception escaping `body` used to leave the thread function and terminate
-// the helper with no result written, so the parent saw only a crash exit code.
-// It is caught here, logged, and reported through `threw`, and the event is set
-// either way so the pump returns; the caller writes the failed result.
+// An exception escaping `body` is caught here, logged, and reported through
+// `threw`, and the event is set either way so the pump returns. It is still a
+// crash, and the caller reports it as one: a single-shot job writes a
+// WorkerCrashed result, and a resident session exits with kWorkerThrewExitCode
+// and writes nothing, so the parent's crash recovery applies either way.
 template <class Body>
 bool RunWithMessagePump(Body&& body, bool& threw)
 {
@@ -599,9 +605,6 @@ int wmain(int argc, wchar_t** argv)
     if (guideFiles.Active() && (arguments->preflight || arguments->command)) return 2;
     MetadataWriter metadata(arguments->metadata);
     const uint64_t jobId = arguments->request.jobId;
-    // What the parent is told when the worker thread threw; the log has what().
-    constexpr const wchar_t* kWorkerThrew =
-        L"The helper stopped on an unexpected error; the helper log has the details.";
     auto fail = [&](std::wstring detail) {
         if (arguments->preflight) {
             PreflightPayload payload;
@@ -663,7 +666,7 @@ int wmain(int argc, wchar_t** argv)
         }, threw);
         DestroyWindow(renderWindow);
         if (!pumped) return fail(L"The helper could not create its preflight completion event.");
-        if (threw) return fail(kWorkerThrew);
+        if (threw) return fail(neural_worker_detail::kWorkerThrewDetail);
         return metadata.WritePreflight(payload) ? 0 : 3;
     }
 
@@ -698,7 +701,13 @@ int wmain(int argc, wchar_t** argv)
         // After the runner, so the device and its swapchain are gone first.
         DestroyWindow(renderWindow);
         if (!pumped) return fail(L"The helper could not create its session completion event.");
-        if (threw) return fail(kWorkerThrew);
+        // No Result. The session thread may have thrown between jobs, where a
+        // Result would be the next job's to read as its own, and mid-job the
+        // render did not fail, the process did. The exit code says so: the
+        // parent relaunches a job this process held as it would after any
+        // crash, and a job sent once it had gone finds the pipe closed and goes
+        // to a fresh helper.
+        if (threw) return static_cast<int>(kWorkerThrewExitCode);
         return exitCode;
     }
 
@@ -717,6 +726,8 @@ int wmain(int argc, wchar_t** argv)
     }, threw);
     DestroyWindow(renderWindow);
     if (!pumped) return fail(L"The helper could not create its render completion event.");
-    if (threw) return fail(kWorkerThrew);
+    // A crash rather than a refusal, so the parent relaunches it from frame
+    // zero exactly as it would a helper that died outright.
+    if (threw) return metadata.WriteResult(neural_worker_detail::WorkerThrewResult(jobId)) ? 0 : 3;
     return metadata.WriteResult(result) ? 0 : 3;
 }

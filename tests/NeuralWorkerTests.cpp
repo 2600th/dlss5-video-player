@@ -24,6 +24,7 @@
 #include <iostream>
 #include <fstream>
 #include <iterator>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -218,6 +219,8 @@ void ResetFailureInjection(std::wstring_view token)
 struct FakeResidentRunner {
     HANDLE metadata{};
     resident_helper::IdleVramPolicy policy{resident_helper::kDefaultIdleVramPolicy};
+    // Set by a job that asks for its process to throw once it has gone idle.
+    bool throwWhenIdle{};
 
     // Invented figures, chosen so a transposed sample or a policy that never
     // crossed the launch line shows up. What this exercises is the transport
@@ -246,6 +249,7 @@ struct FakeResidentRunner {
     // and a smaller footprint; the keep arm reports what it is still holding.
     void Idle()
     {
+        if (throwWhenIdle) throw std::runtime_error("fake helper threw while idle");
         const bool frees = policy == resident_helper::IdleVramPolicy::FreeFeature;
         const WireMemory wire = EncodeMemory(
             MemorySample{MemoryStage::Idle, policy, !frees, frees ? kFreedMiB : kParkedMiB});
@@ -266,6 +270,11 @@ struct FakeResidentRunner {
              RecordFailureInjectionAttempt(L"crash-once") == 1)) {
             KillThisHelper();
         }
+        // An exception out of the job, which the real helper's session catches
+        // on its way out (NeuralWorkerMain); RunFakeResidentWorker does the same.
+        if (source == L"resident-threw-once-source.mkv" && RecordFailureInjectionAttempt(L"threw-once") == 1)
+            throw std::runtime_error("fake helper threw mid-job");
+        if (source == L"resident-threw-when-idle-source.mkv") throwWhenIdle = true;
         if (source == L"resident-preflight-answer-source.mkv") {
             // A well-formed preflight receipt where the job's result belongs:
             // the answer to a question this job never asked.
@@ -293,7 +302,17 @@ int RunFakeResidentWorker(const neural_worker_detail::WorkerArguments& arguments
     resident_worker::CommandChannel channel(arguments.command, arguments.parentProcess);
     // 150 ms of grace instead of the shipped five seconds: the boundary under
     // test is "a job, then quiet", not how long quiet has to last.
-    const resident_worker::ResidentExit reason = resident_worker::RunResidentLoop(channel, runner, 10s, 150ms);
+    resident_worker::ResidentExit reason{};
+    try {
+        reason = resident_worker::RunResidentLoop(channel, runner, 10s, 150ms);
+    } catch (const std::exception&) {
+        // What the real helper does with a session thread that threw: no
+        // Result, and the exit code its parent treats as a crash. It is still
+        // alive for a moment first, as the real one is while its device tears
+        // down, so a job sent then is written and never read.
+        std::this_thread::sleep_for(600ms);
+        return static_cast<int>(kWorkerThrewExitCode);
+    }
     // The real helper tears its device down after deciding to retire, alive
     // and with its command pipe still open; a job sent in that window is
     // written and never read. Long enough here that the next job lands in it.
@@ -435,6 +454,11 @@ int RunFakeWorker(int argc, wchar_t** argv)
     if (source == L"preflight-answer-source.mkv") {
         const auto bytes = EncodePreflight(PreflightPayload{true, "{\"ok\":true,\"gpu\":\"fake\"}"});
         return WriteMessage(handle, WireKind::Preflight, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 14;
+    }
+    if (source == L"threw-once-source.mkv" && RecordFailureInjectionAttempt(L"threw-once") == 1) {
+        // What the real helper writes when its job thread throws mid-render.
+        const auto bytes = EncodeResult(neural_worker_detail::WorkerThrewResult(parsed->request.jobId));
+        return WriteMessage(handle, WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 14;
     }
     if (source == L"wrong-job-source.mkv") {
         NeuralRenderResult failed;
@@ -3158,6 +3182,89 @@ void a_terminal_message_of_the_wrong_kind_is_malformed_on_every_path_test()
     CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
 }
 
+// A job thread that threw was caught and reported as a Preflight failure: the
+// parent accepted it as the job's verdict, never relaunched it, and showed the
+// user a preflight problem. It is a crash. A single-shot helper says so in its
+// Result; a resident one writes nothing and exits with its own code, because
+// a Result written between jobs would be read by the next job as its own.
+void a_helper_that_throws_mid_job_is_relaunched_as_a_crash_test()
+{
+    const NeuralRenderResult reported = neural_worker_detail::WorkerThrewResult(41);
+    CHECK(!reported.ok);
+    CHECK(!reported.cancelled);
+    CHECK(reported.failure == NeuralRenderFailure::WorkerCrashed);
+    CHECK_EQ(uint64_t{41}, reported.jobId);
+    CHECK(kWorkerThrewExitCode != 0 && kWorkerThrewExitCode != kRetiredExitCode &&
+          kWorkerThrewExitCode != neural_worker_detail::kConfigurationChangedExitCode);
+
+    const auto crashRecoveries = [](const std::vector<NeuralRenderProgress>& updates) {
+        return std::ranges::count_if(updates, [](const NeuralRenderProgress& update) {
+            return update.phase == NeuralRenderPhase::Recovering &&
+                   update.recovering == NeuralRenderFailure::WorkerCrashed;
+        });
+    };
+
+    ResetFailureInjection(L"threw-once");
+    std::vector<NeuralRenderProgress> progress;
+    size_t restarts = 0;
+    NeuralSegmentSink sink;
+    sink.onRestart = [&] { ++restarts; };
+    const NeuralRenderResult single = RunNeuralWorker(CurrentExecutable(),
+        ResidentRequest(L"threw-once-source.mkv", 41),
+        [&](const NeuralRenderProgress& update) { progress.push_back(update); }, {}, sink);
+    CHECK(single.ok);
+    CHECK(single.failure == NeuralRenderFailure::None);
+    CHECK_EQ(uint64_t{41}, single.jobId);
+    CHECK_EQ(uint64_t{2}, FailureInjectionAttempts(L"threw-once"));
+    CHECK_EQ(size_t{1}, restarts);
+    CHECK_EQ(std::ptrdiff_t{1}, crashRecoveries(progress));
+    ResetFailureInjection(L"threw-once");
+
+    progress.clear();
+    restarts = 0;
+    NeuralJobHooks hooks;
+    hooks.progress = [&](const NeuralRenderProgress& update) { progress.push_back(update); };
+    hooks.segments.onRestart = [&] { ++restarts; };
+    ResidentNeuralHelper helper;
+    const NeuralRenderResult resident = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-threw-once-source.mkv", 42), hooks);
+    CHECK(resident.ok);
+    CHECK(resident.failure == NeuralRenderFailure::None);
+    CHECK_EQ(uint64_t{42}, resident.jobId);
+    CHECK_EQ(uint64_t{2}, FailureInjectionAttempts(L"threw-once"));
+    CHECK_EQ(size_t{1}, restarts);
+    CHECK_EQ(std::ptrdiff_t{1}, crashRecoveries(progress));
+    helper.Release();
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+    ResetFailureInjection(L"threw-once");
+}
+
+// The same exception between jobs. A resident helper that threw while idle
+// wrote an unsolicited Result with job id 0 and exited 0, and the next job -
+// sent while it was still tearing down - read that Result as its own failure.
+// With nothing written, that job meets a crash and is relaunched instead.
+void a_resident_helper_that_throws_while_idle_does_not_fail_the_next_job_test()
+{
+    NeuralJobHooks hooks;
+    ResidentNeuralHelper helper;
+    resident_helper::HelperPlan plan{};
+    const NeuralRenderResult first = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-threw-when-idle-source.mkv", 51), hooks, {}, &plan);
+    CHECK(first.ok);
+    CHECK(plan == resident_helper::HelperPlan::Launch);
+    // Past the 150 ms grace, when the fake's idle sample throws, and inside the
+    // 600 ms it stays alive afterwards: the parent has every reason to reuse it.
+    std::this_thread::sleep_for(300ms);
+    CHECK(helper.Resident());
+    const NeuralRenderResult second = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-source.mkv", 52), hooks, {}, &plan);
+    CHECK(second.ok);
+    CHECK(second.failure == NeuralRenderFailure::None);
+    CHECK_EQ(uint64_t{52}, second.jobId);
+    helper.Release();
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -3227,5 +3334,7 @@ int wmain(int argc, wchar_t** argv)
     second_kill_fails_closed_with_a_reason_and_leaves_no_orphan_test();
     recovery_probe_refusal_fails_closed_instead_of_relaunching_test();
     a_terminal_message_of_the_wrong_kind_is_malformed_on_every_path_test();
+    a_helper_that_throws_mid_job_is_relaunched_as_a_crash_test();
+    a_resident_helper_that_throws_while_idle_does_not_fail_the_next_job_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
