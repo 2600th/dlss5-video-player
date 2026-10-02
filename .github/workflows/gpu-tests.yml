@@ -2,7 +2,7 @@ name: gpu-tests
 
 # The `gpu`- and `audio`-labelled suites, which the hosted runners cannot run.
 #
-# build-windows runs `ctest -LE "gpu|audio"`, so thirteen tests - and with them
+# build-windows and nightly never run these, so thirteen tests - and with them
 # almost all of DLSSGBackend.cpp and FrameGenerationPass.cpp, the newest and
 # most complex feature in the tree, plus the audio clock every video frame's
 # due time is computed from - carry no CI-executed assertion. They pass in
@@ -16,14 +16,13 @@ name: gpu-tests
 # registered the workflow simply never runs, which is the same coverage as
 # today and costs nothing.
 #
-# It is scheduled rather than run per push: a self-hosted GPU box is a shared,
-# serial resource, and these tests drive a real device. workflow_dispatch is
-# there for the run you actually want before tagging a release.
+# It runs on request, not per push: a self-hosted GPU box is a shared, serial
+# resource, and these tests drive a real device. It used to be scheduled daily
+# as well, but with no runner registered every scheduled run queued for 24 h
+# and was cancelled - a failure a day that reported nothing. Dispatch it for
+# the run you want before tagging; add the schedule back once a runner exists.
 
 on:
-  schedule:
-    # 03:00 UTC daily, off the back of the day's merges.
-    - cron: '0 3 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -44,20 +43,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Clone NVIDIA DLSS SDK
-        shell: cmd
-        run: |
-          git init external\DLSS
-          git -C external\DLSS remote add origin https://github.com/NVIDIA/DLSS.git
-          git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
-          git -C external\DLSS checkout --detach FETCH_HEAD
-
-      - name: Fetch pinned UI assets and media helpers
-        shell: powershell
-        run: |
-          .\tools\fetch_ui_assets.ps1
-          .\tools\fetch_youtube_helpers.ps1
-          .\tools\fetch_ffmpeg_helpers.ps1
+      - name: Build dependencies
+        uses: ./.github/actions/build-deps
 
       # Fetches and checks the locked set into external/runtime. It stages
       # nothing into the build tree; that happens after the build below.
