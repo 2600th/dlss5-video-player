@@ -67,7 +67,24 @@ cmake --build --preset vs2022 --parallel
 ctest --preset portable
 ```
 
-Two more presets reproduce CI's quality job. `analyze` runs the MSVC code
+That is the shipping configuration, which releases and the nightly workflow
+build. Pull requests build the `ci` preset into `build-ci`, which is also the
+quickest local loop for device-free work: the shipped targets and the
+device-free suites, without the GPU and audio smokes
+(`DLSS_VIDEO_PLAYER_HARDWARE_TESTS=OFF`) and without link-time code generation,
+which otherwise re-optimises the whole player for every test executable it
+links. Its `quick` test preset leaves out the `slow` tier - the PolicyTests
+cases that drive real child processes (`PolicyTestsSlow`) and
+`CachedExportTests` - which `portable` runs:
+
+```powershell
+cmake --preset ci
+cmake --build --preset ci --parallel
+ctest --preset quick
+```
+
+Two more presets reproduce the nightly quality job, which every release also
+runs on its tag. `analyze` runs the MSVC code
 analyzer on the three shipped targets, and `asan` builds the portable suites with
 AddressSanitizer into `build-asan`; run them with
 `cmake --preset asan`, `cmake --build --preset asan --parallel` and
@@ -117,8 +134,10 @@ it skipped. `FrameGenerationSmoke` runs on `external/test-media/dlaa-smoke.mp4`
 when that file is there; it is fetched by no script, so otherwise the test
 generates a stand-in of the same shape (1280x720, 30 fps, H.264 with audio)
 with the staged FFmpeg and runs on that.
-`ctest -LE "gpu|audio"` is the portable run CI performs; `ctest -L "gpu|audio"`
-runs the hardware set. `AudioClockSmoke` is the `audio` one: it asserts the
+`ctest -LE "gpu|audio"` is the full device-free run (the `portable` preset) and
+`ctest -L "gpu|audio"` the hardware set; the hardware set needs a tree
+configured with `DLSS_VIDEO_PLAYER_HARDWARE_TESTS` on, as `vs2022` and
+`build_windows.bat` are. `AudioClockSmoke` is the `audio` one: it asserts the
 audio clock every video frame's due time is computed from, against a real
 render endpoint. Each opens with a no-adapter check and reports itself skipped
 (exit 125) rather than failed on a machine without a GPU.
@@ -321,10 +340,24 @@ application, official SDK DLSS runtime, notices and documentation, without
 the neural runtime, FFmpeg or YouTube helpers. CI assembles and verifies this
 core variant on every push and pull request. The `v*` tag workflow publishes it
 as a **draft** release with the notes and a provenance attestation; the complete
-experimental package is assembled locally, attached to the draft as
-`dlss5-video-player-v<version>-win64.zip` with its `.sha256`, and only then is
-the release published. A publish that failed can be re-run for the same tag
-from the Actions tab (`workflow_dispatch` with the tag as input).
+experimental package is assembled locally and then finished with one command:
+
+```powershell
+./tools/publish_release.ps1            # verify, rename, checksum, attach to the draft
+./tools/publish_release.ps1 -Publish   # the same, then publish the draft
+```
+
+It verifies the package, renames it in place to
+`dlss5-video-player-v<version>-win64.zip`, writes its `.sha256`, attaches both
+to this VERSION's draft (never replacing an asset already there), and with
+`-Publish` publishes it. Publishing starts `attest-release-asset.yml`, which
+attests the published zip after checking it against that `.sha256`. A publish
+that failed can be re-run for the same tag from the Actions tab
+(`workflow_dispatch` with the tag as input).
+
+The documentation stamps (`_Verified against <version> ...`) have to name the
+release's major.minor: a minor or major release re-reads and re-stamps every
+guide `tools/release_notes.ps1` lists, and a patch release needs none.
 
 The complete package bundles FFmpeg under GPLv3. Its source is public
 upstream - FFmpeg, BtbN's FFmpeg-Builds scripts and every library they pin,
