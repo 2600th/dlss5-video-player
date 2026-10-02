@@ -136,7 +136,7 @@
         {
           "@type": "Question",
           "name": "Does it upscale video too?",
-          "acceptedAnswer": { "@type": "Answer", "text": "It can, with DLSS Super Resolution, but that is off by default because on video it does not beat a plain scaler: on six clips upscaled from 960×540 to 1080p, bicubic scored higher every time. It is built for rendered games, not decoded footage, so turn it on for its look, not for detail. Neural rendering itself keeps the source resolution." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. RTX Video Super Resolution upscales playback by default wherever the window shows a video larger than it is: on six clips upscaled from 960×540 to 1080p it scored 87.5 VMAF against 80.5 for a plain bicubic upscale. DLSS Super Resolution is there too, off by default, because on video it scored below bicubic every time. Neural rendering itself keeps the source resolution." }
         },
         {
           "@type": "Question",
@@ -670,7 +670,7 @@
   <div class="readout">
     <p class="readout__row"><span class="readout__k">Hardware</span><span class="readout__v readout__v--prose">An NVIDIA RTX card and driver 610.47 or newer; older drivers are refused up front. Checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 cards lack native FP8, should be several times slower, and are untested; for their frame generation the player offers the unofficial community dlssg_sm86 add-on.</span></p>
     <p class="readout__row"><span class="readout__k">Speed</span><span class="readout__v readout__v--prose">On an RTX 5090 a live session costs <span class="data">6.8&nbsp;ms</span> a frame at 1080p30, <span class="data">9.9&nbsp;ms</span> at 1440p30 and <span class="data">23&nbsp;ms</span> at 4K30, all faster than the video plays. On an RTX 4080 SUPER a whole 4K render ran at <span class="data">14.8&nbsp;fps</span>, slower than a 30&nbsp;fps film plays.</span></p>
-    <p class="readout__row"><span class="readout__k">Upscaling</span><span class="readout__v readout__v--prose">DLSS Super Resolution scored below a plain bicubic upscale on all six video clips measured. It is built for games, so it is off by default and there for its look, not for detail.</span></p>
+    <p class="readout__row"><span class="readout__k">Upscaling</span><span class="readout__v readout__v--prose">RTX Video Super Resolution upscales playback by default: <span class="data">87.5</span> VMAF against <span class="data">80.5</span> for bicubic on six clips, 960×540 to 1080p. DLSS Super Resolution scored below bicubic on all six; it is built for games, so it is off by default.</span></p>
     <p class="readout__row"><span class="readout__k">Runtime</span><span class="readout__v readout__v--prose">The neural runtime is a modified, unsigned community build, not a signed NVIDIA package. <a href="#faq-unsigned">Why it is unsigned</a>.</span></p>
     <p class="readout__row"><span class="readout__k">Artifacts</span><span class="readout__v readout__v--prose">Depth is estimated from the picture, and so is motion on cards without the optical flow engine. Expect some artifacts.</span></p>
     <p class="readout__row"><span class="readout__k">Low key</span><span class="readout__v readout__v--prose">In deep shadow the model can crush a face towards black and add speckle. The frame below is the plainest case found.</span></p>
@@ -821,11 +821,12 @@
     <details class="faq__item" id="faq-upscale">
       <summary>Does it upscale video too?</summary>
       <p>
-        It can, with DLSS Super Resolution, but that is off by default because
-        on video it does not beat a plain scaler: on six clips upscaled from
-        960×540 to 1080p, bicubic scored higher every time. It is built for
-        rendered games, not decoded footage, so turn it on for its look, not
-        for detail. Neural rendering itself keeps the source resolution.
+        Yes. RTX Video Super Resolution upscales playback by default wherever
+        the window shows a video larger than it is: on six clips upscaled from
+        960×540 to 1080p it scored 87.5 VMAF against 80.5 for a plain bicubic
+        upscale. DLSS Super Resolution is there too, off by default, because on
+        video it scored below bicubic every time. Neural rendering itself keeps
+        the source resolution.
       </p>
     </details>
     <details class="faq__item" id="faq-photos">

@@ -220,6 +220,13 @@ to attach to a bug report when YouTube changes something upstream.
 
 ## Upscaling is off or playback drops frames
 
+Two upscalers, and only one at a time. **RTX VSR Upscaling** is on by default and
+works whenever the window shows the video larger than it is; the status line says
+`RTX VSR Upscaling on` while it does. If playback keeps dropping frames because of
+it, it lowers its own quality for that video, then pauses (`RTX VSR Upscaling
+paused (playback fell behind)`); a lower rung under **Video > Compare > RTX VSR
+quality**, or turning it off in the DLSS menu, settles it for good.
+
 DLSS Upscaling starts off on a fresh installation and then follows the saved
 preference. Enable it from the DLSS menu or bottom bar. The output rung is Auto
 by default and follows the monitor's current mode; **DLSS > Upscaling output**
@@ -253,8 +260,8 @@ and the notice `R` shows, name the one that is missing:
 
 Like every compare mode, the RTX VSR view is live only during cached playback on
 the neural view (`D`). As the playback upscaler (**DLSS > RTX VSR upscaling**) it
-runs whenever the window shows the video larger than it is; the same conditions
-grey that menu item. Its cost is logged every 300 frames as `RTX VSR GPU:`; if
+runs whenever the window shows the video larger than it is; the reasons listed
+above grey that menu item too, and its label names the one that applies. Its cost is logged every 300 frames as `RTX VSR GPU:`; if
 playback drops frames with it on, pick a lower rung under **Video > Compare >
 RTX VSR quality**, or turn **RTX VSR upscaling** off.
 

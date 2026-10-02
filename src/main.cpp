@@ -5423,7 +5423,7 @@ private:
     void SetComparisonMode(ComparisonMode mode){
         if(!ComparisonModesAvailable()){
             LOG("Comparison mode refused: loaded="<<m_loaded<<" cachedPair="<<m_cachedPlayback<<" neuralView="<<m_neuralRequested);
-            if(const wchar_t* key=compare_availability::RefusalKey(m_loaded,m_neuralRequested,m_cachedPlayback))ShowToast(T(key));
+            if(const wchar_t* key=compare_availability::RefusalKey(m_loaded,m_neuralRequested,m_cachedPlayback,NeuralJobActive()))ShowToast(T(key));
             return;
         }
         // RTX VSR that cannot run says why, where the key was pressed.
@@ -5476,7 +5476,6 @@ private:
         m_comparison.againstVsr=!m_comparison.againstVsr;++m_labelTextRevision;ApplyComparison();
         LOG("Comparison against="<<(m_comparison.againstVsr?"RTX VSR":"DLSS 5"));
     }
-    // The ladder is named in the RTX VSR tag, so a change redraws the atlas.
     // The keep-up guard (VsrPolicy.h). Measures only while VSR is the upscaler and
     // the video plays; a new video starts it over at the chosen quality.
     void GuardPlaybackVsr(){
@@ -5507,12 +5506,12 @@ private:
     }
     static const wchar_t* QualityNameKey(vsr_policy::Quality quality){
         switch(quality){
-            case vsr_policy::Quality::Low:return L"menu.compare_vsr_quality_0";
-            case vsr_policy::Quality::Medium:return L"menu.compare_vsr_quality_1";
-            case vsr_policy::Quality::High:return L"menu.compare_vsr_quality_2";
+            case vsr_policy::Quality::Low:return L"vsr.quality.low";
+            case vsr_policy::Quality::Medium:return L"vsr.quality.medium";
+            case vsr_policy::Quality::High:return L"vsr.quality.high";
             case vsr_policy::Quality::Ultra:break;
         }
-        return L"menu.compare_vsr_quality_3";
+        return L"vsr.quality.ultra";
     }
     void TogglePlaybackVsr(){
         m_playbackVsr=!m_playbackVsr;
@@ -5521,8 +5520,12 @@ private:
         LOG("RTX VSR playback upscaling "<<(m_playbackVsr?"on":"off"));
         SaveVideoSettings();ApplyComparison();SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
     }
+    // The ladder is named in the RTX VSR tag, so a change redraws the atlas. A pick
+    // from the menu is the user's, so whatever the keep-up guard lowered ends here.
     void SetVsrQuality(vsr_policy::Quality quality){
-        if(quality==m_comparison.vsrQuality)return;
+        const bool guarded=m_vsrSessionQuality.has_value();
+        m_vsrSessionQuality.reset();m_vsrGuard.Reset();
+        if(quality==m_comparison.vsrQuality){if(guarded)ApplyComparison();return;}
         m_comparison.vsrQuality=quality;++m_labelTextRevision;ApplyComparison();
         LOG("RTX VSR quality="<<static_cast<int>(quality));
     }
@@ -5915,12 +5918,19 @@ private:
                     EnableMenuItem(menu,command,MF_BYCOMMAND|(admitted?MF_ENABLED:MF_GRAYED));
                 }
             }
+            // RTX VSR Upscaling: checked as set, greyed only where a renderer has said
+            // it cannot run here - nothing loaded is no reason to refuse the setting -
+            // and then labelled with why, as the compare segment's tooltip is.
+            {
+                const bool usable=!m_renderer||VsrUsable();
+                std::wstring label=T(L"menu.rtx_vsr_upscaling");
+                if(!usable)label+=Format(T(L"menu.rtx_vsr_unavailable"),VsrReasonText().c_str());
+                app_menu::SetMenuCommandText(menu,IDM_RTX_VSR_UPSCALING,label);
+                CheckMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(m_playbackVsr?MF_CHECKED:MF_UNCHECKED));
+                EnableMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(usable?MF_ENABLED:MF_GRAYED));
+            }
             // Outside the radio range above, which CheckMenuRadioItem clears:
             // this is a constraint on the multiple, not one of the choices.
-            // RTX VSR upscaling: checked as set, greyed only where a renderer has said
-            // it cannot run here - nothing loaded is no reason to refuse the setting.
-            CheckMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(m_playbackVsr?MF_CHECKED:MF_UNCHECKED));
-            EnableMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(!m_renderer||VsrUsable()?MF_ENABLED:MF_GRAYED));
             CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
                           MF_BYCOMMAND|(m_evenCadenceOnly?MF_CHECKED:MF_UNCHECKED));
             CheckMenuItem(menu,IDM_AUDIO_PASSTHROUGH,
@@ -5947,7 +5957,11 @@ private:
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
             app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(SelectedComparisonMode()),m_zoomStep>0,m_comparison.swap,m_loupe,m_comparison.differenceLuma,
                                            VsrUsable(),m_comparison.againstVsr);
-            app_menu::UpdateVsrQualityMenu(menu,ComparisonModesAvailable()&&VsrUsable(),UINT(vsr_policy::QualityIndex(m_comparison.vsrQuality)));
+            // The ladder is the comparison view's and playback upscaling's, so it is
+            // live for either; the radio marks the rung in use, which the keep-up guard
+            // may have lowered for this video.
+            app_menu::UpdateVsrQualityMenu(menu,VsrUsable()&&(m_playbackVsr||ComparisonModesAvailable()),
+                                           UINT(vsr_policy::QualityIndex(m_vsrSessionQuality.value_or(m_comparison.vsrQuality))));
             app_menu::UpdateMaskMenu(menu,m_loaded,!m_maskSource.pixels.empty(),m_maskInvert,MaskFeatherIndex());
             app_menu::UpdateSecondMixMenu(menu,ComparisonModesAvailable(),SecondMixIndex());
             EnableMenuItem(menu,IDM_SAVE_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
@@ -7227,7 +7241,8 @@ private:
         // RTX VSR is the upscaler whenever DLSS Upscaling is off and the picture is
         // shown larger than the video; the line names it and the size it made.
         if(m_loaded&&m_renderer&&m_renderer->PlaybackVsrShown())
-            return L"RTX VSR upscaling \u00b7 "+std::to_wstring(m_renderer->VsrOutputW())+L"×"+std::to_wstring(m_renderer->VsrOutputH());
+            return L"RTX VSR Upscaling on \u00b7 "+std::to_wstring(m_renderer->VsrOutputW())+L"×"+std::to_wstring(m_renderer->VsrOutputH());
+        if(m_loaded&&m_playbackVsr&&m_vsrSessionOff)return L"RTX VSR Upscaling paused (playback fell behind)";
         if(m_loaded&&m_decoder.Width()&&m_decoder.Height()&&!UpscalingTarget(m_decoder.Width(),m_decoder.Height(),EffectiveUpscaleHeight()).grows){
             // Two different answers the old text collapsed into one. A 4K source
             // on a 4K panel has nothing to gain; a panel below 1080 lines has
@@ -7315,6 +7330,9 @@ private:
         UpdateCachedStatus();InvalidateControls();return ready;
     }
     void RestoreUpscaling(){
+        // Every load comes through here, including a reload of the same file, which
+        // the guard's path check alone would not notice.
+        m_vsrGuardSource.clear();
         const uint32_t height=EffectiveUpscaleHeight();
         if(m_upscalingRequested&&UpscalingTarget(m_decoder.Width(),m_decoder.Height(),height).grows)
             EnableUpscaling(height);
@@ -7869,6 +7887,9 @@ private:
         facts.gpu=m_opt.detectedGpu.description;facts.generation=m_opt.detectedGpu.generation;
         facts.driverVersion=m_opt.detectedGpu.driverVersion;facts.safeMode=m_opt.safeMode;
         if(FrameGenAddonState().loaded)facts.frameGenAddon=FrameGenAddonState().proxy;
+        facts.rtxVsr=!VsrEngine::kBuilt?start_screen::VsrState::NotInBuild
+                    :!framegen_addon::RegularFile(ExecutableDirectory()/L"nvngx_vsr.dll")?start_screen::VsrState::MissingRuntime
+                    :m_playbackVsr?start_screen::VsrState::On:start_screen::VsrState::Off;
         {std::scoped_lock lock(m_startAnswers->mutex);facts.runtime=m_startAnswers->runtime;facts.runtimeVersion=m_startAnswers->runtimeVersion;}
         // The live-session forecast, which is measured on this machine once a
         // session has run and otherwise a measured prior for the generation;

@@ -18,8 +18,11 @@ decisions that still shape the code are in
   against 80.5 for bicubic and 74.9 for DLSS Super Resolution, 78.5 against 69.5
   and 66.1 on H.264 input, and ahead by VMAF NEG and PSNR too, at 0.45 ms a
   frame ([report](docs/measurements/vsr-quality-20261002/REPORT.md)). Nobody had
-  published such numbers; the report lists what had been. It stands aside for
-  DLSS Upscaling, the compare views, HDR and debug views, and can shimmer
+  published such numbers; the report lists what had been. It upscales the
+  render in the DLSS 5 view and the original in the Original view and the
+  press-and-hold peek, so the A/B still compares the models alone, and stands
+  aside for DLSS Upscaling, the views that draw both, HDR video and debug views.
+  The start screen says whether it is on. It can shimmer
   slightly on fine moving detail, so **DLSS > RTX VSR upscaling** turns it off.
   The status line says when it is the upscaler. It works on HDR displays for SDR
   video, and if playback keeps dropping frames because of it on a slower GPU, it

@@ -1294,6 +1294,21 @@ void start_screen_names_a_loaded_frame_generation_addon_test()
     CHECK(std::none_of(plain.begin(), plain.end(), [](const Line& line) { return line.label == L"Frame Generation"; }));
     facts.frameGenAddon = L"version.dll";
     const auto lines = CapabilityLines(facts);
+    // RTX VSR says what it does, or why it does not; never a failure that offers safe mode.
+    const auto vsrLine = [&](VsrState state) {
+        Facts copy = facts;
+        copy.rtxVsr = state;
+        const auto all = CapabilityLines(copy);
+        const auto found = std::find_if(all.begin(), all.end(), [](const Line& line) { return line.label == L"RTX VSR"; });
+        return found == all.end() ? std::optional<Line>{} : std::optional<Line>(*found);
+    };
+    CHECK(!vsrLine(VsrState::Unknown));
+    REQUIRE(vsrLine(VsrState::On));
+    CHECK(vsrLine(VsrState::On)->mark == Mark::Pass);
+    for (const VsrState state : {VsrState::Off, VsrState::NotInBuild, VsrState::MissingRuntime}) {
+        REQUIRE(vsrLine(state));
+        CHECK(vsrLine(state)->mark == Mark::Info);
+    }
     const auto addon = std::find_if(lines.begin(), lines.end(), [](const Line& line) { return line.label == L"Frame Generation"; });
     REQUIRE(addon != lines.end());
     CHECK(addon->mark == Mark::Info);
@@ -9500,13 +9515,17 @@ void hdr_output_follows_the_display_under_the_window_test()
 void compare_refusal_names_what_is_missing_test()
 {
     using compare_availability::RefusalKey;
-    CHECK(RefusalKey(true, true, true) == nullptr);
-    CHECK(std::wstring_view(RefusalKey(false, false, false)) == L"compare.refused.no_video");
-    CHECK(std::wstring_view(RefusalKey(true, false, false)) == L"compare.refused.neural_off");
-    CHECK(std::wstring_view(RefusalKey(true, false, true)) == L"compare.refused.neural_off");
-    CHECK(std::wstring_view(RefusalKey(true, true, false)) == L"compare.refused.no_render");
+    CHECK(RefusalKey(true, true, true, false) == nullptr);
+    CHECK(std::wstring_view(RefusalKey(false, false, false, false)) == L"compare.refused.no_video");
+    // The same words the compare bar already uses for this state.
+    CHECK(std::wstring_view(RefusalKey(true, false, false, false)) == L"compare.hint.unavailable");
+    CHECK(std::wstring_view(RefusalKey(true, false, true, false)) == L"compare.hint.unavailable");
+    CHECK(std::wstring_view(RefusalKey(true, true, false, false)) == L"compare.refused.no_render");
+    // A render already on its way is waited for, not asked for again.
+    CHECK(std::wstring_view(RefusalKey(true, true, false, true)) == L"compare.refused.render_starting");
     const Localizer localizer;
-    for (const wchar_t* key : {L"compare.refused.no_video", L"compare.refused.neural_off", L"compare.refused.no_render"}) {
+    for (const wchar_t* key : {L"compare.refused.no_video", L"compare.hint.unavailable", L"compare.refused.no_render",
+                               L"compare.refused.render_starting"}) {
         const std::wstring text = localizer.Get(key);
         CHECK(!text.empty() && text != key);
     }

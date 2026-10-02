@@ -23,11 +23,13 @@ namespace compare_availability {
 // they need a video, Neural Rendering on and a rendered pair playing. A press
 // that arrived without one used to change nothing on screen; issue #14's log
 // held twenty of them in eighty seconds.
-inline const wchar_t* RefusalKey(bool loaded, bool neuralRequested, bool renderedPair)
+// `renderStarting`: a neural job or live session is already on its way to a pair,
+// so the press is told to wait rather than to start one.
+inline const wchar_t* RefusalKey(bool loaded, bool neuralRequested, bool renderedPair, bool renderStarting)
 {
     if (!loaded) return L"compare.refused.no_video";
-    if (!neuralRequested) return L"compare.refused.neural_off";
-    if (!renderedPair) return L"compare.refused.no_render";
+    if (!neuralRequested) return L"compare.hint.unavailable";
+    if (!renderedPair) return renderStarting ? L"compare.refused.render_starting" : L"compare.refused.no_render";
     return nullptr;
 }
 

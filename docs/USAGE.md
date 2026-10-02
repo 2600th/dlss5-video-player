@@ -492,6 +492,8 @@ which calms grain and also trails motion. The greyed
 line at the top of the submenu and each item's right-hand column give the measured
 range. The same choice is the **History** row of **Export with DLSS stages**.
 
+### YouTube source quality
+
 **Video > YouTube source quality** selects 1080p, 1440p or 2160p. At the selected
 resolution, the player chooses the highest advertised video bitrate across
 available codecs and containers, with the highest-bitrate separate audio stream
@@ -561,7 +563,7 @@ export.
 ## Saved settings and reproducibility
 
 `DLSSVideoPlayer.ini` beside the executable stores volume, mute, fit/fill,
-original/neural view, upscaling preference and output size, YouTube quality,
+original/neural view, RTX VSR Upscaling (`[Playback] RtxVsr`), DLSS Upscaling (`[Playback] SuperResolution`) and its output size, YouTube quality,
 image adjustments, comparison mode and Mix, neural settings, processing scale and
 guide switches. It
 also keeps `[NeuralPace]`: one measured steady-state render pace per source
@@ -992,7 +994,7 @@ streams, the containers it can be written as, the Super Resolution rungs that
 grow it (and to what size), whether the neural runtime is installed and matches
 its lock, and so which stages this machine can run on it. `--capabilities`
 also measures how far frame generation goes on this GPU, which brings up a
-device of its own, and prints `frame_generation_addon` when the dlssg_sm86
+device of its own, and prints `frame_generation_addon` whenever the dlssg_sm86
 add-on for RTX 20/30 is loaded
 ([troubleshooting](TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on));
 `--json` prints one JSON object instead of `key=value` lines.

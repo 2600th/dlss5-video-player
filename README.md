@@ -226,7 +226,8 @@ subtitles, HDR, the render quality ladder and `--render`.
 | Stop | `S` |
 
 Settings persist between launches. A fresh install starts with neural rendering
-on, upscaling off, and upscaling output and YouTube quality on **Auto**: the
+on, RTX VSR Upscaling on, DLSS Upscaling off, and DLSS's output and YouTube
+quality on **Auto**: the
 largest resolution your monitor can show, and the best YouTube stream up to
 1440p.
 

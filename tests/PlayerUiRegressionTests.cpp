@@ -449,6 +449,12 @@ struct PlayerAppTestAccess {
         app.HandleCommand(IDM_RTX_VSR_UPSCALING);
         CHECK(app.EffectiveComparison().playbackVsr);
         CHECK(!app.m_vsrSessionQuality.has_value());
+        // A quality picked from the menu is the user's too: the guard's lowering ends.
+        app.m_vsrSessionQuality=vsr_policy::Quality::Low;
+        app.SetVsrQuality(vsr_policy::Quality::Ultra);
+        CHECK(!app.m_vsrSessionQuality.has_value());
+        CHECK(app.EffectiveComparison().playbackVsrQuality==vsr_policy::Quality::Ultra);
+        app.SetVsrQuality(vsr_policy::Quality::High);
         // Auto is the fresh default, and it is a state of its own: the manual
         // rung underneath it must not move until a rung is actually picked.
         CHECK(app.m_upscaleAuto);
