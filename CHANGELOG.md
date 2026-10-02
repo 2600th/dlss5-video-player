@@ -21,7 +21,11 @@ decisions that still shape the code are in
   published such numbers; the report lists what had been. It stands aside for
   DLSS Upscaling, the compare views, HDR and debug views, and can shimmer
   slightly on fine moving detail, so **DLSS > RTX VSR upscaling** turns it off.
-  The status line says when it is the upscaler.
+  The status line says when it is the upscaler. It works on HDR displays for SDR
+  video, and if playback keeps dropping frames because of it on a slower GPU, it
+  lowers its quality for that video, then pauses, and says so.
+- **With the dlssg_sm86 add-on, the 4x limit says how to raise it.** The
+  confirmation names `MaxGeneratedFrames=4` in `dlssg_sm86.ini` for 5x.
 
 ### Fixed
 

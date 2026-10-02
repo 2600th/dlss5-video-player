@@ -233,6 +233,9 @@ struct ComparisonSettings {
     // that builds or refreshes a renderer already pushes these settings, and a
     // capture, which passes none, can never pick it up.
     bool playbackVsr = false;
+    // The quality playback VSR runs at: the comparison ladder's, unless the keep-up
+    // guard lowered it for this video (VsrPolicy.h KeepUpGuard).
+    vsr_policy::Quality playbackVsrQuality = vsr_policy::kDefaultQuality;
 };
 
 // Whether the present shows RTX VSR anywhere: its own view, the 2x2 (whose fourth

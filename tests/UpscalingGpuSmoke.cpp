@@ -973,8 +973,9 @@ int RunVsrProbe(const wchar_t* source)
             HWND playbackWindow=CreateWindowExW(0,L"STATIC",L"vsr playback",WS_POPUP,0,0,int(ww),int(wh),nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
             auto r=MakeD3D12Renderer();
             r->SetPresentFollowsWindow(true);
+            r->SetHdrOutputAllowed(true);
             playback=playback&&r->Initialize(playbackWindow,w,h,w,h,gw,gh,DefaultNeuralCarrierQuality());
-            ComparisonSettings plain;plain.playbackVsr=true;plain.vsrQuality=vsr_policy::Quality::High;
+            ComparisonSettings plain;plain.playbackVsr=true;plain.playbackVsrQuality=vsr_policy::Quality::High;
             if(playback){r->SetDLSS(false);r->SetComparison(plain);}
             uint32_t played=0,upscaled=0;VideoFrame next;
             while(playback&&played<10&&again.ReadNext(next)){
@@ -996,10 +997,19 @@ int RunVsrProbe(const wchar_t* source)
             plain.playbackVsr=true;r->SetComparison(plain);
             SetWindowPos(playbackWindow,nullptr,0,0,int(w),int(h),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
             const bool ownSize=off&&r->PresentCurrent()&&!r->PlaybackVsrShown();
+            // An SDR video on an HDR display is still SDR in: VSR upscales it and the
+            // compositor encodes its frame for the HDR swapchain. Forced, whatever the
+            // display is, as the hdr-output probe forces it.
+            SetWindowPos(playbackWindow,nullptr,0,0,int(ww),int(wh),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+            const uint64_t beforeHdr=r->VsrEvaluations();
+            bool hdrDisplay=ownSize&&r->SetHdrOutput(true,203.0f)&&r->HdrOutputActive();
+            for(uint32_t i=0;hdrDisplay&&i<3&&again.ReadNext(next);++i)
+                hdrDisplay=r->RenderFrame(next.bgra.data(),next.bgra.size(),nullptr,0,gw,gh,false,false,frameMs)&&r->PlaybackVsrShown()&&!r->GpuUnusable();
+            hdrDisplay=hdrDisplay&&r->VsrEvaluations()==beforeHdr+3;
             std::cout<<"vsr playback: frames="<<played<<" upscaled="<<upscaled<<" evaluations="<<afterPlay
                      <<" pausedKept="<<paused<<" offRestoresScale="<<off<<" meanAbsVsScale="<<playbackDiff
-                     <<" ownSizeLeftAlone="<<ownSize<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
-            playback=playback&&played==10&&upscaled==10&&afterPlay==10&&paused&&off&&ownSize&&playbackDiff>0.05&&playbackDiff<24.0&&
+                     <<" ownSizeLeftAlone="<<ownSize<<" hdrDisplay="<<hdrDisplay<<" output="<<r->VsrOutputW()<<"x"<<r->VsrOutputH()<<"\n";
+            playback=playback&&played==10&&upscaled==10&&afterPlay==10&&paused&&off&&ownSize&&hdrDisplay&&playbackDiff>0.05&&playbackDiff<24.0&&
                      r->VsrOutputW()==ww&&r->VsrOutputH()==wh;
             r.reset();DestroyWindow(playbackWindow);
         }

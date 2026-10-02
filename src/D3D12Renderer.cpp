@@ -2830,7 +2830,7 @@ bool D3D12Renderer::PlaybackVsrApplies(const present_scale::Target&target)const{
     // The one plain picture: with a reference resident, any comparison, a Mix other
     // than 1 or a mask is drawn from both members, and VSR of one would drop the other.
     state.comparing=m_hasReference&&(m_comparison.mode!=ComparisonMode::Neural||m_comparison.strength!=1.0f||(m_comparison.mask&&m_mask));
-    state.hdr=m_framePq||m_hdrOutput;
+    state.hdr=m_framePq;
     state.finalView=m_debugView==DebugView::Final;
     state.sourceW=m_sourceW;state.sourceH=m_sourceH;state.targetW=target.width;state.targetH=target.height;
     return vsr_policy::PlaybackUpscales(state);
@@ -2843,7 +2843,7 @@ void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const 
         // The decoded frame is the picture the compositor would have scaled: T is its
         // linearisation and nothing else (PSConvert), so VSR reads the same pixels.
         const auto size=vsr_policy::OutputSize(m_sourceW,m_sourceH,target.width,target.height);
-        m_playbackVsrShown=EvaluateVsr(cmd,slot,m_decodedTexture.Get(),2u,m_decodedSerial,size,m_comparison.vsrQuality);
+        m_playbackVsrShown=EvaluateVsr(cmd,slot,m_decodedTexture.Get(),2u,m_decodedSerial,size,m_comparison.playbackVsrQuality);
         return;
     }
     if(!ComparisonReadsVsr(m_comparison))return;

@@ -5156,7 +5156,7 @@ void frame_generation_menu_follows_the_measured_runtime_cap_test()
     REQUIRE(RuntimeLoweredPreference(4, 3u).has_value());
     CHECK_EQ(3u, *RuntimeLoweredPreference(4, 3u));
     const Localizer localizer;
-    for (const wchar_t* key : {L"menu.framegen_beyond_gpu", L"framegen.confirm.lowered"}) {
+    for (const wchar_t* key : {L"menu.framegen_beyond_gpu", L"framegen.confirm.lowered", L"framegen.confirm.lowered.addon"}) {
         const std::wstring text = localizer.Get(key);
         CHECK(!text.empty() && text != key);
     }
@@ -9279,6 +9279,41 @@ void vsr_policy_playback_upscales_only_a_plain_picture_shown_larger_test()
     CHECK(without([](PlaybackState& s) { s.targetW = 1280; s.targetH = 2000; }));
     // On by default: it measured above every plain scaler and DLSS SR.
     CHECK(vsr_policy::kPlaybackDefault);
+}
+
+// RTX VSR was measured on an RTX 5090 only; on a slower GPU High can cost a frame.
+// Playback that falls behind while VSR takes a real share of the frame budget steps
+// it down for that video - a quality at a time, then off - and never on one bad
+// window, nor for drops VSR cannot be the cause of.
+void vsr_policy_keep_up_guard_steps_down_only_for_sustained_drops_it_explains_test()
+{
+    using namespace vsr_policy;
+    // 30 fps for 3 s asks for 90 frames: 5 dropped is over 5 %, 4 is not.
+    CHECK(WindowFellBehind(3.0, 5, 30.0, 8.0));
+    CHECK(!WindowFellBehind(3.0, 4, 30.0, 8.0));
+    // VSR at 2 ms of a 33 ms budget is not what is dropping frames.
+    CHECK(!WindowFellBehind(3.0, 30, 30.0, 2.0));
+    CHECK(WindowFellBehind(3.0, 30, 30.0, 6.7));
+    CHECK(!WindowFellBehind(0.0, 30, 30.0, 8.0));
+    CHECK(!WindowFellBehind(3.0, 30, 0.0, 8.0));
+
+    KeepUpGuard guard;
+    CHECK(guard.Observe(true, Quality::High) == KeepUpStep::Hold);
+    CHECK(guard.Observe(false, Quality::High) == KeepUpStep::Hold);   // a good window clears it
+    CHECK(guard.Observe(true, Quality::High) == KeepUpStep::Hold);
+    CHECK(guard.Observe(true, Quality::High) == KeepUpStep::StepDown);
+    // A step starts over: the next quality gets two windows of its own.
+    CHECK(guard.Observe(true, Quality::Medium) == KeepUpStep::Hold);
+    CHECK(guard.Observe(true, Quality::Medium) == KeepUpStep::StepDown);
+    CHECK(guard.Observe(true, Quality::Low) == KeepUpStep::Hold);
+    CHECK(guard.Observe(true, Quality::Low) == KeepUpStep::TurnOff);
+    guard.Reset();
+    CHECK(guard.Observe(true, Quality::Ultra) == KeepUpStep::Hold);
+
+    CHECK(LowerQuality(Quality::Ultra) == Quality::High);
+    CHECK(LowerQuality(Quality::High) == Quality::Medium);
+    CHECK(LowerQuality(Quality::Medium) == Quality::Low);
+    CHECK(LowerQuality(Quality::Low) == Quality::Low);
 }
 
 void vsr_policy_decides_the_view_its_ladder_and_its_size_test()
@@ -15424,6 +15459,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(present_scale_follows_the_window_only_where_it_should_test),
     TEST_CASE(compare_compositor_stays_out_of_the_capture_program_test),
     TEST_CASE(vsr_policy_decides_the_view_its_ladder_and_its_size_test),
+    TEST_CASE(vsr_policy_keep_up_guard_steps_down_only_for_sustained_drops_it_explains_test),
     TEST_CASE(vsr_policy_playback_upscales_only_a_plain_picture_shown_larger_test),
     TEST_CASE(hdr_output_leaves_the_capture_programs_alone_test),
     TEST_CASE(hdr_output_follows_the_display_under_the_window_test),

@@ -3121,6 +3121,7 @@ public:
         // all - was the quietest: one measured session logged a single line
         // covering 132 s and two presented frames.
         ReportPlaybackHealth();
+        GuardPlaybackVsr();
         if(playback_tick::ReadsCachedAhead(TickNow())){
             if(!ReadNextCachedFrame())return;
         }
@@ -4312,7 +4313,12 @@ private:
         if(!plan.cadence.even)
             prompt+=Format(T(L"framegen.confirm.uneven"),plan.cadence.shortHold,plan.cadence.longHold);
         if(const auto lowered=frame_rate_policy::RuntimeLoweredPreference(m_frameGenPreference,MeasuredFrameGenerationCap()))
+        {
             prompt+=Format(T(L"framegen.confirm.lowered"),m_frameGenPreference+1u,*lowered+1u);
+            // With the dlssg_sm86 add-on the cap is its own MaxGeneratedFrames, which
+            // ships at 3 (4x); its bundled runtime goes higher (issue #14).
+            if(FrameGenAddonState().loaded)prompt+=T(L"framegen.confirm.lowered.addon");
+        }
         if(input.neural)prompt+=T(L"framegen.confirm.neural");
         LOG("Frame generation offer: output="<<WideToUtf8(output.wstring())
             <<" input="<<(input.neural?"neural":"original"));
@@ -5249,7 +5255,8 @@ private:
     // without changing the mode; see compare_gesture.
     ComparisonSettings EffectiveComparison()const{
         ComparisonSettings effective=m_comparison;
-        effective.playbackVsr=m_playbackVsr;
+        effective.playbackVsr=m_playbackVsr&&!m_vsrSessionOff;
+        effective.playbackVsrQuality=m_vsrSessionQuality.value_or(m_comparison.vsrQuality);
         const int viewW=ZoomViewWidth();const uint32_t outputW=ZoomOutputWidth();
         effective.zoomScale=compare_zoom::ScaleForStep(m_zoomStep,outputW,viewW);
         if(effective.zoomScale<=1.0f){effective.zoomCenterX=0.5f;effective.zoomCenterY=0.5f;}
@@ -5470,8 +5477,47 @@ private:
         LOG("Comparison against="<<(m_comparison.againstVsr?"RTX VSR":"DLSS 5"));
     }
     // The ladder is named in the RTX VSR tag, so a change redraws the atlas.
+    // The keep-up guard (VsrPolicy.h). Measures only while VSR is the upscaler and
+    // the video plays; a new video starts it over at the chosen quality.
+    void GuardPlaybackVsr(){
+        if(m_path!=m_vsrGuardSource){
+            m_vsrGuardSource=m_path;m_vsrGuard.Reset();m_vsrSessionQuality.reset();m_vsrSessionOff=false;m_vsrGuardAt={};
+        }
+        if(!m_loaded||!m_playing||!m_renderer||!m_renderer->PlaybackVsrShown()){m_vsrGuardAt={};return;}
+        const auto now=Clock::now();
+        if(m_vsrGuardAt==Clock::time_point{}||m_droppedFrames<m_vsrGuardDropped){m_vsrGuardAt=now;m_vsrGuardDropped=m_droppedFrames;return;}
+        const double seconds=std::chrono::duration<double>(now-m_vsrGuardAt).count();
+        if(seconds<vsr_policy::kKeepUpWindowSeconds)return;
+        const uint64_t dropped=m_droppedFrames-m_vsrGuardDropped;
+        const double vsrMs=m_renderer->LastVsrGpuMs();
+        m_vsrGuardAt=now;m_vsrGuardDropped=m_droppedFrames;
+        const vsr_policy::Quality current=m_vsrSessionQuality.value_or(m_comparison.vsrQuality);
+        const bool behind=vsr_policy::WindowFellBehind(seconds,dropped,m_decoder.FrameRate(),vsrMs);
+        const vsr_policy::KeepUpStep step=m_vsrGuard.Observe(behind,current);
+        if(step==vsr_policy::KeepUpStep::Hold)return;
+        LOG("RTX VSR keep-up: dropped "<<dropped<<" of "<<seconds*m_decoder.FrameRate()<<" frames with VSR at "<<vsrMs
+            <<" ms (quality "<<static_cast<int>(current)<<"); "<<(step==vsr_policy::KeepUpStep::TurnOff?"off":"stepping down")<<" for this video.");
+        if(step==vsr_policy::KeepUpStep::TurnOff){
+            m_vsrSessionOff=true;ShowToast(T(L"vsr.keep_up.off"));
+        }else{
+            m_vsrSessionQuality=vsr_policy::LowerQuality(current);
+            ShowToast(Format(T(L"vsr.keep_up.lowered"),T(QualityNameKey(*m_vsrSessionQuality)).c_str()));
+        }
+        ApplyComparison(false);UpdateCachedStatus();
+    }
+    static const wchar_t* QualityNameKey(vsr_policy::Quality quality){
+        switch(quality){
+            case vsr_policy::Quality::Low:return L"menu.compare_vsr_quality_0";
+            case vsr_policy::Quality::Medium:return L"menu.compare_vsr_quality_1";
+            case vsr_policy::Quality::High:return L"menu.compare_vsr_quality_2";
+            case vsr_policy::Quality::Ultra:break;
+        }
+        return L"menu.compare_vsr_quality_3";
+    }
     void TogglePlaybackVsr(){
         m_playbackVsr=!m_playbackVsr;
+        // A choice made now is the user's, not the guard's.
+        m_vsrSessionOff=false;m_vsrSessionQuality.reset();m_vsrGuard.Reset();
         LOG("RTX VSR playback upscaling "<<(m_playbackVsr?"on":"off"));
         SaveVideoSettings();ApplyComparison();SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
     }
@@ -12220,6 +12266,14 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // EffectiveComparison() the player pushes; the renderer decides each present
     // whether the picture is one it applies to (VsrPolicy.h PlaybackUpscales).
     bool m_playbackVsr=vsr_policy::kPlaybackDefault;
+    // The keep-up guard's state for the video on screen: what it lowered VSR to, or
+    // that it turned it off, and the window it is measuring. Never saved.
+    vsr_policy::KeepUpGuard m_vsrGuard;
+    std::optional<vsr_policy::Quality> m_vsrSessionQuality;
+    bool m_vsrSessionOff=false;
+    std::wstring m_vsrGuardSource;
+    Clock::time_point m_vsrGuardAt{};
+    uint64_t m_vsrGuardDropped=0;
     UINT_PTR m_activityTimer=0;
     // The status chips as last painted, what each last flashed on, and the
     // repaint timer that runs only while one is still fading.

@@ -66,6 +66,9 @@ private:
             {L"menu.dlss", L"DLSS"}, {L"menu.neural_rendering", L"Neural Rendering\tD"},
         {L"menu.dlss_upscaling", L"DLSS Upscaling"},
         {L"menu.rtx_vsr_upscaling", L"RTX VSR upscaling (recommended)"},
+        // The keep-up guard (VsrPolicy.h). %s is the quality's menu name.
+        {L"vsr.keep_up.lowered", L"Playback fell behind: RTX VSR quality lowered to %s for this video"},
+        {L"vsr.keep_up.off", L"Playback fell behind: RTX VSR upscaling paused for this video"},
             {L"menu.upscale_output", L"Upscaling output"},
             {L"menu.upscale_auto", L"Auto (match display)"},
             {L"menu.upscale_1080", L"1080p"}, {L"menu.upscale_1440", L"1440p"}, {L"menu.upscale_2160", L"2160p (4K)"},
@@ -192,6 +195,7 @@ private:
             {L"framegen.confirm.uneven", L"\n\nEach frame is shown for %u or %u refreshes of this display, which is the unevenness this video already plays with."},
             // %u is the setting's multiple, then the highest the runtime admits.
             {L"framegen.confirm.lowered", L"\n\nGenerated frames is set to %u\u00d7, but this GPU's Frame Generation allows up to %u\u00d7."},
+            {L"framegen.confirm.lowered.addon", L" The dlssg_sm86 add-on sets that limit: MaxGeneratedFrames=4 in dlssg_sm86.ini beside the player allows 5\u00d7, after a restart."},
             {L"framegen.confirm.neural", L"\n\nThe neural render on screen is what will be converted, not the original - upscale first, generate frames on the result, which is the order NVIDIA’s own pipeline uses. Turn Neural Rendering off first to generate frames from the original instead."},
             {L"framegen.exists", L"This video has already been converted:\n%s\n\nPlay that file instead of converting again?\n\nYes plays it. No converts again and replaces it."},
             {L"framegen.worker_failed", L"The conversion could not start. Try again."},

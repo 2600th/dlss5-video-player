@@ -1001,8 +1001,11 @@ reaches the capture, the cache or an export. As the upscaler
 (`vsr_policy::PlaybackUpscales`, `ComparisonSettings::playbackVsr`) it reads the
 decoded BGRA texture - T is that texture's linearisation and nothing else - and
 the present draws its output as the VSR view, untagged, wherever DLSS SR did not
-make the picture, nothing is being compared, the frame is SDR and the window
-shows it larger than it is. The setting rides on the presentation settings
+make the picture, nothing is being compared, the frame is SDR (an HDR swapchain
+is fine: the compositor encodes VSR's frame like any other) and the window
+shows it larger than it is. `vsr_policy::KeepUpGuard` lowers its quality
+(`ComparisonSettings::playbackVsrQuality`) for one video, then turns it off, when
+playback keeps dropping frames while VSR takes a fifth of the frame budget. The setting rides on the presentation settings
 every path that builds a renderer already pushes, so a capture, which pushes
 none, cannot pick it up. Measured in `docs/measurements/vsr-quality-20261002`.
 

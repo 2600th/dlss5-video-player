@@ -145,7 +145,10 @@ struct PlaybackState {
     bool ready = false;           // Decide() said Ready and the feature exists
     bool superResolution = false; // DLSS SR made this frame's picture: it is already upscaled
     bool comparing = false;       // a comparison, a Mix other than 1 or a mask is drawn
-    bool hdr = false;             // a PQ frame or an HDR swapchain: VSR's input is 8-bit SDR
+    // An HDR (PQ) frame: VSR's input is 8-bit SDR. An HDR display is not a reason -
+    // an SDR video on one is still SDR in, and the compositor brings VSR's frame to
+    // linear light and encodes it for the display as it does every other member.
+    bool hdr = false;
     bool finalView = true;        // not a debug view
     uint32_t sourceW = 0, sourceH = 0;
     uint32_t targetW = 0, targetH = 0;  // what the picture is fitted into
@@ -161,5 +164,47 @@ inline bool PlaybackUpscales(const PlaybackState& state)
     const Size size = OutputSize(state.sourceW, state.sourceH, state.targetW, state.targetH);
     return size.width > state.sourceW || size.height > state.sourceH;
 }
+
+// The keep-up guard. RTX VSR was measured on an RTX 5090 (High: 1.5 ms a 1080p
+// frame, 2.7 ms a 1440p one); a slower GPU can spend a real share of a frame on
+// it. Playback that drops more than kKeepUpDropShare of the frames the source asks
+// for, in a window where VSR took at least kKeepUpCostShare of the frame budget,
+// has fallen behind in a way VSR can explain. Two such windows in a row lower the
+// quality for that video, a level at a time, and at Low turn VSR off for it; the
+// saved setting never moves.
+inline constexpr double kKeepUpWindowSeconds = 3.0;
+inline constexpr double kKeepUpDropShare = 0.05;
+inline constexpr double kKeepUpCostShare = 0.2;
+
+inline bool WindowFellBehind(double seconds, uint64_t dropped, double sourceFps, double vsrGpuMs)
+{
+    if (seconds <= 0.0 || sourceFps <= 0.0) return false;
+    const double asked = seconds * sourceFps;
+    const double budgetMs = 1000.0 / sourceFps;
+    return double(dropped) > asked * kKeepUpDropShare && vsrGpuMs >= budgetMs * kKeepUpCostShare;
+}
+
+inline Quality LowerQuality(Quality quality)
+{
+    const size_t index = QualityIndex(quality);
+    return index == 0 ? kQualities[0] : kQualities[index - 1];
+}
+
+enum class KeepUpStep { Hold, StepDown, TurnOff };
+
+class KeepUpGuard {
+public:
+    KeepUpStep Observe(bool fellBehind, Quality current)
+    {
+        if (!fellBehind) { behind_ = 0; return KeepUpStep::Hold; }
+        if (++behind_ < 2) return KeepUpStep::Hold;
+        behind_ = 0;
+        return current == kQualities[0] ? KeepUpStep::TurnOff : KeepUpStep::StepDown;
+    }
+    void Reset() { behind_ = 0; }
+
+private:
+    int behind_ = 0;
+};
 
 } // namespace vsr_policy

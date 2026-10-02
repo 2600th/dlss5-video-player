@@ -446,9 +446,17 @@ see that.
 
 It stands aside wherever it does not apply: while **DLSS Upscaling** is on, in
 the comparison views (which show it as a member of their own), at a Mix other
-than 100% or with a mask, for an HDR video or on an HDR display (it takes 8-bit
-SDR), in a debug view, and wherever the video is shown at its own size or
-smaller. It needs what the **RTX VSR** view needs (see
+than 100% or with a mask, for an HDR video (it takes 8-bit SDR; an SDR video
+on an HDR display is upscaled as anywhere else), in a debug view, and wherever
+the video is shown at its own size or smaller.
+
+It watches that it keeps up. RTX VSR was measured on an RTX 5090; a slower GPU
+can spend a real share of each frame on it. If playback drops more than 5% of
+the video's frames for two 3-second windows in a row while RTX VSR takes at
+least a fifth of the frame time, the player lowers its quality one level for
+that video, and at Low pauses it for that video, with a notice each time. Your
+setting does not change, and the next video starts at it again; choosing the
+menu item again also starts over. It needs what the **RTX VSR** view needs (see
 [RTX VSR is grey](TROUBLESHOOTING.md#rtx-vsr-is-grey)); without it the item is
 grey and the window scales as before. `[Playback] RtxVsr` in
 `DLSSVideoPlayer.ini` holds the setting.

@@ -438,6 +438,17 @@ struct PlayerAppTestAccess {
         CHECK(!app.EffectiveComparison().playbackVsr);
         app.HandleCommand(IDM_RTX_VSR_UPSCALING);
         CHECK(app.m_playbackVsr);
+        // The keep-up guard lowers playback's quality for one video and never the
+        // comparison ladder's; a choice made from the menu clears what it did.
+        app.m_vsrSessionQuality=vsr_policy::Quality::Low;
+        CHECK(app.EffectiveComparison().playbackVsrQuality==vsr_policy::Quality::Low);
+        CHECK(app.EffectiveComparison().vsrQuality==app.m_comparison.vsrQuality);
+        app.m_vsrSessionOff=true;
+        CHECK(!app.EffectiveComparison().playbackVsr);
+        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        CHECK(app.EffectiveComparison().playbackVsr);
+        CHECK(!app.m_vsrSessionQuality.has_value());
         // Auto is the fresh default, and it is a state of its own: the manual
         // rung underneath it must not move until a rung is actually picked.
         CHECK(app.m_upscaleAuto);
