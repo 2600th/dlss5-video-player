@@ -5524,12 +5524,15 @@ private:
         }
         if(!m_loaded||!m_playing||!m_renderer||!m_renderer->PlaybackVsrShown()){m_vsrGuardAt={};return;}
         const auto now=Clock::now();
-        if(m_vsrGuardAt==Clock::time_point{}||m_droppedFrames<m_vsrGuardDropped){m_vsrGuardAt=now;m_vsrGuardDropped=m_droppedFrames;return;}
+        if(m_vsrGuardAt==Clock::time_point{}||m_droppedFrames<m_vsrGuardDropped){
+            m_vsrGuardAt=now;m_vsrGuardDropped=m_droppedFrames;m_vsrGuardMsSum=0.0;m_vsrGuardMsSamples=0;return;
+        }
+        if(const double ms=m_renderer->LastVsrGpuMs();ms>0.0){m_vsrGuardMsSum+=ms;++m_vsrGuardMsSamples;}
         const double seconds=std::chrono::duration<double>(now-m_vsrGuardAt).count();
         if(seconds<vsr_policy::kKeepUpWindowSeconds)return;
         const uint64_t dropped=m_droppedFrames-m_vsrGuardDropped;
-        const double vsrMs=m_renderer->LastVsrGpuMs();
-        m_vsrGuardAt=now;m_vsrGuardDropped=m_droppedFrames;
+        const double vsrMs=m_vsrGuardMsSamples?m_vsrGuardMsSum/double(m_vsrGuardMsSamples):0.0;
+        m_vsrGuardAt=now;m_vsrGuardDropped=m_droppedFrames;m_vsrGuardMsSum=0.0;m_vsrGuardMsSamples=0;
         const vsr_policy::Quality current=m_vsrSessionQuality.value_or(m_comparison.vsrQuality);
         const bool behind=vsr_policy::WindowFellBehind(seconds,dropped,m_decoder.FrameRate(),vsrMs);
         const vsr_policy::KeepUpStep step=m_vsrGuard.Observe(behind,current);
@@ -12360,6 +12363,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     std::wstring m_vsrGuardSource;
     Clock::time_point m_vsrGuardAt{};
     uint64_t m_vsrGuardDropped=0;
+    // VSR's GPU time over the window, sampled every tick: one frame's cost at the
+    // window's edge let a single spike step the quality down.
+    double m_vsrGuardMsSum=0.0;uint32_t m_vsrGuardMsSamples=0;
     UINT_PTR m_activityTimer=0;
     // The status chips as last painted, what each last flashed on, and the
     // repaint timer that runs only while one is still fading.
