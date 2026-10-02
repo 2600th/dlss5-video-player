@@ -84,6 +84,7 @@
       "screenshot": [
         "{{SITE_URL}}media/compare-wipe.jpg",
         "{{SITE_URL}}media/compare-difference.jpg",
+        "{{SITE_URL}}media/vsr-wipe.jpg",
         "{{SITE_URL}}media/photo-wipe.jpg",
         "{{SITE_URL}}media/neural-playback.jpg",
         "{{SITE_URL}}media/neural-strength.jpg"
@@ -95,6 +96,7 @@
         "DLSS 5 neural rendering while the video plays",
         "The original and the render compared on the same frame: split, wipe, side by side, 2x2, Difference and a loupe",
         "Seek anywhere, rendered or not",
+        "RTX Video Super Resolution upscaling, on by default wherever the window shows the video larger than it is",
         "Game screenshots and photos (PNG, JPEG, BMP, TIFF, WebP) and animated GIFs, as well as video",
         "HDR10 and HLG tone mapping, and subtitles drawn after the render",
         "A constant-quality render cache, reused while the source, runtime and settings match",
@@ -121,7 +123,7 @@
         {
           "@type": "Question",
           "name": "Which GPUs does it need?",
-          "acceptedAnswer": { "@type": "Answer", "text": "An NVIDIA RTX card and driver 610.47 or newer; with an older driver the player says so up front. It has been checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack native FP8 and should be several times slower; nobody has tested one yet. On any other GPU the start screen says \"not an RTX GPU, so no DLSS\", and playback there has not been tested. Frame generation is NVIDIA's for RTX 40 and 50; on RTX 20 and 30 the player offers to download the unofficial community dlssg_sm86 add-on." }
+          "acceptedAnswer": { "@type": "Answer", "text": "An NVIDIA RTX card and driver 610.47 or newer; with an older driver the player says so up front. It has been checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 series cards lack native FP8 and should be several times slower; nobody has tested neural rendering on one yet. On any other GPU the start screen says \"not an RTX GPU, so no DLSS\", and playback there has not been tested. Frame generation is NVIDIA's for RTX 40 and 50; on RTX 20 and 30 the player offers to download the unofficial community dlssg_sm86 add-on, and a user ran frame generation at 4x on an RTX 3060 with it." }
         },
         {
           "@type": "Question",
@@ -396,7 +398,7 @@
           <source type="image/avif" srcset="assets/gallery/gta-player-neural-960.avif 960w, assets/gallery/gta-player-neural-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
           <source type="image/webp" srcset="assets/gallery/gta-player-neural-960.webp 960w, assets/gallery/gta-player-neural-1440.webp 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
           <img class="scene__plate scene__plate--neural" src="media/neural-playback.jpg" width="1440" height="930"
-               loading="lazy" decoding="async" alt="The player paused on Grand Theft Auto VI at 1:04 with the neural view on.">
+               loading="lazy" decoding="async" alt="The player paused on Grand Theft Auto VI, frame 1940, with the neural view on.">
         </picture>
         <picture>
           <source type="image/avif" srcset="assets/gallery/gta-player-original-960.avif 960w, assets/gallery/gta-player-original-1440.avif 1440w" sizes="(max-width: 76rem) 100vw, 72rem">
@@ -414,8 +416,8 @@
       <a class="scene__link" href="#scene-gta-player">Link to this frame</a>
     </div>
     <figcaption class="scene__caption">
-      <span class="scene__title">Grand Theft Auto VI, paused at 1:04 in the player · Rockstar Games</span>
-      <span class="scene__data">neural view on, then off, no seek between · Intensity, Local tone and Local structure at 2.0 (default 1.0) · RTX 4080 SUPER</span>
+      <span class="scene__title">Grand Theft Auto VI, paused on frame 1940 in the player · Rockstar Games</span>
+      <span class="scene__data">neural view on, then off, no seek between · default settings · RTX 5090</span>
     </figcaption>
   </figure>
 </section>
@@ -440,9 +442,9 @@
         <source type="image/avif" srcset="assets/gallery/gta-player-neural-960.avif 960w, assets/gallery/gta-player-neural-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
         <source type="image/webp" srcset="assets/gallery/gta-player-neural-960.webp 960w, assets/gallery/gta-player-neural-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
         <img src="media/neural-playback.jpg" width="1440" height="930" loading="lazy" decoding="async"
-             alt="The player paused on Grand Theft Auto VI with neural rendering on, the status line reporting the live render running ahead.">
+             alt="The player paused on Grand Theft Auto VI with neural rendering on, showing the frame from its render of the whole trailer.">
       </picture>
-      <figcaption>Grand Theft Auto VI, paused at 1:04 in a live session<span class="beat__tick">neural rendering from here · 22.6&nbsp;s buffered · Intensity, Local tone and Local structure at 2.0</span></figcaption>
+      <figcaption>Grand Theft Auto VI, paused on a rendered frame<span class="beat__tick">frame 1940 · whole-trailer render · default settings</span></figcaption>
     </figure>
   </article>
 
@@ -487,7 +489,31 @@
     </figure>
   </article>
 
-  <article class="beat beat--flip">
+  <article class="beat beat--flip" id="vsr">
+    <div class="beat__text">
+      <h3 class="beat__title">A larger picture, upscaled by RTX VSR <span class="new" title="In main, after v0.27.2; the next release carries it">New</span></h3>
+      <p>
+        Wherever the window shows a video larger than it is, NVIDIA&rsquo;s RTX
+        Video Super Resolution makes the picture at that size, on by default.
+        <strong>Compare against RTX VSR</strong> (<kbd>Shift</kbd>+<kbd>R</kbd>)
+        puts it beside the plain scale on the same frame. In a separate
+        measurement, six clips from 960×540 to 1080p, it scored 87.5 VMAF
+        against bicubic&rsquo;s 80.5
+        (<a href="{{REPO_URL}}/blob/main/docs/measurements/vsr-quality-20261002/REPORT.md" rel="noopener">report</a>).
+      </p>
+    </div>
+    <figure class="beat__figure">
+      <picture>
+        <source type="image/avif" srcset="assets/screens/vsr-wipe-crop-960.avif 960w, assets/screens/vsr-wipe-crop-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <source type="image/webp" srcset="assets/screens/vsr-wipe-crop-960.webp 960w, assets/screens/vsr-wipe-crop-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <img src="media/vsr-wipe-crop.png" width="1449" height="735" loading="lazy" decoding="async"
+             alt="A 720p copy of 007 First Light in Wipe, compared against RTX VSR: the player's plain scale left of a divider down the face, RTX VSR at High right of it.">
+      </picture>
+      <figcaption>A 720p frame shown at 1.13×, plain scale left, RTX VSR right<span class="beat__tick">007 First Light, frame 1122 · <a href="media/vsr-wipe-crop.png">1:1 file</a> · <a href="media/vsr-wipe.jpg">whole window</a></span></figcaption>
+    </figure>
+  </article>
+
+  <article class="beat">
     <div class="beat__text">
       <h3 class="beat__title">Keep the evidence, with its provenance</h3>
       <p>
@@ -498,33 +524,38 @@
     </div>
     <figure class="beat__figure">
       <picture>
-        <source type="image/avif" srcset="assets/screens/saved-comparison-2x2-960.avif 960w, assets/screens/saved-comparison-2x2-1266.avif 1266w" sizes="(max-width: 60rem) 100vw, 50rem">
-        <source type="image/webp" srcset="assets/screens/saved-comparison-2x2-960.webp 960w, assets/screens/saved-comparison-2x2-1266.webp 1266w" sizes="(max-width: 60rem) 100vw, 50rem">
-        <img src="media/saved-comparison-2x2.png" width="1266" height="790" loading="lazy" decoding="async"
-             alt="The PNG the player saved for its 2 x 2 view: original, DLSS 5, Difference and DLSS 5 at Mix 50%, with a footer recording the version, frame, view, settings digest and runtime.">
+        <source type="image/avif" srcset="assets/screens/saved-comparison-2x2-960.avif 960w, assets/screens/saved-comparison-2x2-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <source type="image/webp" srcset="assets/screens/saved-comparison-2x2-960.webp 960w, assets/screens/saved-comparison-2x2-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <img src="media/saved-comparison-2x2.png" width="1449" height="906" loading="lazy" decoding="async"
+             alt="The PNG the player saved for its 2 x 2 view: original, DLSS 5, Difference and RTX VSR at High, with a footer recording the version, frame, view, settings digest and runtime.">
       </picture>
       <figcaption>The file the player saved, as saved<span class="beat__tick">2 × 2 view of 007 First Light, frame 1122</span></figcaption>
     </figure>
   </article>
 
-  <article class="beat">
+  <article class="beat beat--flip">
     <div class="beat__text">
       <h3 class="beat__title">Come back and it is still there</h3>
       <p>
         Renders stay on disk until you clear them or the drive falls below
         20&nbsp;GB free. Reopen a film weeks later and its whole-film render is
         still attached, as long as the source, the runtime and the neural
-        settings still match.
+        settings still match. From 0.28.0, an update keeps them too, unless
+        its notes say otherwise.
       </p>
     </div>
     <figure class="beat__figure">
-      <img src="media/recent-videos.jpg" width="1493" height="932" loading="lazy" decoding="async"
-           alt="The File menu open, with Game trailers, Recent videos and Save comparison image, over a paused neural frame.">
-      <figcaption>Recent videos reopens a film with its render already attached</figcaption>
+      <picture>
+        <source type="image/avif" srcset="assets/screens/player-start-960.avif 960w, assets/screens/player-start-1116.avif 1116w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <source type="image/webp" srcset="assets/screens/player-start-960.webp 960w, assets/screens/player-start-1116.webp 1116w" sizes="(max-width: 60rem) 100vw, 50rem">
+        <img src="media/player-start.jpg" width="1116" height="819" loading="lazy" decoding="async"
+             alt="The start screen: the capability check, two Recent tiles for GTA VI Trailer 2 and 007 First Light each marked Rendered 100%, and the game trailers.">
+      </picture>
+      <figcaption>Recent videos on the start screen, with each render's coverage</figcaption>
     </figure>
   </article>
 
-  <article class="beat beat--flip" id="photos">
+  <article class="beat" id="photos">
     <div class="beat__text">
       <h3 class="beat__title">Screenshots and GIFs, too</h3>
       <p>
@@ -564,10 +595,16 @@
     <p class="readout__row"><span class="readout__k">Video</span><span class="readout__v readout__v--prose">MKV or MP4, of the whole video or a marked clip. MKV keeps the source audio, subtitles and chapters without re-encoding them.</span></p>
     <p class="readout__row"><span class="readout__k">GIF</span><span class="readout__v readout__v--prose">An animated GIF renders frame by frame with its own timing, and saves as GIF, MP4 or MKV.</span></p>
     <p class="readout__row"><span class="readout__k">Photo</span><span class="readout__v readout__v--prose">PNG, JPEG, BMP, TIFF or static WebP in; PNG or JPEG out, at the source size. The 2560×1440 screenshot <a href="#photos">above</a> took <span class="data">8&nbsp;s</span> from the command line on an RTX 4080 SUPER.</span></p>
-    <p class="readout__row"><span class="readout__k">Stages</span><span class="readout__v readout__v--prose">Super Resolution, neural rendering and frame generation at 2× to 5× the frame rate, any combination, in one file and in NVIDIA&rsquo;s order.</span></p>
-    <p class="readout__row"><span class="readout__k">Scripted</span><span class="readout__v readout__v--prose"><code>dlss5-convert clip.mp4</code> writes <code>clip-dlss.mkv</code> without opening the player, and takes folders and wildcards too. Every stage and Neural setting is an option: <code>--preset strong --passes 3</code> stacks three passes of the strong look, <code>--stages fg --multiplier 3</code> triples the frame rate. <code>dlss5-convert probe</code> says what a file is and what this machine can run on it; the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md#from-the-command-line" rel="noopener">usage guide</a> has the rest. <span class="new" title="In main, after v0.26.2; the next release carries it">New</span></span></p>
+    <p class="readout__row"><span class="readout__k">Stages</span><span class="readout__v readout__v--prose">Super Resolution, neural rendering and frame generation at 2× to 5× the frame rate, any combination, in one file and in NVIDIA&rsquo;s order. Super Resolution on its own runs on RTX VSR by default, or DLSS Super Resolution if you choose it. <span class="new" title="In main, after v0.27.2; the next release carries it">New</span></span></p>
+    <p class="readout__row"><span class="readout__k">Scripted</span><span class="readout__v readout__v--prose"><code>dlss5-convert clip.mp4</code> writes <code>clip-dlss.mkv</code> without opening the player, and takes folders and wildcards too. Every stage and Neural setting is an option: <code>--preset strong --passes 3</code> stacks three passes of the strong look, <code>--stages fg --multiplier 3</code> triples the frame rate. <code>dlss5-convert probe</code> says what a file is and what this machine can run on it; the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md#from-the-command-line" rel="noopener">usage guide</a> has the rest.</span></p>
     <p class="readout__row"><span class="readout__k">Left out</span><span class="readout__v readout__v--prose">Subtitles travel as tracks and are never burned in. Image adjustments and playback upscaling are not baked in; the stages export is how a larger size goes into the file.</span></p>
   </div>
+
+  <figure class="screen export__figure">
+    <img src="media/export-stages-vsr.jpg" width="472" height="468" loading="lazy" decoding="async"
+         alt="The Export with DLSS stages window: Super Resolution ticked, output height 2160p, Upscaler RTX VSR (recommended), neural rendering and frame generation unticked, and the result 3840 × 2160 at 30 fps, 1 pass.">
+    <figcaption>Super Resolution alone, upscaled by RTX VSR<span class="beat__tick">Export with DLSS stages, at 100% scaling</span></figcaption>
+  </figure>
 </section>
 
 <!-- ============================ features ============================ -->
@@ -577,8 +614,8 @@
     Details are in the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md" rel="noopener">usage guide</a>.
     Nothing is uploaded: the work happens on your GPU and the cache stays on
     your disk.
-    <!-- unreleased --><span class="unreleased-note">Items marked <span class="new" title="In main, after v0.26.2; the next release carries it">New</span> are in
-    <code>main</code>, after v0.26.2: the next release carries them. Until
+    <!-- unreleased --><span class="unreleased-note">Items marked <span class="new" title="In main, after v0.27.2; the next release carries it">New</span> are in
+    <code>main</code>, after v0.27.2: the next release carries them. Until
     then, <a href="{{REPO_URL}}/blob/main/docs/BUILDING.md" rel="noopener">build it yourself</a>.</span><!-- /unreleased -->
   </p>
 
@@ -598,6 +635,7 @@
       <h3 class="matrix__title">Play</h3>
       <ul class="matrix__list">
         <li>Renders while you watch, and seeks anywhere, rendered or not</li>
+        <li>RTX Video Super Resolution upscales the picture, on by default wherever the window is larger than the video: <span class="data">87.5</span> VMAF against bicubic&rsquo;s <span class="data">80.5</span> in the <a href="{{REPO_URL}}/blob/main/docs/measurements/vsr-quality-20261002/REPORT.md" rel="noopener">measurement</a> <span class="new" title="In main, after v0.27.2; the next release carries it">New</span></li>
         <li>Local files, public YouTube links, photos, animated GIFs and the bundled game trailers</li>
         <li>HDR10 and HLG tone-mapped for the model, and the original shown in HDR on an HDR display</li>
         <li>Subtitles (SRT, ASS, WebVTT, PGS, VobSub) drawn after the render, so text is never warped</li>
@@ -611,8 +649,8 @@
         <li>PNG, JPEG, GIF, MP4 or MKV; MKV keeps the audio, subtitles and chapters untouched</li>
         <li>Super Resolution, neural rendering and frame generation in one file, in NVIDIA&rsquo;s order</li>
         <li>Frame generation from 2× to 5× the frame rate, as a conversion</li>
-        <li>The same export from the command line: <code>dlss5-convert</code> converts files and folders, skips what is done and reports each result <span class="new" title="In main, after v0.26.2; the next release carries it">New</span></li>
-        <li>Every export setting as an option, stacked neural passes and the encode included <span class="new" title="In main, after v0.26.2; the next release carries it">New</span></li>
+        <li>The same export from the command line: <code>dlss5-convert</code> converts files and folders, skips what is done and reports each result</li>
+        <li>Every export setting as an option, stacked neural passes and the encode included</li>
       </ul>
     </section>
 
@@ -755,8 +793,8 @@
     no installer: unzip it and run it. Every build is on the
     <a href="{{RELEASE_URL}}" rel="noopener">release page</a> with its checksum.
     <!-- unreleased --><span class="unreleased-note">The features marked
-    <span class="new" title="In main, after v0.26.2; the next release carries it">New</span> come from <code>main</code>, after v0.26.2: the
-    <code>dlss5-convert</code> command-line converter and its options. The next
+    <span class="new" title="In main, after v0.27.2; the next release carries it">New</span> come from <code>main</code>, after v0.27.2: RTX
+    VSR as the upscaler for playback and for Super Resolution exports. The next
     release will carry them; until then,
     <a href="{{REPO_URL}}/blob/main/docs/BUILDING.md" rel="noopener">build it yourself</a>.</span><!-- /unreleased -->
   </p>
@@ -779,12 +817,12 @@
     </div>
     <figure class="requires__figure">
       <picture>
-        <source type="image/avif" srcset="assets/screens/player-start-960.avif 960w, assets/screens/player-start-1440.avif 1440w" sizes="(max-width: 60rem) 100vw, 34rem">
-        <source type="image/webp" srcset="assets/screens/player-start-960.webp 960w, assets/screens/player-start-1440.webp 1440w" sizes="(max-width: 60rem) 100vw, 34rem">
-        <img src="media/player-start.jpg" width="1902" height="1023" loading="lazy" decoding="async"
-             alt="The start screen: the capability check and the seven game trailers with their YouTube thumbnails.">
+        <source type="image/avif" srcset="assets/screens/player-start-960.avif 960w, assets/screens/player-start-1116.avif 1116w" sizes="(max-width: 60rem) 100vw, 34rem">
+        <source type="image/webp" srcset="assets/screens/player-start-960.webp 960w, assets/screens/player-start-1116.webp 1116w" sizes="(max-width: 60rem) 100vw, 34rem">
+        <img src="media/player-start.jpg" width="1116" height="819" loading="lazy" decoding="async"
+             alt="The start screen: the capability check with its RTX VSR line, two recent videos, and the game trailers with their YouTube thumbnails.">
       </picture>
-      <figcaption>The start screen checks the machine first<span class="beat__tick">thumbnails from YouTube, for the trailers’ publishers</span></figcaption>
+      <figcaption>The start screen checks the machine first<span class="beat__tick">RTX 5090 · thumbnails from YouTube, for the trailers’ publishers</span></figcaption>
     </figure>
   </div>
 
@@ -839,11 +877,12 @@
         An NVIDIA RTX card and driver 610.47 or newer; with an older driver
         the player says so up front. It has been checked on an RTX 4080 SUPER
         and an RTX 5090. RTX 20 and 30 series cards lack native FP8 and should
-        be several times slower; nobody has tested one yet. On any other GPU
-        the start screen says "not an RTX GPU, so no DLSS", and playback there
-        has not been tested. Frame generation is NVIDIA's for RTX 40 and 50;
-        on RTX 20 and 30 the player offers to download the unofficial
-        community dlssg_sm86 add-on.
+        be several times slower; nobody has tested neural rendering on one
+        yet. On any other GPU the start screen says "not an RTX GPU, so no
+        DLSS", and playback there has not been tested. Frame generation is
+        NVIDIA's for RTX 40 and 50; on RTX 20 and 30 the player offers to
+        download the unofficial community dlssg_sm86 add-on, and a user ran
+        frame generation at 4x on an RTX 3060 with it.
       </p>
     </details>
     <details class="faq__item" id="faq-speed">

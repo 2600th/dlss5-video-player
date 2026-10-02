@@ -978,6 +978,10 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 .screen, .requires__figure { margin: 0; }
 .screen img, .requires__figure img { width: 100%; height: auto; border: 1px solid var(--line-soft); }
 .screen figcaption, .requires__figure figcaption { margin-top: 0.7rem; color: var(--text-meta); font-size: 0.78rem; }
+/* The export window under the export ledger, at its own pixels: a 472 px dialog
+   captured at 100% would only blur if it were stretched to the column. The
+   two extra pixels are the image's hairline border. */
+.export__figure { max-width: 474px; margin-top: clamp(2rem, 4vw, 3rem); }
 .requires__title { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.9rem; }
 .requires__list { color: var(--text-dim); max-width: var(--measure); padding-left: 1.2rem; }
 .requires__list li { margin-bottom: 0.5rem; }
