@@ -2866,6 +2866,8 @@ void D3D12Renderer::RecordVsr(ID3D12GraphicsCommandList*cmd,uint32_t slot,const 
     // An HDR original compared in HDR is PQ: never RTX VSR's input, which is 8-bit SDR.
     // A view that reads RTX VSR asks for the SDR original (ComparisonCombinesPixels).
     if(!m_hasReference||!m_reference||m_referenceInCopyDest||m_referencePq)return;
+    // The same latch as playback's: cached playback uploads a reference per frame.
+    if(m_vsrFailures>=3)return;
     const auto size=vsr_policy::OutputSize(m_sourceW,m_sourceH,target.width,target.height);
     EvaluateVsr(cmd,slot,m_reference.Get(),1u,m_referenceSerial,size,m_comparison.vsrQuality);
 }

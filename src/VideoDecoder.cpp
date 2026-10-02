@@ -33,12 +33,9 @@ using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
 
 #include "PrecisionSleeper.h"
+#include "WindowsArgument.h"
 
-static std::wstring Quote(const std::wstring& s) {
-    // Windows filenames cannot contain a literal quote character, so this is
-    // sufficient for the executable and video paths used by this player.
-    return L"\"" + s + L"\"";
-}
+static std::wstring Quote(const std::wstring& s) { return QuoteCommandArgument(s); }
 
 // Bytes of helper stdout a probe may hand back before it is treated as broken:
 // the same bound MediaPipeline's capture keeps.

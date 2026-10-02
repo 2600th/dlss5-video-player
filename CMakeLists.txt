@@ -400,6 +400,10 @@ dlss_video_player_symbols(DLSSVideoPlayer)
 # there (PlayerDllSearchPinned checks the flag). Not on NeuralWorker, which
 # needs the proxy dxgi.dll beside it, and not under ASan, whose runtime DLL is
 # found beside the executable.
+# One DLL is loaded from beside the player on purpose: the dlssg_sm86 Frame
+# Generation add-on, by full path and only with its ini there (FrameGenAddon.h).
+# LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR lets its own imports resolve beside it too,
+# so while it is loaded the player is no longer System32-only.
 if(NOT DLSS_VIDEO_PLAYER_ASAN)
     target_link_options(DLSSVideoPlayer PRIVATE /DEPENDENTLOADFLAG:0x800)
 endif()

@@ -5563,8 +5563,8 @@ private:
     // The ladder is named in the RTX VSR tag, so a change redraws the atlas. A pick
     // from the menu is the user's, so whatever the keep-up guard lowered ends here.
     void SetVsrQuality(vsr_policy::Quality quality){
-        const bool guarded=m_vsrSessionQuality.has_value();
-        m_vsrSessionQuality.reset();m_vsrGuard.Reset();
+        const bool guarded=m_vsrSessionQuality.has_value()||m_vsrSessionOff;
+        m_vsrSessionQuality.reset();m_vsrSessionOff=false;m_vsrGuard.Reset();
         if(quality==m_comparison.vsrQuality){if(guarded)ApplyComparison();return;}
         m_comparison.vsrQuality=quality;++m_labelTextRevision;ApplyComparison();
         LOG("RTX VSR quality="<<static_cast<int>(quality));
@@ -7942,7 +7942,7 @@ private:
         start_screen::Facts facts{};
         facts.gpu=m_opt.detectedGpu.description;facts.generation=m_opt.detectedGpu.generation;
         facts.driverVersion=m_opt.detectedGpu.driverVersion;facts.safeMode=m_opt.safeMode;
-        if(FrameGenAddonState().loaded)facts.frameGenAddon=FrameGenAddonState().proxy;
+        if(FrameGenAddonState().loaded){facts.frameGenAddon=FrameGenAddonState().proxy;facts.frameGenAddonPinned=FrameGenAddonState().pinned;}
         facts.rtxVsr=!VsrEngine::kBuilt?start_screen::VsrState::NotInBuild
                     :!framegen_addon::RegularFile(ExecutableDirectory()/L"nvngx_vsr.dll")?start_screen::VsrState::MissingRuntime
                     :m_playbackVsr?start_screen::VsrState::On:start_screen::VsrState::Off;
@@ -10816,6 +10816,15 @@ private:
     }
     void OpenRenderReceipt(){
         if(m_cachedReceiptPath.empty())return;
+        // Handed to the shell, which opens it with whatever claims the extension -
+        // so only the cache's own receipt, never another file under a cache root
+        // the user may have pointed anywhere.
+        std::error_code canonicalError;
+        const auto relative=std::filesystem::weakly_canonical(m_cachedReceiptPath,canonicalError).lexically_relative(std::filesystem::weakly_canonical(m_cacheRoot,canonicalError));
+        const bool insideCache=!canonicalError&&!relative.empty()&&*relative.begin()!=L"..";
+        if(_wcsicmp(m_cachedReceiptPath.extension().c_str(),L".json")!=0||!insideCache){
+            LOG("Render receipt not opened: not the cache's own receipt: "<<WideToUtf8(m_cachedReceiptPath.wstring()));return;
+        }
         const auto result=reinterpret_cast<INT_PTR>(ShellExecuteW(m_hwnd,L"open",m_cachedReceiptPath.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
         if(result<=32)LOG("Opening the render receipt failed: code="<<result<<" path="<<WideToUtf8(m_cachedReceiptPath.wstring()));
     }

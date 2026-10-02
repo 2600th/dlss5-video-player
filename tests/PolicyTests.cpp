@@ -74,6 +74,8 @@
 #include "MediaTransportPolicy.h"
 #include "StartScreenPolicy.h"
 #include "FrameGenAddon.h"
+#include "WindowsArgument.h"
+#include "NeuralWorkerProtocol.h"
 #include "UpdateCheck.h"
 #include "CompareBarPolicy.h"
 #include "CompareViewPolicy.h"
@@ -1313,6 +1315,17 @@ void start_screen_names_a_loaded_frame_generation_addon_test()
     REQUIRE(addon != lines.end());
     CHECK(addon->mark == Mark::Info);
     CHECK(addon->value.find(L"dlssg_sm86") != std::wstring::npos);
+    // A build other than the pinned one loads too - the user put it there - but is named.
+    CHECK(addon->value.find(L"not the build") == std::wstring::npos);
+    {
+        Facts unpinned = facts;
+        unpinned.frameGenAddonPinned = false;
+        const auto all = CapabilityLines(unpinned);
+        const auto found = std::find_if(all.begin(), all.end(), [](const Line& line) { return line.label == L"Frame Generation"; });
+        REQUIRE(found != all.end());
+        CHECK(found->value.find(L"not the build") != std::wstring::npos);
+        CHECK(found->mark == Mark::Info);
+    }
     CHECK(!OfferSafeMode(lines, false));
 }
 
@@ -1320,6 +1333,33 @@ void start_screen_names_a_loaded_frame_generation_addon_test()
 // dlssg_for_sm86 proxy beside it was never loaded. It is loaded by full path
 // instead - only when its own ini marks it as that add-on, and never under a
 // name the player refuses beside itself (dxgi.dll) or renders through.
+// The ffmpeg command lines quote every path; a trailing backslash or a quote must
+// come back out of CommandLineToArgvW as written.
+// A segment name the parent opens inside its staging directory: never a device.
+void segment_names_refuse_devices_and_trailing_dots_test()
+{
+    using neural_worker_protocol::IsValidSegmentName;
+    CHECK(IsValidSegmentName(L"segment-0001.mkv"));
+    for (const std::wstring_view name : {L"CON", L"nul", L"COM1", L"lpt9.mkv", L"aux.txt", L"seg.mkv.", L"seg.mkv ", L"..", L"a\\b"})
+        CHECK(!IsValidSegmentName(name));
+    CHECK(IsValidSegmentName(L"console.mkv"));
+}
+
+void command_argument_quoting_round_trips_through_argv_test()
+{
+    for (const std::wstring argument : {std::wstring(L"C:\\Videos\\clip one.mp4"), std::wstring(L"C:\\dir with space\\"),
+                                        std::wstring(L"a\"b"), std::wstring(L"x\\\"y"), std::wstring(L"")}) {
+        const std::wstring line = L"tool.exe " + QuoteCommandArgument(argument);
+        int count = 0;
+        LPWSTR* argv = CommandLineToArgvW(line.c_str(), &count);
+        REQUIRE(argv != nullptr);
+        CHECK_EQ(2, count);
+        if (count == 2) CHECK(std::wstring(argv[1]) == argument);
+        LocalFree(argv);
+    }
+    CHECK(QuoteCommandArgument(L"C:\\a b\\") == L"\"C:\\a b\\\\\"");
+}
+
 void framegen_addon_picks_the_dlssg_sm86_proxy_beside_the_player_test()
 {
     using framegen_addon::ProxyToLoad;
@@ -15468,6 +15508,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test),
     TEST_CASE(start_screen_checks_say_what_passed_and_what_failed_test),
     TEST_CASE(start_screen_names_a_loaded_frame_generation_addon_test),
+    TEST_CASE(command_argument_quoting_round_trips_through_argv_test),
+    TEST_CASE(segment_names_refuse_devices_and_trailing_dots_test),
     TEST_CASE(framegen_addon_picks_the_dlssg_sm86_proxy_beside_the_player_test),
     TEST_CASE(framegen_addon_refusal_advice_names_the_gpu_not_the_driver_on_rtx20_and_rtx30_test),
     TEST_CASE(framegen_addon_loads_its_proxy_as_a_second_module_beside_system32_test),

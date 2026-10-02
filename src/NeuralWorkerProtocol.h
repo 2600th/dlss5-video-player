@@ -232,12 +232,33 @@ inline bool IsKnownEncoder(uint8_t encoder) noexcept
 inline bool IsBooleanByte(uint8_t value) noexcept { return value == 0 || value == 1; }
 
 // A segment file name must be usable exactly as written inside the staging
-// directory: no directory component, no traversal, no NUL.
+// directory: no directory component, no traversal, no NUL - and nothing Windows
+// reads as something else: a device (CON, NUL, COM1, LPT9, with or without an
+// extension) or a name it would silently trim (a trailing dot or space).
 inline bool IsValidSegmentName(std::wstring_view name) noexcept
 {
-    return !name.empty() && name.find_first_of(L"\\/:") == std::wstring_view::npos &&
-           name.find(L'\0') == std::wstring_view::npos &&
-           name.find(L"..") == std::wstring_view::npos;
+    if (name.empty() || name.find_first_of(L"\\/:") != std::wstring_view::npos ||
+        name.find(L'\0') != std::wstring_view::npos || name.find(L"..") != std::wstring_view::npos)
+        return false;
+    if (name.back() == L'.' || name.back() == L' ') return false;
+    const std::wstring_view stem = name.substr(0, name.find(L'.'));
+    const auto is = [&](std::wstring_view device) {
+        if (stem.size() != device.size()) return false;
+        for (size_t i = 0; i < stem.size(); ++i)
+            if ((stem[i] | 0x20) != (device[i] | 0x20)) return false;
+        return true;
+    };
+    if (is(L"con") || is(L"prn") || is(L"aux") || is(L"nul")) return false;
+    if (stem.size() == 4 && stem[3] >= L'1' && stem[3] <= L'9') {
+        const std::wstring_view head = stem.substr(0, 3);
+        const auto headIs = [&](std::wstring_view device) {
+            for (size_t i = 0; i < 3; ++i)
+                if ((head[i] | 0x20) != device[i]) return false;
+            return true;
+        };
+        if (headIs(L"com") || headIs(L"lpt")) return false;
+    }
+    return true;
 }
 
 inline bool WriteAll(HANDLE handle, const void* data, size_t bytes)

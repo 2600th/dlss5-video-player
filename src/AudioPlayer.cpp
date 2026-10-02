@@ -16,11 +16,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include "WindowsArgument.h"
 #include <optional>
 #include <thread>
 
 namespace fs = std::filesystem;
-static std::wstring Q(const std::wstring& s) { return L"\"" + s + L"\""; }
+static std::wstring Q(const std::wstring& s) { return QuoteCommandArgument(s); }
 
 AudioPlayer::~AudioPlayer() { Stop(); }
 
