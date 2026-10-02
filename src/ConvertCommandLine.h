@@ -11,6 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "RenderCliContract.h"
+
 // `dlss5-convert`: the console front end for DLSSVideoPlayer.exe's --render
 // and --probe (ConvertMain.cpp).
 //
@@ -26,12 +28,12 @@
 // player is handed. Finding files and running the player are ConvertMain's.
 namespace convert_command {
 
-// The player's exit codes (render_command), and the batch's.
-inline constexpr int kExitOk = 0;
-inline constexpr int kExitBadArguments = 2;
-inline constexpr int kExitRefused = 3;
-inline constexpr int kExitFailed = 4;
-inline constexpr int kExitCancelled = 5;
+// The player's exit codes (render_cli, which render_command uses too), and the batch's.
+using render_cli::kExitOk;
+using render_cli::kExitBadArguments;
+using render_cli::kExitRefused;
+using render_cli::kExitFailed;
+using render_cli::kExitCancelled;
 
 enum class Mode { Convert, Probe, Help, Version, BadArguments };
 
@@ -141,12 +143,8 @@ inline Options Parse(std::span<const std::wstring> arguments)
         else if (argument == L"--fail-fast") options.failFast = true;
         else if (argument == L"--dry-run") options.dryRun = true;
         else if (argument == L"--quiet" || argument == L"-q") options.quiet = true;
-        else if (argument == L"--safe-mode") options.renderOptions.push_back(argument);
-        else if (argument == L"--stages" || argument == L"--height" || argument == L"--multiplier" ||
-                 argument == L"--preset" || argument == L"--processing-scale" || argument == L"--range" ||
-                 argument == L"--passes" || argument == L"--intensity" || argument == L"--local-tone" ||
-                 argument == L"--local-structure" || argument == L"--color-strength" || argument == L"--encode" ||
-                 argument == L"--history" || argument == L"--sr-engine") {
+        else if (render_cli::IsForwardedFlag(argument)) options.renderOptions.push_back(argument);
+        else if (render_cli::IsForwardedValueOption(argument)) {
             const std::wstring* given = value();
             if (!given) return bad(argument + L" needs a value.");
             for (size_t seen = 0; seen < options.renderOptions.size(); ++seen)
@@ -163,7 +161,7 @@ inline Options Parse(std::span<const std::wstring> arguments)
                 : argument == L"--report" ? options.report : options.player;
             slot = *given;
         } else if (argument == L"--quality") {
-            return bad(L"The encode is --encode standard, high or lossless (--quality is an option the player retired).");
+            return bad(std::wstring(render_cli::kRetiredQualityRefusal));
         } else {
             return bad(L"Unknown option: " + argument);
         }

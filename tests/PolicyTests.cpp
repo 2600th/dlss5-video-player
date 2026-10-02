@@ -44,6 +44,7 @@
 #include "RangeSelection.h"
 #include "ExportPipeline.h"
 #include "RenderCommandLine.h"
+#include "StageExport.h"
 #include "FrameResample.h"
 #include "UntaggedColorPolicy.h"
 #include "DisplayOrientationPolicy.h"
@@ -5753,6 +5754,53 @@ void export_container_follows_the_chosen_extension_test()
     CHECK(std::wstring(ExportVideoTag(ExportContainer::Mp4, "hevc")) == L"hvc1");
     CHECK(std::wstring(ExportVideoTag(ExportContainer::Mp4, "h264")).empty());
     CHECK(std::wstring(ExportVideoTag(ExportContainer::Matroska, "hevc")).empty());
+}
+
+// The dialog and --render say what an export will do through StageExport's
+// formatters, and why it will not through ExportRefusalKey: one wording for
+// both, pinned here, and a key for every refusal that the English table holds.
+void stage_export_summaries_are_the_dialogs_and_the_command_lines_test()
+{
+    const Localizer localizer;
+    std::vector<std::wstring> keys;
+    for (const ExportRefusal refusal : {ExportRefusal::NothingSelected, ExportRefusal::SourceGeometryUnknown,
+                                        ExportRefusal::AlreadyAtTarget, ExportRefusal::MultiplierUnsupported,
+                                        ExportRefusal::VsrUnavailable, ExportRefusal::StillImage}) {
+        const std::wstring key = ExportRefusalKey(refusal);
+        CHECK(key.starts_with(L"export.stages.refusal."));
+        CHECK(localizer.Get(key.c_str()) != key);
+        CHECK(std::find(keys.begin(), keys.end(), key) == keys.end());
+        keys.push_back(key);
+    }
+    CHECK(std::wstring(ExportRefusalKey(ExportRefusal::None)) == L"export.stages.refusal.nothing");
+
+    ExportPlan plan;
+    plan.valid = true;
+    plan.workerStage = true;
+    plan.requireNeural = true;
+    plan.outputWidth = 1920;
+    plan.outputHeight = 1080;
+    plan.outputFps = 29.97;
+    CHECK(StageExportResultSummary(plan) == L"1920 \u00d7 1080 at 29.97 fps \u00b7 1 pass");
+    CHECK(StageExportPlanSummary(plan, 1920, 1080, 29.97) == L"1920 x 1080 at 29.97 fps -> 1920 x 1080 at 29.97 fps, 1 pass");
+    // The model at the source size: the rung alone, whatever the history says.
+    CHECK(StageExportEncodeSummary(plan, 1920, EncoderQuality::Lossless, UpscalingHistory::PerFrame) == L"encode: lossless");
+    plan.frameGenStage = true;
+    plan.multiplier = 2;
+    plan.outputFps = 59.94;
+    CHECK(StageExportResultSummary(plan) == L"1920 \u00d7 1080 at 59.94 fps \u00b7 2 passes");
+    CHECK(StageExportPlanSummary(plan, 1280, 720, 29.97) == L"1280 x 720 at 29.97 fps -> 1920 x 1080 at 59.94 fps, 2 passes");
+    // The model on an upscaled carrier keeps its own history; nothing names one.
+    CHECK(StageExportEncodeSummary(plan, 1280, EncoderQuality::High, UpscalingHistory::PerFrame) == L"encode: high");
+    // Super Resolution alone: DLSS in the helper says its history, RTX VSR has none.
+    plan.requireNeural = false;
+    CHECK(StageExportEncodeSummary(plan, 1280, EncoderQuality::Standard, UpscalingHistory::PerFrame) ==
+          L"encode: standard, upscaler DLSS, history per-frame");
+    plan.workerStage = false;
+    plan.vsrStage = true;
+    CHECK(StageExportEncodeSummary(plan, 1280, EncoderQuality::High, UpscalingHistory::Temporal) ==
+          L"encode: high, upscaler RTX VSR");
+    CHECK(StageExportResultSummary(plan) == L"1920 \u00d7 1080 at 59.94 fps \u00b7 2 passes");
 }
 
 // `--render` is parsed before anything else runs, so the one thing it must
@@ -15765,6 +15813,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(export_container_follows_the_chosen_extension_test),
     TEST_CASE(live_forecast_scales_by_the_processing_rung_test),
     TEST_CASE(render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test),
+    TEST_CASE(stage_export_summaries_are_the_dialogs_and_the_command_lines_test),
     TEST_CASE(neural_zero_motion_test_ships_on_and_is_a_cache_key_term_test),
     TEST_CASE(upscaling_history_defaults_to_temporal_and_never_reaches_the_model_test),
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),

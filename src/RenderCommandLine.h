@@ -2,6 +2,7 @@
 
 #include "ExportPipeline.h"
 #include "NeuralPresets.h"
+#include "RenderCliContract.h"
 #include "UpscalingPolicy.h"
 
 #include <cstddef>
@@ -25,15 +26,12 @@
 // caller against them, through the same PlanExport the dialog uses.
 namespace render_command {
 
-// What the process returns. Distinct codes, because a batch script's next
-// step depends on WHICH of these happened: a bad argument is the script's bug,
-// a refusal is this source or this machine, a failure is worth a retry, and a
-// cancel was somebody's decision.
-inline constexpr int kExitOk = 0;
-inline constexpr int kExitBadArguments = 2;
-inline constexpr int kExitRefused = 3;
-inline constexpr int kExitFailed = 4;
-inline constexpr int kExitCancelled = 5;
+// What the process returns: render_cli's codes, which dlss5-convert reads.
+using render_cli::kExitOk;
+using render_cli::kExitBadArguments;
+using render_cli::kExitRefused;
+using render_cli::kExitFailed;
+using render_cli::kExitCancelled;
 
 enum class Mode {
     // No --render and no --help: the player starts exactly as it always has.
@@ -212,14 +210,10 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             seen = true;
             return true;
         };
-        const bool takesValue = argument == L"--render" || argument == L"--range" ||
-            argument == L"--preset" || argument == L"--stages" || argument == L"--height" ||
-            argument == L"--multiplier" || argument == L"--out" || argument == L"--processing-scale" ||
-            argument == L"--passes" || argument == L"--intensity" || argument == L"--local-tone" ||
-            argument == L"--local-structure" || argument == L"--color-strength" || argument == L"--encode" ||
-            argument == L"--history" || argument == L"--sr-engine";
+        // render_cli lists them, so dlss5-convert forwards what this takes.
+        const bool takesValue = render_cli::IsRenderValueOption(argument);
         if (argument == L"--quality")
-            return bad(L"The encode is --encode standard, high or lossless (--quality is an option the player retired).");
+            return bad(std::wstring(render_cli::kRetiredQualityRefusal));
         if (!takesValue) return bad(L"Unknown argument: " + argument);
         if (index + 1 >= userArguments.size() || userArguments[index + 1].empty())
             return bad(argument + L" needs a value.");
@@ -315,7 +309,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             if (!multiplier || *multiplier < 2 || *multiplier > 5)
                 return bad(L"--multiplier takes 2, 3, 4 or 5.");
             command.selection.multiplier = *multiplier;
-        } else {
+        } else if (argument == L"--out") {
             if (!once(seenOut)) return bad(L"--out was given twice.");
             // The container follows the extension (ExportContainerFor). Which
             // of them this source may be written as is settled once it is
@@ -323,6 +317,10 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             if (!ExportContainerFor(std::filesystem::path(value).extension().wstring()))
                 return bad(L"--out must name a .mkv, .mp4, .gif, .png or .jpg file.");
             command.output = value;
+        } else {
+            // In render_cli's table but not read here: refused, never taken
+            // for another option.
+            return bad(L"Unknown argument: " + argument);
         }
     }
     const ExportSelection& selection = command.selection;

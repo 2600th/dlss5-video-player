@@ -119,6 +119,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "UpscalingPolicy.h"
 #include "NeuralMotionPolicy.h"
 #include "ExportPipeline.h"
+#include "StageExport.h"
 #include "RenderCommandLine.h"
 #include "UpdateCheck.h"
 #include "TrailerThumbnail.h"
@@ -1669,19 +1670,6 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
     return result;
 }
 
-static const wchar_t* ExportRefusalKey(ExportRefusal refusal){
-    switch(refusal){
-    case ExportRefusal::NothingSelected:return L"export.stages.refusal.nothing";
-    case ExportRefusal::SourceGeometryUnknown:return L"export.stages.refusal.geometry";
-    case ExportRefusal::AlreadyAtTarget:return L"export.stages.refusal.target";
-    case ExportRefusal::MultiplierUnsupported:return L"export.stages.refusal.multiplier";
-    case ExportRefusal::VsrUnavailable:return L"export.stages.refusal.vsr";
-    case ExportRefusal::StillImage:return L"export.stages.refusal.still";
-    case ExportRefusal::None:break;
-    }
-    return L"export.stages.refusal.nothing";
-}
-
 // The saved processing scale, or the default for a value that is not a rung -
 // a hand-edited 60 is not a choice this player offers, so it is not honoured.
 static uint32_t ReadProcessingScale(const std::filesystem::path& settings){
@@ -1720,285 +1708,6 @@ static EncoderQuality ReadCacheQuality(const std::filesystem::path& settings){
     EncoderQuality quality=EncoderQuality::Standard;
     ParseEncoderQuality(narrow,quality);
     return quality;
-}
-
-// Everything a neural render writes into the add-on's [RenoDX.DLSS5]: the
-// Neural settings, and the model's place against the carrier's upscale that
-// the processing scale needs (PreUpscaleOverride says when that is written).
-static std::vector<NeuralAddonOverride> RenderAddonOverrides(const std::filesystem::path& ini,
-                                                             const NeuralSettings& settings,
-                                                             uint32_t processingScale){
-    std::vector<NeuralAddonOverride> overrides=NeuralAddonOverridesFor(settings);
-    std::string current;
-    if(const auto snapshot=ReadNeuralAddonSettingsSnapshot(ini)){
-        // The snapshot is canonical: one exact-case key per line.
-        constexpr std::string_view kKey="\nNRPreUpscale=";
-        if(const size_t at=snapshot->find(kKey);at!=std::string::npos){
-            const size_t begin=at+kKey.size();
-            current=snapshot->substr(begin,snapshot->find('\n',begin)-begin);
-        }
-    }
-    if(const auto order=PreUpscaleOverride(processingScale,current))
-        overrides.emplace_back("NRPreUpscale",std::string(*order));
-    return overrides;
-}
-
-// ---- What refuses a neural pass before a helper is asked for one --------
-//
-// Shared by the live render (NeuralJobRun) and the stage export, in the words
-// the live path has always used, so a runtime one of them refuses is never
-// rendered with by the other. The export used to check neither: it wrote the
-// settings and ran the helper against whatever the directory held, and a
-// drifted runtime the live path refused still produced a file called neural.
-
-// Empty when every locked file matches.
-static std::wstring RuntimeLockRefusal(std::span<const RuntimeLockCheck> checks){
-    if(RuntimeLockSatisfied(checks))return {};
-    return L"The neural runtime does not match the locked stack: "+DescribeRuntimeLockDrift(checks);
-}
-
-// Empty when the directory holds no module the lock does not name, and when it
-// cannot be listed: the helper refuses that itself, with its own reason.
-static std::wstring UnlockedRuntimeModulesRefusal(const std::filesystem::path& runtimeDirectory,const RuntimeLock& lock){
-    const auto unlocked=FindUnlockedRuntimeModules(runtimeDirectory,lock);
-    return unlocked?runtime_modules::UnlockedModulesRefusal(*unlocked):std::wstring{};
-}
-
-// Both, the lock first, which is the order a live render meets them in. Empty
-// when neither refuses. A cancelled check leaves hashes unverified and so
-// reads as drift; the caller asks its stop token before believing it.
-static std::wstring StageExportRuntimeRefusal(const std::filesystem::path& runtimeDirectory,const RuntimeLock& lock,std::stop_token stop){
-    const auto checks=VerifyRuntimeLock(runtimeDirectory,lock,stop);
-    if(std::wstring refusal=RuntimeLockRefusal(checks);!refusal.empty())return refusal;
-    return UnlockedRuntimeModulesRefusal(runtimeDirectory,lock);
-}
-
-// ---- Export with DLSS stages, the passes themselves --------------------
-//
-// Shared by the dialog and by `--render`, so a script gets the file the dialog
-// would have written rather than a second implementation of it that drifts.
-// Everything the two callers differ in - where progress goes, how the outcome
-// is shown, whether a range was asked for - is a parameter.
-struct StageExportJob {
-    ExportPlan plan;
-    std::filesystem::path source;
-    std::filesystem::path destination;
-    // Where the intermediate passes are written: the cache root's
-    // export-stages directory, beside the other derived carriers.
-    std::filesystem::path scratch;
-    // The player's directory: ffmpeg beside it, the helper in neural-runtime.
-    std::filesystem::path helpers;
-    uint32_t sourceWidth{},sourceHeight{};
-    double fps{},duration{};
-    // ExportDisplayAspect of the source; empty for square pixels.
-    std::wstring displayAspect;
-    // FrameGenerationRequest::holdDuplicates for the frame-generation pass.
-    bool holdDuplicates{};
-    // Whole for the dialog. A range reaches the worker pass only; frame
-    // generation then reads that pass's carrier, which covers just the range.
-    NeuralRenderRange range{};
-    // RTX VSR's quality for a vsrStage plan: the comparison ladder's, saved.
-    vsr_policy::Quality vsrQuality{vsr_policy::kDefaultQuality};
-    uint32_t nvencPreset{5};
-    // The model's resolution for a neural pass at the source size. An export
-    // that upscales runs the model on the upscaled frame, as it always has,
-    // whatever this says: a reduced model input and a Super Resolution output
-    // are one carrier's two jobs, and it can only do one of them.
-    uint32_t processingScale{kDefaultProcessingScale};
-    // Super Resolution's history for an upscaling pass without the model; a pass
-    // that runs the model keeps Temporal (CarrierUpscalingHistory).
-    UpscalingHistory upscalingHistory{kRecommendedUpscalingHistory};
-    // Written to the add-on before a neural pass. The dialog's tooltip has
-    // always said the neural stage "runs the neural model with the settings
-    // from Neural settings", but nothing wrote them: the export used whatever
-    // the last live render had left in ReShade.ini.
-    NeuralSettings neuralSettings{};
-    // The capture-quality switches of Encoder settings, so the export's neural pass
-    // writes the same way the cache does.
-    bool captureDither{true};
-    EncoderQuality quality{EncoderQuality::Standard};
-    bool sourceDeband{false};
-    bool suppliedExposure{false};
-    // Ends the player's idle resident helper before this export's helper
-    // starts in the same runtime directory. Empty for `--render`, which runs in
-    // a process of its own and has none.
-    std::function<void()> releaseResidentHelper;
-    // The lock the runtime directory is held to before any worker pass; empty
-    // is the embedded one. Tests only, which have no runtime that satisfies it.
-    std::optional<RuntimeLock> runtimeLock;
-};
-
-// `passKey` null is the end of the passes, when the finished file is moved
-// into place.
-struct StageExportUpdate {
-    uint32_t pass{},passes{};
-    const wchar_t* passKey{};
-    uint64_t completedFrames{},totalFrames{};
-};
-
-enum class StageExportStatus { Done, Refused, Failed, Cancelled };
-
-struct StageExportOutcome {
-    StageExportStatus status{StageExportStatus::Failed};
-    std::wstring detail;
-};
-
-static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop,
-                                         const std::function<void(const StageExportUpdate&)>& progress){
-    const ExportPlan& plan=job.plan;
-    const uint64_t tag=GetTickCount64();
-    const auto stageOne=job.scratch/(L"stage1-"+std::to_wstring(tag)+L".mkv");
-    const auto stageTwo=job.scratch/(L"stage2-"+std::to_wstring(tag)+L".mkv");
-    std::filesystem::path produced=job.source;
-    // Both intermediates, always: the last step writes the destination from
-    // them rather than renaming one into place, so the one it read is as
-    // spent as the other. The guard that used to keep `produced` also kept
-    // the first pass's carrier when frame generation failed after it.
-    const auto sweep=[&]{std::error_code ec;
-        std::filesystem::remove(stageOne,ec);
-        std::filesystem::remove(stageTwo,ec);};
-    const auto report=[&](StageExportUpdate update){if(progress)progress(update);};
-    // Asked before the passes rather than by the last step after them: the
-    // file is replaced, and a source replaced by its own export is gone.
-    {std::error_code sameError;
-        if(std::filesystem::equivalent(job.source,job.destination,sameError)&&!sameError)
-            return {StageExportStatus::Refused,L"The export cannot replace its own source. Choose a new filename."};}
-    const uint32_t passes=ExportStageCount(plan);
-    if(plan.vsrStage){
-        VsrUpscaleRequest request{};
-        request.source=produced;request.output=stageOne;
-        request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
-        request.quality=job.vsrQuality;request.range=job.range;
-        request.nvencPreset=job.nvencPreset;request.encode=job.quality;
-        report({1,passes,L"export.progress.pass_vsr",0,0});
-        const VsrUpscaleResult result=RunVsrUpscalePass(job.helpers,request,stop,
-            [&](const VsrUpscaleProgress& p){report({1,passes,L"export.progress.pass_vsr",p.framesWritten,p.framesTotal});});
-        if(!result.ok){
-            sweep();
-            return {result.cancelled?StageExportStatus::Cancelled:StageExportStatus::Failed,result.detail};
-        }
-        produced=stageOne;
-    }
-    if(plan.workerStage){
-        NeuralRenderRequest request{};
-        request.sourcePath=produced;request.stagingVideoPath=stageOne;
-        request.width=job.sourceWidth;request.height=job.sourceHeight;
-        request.fps=job.fps;request.durationSeconds=job.duration;
-        request.range=job.range;
-        request.nvencPreset=job.nvencPreset;
-        request.captureDither=job.captureDither;
-        // The stage export writes at the same rung the cache does.
-        request.quality=job.quality;
-        request.sourceDeband=job.sourceDeband;
-        request.suppliedExposure=job.suppliedExposure;
-        request.requireNeural=plan.requireNeural;
-        const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;
-        if(upscales){
-            request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
-        }
-        if(plan.requireNeural&&!upscales)request.processingScale=job.processingScale;
-        if(upscales)request.upscalingHistory=CarrierUpscalingHistory(job.upscalingHistory,plan.requireNeural);
-        const wchar_t* passKey=plan.requireNeural
-            ?(plan.outputWidth!=job.sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
-            :L"export.progress.pass_sr";
-        const auto runtimeDirectory=job.helpers/L"neural-runtime";
-        // Refused on what refuses a live render, before anything is written:
-        // a file that drifted from the lock, or a module the lock does not
-        // name beside feature 18. A Super Resolution-only pass too (P1.33): it
-        // is not presented as neural, but its helper loads the same proxy and
-        // Streamline modules from this directory, and the helper's own check
-        // of stray modules at startup came after the settings were written.
-        {
-            const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,job.runtimeLock?*job.runtimeLock:EmbeddedRuntimeLock(),stop);
-            if(stop.stop_requested())return {StageExportStatus::Cancelled,{}};
-            if(!refusal.empty()){
-                LOG("Stage export refused before the helper: "<<WideToUtf8(refusal));
-                return {StageExportStatus::Refused,refusal};
-            }
-        }
-        // One writer at a time, exactly as a live render: the settings written
-        // below and the helper's proxy log are shared per runtime directory, and
-        // `--render` can run beside a player that is rendering.
-        NeuralRuntimeLease runtimeLease(runtimeDirectory);
-        if(!runtimeLease.Held())
-            return {StageExportStatus::Refused,L"Another neural render is using the experimental runtime. Wait for it to finish, then try again."};
-        // An idle resident helper from an earlier live job still holds the
-        // device, its feature-18 workset and the runtime's ReShade.log. A
-        // second helper beside it risks the VRAM a small card does not have,
-        // and moves the proxy's log to ReShade.log1 where the evidence reader
-        // may not look. It goes first, as it does before a preflight probe -
-        // under the lease, which every job thread that uses it also holds.
-        if(job.releaseResidentHelper)job.releaseResidentHelper();
-        // The add-on state the job needs, with the neural settings when it runs
-        // the model. The helper checks the same state itself and relaunches when
-        // it had to change it; writing it here first saves that relaunch.
-        const auto overrides=plan.requireNeural
-            ?RenderAddonOverrides(runtimeDirectory/L"ReShade.ini",job.neuralSettings,request.processingScale)
-            :std::vector<NeuralAddonOverride>{};
-        const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",plan.requireNeural,overrides);
-        if(!configured.ok){
-            LOG("Stage export could not prepare the neural add-on: "<<WideToUtf8(configured.error));
-            return {StageExportStatus::Failed,L"The neural settings could not be prepared."};
-        }
-        report({1,passes,passKey,0,0});
-        const NeuralRenderResult result=RunNeuralWorker(job.helpers/L"neural-runtime"/L"NeuralWorker.exe",request,
-            [&](const NeuralRenderProgress& p){report({1,passes,passKey,p.completedFrames,p.totalFrames});},stop);
-        if(!result.ok){
-            sweep();
-            return {result.cancelled?StageExportStatus::Cancelled:StageExportStatus::Failed,result.detail};
-        }
-        produced=stageOne;
-    }
-    if(plan.frameGenStage){
-        FrameGenerationRequest request{};
-        request.source=produced;
-        // Video only: the last step below attaches the original's streams to
-        // whatever the passes produced, trimmed to the range.
-        request.carryStreams=false;
-        request.output=stageTwo;
-        request.multiplier=plan.multiplier;
-        request.nvencPreset=job.nvencPreset;
-        request.holdDuplicates=job.holdDuplicates;
-        const uint32_t generatePass=plan.workerStage?2u:1u;
-        report({generatePass,passes,L"export.progress.pass_framegen",0,0});
-        const FrameGenerationResult result=FrameGenerationPass(job.helpers).Run(request,stop,
-            [&](const FrameGenerationProgress& p){report({generatePass,passes,L"export.progress.pass_framegen",p.sourceFramesRead,p.sourceFramesTotal});});
-        if(!result.ok){
-            sweep();
-            return {result.error==FrameGenerationError::Cancelled?StageExportStatus::Cancelled:StageExportStatus::Failed,result.detail};
-        }
-        produced=stageTwo;
-    }
-    // Every pass writes Matroska. This used to be renamed onto the chosen name
-    // whatever it was, so "clip.mp4" was a Matroska file under an MP4 name;
-    // the last step now writes the container the name asks for, keeping the
-    // video bitstream as the passes encoded it.
-    //
-    // It is also where the original's audio, subtitles and chapters come in,
-    // for every combination of stages. The neural worker writes its carrier
-    // video-only, so an export without frame generation used to be silent,
-    // and so was one with a range, because frame generation copied streams
-    // from that carrier. Every pass keeps the length of what it read, so the
-    // streams need no retime - only the trim a ranged carrier needs, which
-    // is the cached-range export's.
-    StageExportMuxRequest finish{produced,job.source,job.destination};
-    finish.displayAspect=job.displayAspect;
-    if(!job.range.Whole()){
-        finish.rangeStartSeconds=double(job.range.start100ns)*1e-7;
-        if(job.range.end100ns>job.range.start100ns)finish.rangeDurationSeconds=double(job.range.end100ns-job.range.start100ns)*1e-7;
-    }
-    report({});
-    const MaterializeResult finished=MuxStageExport(job.helpers,finish,stop);
-    sweep();
-    if(!finished.ok){
-        if(finished.error==MaterializeError::Cancelled)return {StageExportStatus::Cancelled,{}};
-        LOG("Stage export could not write "<<WideToUtf8(job.destination.wstring())<<": "<<WideToUtf8(finished.detail));
-        return {StageExportStatus::Failed,finished.detail};
-    }
-    LOG("Stage export wrote "<<WideToUtf8(job.destination.wstring())<<(finished.detail.empty()?"":" - ")<<WideToUtf8(finished.detail));
-    // The note (what the container left out) goes to the dialog and to
-    // --render's console, not only the log (P1.33).
-    return {StageExportStatus::Done,finished.detail};
 }
 
 // How a neural job relates to what is on screen: an offline job replaces
@@ -6968,14 +6677,7 @@ private:
         if(HWND c=GetDlgItem(h,IDC_EX_HISTORY))EnableWindow(c,srAlone&&m_exportSelection.engine==SuperResolutionEngine::Dlss);
         if(HWND c=GetDlgItem(h,IDC_EX_MULTIPLIER))EnableWindow(c,m_exportSelection.frameGeneration&&ExportMaxMultiplier()>2);
         const ExportPlan plan=CurrentExportPlan();
-        std::wstring summary;
-        if(!plan.valid)summary=T(ExportRefusalKey(plan.refusal));
-        else{
-            wchar_t line[256];
-            swprintf_s(line,L"%u × %u at %.4g fps · %u pass%s",plan.outputWidth,plan.outputHeight,
-                       plan.outputFps,ExportStageCount(plan),ExportStageCount(plan)==1?L"":L"es");
-            summary=line;
-        }
+        const std::wstring summary=plan.valid?StageExportResultSummary(plan):T(ExportRefusalKey(plan.refusal));
         SetDlgItemTextW(h,IDC_EX_SUMMARY,summary.c_str());
         if(HWND run=GetDlgItem(h,IDC_EX_RUN))EnableWindow(run,plan.valid&&!ExportStagesBusy());
     }
@@ -12952,16 +12654,11 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         job.sourceDeband=GetPrivateProfileIntW(L"Encoding",L"SourceDeband",0,settings.c_str())!=0;
         job.suppliedExposure=GetPrivateProfileIntW(L"Encoding",L"SuppliedExposure",0,settings.c_str())!=0;
 
-        wchar_t summary[256];
-        swprintf_s(summary,L"%u x %u at %.4g fps -> %u x %u at %.4g fps, %u pass%s",width,height,fps,
-                   plan.outputWidth,plan.outputHeight,plan.outputFps,ExportStageCount(plan),ExportStageCount(plan)==1?L"":L"es");
-        say(summary);
+        say(StageExportPlanSummary(plan,width,height,fps));
         // What the render will look like and how it is encoded, whichever of
         // the command line, the preset and the saved settings each came from.
         if(plan.requireNeural)say(L"neural: "+Utf8ToWide(CanonicalNeuralSettings(neuralSettings)));
-        say(L"encode: "+Utf8ToWide(std::string(EncoderQualityName(job.quality)))+
-            (plan.vsrStage?L", upscaler RTX VSR":
-             plan.outputWidth!=width&&!plan.requireNeural?L", upscaler DLSS, history "+Utf8ToWide(std::string(UpscalingHistoryName(job.upscalingHistory))):std::wstring()));
+        say(StageExportEncodeSummary(plan,width,job.quality,job.upscalingHistory));
         say(L"writing "+output.wstring());
         LOG("--render plan: upscale="<<command.selection.upscale<<" engine="<<SuperResolutionEngineName(selection.engine)<<" neural="<<command.selection.neural
             <<" framegen="<<command.selection.frameGeneration<<" output="<<plan.outputWidth<<"x"<<plan.outputHeight
