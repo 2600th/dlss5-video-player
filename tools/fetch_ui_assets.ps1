@@ -3,6 +3,9 @@ param()
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Windows PowerShell redraws a progress bar for every block Invoke-WebRequest
+# reads, which made the download many times slower than the transfer itself.
+$ProgressPreference = 'SilentlyContinue'
 
 $packageName = '@tabler/icons-webfont'
 $packageVersion = '3.46.0'
