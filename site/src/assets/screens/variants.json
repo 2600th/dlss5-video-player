@@ -276,29 +276,29 @@
                                                             "width":  960,
                                                             "format":  "avif",
                                                             "file":  "vsr-wipe-crop-960.avif",
-                                                            "bytes":  7600,
-                                                            "psnrAgainstSource":  43.02
+                                                            "bytes":  7570,
+                                                            "psnrAgainstSource":  43.1
                                                         },
                                                         {
                                                             "width":  960,
                                                             "format":  "webp",
                                                             "file":  "vsr-wipe-crop-960.webp",
-                                                            "bytes":  14820,
-                                                            "psnrAgainstSource":  40.76
+                                                            "bytes":  14754,
+                                                            "psnrAgainstSource":  40.85
                                                         },
                                                         {
                                                             "width":  1440,
                                                             "format":  "avif",
                                                             "file":  "vsr-wipe-crop-1440.avif",
-                                                            "bytes":  11369,
-                                                            "psnrAgainstSource":  44.36
+                                                            "bytes":  11159,
+                                                            "psnrAgainstSource":  44.34
                                                         },
                                                         {
                                                             "width":  1440,
                                                             "format":  "webp",
                                                             "file":  "vsr-wipe-crop-1440.webp",
-                                                            "bytes":  24306,
-                                                            "psnrAgainstSource":  41.74
+                                                            "bytes":  24212,
+                                                            "psnrAgainstSource":  41.78
                                                         }
                                                     ]
                                    }

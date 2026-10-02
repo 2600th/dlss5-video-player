@@ -286,9 +286,9 @@ The player paused on one frame of *007 First Light* rendered at default
 settings: the first four on an RTX 5090 at 100% display scaling, the next three
 on an RTX 4080 SUPER at 150%. Click any image for full size.
 
-![A 1280x720 copy of 007 First Light in Wipe, compared against RTX VSR: the player's plain scale of the original left of a divider down the face, RTX VSR at High right of it, both tags at the top; an unscaled crop of the player's picture](docs/screenshots/current/vsr-wipe-crop.png)
+![A 960x540 copy of 007 First Light in Wipe, compared against RTX VSR: the player's plain scale of the original left of a divider down the face, RTX VSR at High right of it, both tags at the top; an unscaled crop of the player's picture](docs/screenshots/current/vsr-wipe-crop.png)
 
-One 720p frame shown at 1.13x: the player's plain scaling left of the divider,
+One 540p frame shown at 1.51x: the player's plain scaling left of the divider,
 RTX VSR right, unscaled crop ([whole window](docs/screenshots/current/vsr-wipe.jpg)).
 The measured comparison is the
 [RTX VSR quality report](docs/measurements/vsr-quality-20261002/REPORT.md), not

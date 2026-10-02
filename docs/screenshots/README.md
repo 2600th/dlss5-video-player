@@ -8,9 +8,9 @@ for images that have since been replaced are in the git history of this file.
 
 | File | What it shows | Made |
 | --- | --- | --- |
-| `current/vsr-wipe.jpg` | A 1280x720 copy of 007 First Light paused on frame 1122 in Wipe, compared against RTX VSR: the player's plain (bilinear) scale of the original left of the divider, RTX VSR at High right of it, the picture at 1.13x the video | 2 Oct 2026, `9d0f790` |
+| `current/vsr-wipe.jpg` | A 960x540 copy of 007 First Light paused on frame 1122 in Wipe, compared against RTX VSR: the player's plain (bilinear) scale of the original left of the divider, RTX VSR at High right of it, the picture at 1.51x the video | 2 Oct 2026, `9d0f790` |
 | `current/vsr-wipe-crop.png` | The picture area of `vsr-wipe.jpg`, 1:1, with both tags | 2 Oct 2026, `9d0f790` |
-| `current/export-stages-vsr.jpg` | **Export with DLSS stages** with Super Resolution alone, 2160p, Upscaler **RTX VSR (recommended)**, and its summary line | 2 Oct 2026, `9d0f790` |
+| `current/export-stages-vsr.jpg` | **Export with DLSS stages** with Super Resolution alone, 2160p, Upscaler **RTX VSR (recommended)**, and its summary line | 2 Oct 2026, `5f043ba` |
 | `current/player-start.jpg` | The start screen after two renders and a restart: the capability check with its RTX VSR line, two Recent tiles at Rendered 100%, and the Game trailers row | 2 Oct 2026, `9d0f790` |
 | `current/compare-wipe.jpg` | 007 First Light paused on frame 1122 in Wipe, the divider down the face, with the compare bar | 2 Oct 2026, `9d0f790` |
 | `current/compare-difference.jpg` | The same frame in Difference (x4, brightness only): where the model changed the picture | 2 Oct 2026, `9d0f790` |
@@ -126,46 +126,45 @@ The settings digest is the one the 24 September footer gave for the defaults.
 
 `vsr-wipe.jpg` and `vsr-wipe-crop.png`. RTX VSR only works where the picture is
 shown larger than the video, which a 2560x1440 trailer never is on a 1080p
-display, so the source is a 1280x720 copy of the cached 007 source, made with
-the bundled ffmpeg:
+display, so the source is a 960x540 copy of the cached 007 source, the input
+size of the [RTX VSR quality report](../measurements/vsr-quality-20261002/REPORT.md)'s
+540p-to-1080p measurement, made with the bundled ffmpeg:
 
 ```
 ffmpeg -i source.mkv -map 0:v:0 -map 0:a:0
-  -vf scale=1280:720:flags=lanczos+accurate_rnd+full_chroma_int -fps_mode passthrough
+  -vf scale=960:540:flags=lanczos+accurate_rnd+full_chroma_int -fps_mode passthrough
   -c:v libx264 -preset slow -crf 12 -pix_fmt yuv420p
   -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -c:a copy
-  "007 First Light 720p.mkv"
+  "007 First Light 540p.mkv"
 ```
 
 5,784 frames, SHA-256
-`3ee4dd70c80f55720b86892c98edab40c3a82e39d939931f4ba7a578baaddff4`. It was
+`27407aef60bd59dd0368094a1cccabaeed4333cb2754d1dc178a0b65b5673e9a`. It was
 opened as a local file (on the player's command line, after the start screen
 had been captured, so no local name reached a Recent tile) in the 1902x1023
 window and rendered whole, because the compare views need a render (render key
-`118cb8468703a30b…`, 5,784 / 5,784 verified). Then, paused on frame 1122:
+`fad0ab4556db0e4d…`, 5,784 / 5,784 verified). Then, paused on frame 1122:
 **Wipe** and **Video > Compare > Compare against RTX VSR** (`Shift+R`'s
 command), the divider still at 60.8%.
 
-The picture is 1449x815: **1.13x** the video, the largest Fit makes on this
-display, because the menu, compare bar, controls and status line take 156 of
-the client's 971 rows. **Fill** reaches 1.48x but pushes the tags out of view,
-so it was not used. RTX VSR runs at High, its default (`1280x720 -> 1449x815`
-in the log). Left of the divider is the compositor's bilinear scale of the
-original. A check on the capture: the left side differs from a bilinear scale
-of the copy's frame 1122 by 1.04 levels (1.52 and 1.50 for frames 1121 and
-1123), the right side by 1.42; the right side's mean Laplacian, a measure of
-fine detail, is 2.72 against the left's 2.09 beside the divider. The status
-line reads `DLSS Upscaling off`, which is right: playback VSR stands aside
-while a compare view draws both members.
+The picture is 1449x815: **1.51x** the video. RTX VSR runs at High, its
+default (`960x540 -> 1449x815` in the log). Left of the divider is the
+compositor's bilinear scale of the original. A check on the capture: the left
+side differs from a bilinear scale of the copy's frame 1122 by 1.04 levels
+(1.51 and 1.49 for frames 1121 and 1123), the right side by 1.48; the right
+side's mean Laplacian, a measure of fine detail, is 2.57 against the left's
+1.82 beside the divider. The status line reads `DLSS Upscaling off`, which is
+right: playback VSR stands aside while a compare view draws both members.
 
 `vsr-wipe-crop.png` is the render window's area of that capture, x 226-1675 and
 y 55-790 of the visible frame: 1449x735, unscaled and lossless, both tags in
 it. It is one frame of a game trailer on one display; the measured comparison
-is the [RTX VSR quality report](../measurements/vsr-quality-20261002/REPORT.md),
-not this picture.
+is the report, not this picture.
 
-A 960x540 copy made the same way showed at 1.51x in the same window and was
-captured too; it is not used here.
+A 1280x720 copy made the same way only reaches 1.13x in this window, because
+the menu, compare bar, controls and status line take 156 of the client's 971
+rows; **Fill** takes it to 1.48x but pushes the tags out of view. Both were
+captured and are not used.
 
 ### GTA VI on and off, frame 1940
 
@@ -178,15 +177,19 @@ pair, which was taken with Intensity, Local tone and Local structure at 2.0.
 
 ### Export with DLSS stages
 
-`export-stages-vsr.jpg`, with GTA VI loaded: **DLSS > Convert & export > Export
-with DLSS stages** opened its window, which is a tool window of its own, and
-was captured by its own handle: 472x468 at 100%. **Super Resolution** was
+`export-stages-vsr.jpg` was retaken with the rebuilt player at `5f043ba`, whose
+export dropdowns are 300 wide instead of 160 (at `9d0f790` the greyed History
+box was cut to "Per-frame (recommendec"). That build was copied, with its
+neural runtime and tools, into a new folder with no settings file, cache or
+logs, at a path short enough for its own cache beside the exe, which it used.
+The 960x540 copy was opened on its command line, then **DLSS > Convert &
+export > Export with DLSS stages** opened its window, which is a tool window of
+its own, captured by its own handle: 472x468 at 100%. **Super Resolution** was
 ticked, **Output height** set to 2160p and **Upscaler** to **RTX VSR
 (recommended)**; Neural rendering and Frame generation stayed unticked, as they
-open. The summary reads `3840 × 2160 at 30 fps · 1 pass`. Nothing was
-exported, so no save dialog or output path exists. **History** is greyed, since
-it applies to DLSS Super Resolution only, and at this size its text is cut to
-"Per-frame (recommendec".
+open. The summary reads `3840 × 2160 at 59.94 fps · 1 pass`. Nothing was
+exported, so no save dialog or output path exists. **History** is greyed,
+since it applies to DLSS Super Resolution only.
 
 ### The start screen
 
