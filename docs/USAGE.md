@@ -438,7 +438,7 @@ while it is the upscaler.
 It is the default because it measured best. 960x540 to 1080p over six clips on
 an RTX 5090, at High: 87.5 VMAF against 80.5 for bicubic and 74.9 for DLSS Super
 Resolution, 78.5 against 69.5 and 66.1 on H.264-compressed input, and ahead by
-VMAF NEG (which does not reward sharpening) and PSNR too, at 0.45 ms a frame;
+VMAF NEG (which does not reward sharpening) and PSNR too, at 0.45 ms for a 540p frame;
 a 1080p frame takes about 1.5 ms and a 1440p one 2.7 ms on that GPU
 ([docs/measurements/vsr-quality-20261002](measurements/vsr-quality-20261002/REPORT.md)).
 Its error does change more from one frame to the next than a plain scaler's, so

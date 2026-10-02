@@ -72,7 +72,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_package.ps1
 ## First run
 
 1. Unzip into a **new, empty folder**. Keep `neural-runtime/` next to the exe.
-2. Run `DLSSVideoPlayer.exe`.
+2. Run `DLSSVideoPlayer.exe`. The player is not code-signed, so Windows may
+   say "Windows protected your PC": choose **More info > Run anyway**, after
+   [checking the download](#check-what-you-downloaded) if you want to be sure
+   it is this project's.
 3. Open a file (`Ctrl+O`), paste a public YouTube link (`Ctrl+L`), or pick
    something from **File > Game trailers**.
 4. Press `D`. It buffers for a few seconds, then plays the render.
@@ -156,7 +159,9 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   marked and converted with `Ctrl+R`.
 - **Export with DLSS stages** (`Ctrl+S`) renders a new file with any of Super
   Resolution, neural rendering and frame generation (2x to 5x the frame rate),
-  in NVIDIA's order.
+  in NVIDIA's order. Super Resolution on its own runs on RTX VSR by default -
+  the upscaler that measured best - or on DLSS Super Resolution if you choose
+  it under **Upscaler**.
 - **From the command line**, `dlss5-convert` runs the same export without
   opening the player, waits for it and shows its progress. Give it files,
   folders or wildcards; this writes `clip-dlss.mkv` beside the input:
@@ -166,12 +171,15 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   ```
 
   Every stage and Neural setting is an option. Three stacked neural passes of
-  the strong look, frame generation at 3x, and a folder upscaled to 4K:
+  the strong look, frame generation at 3x, a folder upscaled to 4K with RTX VSR
+  (the default upscaler; `--sr-engine dlss` picks DLSS), and a folder rendered
+  and upscaled together:
 
   ```bat
   dlss5-convert clip.mp4 --preset strong --passes 3
   dlss5-convert clip.mp4 --stages fg --multiplier 3
-  dlss5-convert clips -r --stages sr,nr --height 2160 --out-dir clips-4k
+  dlss5-convert clips -r --stages sr --height 2160 --out-dir clips-4k
+  dlss5-convert clips -r --stages sr,nr --height 2160 --out-dir clips-nr-4k
   ```
 
   `dlss5-convert probe clip.mp4` says what a file is and which stages this
@@ -281,9 +289,20 @@ not what every source will gain.
 - **Driver 610.47 or newer.** Older drivers refuse neural rendering on any card,
   and the player tells you up front. See
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
-- **Tested GPUs.** An RTX 5090 (on 0.26.2) and an RTX 4080 SUPER (on 0.26.1).
-  RTX 20 and 30 series cards lack native FP8 and should be several times
-  slower; nobody has tested one yet.
+- **Which GPU does what:**
+
+  | GPU | Neural rendering | RTX VSR upscaling | DLSS Super Resolution | Frame generation |
+  | --- | --- | --- | --- | --- |
+  | RTX 50 | Yes; tested on an RTX 5090 | Yes; measured on an RTX 5090 | Yes | Yes, up to 5x here |
+  | RTX 40 | Yes; tested on an RTX 4080 SUPER | Yes | Yes | Yes, 2x |
+  | RTX 30 | Untested, and expected several times slower without native FP8 | Yes | Yes | Only with the community [dlssg_sm86 add-on](docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on); a user ran 4x on an RTX 3060 ([#14](https://github.com/2600th/dlss5-video-player/issues/14)) |
+  | RTX 20 | As RTX 30, untested | Yes | Yes | Only with the add-on; untested |
+
+  NVIDIA's own DLSS 5 support is RTX 50 only, and this player runs neural
+  rendering on a modified community runtime on every generation, RTX 50
+  included. RTX VSR costs about 1.5 ms for a 1080p frame
+  and 2.7 ms for a 1440p one at High on an RTX 5090; slower cards pay more, and
+  the player lowers its quality for a video it cannot keep up with.
 - **Depth is estimated from the picture**, and so is motion on cards without
   the optical flow engine. Expect some artifacts.
 - **DLSS Super Resolution doesn't beat a plain scaler on video.** Against

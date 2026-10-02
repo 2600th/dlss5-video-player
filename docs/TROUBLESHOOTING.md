@@ -218,6 +218,15 @@ not be created" is a read-only install folder.
 Every refusal is also written to the log, with the cause named, which is what
 to attach to a bug report when YouTube changes something upstream.
 
+## Windows says "Windows protected your PC"
+
+The player and its runtime are not code-signed, so SmartScreen warns the first
+time `DLSSVideoPlayer.exe` runs from a downloaded zip. Check the download first
+if you want to be sure it is this project's (`sha256sum -c` and
+`gh attestation verify`, as the README shows), then choose **More info > Run
+anyway**. Unzipping into a new folder you own, not into Program Files, also
+keeps the cache beside the player writable.
+
 ## Upscaling is off or playback drops frames
 
 Two upscalers, and only one at a time. **RTX VSR Upscaling** is on by default and

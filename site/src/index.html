@@ -116,7 +116,7 @@
         {
           "@type": "Question",
           "name": "Why is the neural runtime unsigned?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Because it has been modified. It includes NVIDIA's neural DLL patched to run on RTX 40 cards, which invalidates NVIDIA's signature, alongside community ReShade and RenoDX files that were never signed. Nobody is in a position to re-sign it, so it ships unsigned and says so. Its files are pinned by size and SHA-256, and the package verifier rejects any that have changed." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Because it has been modified. It includes NVIDIA's neural DLL modified by the community to run on every RTX generation, 20 through 50, which invalidates NVIDIA's signature, alongside community ReShade and RenoDX files that were never signed. Nobody is in a position to re-sign it, so it ships unsigned and says so. Its files are pinned by size and SHA-256, and the package verifier rejects any that have changed." }
         },
         {
           "@type": "Question",
@@ -771,8 +771,9 @@
     <details class="faq__item" id="faq-unsigned">
       <summary>Why is the neural runtime unsigned?</summary>
       <p>
-        Because it has been modified. It includes NVIDIA's neural DLL patched
-        to run on RTX 40 cards, which invalidates NVIDIA's signature, alongside
+        Because it has been modified. It includes NVIDIA's neural DLL modified
+        by the community to run on every RTX generation, 20 through 50, which
+        invalidates NVIDIA's signature, alongside
         community ReShade and RenoDX files that were never signed. Nobody is in
         a position to re-sign it, so it ships unsigned and says so. Its files
         are pinned by size and SHA-256, and the package verifier rejects any

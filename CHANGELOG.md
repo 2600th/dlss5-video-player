@@ -16,8 +16,9 @@ decisions that still shape the code are in
   instead of the window's plain scale, on the frame the player already decodes.
   Measured 960x540 to 1080p over six clips on an RTX 5090, at High: 87.5 VMAF
   against 80.5 for bicubic and 74.9 for DLSS Super Resolution, 78.5 against 69.5
-  and 66.1 on H.264 input, and ahead by VMAF NEG and PSNR too, at 0.45 ms a
-  frame ([report](docs/measurements/vsr-quality-20261002/REPORT.md)). Nobody had
+  and 66.1 on H.264 input, and ahead by VMAF NEG and PSNR too. It costs 0.45 ms
+  for a 540p frame, 1.5 ms for 1080p and 2.7 ms for 1440p on that GPU, and more
+  on slower ones ([report](docs/measurements/vsr-quality-20261002/REPORT.md)). Nobody had
   published such numbers; the report lists what had been. It upscales the
   render in the DLSS 5 view and the original in the Original view and the
   press-and-hold peek, so the A/B still compares the models alone, and stands
