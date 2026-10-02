@@ -694,6 +694,59 @@
   </div>
 </section>
 
+<!-- ============================ versus ============================ -->
+<section class="section" id="versus">
+  <div class="section__head">
+    <h2 class="section__title">Next to the other projects</h2>
+    <p class="section__note">
+      Several open-source projects put DLSS&nbsp;5&rsquo;s neural pass on video, and they do different jobs.
+      As of 2&nbsp;October 2026, from each project&rsquo;s own README, releases and issues; the
+      <a href="{{REPO_URL}}/blob/main/docs/RELATED_PROJECTS.md" rel="noopener">full list</a> has more, and corrections are welcome.
+    </p>
+  </div>
+
+  <div class="versus" role="region" aria-labelledby="versus-caption" tabindex="0">
+    <table class="versus__table">
+      <caption id="versus-caption" class="visually-hidden">DLSS 5 Video Player compared with Visual Enhancer, NeuralScreen, Veyra and DLSS5Tool</caption>
+      <thead>
+        <tr>
+          <td></td>
+          <th scope="col" class="versus__ours">This player</th>
+          <th scope="col"><a href="https://github.com/Merserk/dlss5-visual-enhancer" rel="noopener">Visual Enhancer</a> <span class="versus__ver">v14.0</span></th>
+          <th scope="col"><a href="https://github.com/perseval-BLR/NeuralScreen" rel="noopener">NeuralScreen</a> <span class="versus__ver">v2.1.9</span></th>
+          <th scope="col"><a href="https://github.com/Likely7/Veyra-NRVideo" rel="noopener">Veyra</a> <span class="versus__ver">2.0.0</span></th>
+          <th scope="col"><a href="https://github.com/banbanzhige/DLSS5Tool" rel="noopener">DLSS5Tool</a> <span class="versus__ver">v2.3.3</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row">What it is</th><td class="versus__ours">Plays the video while rendering all of it in the background, and exports</td><td>Converts through a stage pipeline; a Live mode plays through it</td><td>An overlay on the whole desktop, plus file conversion</td><td>Plays files, capture cards and game streams in real time</td><td>Converts, with a preview</td></tr>
+        <tr><th scope="row">Render you keep</th><td class="versus__ours">Yes: rendered frames are cached, seekable and re-watched</td><td>No: Live keeps a 2&ndash;30&nbsp;s buffer</td><td>No: real time</td><td>No: real time</td><td>Export only</td></tr>
+        <tr><th scope="row">Compare</th><td class="versus__ours">Split, Wipe, Difference, Side by side, 2&times;2, loupe, hold for original, against RTX VSR</td><td>Split, 2-Up</td><td>Before/after wipe</td><td>Original/enhanced toggle</td><td>Wipe, side by side</td></tr>
+        <tr><th scope="row">Upscaling</th><td class="versus__ours">RTX VSR by default in playback and export; DLSS SR on request; <a href="#limits">measured</a></td><td>RTX VSR and DLSS SR stages, off by default</td><td>None, by design</td><td>DLSS SR, RTX VSR or FSR</td><td>RTX VSR 2&times; or 4&times;</td></tr>
+        <tr><th scope="row">Frame gen.</th><td class="versus__ours">DLSS-G 2&ndash;5&times; as a conversion; RTX 20/30 through an offered, hash-checked add-on</td><td>DLSS-G as a conversion</td><td>DLSS-G 2&ndash;4&times;, live</td><td>DLSS-G, XeSS or FSR up to 6&times;, live</td><td>DLSS-G 2&times;, export</td></tr>
+        <tr><th scope="row">Inputs</th><td class="versus__ours">Local video, public YouTube, photos, GIFs</td><td>Images, video, URLs, YouTube, Twitch</td><td>Anything on screen, files</td><td>Files, images, capture cards, PS5, PC and Xbox streams</td><td>Images, video, image sequences</td></tr>
+        <tr><th scope="row">Export keeps</th><td class="versus__ours">Audio, subtitles and chapters</td><td>Audio and chapters; not subtitles</td><td>Audio</td><td>Audio and subtitles</td><td>Audio</td></tr>
+        <tr><th scope="row">HDR</th><td class="versus__ours">Shown on HDR displays; exports are SDR</td><td>10-bit HDR export; SDR&rarr;HDR</td><td>HDR10 recording; capture experimental</td><td>Kept; HEVC Main10 export</td><td>HDR10/HLG export</td></tr>
+        <tr><th scope="row">Command line</th><td class="versus__ours"><code>dlss5-convert</code>: files, folders, JSON report</td><td><code>VE_CLI.exe</code></td><td>No; a GUI queue</td><td>Not documented</td><td>Not documented</td></tr>
+        <tr><th scope="row">Download</th><td class="versus__ours"><span class="data">377&nbsp;MB</span>, or <span class="data">36&nbsp;MB</span> without the runtime</td><td><span class="data">726&nbsp;MB</span></td><td><span class="data">230&nbsp;MB</span></td><td><span class="data">409&nbsp;MB</span></td><td><span class="data">580&nbsp;MB</span> lite</td></tr>
+        <tr><th scope="row">Verify</th><td class="versus__ours">SHA-256, GitHub attestations, a manifest and a verifier</td><td>GitHub&rsquo;s per-file digest</td><td>SHA256SUMS and a runtime manifest</td><td>SHA-256 files</td><td>Runtime hashes</td></tr>
+        <tr><th scope="row">Licence</th><td class="versus__ours">MIT</td><td>Source-available, its own terms</td><td>PolyForm Strict, non-commercial</td><td>GPL-3.0; AGPL for streaming</td><td>MIT</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="versus__pick">
+    Pick this player to watch a video rendered, see exactly what the model changed against the original, and keep the render.
+    Pick Visual Enhancer for the widest conversion pipeline, NeuralScreen for games or anything else on screen in real time,
+    Veyra for capture cards, console streams or live frame generation, and DLSS5Tool for HDR or image-sequence conversion.
+  </p>
+  <p class="versus__caveat">
+    None of these is an NVIDIA product. On most GPUs each runs the neural pass on a runtime NVIDIA has not published for this
+    use &ndash; modified, leaked or architecture-spoofed &ndash; so read what each one ships, and download it from its original
+    repository: re-uploads under other accounts have been reported carrying malware.
+  </p>
+</section>
+
 <!-- ============================ download ============================ -->
 <section class="section" id="download">
   <h2 class="section__title">Download</h2>

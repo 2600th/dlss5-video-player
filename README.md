@@ -186,6 +186,42 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
   machine can run on it. `--range`, `--encode`, `--report` and the rest are in
   the [usage guide](docs/USAGE.md#from-the-command-line).
 
+## How it compares
+
+Several open-source projects put DLSS 5's neural pass on video. They do
+different jobs, so the right one depends on what you want to do. As of
+2026-10-02, from each project's README, releases and issues (details and more
+projects in [RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md); corrections
+welcome):
+
+| | **DLSS 5 Video Player** (this) | [Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) v14.0 | [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) v2.1.9 | [Veyra](https://github.com/Likely7/Veyra-NRVideo) 2.0.0 | [DLSS5Tool](https://github.com/banbanzhige/DLSS5Tool) v2.3.3 |
+| --- | --- | --- | --- | --- | --- |
+| What it is | A player that renders the whole video in the background, plus export | A converter with a stage pipeline, plus a Live mode | An overlay on the whole desktop, plus file conversion | A real-time player for files, capture cards and game streams | A converter with a preview |
+| Neural render you can keep, seek and re-watch | Yes: rendered frames are cached and reused | No: Live keeps a 2–30 s buffer | No: real time | No: real time | Export only |
+| Compare tools | Split, Wipe, Difference, Side by side, 2×2, loupe, hold for original, against RTX VSR | Split, 2-Up | Before/after wipe | Original/enhanced toggle | Wipe, side by side |
+| Upscaling | RTX VSR by default in playback and export, DLSS SR on request; [measured](docs/measurements/vsr-quality-20261002/REPORT.md) | RTX VSR and DLSS SR stages, off by default | None (by design) | DLSS SR, RTX VSR or FSR | RTX VSR 2× or 4× |
+| Frame generation | DLSS-G 2–5× as a conversion; RTX 20/30 through an offered, hash-checked add-on | DLSS-G as a conversion | DLSS-G 2–4×, live | DLSS-G, XeSS or FSR up to 6×, live | DLSS-G 2×, export |
+| Inputs | Local video, public YouTube, photos, GIFs | Images, video, URLs, YouTube, Twitch | Anything on screen, files | Files, images, capture cards, PS5, PC and Xbox streams | Images, video, image sequences |
+| Keeps audio / subtitles / chapters on export | Yes / yes / yes | Yes / no / yes | Audio yes | Audio and subtitles yes | Audio yes |
+| HDR | HDR shown on HDR displays; exports are SDR | 10-bit HDR export, SDR→HDR | HDR10 recording (experimental capture) | HDR kept, HEVC Main10 export | HDR10/HLG export |
+| Command line | `dlss5-convert`: files, folders, JSON report | `VE_CLI.exe` | No; a GUI queue | Not documented | Not documented |
+| Download | 377 MB (36 MB without the neural runtime) | 726 MB | 230 MB | 409 MB | 580 MB lite |
+| Verifying the download | SHA-256, GitHub attestations, a file manifest and a verifier script | GitHub's per-file digest | SHA256SUMS and a runtime manifest | SHA-256 files | Runtime hashes |
+| Licence | MIT | Source-available, its own terms | PolyForm Strict (non-commercial) | GPL-3.0 (AGPL for its streaming part) | MIT |
+
+Pick this player to watch a video rendered, check exactly what the model
+changed against the original, and keep the render. Pick Visual Enhancer for the
+widest conversion pipeline (ProRes, AV1, HDR export, grading), NeuralScreen for
+games or anything else on screen in real time, Veyra for capture cards,
+console streams or live frame generation, and DLSS5Tool for HDR or
+image-sequence conversion.
+
+None of these is an NVIDIA product. On most GPUs each runs the neural pass on a
+runtime build NVIDIA has not published for this use - community-modified,
+leaked or architecture-spoofed - so read what each one ships. Download any of
+them from its original repository: re-uploads under other accounts have been
+reported carrying malware.
+
 ## What's new in 0.27.2
 
 **0.27.2** (2026-10-02). A hotfix for Frame Generation on RTX 20 and 30
