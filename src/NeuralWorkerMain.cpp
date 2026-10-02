@@ -234,13 +234,27 @@ NeuralRenderResult FailedResult(std::wstring detail, uint64_t jobId)
 // window's message pump alive for the proxy and DXGI. A resident helper wraps
 // its whole session in one of these rather than one per job: the window and the
 // device that outlive a job need the pump to outlive it too.
+//
+// An exception escaping `body` used to leave the thread function and terminate
+// the helper with no result written, so the parent saw only a crash exit code.
+// It is caught here, logged, and reported through `threw`, and the event is set
+// either way so the pump returns; the caller writes the failed result.
 template <class Body>
-bool RunWithMessagePump(Body&& body)
+bool RunWithMessagePump(Body&& body, bool& threw)
 {
+    threw = false;
     HANDLE completed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!completed) return false;
     std::jthread worker([&] {
-        body();
+        try {
+            body();
+        } catch (const std::exception& error) {
+            LOG("Neural helper worker stopped on an unexpected exception: " << error.what());
+            threw = true;
+        } catch (...) {
+            LOG("Neural helper worker stopped on an unexpected non-standard exception.");
+            threw = true;
+        }
         SetEvent(completed);
     });
     PumpMessagesUntil(completed);
@@ -585,6 +599,9 @@ int wmain(int argc, wchar_t** argv)
     if (guideFiles.Active() && (arguments->preflight || arguments->command)) return 2;
     MetadataWriter metadata(arguments->metadata);
     const uint64_t jobId = arguments->request.jobId;
+    // What the parent is told when the worker thread threw; the log has what().
+    constexpr const wchar_t* kWorkerThrew =
+        L"The helper stopped on an unexpected error; the helper log has the details.";
     auto fail = [&](std::wstring detail) {
         if (arguments->preflight) {
             PreflightPayload payload;
@@ -640,11 +657,13 @@ int wmain(int argc, wchar_t** argv)
 
     if (arguments->preflight) {
         PreflightPayload payload;
+        bool threw = false;
         const bool pumped = RunWithMessagePump([&] {
             payload = RunNeuralPreflightProbe(renderWindow, moduleDirectory, gpu);
-        });
+        }, threw);
         DestroyWindow(renderWindow);
         if (!pumped) return fail(L"The helper could not create its preflight completion event.");
+        if (threw) return fail(kWorkerThrew);
         return metadata.WritePreflight(payload) ? 0 : 3;
     }
 
@@ -662,6 +681,7 @@ int wmain(int argc, wchar_t** argv)
         LOG("Resident helper session starting with idleVramPolicy="
             << narrow_text::LossyAscii(resident_helper::IdleVramPolicyName(arguments->idleVramPolicy)));
         int exitCode = 0;
+        bool threw = false;
         // One pump for the whole session: the window and the device outlive any
         // single job, so the thread that owns them has to keep pumping between
         // jobs as well as during them.
@@ -674,10 +694,11 @@ int wmain(int argc, wchar_t** argv)
                 resident_worker::RunResidentLoop(channel, runner);
             LOG("Resident helper session ended: " << ResidentExitName(reason));
             exitCode = static_cast<int>(resident_worker::ResidentExitCode(reason));
-        });
+        }, threw);
         // After the runner, so the device and its swapchain are gone first.
         DestroyWindow(renderWindow);
         if (!pumped) return fail(L"The helper could not create its session completion event.");
+        if (threw) return fail(kWorkerThrew);
         return exitCode;
     }
 
@@ -685,6 +706,7 @@ int wmain(int argc, wchar_t** argv)
     request.renderWindow = renderWindow;
     request.guideFiles = guideFiles;
     NeuralRenderResult result;
+    bool threw = false;
     const bool pumped = RunWithMessagePump([&] {
         OfflineNeuralRenderer renderer;
         // A single-shot helper exits rather than idling, so its policy is the
@@ -692,8 +714,9 @@ int wmain(int argc, wchar_t** argv)
         // process goes, and the post-job sample says what that was worth.
         result = RunOneJob(renderer, metadata, request, helperPhases,
                            resident_helper::kDefaultIdleVramPolicy, {});
-    });
+    }, threw);
     DestroyWindow(renderWindow);
     if (!pumped) return fail(L"The helper could not create its render completion event.");
+    if (threw) return fail(kWorkerThrew);
     return metadata.WriteResult(result) ? 0 : 3;
 }

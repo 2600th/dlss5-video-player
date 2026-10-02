@@ -5,6 +5,7 @@
 #include "KillOnCloseJob.h"
 #include "MediaTools.h"
 #include "Log.h"
+#include <objbase.h>
 #include <filesystem>
 #include <vector>
 #include <sstream>
@@ -66,6 +67,20 @@ void DrainAvailable(HANDLE pipe, audio_stderr::Tail& tail)
         tail.Append(buffer, got);
     }
 }
+
+// The reader thread drives WASAPI every round and, after a detached stop, is
+// the last owner of the reader state whose destructor releases the endpoint
+// and unregisters its notification callback. Those are COM calls, and a thread
+// that never joined an apartment only borrows the MTA while some other thread
+// happens to keep it alive. Uninitialised only when this call took the
+// reference, so a thread already in an apartment is left as it was.
+struct ReaderComApartment {
+    HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    ReaderComApartment() = default;
+    ReaderComApartment(const ReaderComApartment&) = delete;
+    ReaderComApartment& operator=(const ReaderComApartment&) = delete;
+    ~ReaderComApartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+};
 
 // Runs a helper and returns its standard output. Bounded in both directions:
 // a helper that never exits is killed with its job, and one that floods the
@@ -477,8 +492,13 @@ void AudioPlayer::StopProcess(const std::shared_ptr<ReaderState>& state) {
     }
 }
 
-void AudioPlayer::ReaderThread(std::shared_ptr<ReaderState> state) noexcept
+void AudioPlayer::ReaderThread(std::shared_ptr<ReaderState> owned) noexcept
 {
+    // The parameter outlives every local, so the state moves into one declared
+    // after the apartment: if this thread holds the last reference, the
+    // renderer is released while COM is still initialised here.
+    const ReaderComApartment com;
+    const std::shared_ptr<ReaderState> state = std::move(owned);
     try { ThreadMain(state); }
     catch (...) { LOG("Audio: reader thread stopped after an unexpected exception."); }
     // The child's exit code was never read and its stderr went to NUL, so a

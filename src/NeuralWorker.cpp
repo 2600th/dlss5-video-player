@@ -338,6 +338,9 @@ public:
     // The same decoder, fed from memory instead of the pipe.
     bool Push(std::span<const std::byte> chunk)
     {
+        // A stream that broke once stays broken: nothing after the bad message
+        // can be framed, and decoding on would only re-deliver what came before.
+        if (malformed_) return false;
         if (bytes_.size() + chunk.size() > kMaximumPayloadBytes * 2u) {
             malformed_ = true;
             return false;
@@ -376,9 +379,23 @@ public:
     // round trip would spend the cold start residency exists to remove.
 
 private:
+    // The messages already handed out are dropped whether or not decoding
+    // stopped on a bad one. Returning early used to leave them in the buffer,
+    // so the pump's last drain after a malformed stream decoded them again and
+    // re-fired progress, segment and restart callbacks for messages already
+    // acted on.
     bool Consume()
     {
         size_t offset = 0;
+        const bool ok = ConsumeFrom(offset);
+        if (offset) bytes_.erase(bytes_.begin(), bytes_.begin() + static_cast<std::ptrdiff_t>(offset));
+        return ok;
+    }
+
+    // Decodes whole messages from `offset`, leaving it past the last one it
+    // delivered.
+    bool ConsumeFrom(size_t& offset)
+    {
         while (bytes_.size() - offset >= sizeof(WireHeader)) {
             WireHeader header{};
             std::memcpy(&header, bytes_.data() + offset, sizeof(header));
@@ -493,7 +510,6 @@ private:
             }
             offset += messageBytes;
         }
-        if (offset) bytes_.erase(bytes_.begin(), bytes_.begin() + static_cast<std::ptrdiff_t>(offset));
         return true;
     }
 
@@ -722,9 +738,12 @@ StartOutcome StartHelper(const std::filesystem::path& executable,
     }
     // The helper exists from here on, suspended. This is the boundary the
     // player's Launch phase ends at: the process is the parent's last
-    // observation before the loader window the helper measures itself.
-    if (processCreated) processCreated();
+    // observation before the loader window the helper measures itself. Reported
+    // once the helper is in its job, never before: a callback that throws then
+    // unwinds through the kill-on-close job and takes the suspended helper
+    // with it, where before the assignment it left one suspended outside any job.
     const bool assigned = AssignProcessToJobObject(job.Get(), process.hProcess) != FALSE;
+    if (assigned && processCreated) processCreated();
     const DWORD resumed = assigned ? ResumeThread(process.hThread) : static_cast<DWORD>(-1);
     CloseHandle(process.hThread);
     if (!assigned || resumed == static_cast<DWORD>(-1)) {
@@ -759,9 +778,10 @@ struct PumpOutcome {
     bool completed{};   // a terminal message for this job arrived
 };
 
-// Pumps the helper's metadata pipe until this job is over. A single-shot helper
-// is followed to its exit; a resident one is followed to its terminal message,
-// because the process is meant to still be there afterwards.
+// Pumps the helper's metadata pipe until this job is over: its terminal message,
+// or - for a single-shot helper that never sends one - its exit. A resident one
+// is meant to still be there afterwards; a single-shot one is ended by the
+// caller.
 PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_token stop,
                  bool resident)
 {
@@ -778,8 +798,12 @@ PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_
         if (!reader.ReadAvailable(*helper.metadata, &budgetSpent)) { outcome.malformed = true; break; }
         // Judged from the reader rather than from the process, because a helper
         // that writes its result and exits in the same breath is judged below
-        // on what it said, not on the fact that it went.
-        if (resident && reader.Complete()) break;
+        // on what it said, not on the fact that it went. A single-shot helper
+        // is let go here too: once its terminal message is in there is nothing
+        // left to read, and the caller ends the process with EndHelper either
+        // way, so following it to its exit only waited out its teardown - or,
+        // for a helper that hung in it, waited for nothing.
+        if (reader.Complete()) break;
         if (stop.stop_requested() && !outcome.cancelled) {
             outcome.cancelled = true;
             // A single-shot helper is killed by the caller. A resident one is
@@ -1972,10 +1996,12 @@ neural_worker_detail::MetadataStreamOutcome neural_worker_detail::DecodeMetadata
     MetadataReader reader(expecting, [&](const NeuralRenderProgress&) { ++outcome.progressUpdates; }, sink);
     // Deliberately fragmented: the pipe delivers arbitrary chunks and a message
     // header can straddle two reads.
+    // Every chunk is pushed even after a refusal, as the pump's final drain
+    // does with whatever is still in the pipe: a malformed stream must not
+    // re-deliver what it already handed out.
     constexpr size_t chunkBytes = 7;
-    for (size_t offset = 0; offset < bytes.size(); offset += chunkBytes) {
-        if (!reader.Push(bytes.subspan(offset, std::min(chunkBytes, bytes.size() - offset)))) break;
-    }
+    for (size_t offset = 0; offset < bytes.size(); offset += chunkBytes)
+        reader.Push(bytes.subspan(offset, std::min(chunkBytes, bytes.size() - offset)));
     outcome.malformed = reader.Malformed();
     outcome.complete = reader.Complete();
     outcome.timeline = reader.Timeline();

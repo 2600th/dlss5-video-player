@@ -303,8 +303,8 @@ public:
     }
     // Whether the running child emits P010 for that pass, and where the last
     // frame of it was tone mapped - for the log and the throughput probe.
-    bool DecodingP010() const { return m_ffmpegP010; }
-    bool LastToneMapOnGpu() const { return m_lastToneMapGpu; }
+    bool DecodingP010() const { return m_ffmpegP010.load(std::memory_order_relaxed); }
+    bool LastToneMapOnGpu() const { return m_lastToneMapGpu.load(std::memory_order_relaxed); }
     // Asks for an HDR source to be decoded as PQ BT.2020 in ten bits (VideoFrame::pq)
     // instead of tone mapped, for an HDR display to show the original as graded.
     // A presentation request and nothing else: an SDR source ignores it, and the
@@ -313,10 +313,10 @@ public:
     // preference. A running child keeps what it was started with; the next seek
     // restarts it with the new answer (a kept-child seek is refused while they
     // differ).
-    void SetHdrPresentation(bool pq) { m_hdrPresentation = pq; }
-    bool HdrPresentation() const { return m_hdrPresentation; }
+    void SetHdrPresentation(bool pq) { m_hdrPresentation.store(pq, std::memory_order_relaxed); }
+    bool HdrPresentation() const { return m_hdrPresentation.load(std::memory_order_relaxed); }
     // Whether the running child emits PQ frames.
-    bool DecodingPq() const { return m_ffmpegPq; }
+    bool DecodingPq() const { return m_ffmpegPq.load(std::memory_order_relaxed); }
     bool DecodesUntaggedAsBt709() const {
         const auto [width, height] = StoredGeometry();
         return UntaggedSourceDecodesAsBt709(m_source.color, width, height,
@@ -338,8 +338,12 @@ public:
     // Whether the running child decodes and converts on the GPU through CUDA,
     // rather than D3D11VA or the CPU - for a test that has to know which of
     // the three produced the frames it just checked.
+    // The handle is read under m_frameMutex because the queue thread replaces
+    // the child (and its acceleration) when a hardware path falls back.
     bool DecodingOnCuda() const {
-        return m_backend == Backend::FFmpeg && m_ffmpegProcess && m_ffmpegAcceleration == FFmpegAcceleration::Cuda;
+        if (m_backend != Backend::FFmpeg) return false;
+        std::lock_guard lock(m_frameMutex);
+        return m_ffmpegProcess && m_ffmpegAcceleration.load(std::memory_order_relaxed) == FFmpegAcceleration::Cuda;
     }
 
 private:
@@ -528,14 +532,20 @@ private:
     bool m_seekTimingPending = false;
     bool m_seekReusedBuffered = false;
     mutable std::mutex m_seekTimingMutex;
-    FFmpegAcceleration m_ffmpegAcceleration = FFmpegAcceleration::Software;
+    // These five are atomic because a hardware fallback restarts the child on
+    // the queue thread (TryNextFFmpegAcceleration) and the read path records the
+    // tone map there, while the getters above and SetHdrPresentation run on the
+    // UI or test thread. Relaxed: each is a self-contained answer, and nothing
+    // else is published through them - the queue thread that writes them is the
+    // only one that acts on the frames they describe.
+    std::atomic<FFmpegAcceleration> m_ffmpegAcceleration{FFmpegAcceleration::Software};
     // SetHdrPresentation's request, and what the running child was started with.
-    bool m_hdrPresentation = false;
-    bool m_ffmpegPq = false;
+    std::atomic<bool> m_hdrPresentation{false};
+    std::atomic<bool> m_ffmpegPq{false};
     // The running child emits P010 that the decoder tone maps itself (HdrToneMap.h),
     // with this table: built once per source and peak, kept across restarts.
-    bool m_ffmpegP010 = false;
-    bool m_lastToneMapGpu = false;
+    std::atomic<bool> m_ffmpegP010{false};
+    std::atomic<bool> m_lastToneMapGpu{false};
     std::shared_ptr<const hdr_tonemap::Table> m_toneMapTable;
     uint32_t m_sourceGeneration = 0;
     bool m_restartDiscontinuity = false;
@@ -565,7 +575,8 @@ private:
     // in-kernel wait for the child from the rest of pipeRead.
     std::chrono::steady_clock::duration m_frameBlockedNanos{};
     uint64_t m_frameReadCalls = 0;
-    std::mutex m_frameMutex;
+    // Mutable so DecodingOnCuda can read the child's handle under it.
+    mutable std::mutex m_frameMutex;
     std::condition_variable_any m_frameCv;
     std::deque<VideoFrame> m_frameQueue;
     VideoReadResult m_frameTerminal = VideoReadResult::NotReady;

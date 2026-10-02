@@ -58,7 +58,16 @@ struct LoadResult {
     bool loaded{};
     DWORD error{};           // GetLastError when the load failed
     HMODULE module{};        // held for the life of the process
+    // The proxy's SHA-256 (lowercase hex; empty when it could not be read), and
+    // whether it is the build kPinnedFiles names for that file name. Reported,
+    // never enforced: a user may install another release of the add-on by hand,
+    // and the log is where a mismatch is worth seeing.
+    std::string sha256;
+    bool pinned{};
 };
+
+// Defined after kPinnedFiles, below.
+inline bool PinnedBuild(std::wstring_view saveAs, std::string_view sha256);
 
 inline bool RegularFile(const std::filesystem::path& path)
 {
@@ -83,6 +92,10 @@ inline LoadResult LoadBeside(const std::filesystem::path& directory)
                                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     result.loaded = result.module != nullptr;
     if (!result.loaded) result.error = GetLastError();
+    // After the load: a mapped image cannot be rewritten in place, so on success
+    // this is the file the process is running.
+    result.sha256 = Sha256File(path).value_or(std::string());
+    result.pinned = !result.sha256.empty() && PinnedBuild(result.proxy, result.sha256);
     return result;
 }
 
@@ -150,6 +163,13 @@ inline constexpr std::array<PinnedFile, 3> kPinnedFiles{{
     {L"dlssg_sm86.ini", "2616857ee29ec61e33c8b52e1b50f4c93cb5339adbb13b73f0ae71a722427a43", 3548, L"dlssg_sm86.ini"},
 }};
 
+inline bool PinnedBuild(std::wstring_view saveAs, std::string_view sha256)
+{
+    return std::ranges::any_of(kPinnedFiles, [&](const PinnedFile& file) {
+        return file.saveAs == saveAs && file.sha256 == sha256;
+    });
+}
+
 inline uint64_t PinnedBytes()
 {
     uint64_t total = 0;
@@ -184,10 +204,24 @@ inline std::optional<std::string> ReadWholeFile(const std::filesystem::path& pat
     return std::string(std::istreambuf_iterator<char>(in), {});
 }
 
+// Whether a file already at `file`'s destination is something other than the
+// pinned build - another mod's version.dll - which the install must not replace.
+inline bool ForeignFileAt(const std::filesystem::path& directory, const PinnedFile& file)
+{
+    const std::filesystem::path destination = directory / file.saveAs;
+    if (!RegularFile(destination)) return false;
+    const auto existing = ReadWholeFile(destination);
+    return !existing || Sha256Bytes(*existing).value_or(std::string()) != file.sha256;
+}
+
 // `fetch(file)` returns the file's bytes, or nothing when it could not be
 // fetched. Every file is fetched and verified before any is written, and an
 // existing file of the same name that is not the pinned one - another mod's
-// version.dll - stops the install with nothing changed.
+// version.dll - stops the install with nothing changed. That check is made
+// again for each file just before it is written: the download takes seconds,
+// and a foreign file that appeared meanwhile must not be overwritten either.
+// A stop there can leave the files before it written, but only as their pinned
+// builds, and the ini - the loader's marker - is the last of them.
 template <class Fetch>
 InstallResult Install(const std::filesystem::path& directory, Fetch&& fetch,
                       std::span<const PinnedFile> files = kPinnedFiles)
@@ -195,12 +229,7 @@ InstallResult Install(const std::filesystem::path& directory, Fetch&& fetch,
     std::vector<std::string> bodies;
     bodies.reserve(files.size());
     for (const PinnedFile& file : files) {
-        const std::filesystem::path destination = directory / file.saveAs;
-        if (RegularFile(destination)) {
-            const auto existing = ReadWholeFile(destination);
-            if (!existing || Sha256Bytes(*existing).value_or(std::string()) != file.sha256)
-                return {InstallStep::Conflict, std::wstring(file.saveAs)};
-        }
+        if (ForeignFileAt(directory, file)) return {InstallStep::Conflict, std::wstring(file.saveAs)};
         std::optional<std::string> body = fetch(file);
         if (!body) return {InstallStep::Download, std::wstring(file.name)};
         if (body->size() != file.bytes || Sha256Bytes(*body).value_or(std::string()) != file.sha256)
@@ -208,6 +237,8 @@ InstallResult Install(const std::filesystem::path& directory, Fetch&& fetch,
         bodies.push_back(std::move(*body));
     }
     for (size_t index = 0; index < files.size(); ++index) {
+        if (ForeignFileAt(directory, files[index]))
+            return {InstallStep::Conflict, std::wstring(files[index].saveAs)};
         const atomic_file::Outcome written = atomic_file::Replace(directory / files[index].saveAs, bodies[index]);
         if (!written) return {InstallStep::Write, std::wstring(files[index].saveAs), written.error};
     }

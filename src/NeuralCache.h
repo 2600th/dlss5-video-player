@@ -270,6 +270,13 @@ struct NeuralCacheFailure {
 };
 const char* NeuralCacheFailureCauseName(NeuralCacheFailure::Cause cause);
 
+// Whether `name`, a child of the cache root's `bucket` directory (sources,
+// renders, staging, live, frame-generation, thumbs), has a shape the cache or
+// the player writes there. Clear() deletes nothing else: the root is
+// user-settable, and a user who points it at a folder already holding files
+// must not lose them to "Clear cache".
+bool NeuralCacheCreatesName(std::wstring_view bucket, std::wstring_view name);
+
 class NeuralCacheManager {
 public:
     // An empty root prefers <executable directory>/cache/v1, with LocalAppData
@@ -322,7 +329,9 @@ public:
     bool MarkInvalid(const std::filesystem::path& staging);
     bool Quarantine(const NeuralCacheEntry& entry);
     // Removes only this exact owned cache entry. Missing entries succeed.
-    // Callers must first release playback/jobs referencing the entry.
+    // Callers must first release playback/jobs referencing the entry. Taken
+    // under the root's lock and retired by rename, as eviction does: false when
+    // another instance holds the cache, or when something has the entry open.
     bool RemoveSource(std::string_view key);
     bool RemoveRender(std::string_view key);
 

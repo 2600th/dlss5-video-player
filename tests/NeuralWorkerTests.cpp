@@ -2104,6 +2104,37 @@ void metadata_reader_accepts_segments_before_the_result_test()
     CHECK(neural_worker_detail::DecodeMetadataStream(broken).malformed);
 }
 
+// A malformed message stopped the decoder before it dropped the messages it had
+// already delivered, so the pump's last drain - and any later read - decoded
+// them again: progress, segments and restarts fired twice for one message.
+void a_malformed_stream_never_re_delivers_what_it_handed_out_test()
+{
+    const WireProgress progress = EncodeProgress([] {
+        NeuralRenderProgress value;
+        value.phase = NeuralRenderPhase::NeuralRendering;
+        value.completedFrames = 1;
+        value.totalFrames = 48;
+        return value;
+    }());
+    const auto segmentPayload = [](uint64_t index) {
+        return EncodeSegment(TestSegment(index, 24), kTestFrameDuration100ns);
+    };
+    std::vector<std::byte> stream;
+    AppendMessage(stream, WireKind::Progress, AsBytes(progress));
+    AppendMessage(stream, WireKind::Segment, segmentPayload(0));
+    AppendMessage(stream, WireKind::Segment, segmentPayload(1));
+    AppendMessage(stream, WireKind::Segment, segmentPayload(3));   // a gap: malformed
+    // Bytes still arriving after the bad message, as a pump's final drain sees.
+    AppendMessage(stream, WireKind::Progress, AsBytes(progress));
+    AppendMessage(stream, WireKind::Segment, segmentPayload(0));
+    const auto decoded = neural_worker_detail::DecodeMetadataStream(stream);
+    CHECK(decoded.malformed);
+    CHECK(!decoded.complete);
+    CHECK(decoded.progressUpdates == 1);
+    CHECK(decoded.restarts == 0);
+    CHECK(decoded.segments.size() == 2);
+}
+
 // P0.14, at the decoder: a job's stream ends with a Result and a probe's with a
 // Preflight receipt, and each refuses the other's however well-formed it is -
 // either verdict, reserved bytes zero, a JSON body. The reader used to take
@@ -3172,6 +3203,7 @@ int wmain(int argc, wchar_t** argv)
     protocol_rejects_inconsistent_results_test();
     segment_messages_round_trip_and_reject_malformed_test();
     metadata_reader_accepts_segments_before_the_result_test();
+    a_malformed_stream_never_re_delivers_what_it_handed_out_test();
     a_stream_ends_only_with_the_terminal_message_it_expects_test();
     running_helper_publishes_segments_before_its_result_test();
     configuration_retry_is_sequential_and_bounded_test();

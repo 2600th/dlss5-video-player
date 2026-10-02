@@ -265,13 +265,21 @@ struct SynchronizedPlayback::Impl {
         try{
             pending.future=std::async(std::launch::async,
                 [factory,media,path,nv12,seekSeconds,stop=pending.stop.get_token()]()->std::unique_ptr<ISynchronizedFrameSource>{
-                    auto source=factory();
-                    if(!source)return nullptr;
-                    source->PreferNv12(nv12);
-                    const bool ready=media.Valid()?source->OpenKnown(path,media,stop)
-                                                  :source->Open(path,stop);
-                    if(!ready||(seekSeconds>0.0&&!source->SeekSeconds(seekSeconds))){source->Close();return nullptr;}
-                    return source;
+                    // Failures are silent here by contract, and that includes
+                    // a throw: escaping, it would come back out of future.get()
+                    // in HarvestAsyncOpen, on the playback thread, which does not
+                    // expect one. The boundary's synchronous open reports instead.
+                    try{
+                        auto source=factory();
+                        if(!source)return nullptr;
+                        source->PreferNv12(nv12);
+                        const bool ready=media.Valid()?source->OpenKnown(path,media,stop)
+                                                      :source->Open(path,stop);
+                        if(!ready||(seekSeconds>0.0&&!source->SeekSeconds(seekSeconds))){source->Close();return nullptr;}
+                        return source;
+                    }catch(...){
+                        return nullptr;
+                    }
                 });
         }catch(const std::system_error&){
             return;
@@ -690,7 +698,13 @@ SynchronizedPlayback::SynchronizedPlayback(ISynchronizedFrameSource& original,
 
 SynchronizedPlayback::~SynchronizedPlayback(){Close();}
 SynchronizedPlayback::SynchronizedPlayback(SynchronizedPlayback&&) noexcept=default;
-SynchronizedPlayback& SynchronizedPlayback::operator=(SynchronizedPlayback&&) noexcept=default;
+// Not defaulted: the default destroyed the old impl without Close(), so the
+// sources it held open were never closed the way the destructor closes them.
+SynchronizedPlayback& SynchronizedPlayback::operator=(SynchronizedPlayback&& other) noexcept
+{
+    if(this!=&other){Close();impl_=std::move(other.impl_);}
+    return *this;
+}
 
 bool SynchronizedPlayback::SetOriginalHdrPresentation(bool pq)
 {
