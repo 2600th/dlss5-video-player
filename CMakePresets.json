@@ -13,12 +13,20 @@
       "cacheVariables": { "BUILD_TESTING": "ON" }
     },
     {
+      "name": "ci",
+      "inherits": "vs2022",
+      "displayName": "Quick build (pull requests)",
+      "description": "What build-windows builds on every push and pull request, and the fast local loop: the shipped targets and the device-free suites, without the GPU and audio smokes a hosted runner cannot run and without link-time code generation, which re-optimised the whole player once per test executable (5 test links: 77 s with it, 6 s without). Releases and the nightly full run build vs2022.",
+      "binaryDir": "${sourceDir}/build-ci",
+      "cacheVariables": { "DLSS_VIDEO_PLAYER_IPO": "OFF", "DLSS_VIDEO_PLAYER_HARDWARE_TESTS": "OFF" }
+    },
+    {
       "name": "asan",
       "inherits": "vs2022",
       "displayName": "AddressSanitizer",
       "description": "Every object instrumented with /fsanitize=address, for the device-free suites. Not for shipping.",
       "binaryDir": "${sourceDir}/build-asan",
-      "cacheVariables": { "DLSS_VIDEO_PLAYER_ASAN": "ON" }
+      "cacheVariables": { "DLSS_VIDEO_PLAYER_ASAN": "ON", "DLSS_VIDEO_PLAYER_HARDWARE_TESTS": "OFF" }
     },
     {
       "name": "analyze",
@@ -31,6 +39,7 @@
   ],
   "buildPresets": [
     { "name": "vs2022", "configurePreset": "vs2022", "configuration": "Release" },
+    { "name": "ci", "configurePreset": "ci", "configuration": "Release" },
     {
       "name": "asan",
       "configurePreset": "asan",
@@ -57,6 +66,15 @@
       "configuration": "Release",
       "output": { "outputOnFailure": true },
       "filter": { "exclude": { "label": "gpu|audio" } }
+    },
+    {
+      "name": "quick",
+      "displayName": "Quick tier (pull requests)",
+      "description": "The device-free suites minus the `slow` tier (PolicyTestsSlow, CachedExportTests), which the nightly and release runs add back with the portable preset.",
+      "configurePreset": "ci",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "gpu|audio|slow" } }
     },
     {
       "name": "hardware",
