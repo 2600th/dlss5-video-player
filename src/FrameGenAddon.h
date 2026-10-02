@@ -24,10 +24,10 @@
 // The add-on is a proxy DLL - version.dll, winmm.dll, dbghelp.dll or
 // dinput8.dll beside the executable - that hooks the load of nvngx_dlssg.dll
 // once it is in the process. It relies on the executable's own import of that
-// name being found beside it. Since 0.27.0 the player's load-time imports
-// resolve from System32 only (/DEPENDENTLOADFLAG:0x800, CMakeLists.txt), so
-// the System32 VERSION.dll is in by the time NGX loads nvngx_dlssg.dll, whose
-// own VERSION.dll import then binds to it, and the proxy is never loaded.
+// name being found beside it. The player's load-time imports resolve from
+// System32 only (/DEPENDENTLOADFLAG:0x800, CMakeLists.txt), so the System32
+// VERSION.dll is in by the time NGX loads nvngx_dlssg.dll, whose own
+// VERSION.dll import then binds to it, and the proxy is never loaded.
 //
 // It is loaded here by full path instead, which Windows admits as a second
 // module of the same name. Only when the add-on's own ini sits beside it: a
