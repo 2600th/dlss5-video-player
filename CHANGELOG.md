@@ -60,6 +60,12 @@ decisions that still shape the code are in
   and say the GPU's highest, and the confirmation says when the setting was
   lowered. On an RTX 3060 with the dlssg_sm86 add-on, 5x used to convert at 4x
   without a word (issue #14).
+- **A render the neural helper crashed in is retried again.** A helper that
+  stopped on an unexpected error mid-render was reported as a refused render
+  and the job ended there; it is a crash again, and the render restarts in a
+  fresh helper as it does after any other crash. A helper that fails after
+  reporting its result is no longer counted as a success, and one the player
+  stops reading is always ended rather than left holding the GPU.
 - **A refused compare key says why.** Pressing a compare view with no neural
   render, with Neural Rendering off or with no video shows a notice naming what
   is missing, where it used to do nothing.
