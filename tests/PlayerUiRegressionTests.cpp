@@ -1905,6 +1905,17 @@ struct PlayerAppTestAccess {
             CHECK(app.EffectiveComparison().labelFade < 1.0f);
             std::this_thread::sleep_for(chrome_motion::kHoverIn + std::chrono::milliseconds(30));
             CHECK_EQ(1.0f, app.EffectiveComparison().labelFade);
+            // The first timer tick can arrive after the whole fade - a slow
+            // mode change, a busy queue - and must still hand the renderer the
+            // landed level. It used to find nothing moving, now or before, and
+            // a paused frame kept its tags invisible.
+            {
+                const bool seeking = app.m_seeking;
+                app.m_seeking = true; // no present: this renderer has no device
+                app.AnimateTagFade(Clock::now());
+                CHECK_EQ(1.0f, app.m_renderer->GetComparison().labelFade);
+                app.m_seeking = seeking;
+            }
             app.m_activityMotionEnabled = false;
             app.SetComparisonMode(ComparisonMode::Wipe);
             CHECK_EQ(1.0f, app.EffectiveComparison().labelFade);

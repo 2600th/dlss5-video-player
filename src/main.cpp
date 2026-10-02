@@ -5147,7 +5147,9 @@ private:
             SyncMaskToSource();
             m_renderer->SetComparison(EffectiveComparison());
             if(ComparisonModesAvailable()){EnsureLabelAtlas();EnsureMask();}
-            if(refreshPaused&&!m_playing&&!m_seeking){UploadPausedComparisonReference();if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
+            // The status line names the upscaler the present just used, and
+            // only playback's tick rebuilds it, so a paused change says so here.
+            if(refreshPaused&&!m_playing&&!m_seeking){UploadPausedComparisonReference();if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();UpdateCachedStatus();}
             // The RTX VSR feature is created the first time a view reads it; a refusal
             // there greys the view, and the tags that name it are drawn again.
             const vsr_policy::Reason vsr=m_renderer->VsrReason();
@@ -5184,7 +5186,10 @@ private:
         StartCompareMarkSlide(SelectedComparisonMode(),mode);
         // The tags name the new arrangement; they fade in with it rather than
         // printing at once over a picture that has just changed shape.
-        if(mode!=m_comparison.mode){m_tagFade.Reset(false);m_tagFade.Set(true,Clock::now(),m_activityMotionEnabled);if(m_activityMotionEnabled)EnsureHoverTimer();}
+        // m_tagsWereMoving too: the first timer tick can come after the whole
+        // fade (a slow mode change, a busy queue), and must still present the
+        // landed level rather than find nothing moving and leave the tags out.
+        if(mode!=m_comparison.mode){m_tagFade.Reset(false);m_tagFade.Set(true,Clock::now(),m_activityMotionEnabled);m_tagsWereMoving=true;if(m_activityMotionEnabled)EnsureHoverTimer();}
         m_comparison.mode=mode;ApplyComparison();
         LOG("Comparison mode="<<static_cast<int>(mode)<<" splitX="<<m_comparison.splitX<<" zoomStep="<<m_zoomStep
             <<" reference="<<m_havePresentedPair);
