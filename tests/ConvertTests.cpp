@@ -89,6 +89,8 @@ void planner_test()
     CHECK((tuned.renderOptions == std::vector<std::wstring>{L"--passes", L"3", L"--intensity", L"1.5",
                                                            L"--encode", L"high", L"--color-strength", L"0.8"}));
     CHECK(ParseLine({L"a.mp4", L"--stages", L"sr", L"--history", L"per-frame"}).renderOptions.back() == L"per-frame");
+    CHECK((ParseLine({L"a.mp4", L"--stages", L"sr", L"--sr-engine", L"dlss"}).renderOptions ==
+           std::vector<std::wstring>{L"--stages", L"sr", L"--sr-engine", L"dlss"}));
     CHECK(ParseLine({}).mode == Mode::BadArguments);
     CHECK(ParseLine({L"a.mp4", L"--bogus"}).mode == Mode::BadArguments);
     CHECK(ParseLine({L"a.mp4", L"--format", L"avi"}).mode == Mode::BadArguments);

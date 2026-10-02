@@ -70,6 +70,9 @@ struct Command {
     // Super Resolution's history for sr without nr (UpscalingHistoryName);
     // empty uses the saved choice.
     std::optional<UpscalingHistory> history;
+    // Super Resolution's engine for sr without nr; empty uses the saved choice.
+    // --history alone implies dlss, the engine it belongs to.
+    std::optional<SuperResolutionEngine> engine;
     // One of kProcessingScaleRungs; empty uses the saved processing scale.
     std::optional<uint32_t> processingScale;
     // Stages, output rung and multiplier, in the dialog's own vocabulary so the
@@ -187,7 +190,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     bool seenRender = false, seenRange = false, seenPreset = false, seenStages = false,
          seenHeight = false, seenMultiplier = false, seenOut = false, seenQuiet = false,
          seenScale = false, seenPasses = false, seenIntensity = false, seenTone = false,
-         seenStructure = false, seenColor = false, seenEncode = false, seenHistory = false;
+         seenStructure = false, seenColor = false, seenEncode = false, seenHistory = false, seenEngine = false;
     std::wstring_view presetName;
     // What the dialog opens with: the neural pass alone.
     command.selection = ExportSelection{};
@@ -214,7 +217,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             argument == L"--multiplier" || argument == L"--out" || argument == L"--processing-scale" ||
             argument == L"--passes" || argument == L"--intensity" || argument == L"--local-tone" ||
             argument == L"--local-structure" || argument == L"--color-strength" || argument == L"--encode" ||
-            argument == L"--history";
+            argument == L"--history" || argument == L"--sr-engine";
         if (argument == L"--quality")
             return bad(L"The encode is --encode standard, high or lossless (--quality is an option the player retired).");
         if (!takesValue) return bad(L"Unknown argument: " + argument);
@@ -296,6 +299,12 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             if (value != L"standard" && value != L"high" && value != L"lossless")
                 return bad(L"--encode takes standard, high or lossless.");
             command.quality = value == L"standard" ? "standard" : value == L"high" ? "high" : "lossless";
+        } else if (argument == L"--sr-engine") {
+            if (!once(seenEngine)) return bad(L"--sr-engine was given twice.");
+            std::string lower;
+            for (const wchar_t c : value) lower.push_back(c < 0x80 ? static_cast<char>(std::towlower(c)) : '?');
+            command.engine = ParseSuperResolutionEngine(lower);
+            if (!command.engine) return bad(L"--sr-engine takes vsr or dlss.");
         } else if (argument == L"--history") {
             if (!once(seenHistory)) return bad(L"--history was given twice.");
             command.history = ParseUpscalingHistory(value == L"temporal" ? "temporal" : value == L"per-frame" ? "per-frame" : "");
@@ -346,6 +355,11 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     // greys it out the same way).
     if (seenHistory && (!selection.upscale || selection.neural))
         return bad(L"--history needs the sr stage without nr.");
+    if (seenEngine && (!selection.upscale || selection.neural))
+        return bad(L"--sr-engine needs the sr stage without nr: with nr the upscale is the model's carrier.");
+    if (seenHistory && command.engine == SuperResolutionEngine::RtxVsr)
+        return bad(L"--history is DLSS Super Resolution's; RTX VSR has none. Drop it, or use --sr-engine dlss.");
+    if (seenHistory && !command.engine) command.engine = SuperResolutionEngine::Dlss;
     if (seenEncode && !selection.upscale && !selection.neural)
         return bad(L"--encode needs the sr or nr stage: frame generation alone keeps its own encode.");
     // Frame generation converts a whole file and copies the source's audio onto
@@ -403,8 +417,12 @@ inline std::wstring Usage()
         L"                     Neural settings' Look group. Each applies over --preset.\n"
         L"  --encode Q         The encode: standard (8-bit), high (10-bit) or lossless.\n"
         L"                     Default: the player's saved Encoder settings.\n"
-        L"  --history H        Super Resolution's history for sr without nr: temporal or\n"
-        L"                     per-frame. Default: the player's saved choice.\n"
+        L"  --sr-engine E      The upscaler for sr without nr: vsr (RTX Video Super\n"
+        L"                     Resolution, recommended) or dlss (DLSS Super Resolution).\n"
+        L"                     Default: the player's saved choice. With nr it is DLSS.\n"
+        L"  --history H        DLSS Super Resolution's history for sr without nr: temporal\n"
+        L"                     or per-frame; implies --sr-engine dlss. Default: the\n"
+        L"                     player's saved choice.\n"
         L"  --processing-scale N  The resolution the model runs at, as a percentage of\n"
         L"                     the source: 100, 75 or 50, restored to the source size by\n"
         L"                     Super Resolution. For nr without sr. Default: the player's\n"

@@ -3,6 +3,7 @@
 // the portable suite excludes (`ctest -LE gpu`), and run on an RTX machine with
 // `ctest -L gpu` against the demo clip in docs/media.
 #include "D3D12Renderer.h"
+#include "VsrUpscalePass.h"
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "UpscalingPolicy.h"
@@ -102,6 +103,10 @@ int RunVsrProbe(const wchar_t* source);
 // the network maps texel for pixel, no tags, RGBA as CaptureComposedView reads it.
 //   UpscalingGpuSmoke vsr-capture <clip> <out width> <out height> <quality 1-4> <raw> <frames>
 int RunVsrCapture(const wchar_t* source,uint32_t outW,uint32_t outH,uint32_t quality,const wchar_t* raw,uint32_t maxFrames);
+// The export's RTX VSR pass (VsrUpscalePass) end to end: the whole clip to 1440p,
+// then a one-second range, each frame VSR's and each encoded.
+//   UpscalingGpuSmoke vsr-export <clip> <work dir>
+int RunVsrExportProbe(const wchar_t* source,const wchar_t* work);
 
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
@@ -119,6 +124,7 @@ int wmain(int argc,wchar_t** argv) {
     if(argc==2&&std::wstring_view(argv[1])==L"subtitle-upload")return RunSubtitleUploadProbe();
     if(argc==2&&std::wstring_view(argv[1])==L"debug-views")return RunDebugViewProbe();
     if(argc==3&&std::wstring_view(argv[1])==L"vsr")return RunVsrProbe(argv[2]);
+    if(argc==4&&std::wstring_view(argv[1])==L"vsr-export")return RunVsrExportProbe(argv[2],argv[3]);
     if(argc==8&&std::wstring_view(argv[1])==L"vsr-capture")
         return RunVsrCapture(argv[2],std::wcstoul(argv[3],nullptr,10),std::wcstoul(argv[4],nullptr,10),
                              std::wcstoul(argv[5],nullptr,10),argv[6],std::wcstoul(argv[7],nullptr,10));
@@ -1155,6 +1161,42 @@ int RunVsrCapture(const wchar_t* source,uint32_t outW,uint32_t outH,uint32_t qua
             code=ok&&frames>0&&texelForPixel&&renderer->VsrEvaluations()==frames?0:5;
         }
         DestroyWindow(window);
+    }
+    MFShutdown();CoUninitialize();return code;
+}
+
+int RunVsrExportProbe(const wchar_t* source,const wchar_t* work)
+{
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    int code=1;
+    {
+        VideoDecoder decoder;
+        if(!decoder.Open(source,MediaSourceKind::LocalFile))return 3;
+        const auto target=UpscalingTarget(decoder.Width(),decoder.Height(),1440);
+        const double fps=decoder.FrameRate();
+        const uint64_t expected=uint64_t(std::llround(decoder.DurationSeconds()*fps));
+        decoder.Close();
+        if(!target.grows)return 4;
+        std::error_code error;std::filesystem::create_directories(work,error);
+        wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
+        const std::filesystem::path helpers=std::filesystem::path(module).parent_path();
+        VsrUpscaleRequest request{};
+        request.source=source;request.output=std::filesystem::path(work)/L"vsr-export-whole.mkv";
+        request.outputWidth=target.width;request.outputHeight=target.height;
+        const VsrUpscaleResult whole=RunVsrUpscalePass(helpers,request,{});
+        // One second from the first: a range is the frames inside it, not the file.
+        request.output=std::filesystem::path(work)/L"vsr-export-range.mkv";
+        request.range={10'000'000,20'000'000};
+        const VsrUpscaleResult range=RunVsrUpscalePass(helpers,request,{});
+        const uint64_t second=uint64_t(std::llround(fps));
+        const uintmax_t rangeBytes=std::filesystem::file_size(request.output,error);
+        const bool wholeOk=whole.ok&&whole.framesWritten+1>=expected&&whole.framesWritten<=expected+1&&whole.evaluations==whole.framesWritten;
+        const bool rangeOk=range.ok&&range.framesWritten+1>=second&&range.framesWritten<=second+1&&
+                           range.evaluations==range.framesWritten&&!error&&rangeBytes>0;
+        std::cout<<"vsr-export: "<<target.width<<"x"<<target.height<<" whole="<<whole.ok<<" frames="<<whole.framesWritten<<" of ~"<<expected
+                 <<" evaluations="<<whole.evaluations<<" range="<<range.ok<<" frames="<<range.framesWritten<<" of ~"<<second
+                 <<" evaluations="<<range.evaluations<<" bytes="<<rangeBytes<<'\n';
+        code=wholeOk&&rangeOk?0:5;
     }
     MFShutdown();CoUninitialize();return code;
 }

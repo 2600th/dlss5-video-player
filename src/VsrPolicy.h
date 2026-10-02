@@ -8,9 +8,9 @@
 // RTX Video Super Resolution (P2.8): NVIDIA's video super resolution, trained on
 // compressed video, run live on the frame the player already decodes. It is the
 // playback upscaler wherever the window shows the picture larger than the video,
-// and a comparison view beside DLSS 5. It is presentation only - the window
-// compositor reads it, and nothing that reaches the cache capture, an export or a
-// cache key does - so it needs no render and no cache. The engine itself is
+// a comparison view beside DLSS 5, and an export's default upscaler
+// (VsrUpscalePass). It never reaches the cache capture or a cache key, so it
+// needs no render and no cache. The engine itself is
 // VsrEngine; this is what can be decided without a GPU: the quality it runs at,
 // whether it can run and what to say when it cannot, and how large a frame it makes.
 namespace vsr_policy {

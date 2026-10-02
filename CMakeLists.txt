@@ -316,6 +316,7 @@ add_library(player_app OBJECT
     src/UiResources.cpp src/UiResources.h
     src/DLSSGBackend.cpp src/DLSSGBackend.h
     src/FrameGenerationPass.cpp src/FrameGenerationPass.h
+    src/VsrUpscalePass.cpp src/VsrUpscalePass.h
     src/AudioPlayer.cpp src/AudioPlayer.h src/WasapiRenderer.cpp
     src/SubtitleOverlay.cpp src/SubtitleOverlay.h src/SubtitlePolicy.h
     src/RecentMedia.cpp src/RecentMedia.h
@@ -595,6 +596,10 @@ if(BUILD_TESTING)
         add_test(NAME VsrGpuSmoke COMMAND UpscalingGpuSmoke vsr
             "${CMAKE_SOURCE_DIR}/docs/media/neural-comparison-demo.mp4")
         set_tests_properties(VsrGpuSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 300)
+        # The export pass (VsrUpscalePass): the clip to 1440p and a one-second range.
+        add_test(NAME VsrExportSmoke COMMAND UpscalingGpuSmoke vsr-export
+            "${CMAKE_SOURCE_DIR}/docs/media/neural-comparison-demo.mp4" "${CMAKE_BINARY_DIR}/vsr-export")
+        set_tests_properties(VsrExportSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 300)
     endif()
     add_test(NAME MediaGpuSmoke COMMAND MediaGpuSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")

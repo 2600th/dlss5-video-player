@@ -73,6 +73,7 @@
 #include "PlaybackTickPolicy.h"
 #include "NeuralJobPolicy.h"
 #include "FrameGenerationPass.h"
+#include "VsrUpscalePass.h"
 #include "NeuralCache.h"
 #include "SourceDigestMemo.h"
 
@@ -410,6 +411,7 @@ static constexpr int IDC_EX_SUMMARY = 7506;
 static constexpr int IDC_EX_RUN = 7507;
 static constexpr int IDC_EX_CLOSE = 7508;
 static constexpr int IDC_EX_HISTORY = 7509;
+static constexpr int IDC_EX_ENGINE = 7510;
 
 static constexpr int IDC_TIMECODE_EDIT = 7501;
 static constexpr int IDC_TIMECODE_SET_IN = 7502;
@@ -1290,7 +1292,10 @@ static void LoadFrameGenAddon(bool safeMode) {
     auto& addon=FrameGenAddonState();
     addon=framegen_addon::LoadBeside(*directory);
     if(addon.proxy.empty())return;
-    if(addon.loaded)LOG("dlssg_sm86 add-on loaded for Frame Generation: "<<WideToUtf8((*directory/addon.proxy).wstring()));
+    // The digest says which build loaded: the pinned one the offer installs, or
+    // another a user put there by hand, which loads too but is named as such.
+    if(addon.loaded)LOG("dlssg_sm86 add-on loaded for Frame Generation: "<<WideToUtf8((*directory/addon.proxy).wstring())
+                        <<" sha256="<<addon.sha256<<(addon.pinned?" (the pinned 0.3.5 build)":" (not the build the player installs)"));
     else LOG("dlssg_sm86 add-on found but its "<<WideToUtf8(addon.proxy)<<" did not load: error "<<addon.error);
 }
 
@@ -1670,6 +1675,7 @@ static const wchar_t* ExportRefusalKey(ExportRefusal refusal){
     case ExportRefusal::SourceGeometryUnknown:return L"export.stages.refusal.geometry";
     case ExportRefusal::AlreadyAtTarget:return L"export.stages.refusal.target";
     case ExportRefusal::MultiplierUnsupported:return L"export.stages.refusal.multiplier";
+    case ExportRefusal::VsrUnavailable:return L"export.stages.refusal.vsr";
     case ExportRefusal::StillImage:return L"export.stages.refusal.still";
     case ExportRefusal::None:break;
     }
@@ -1688,6 +1694,21 @@ static UpscalingHistory ReadUpscalingHistory(const std::filesystem::path& settin
     wchar_t saved[32]{};
     GetPrivateProfileStringW(L"Playback",L"UpscalingHistory",L"",saved,static_cast<DWORD>(std::size(saved)),settings.c_str());
     return ParseUpscalingHistory(WideToUtf8(saved)).value_or(kRecommendedUpscalingHistory);
+}
+
+// The saved export upscaler ([Export] SrEngine), by name; anything else is RTX VSR.
+static SuperResolutionEngine ReadSuperResolutionEngine(const std::filesystem::path& settings){
+    wchar_t saved[16]{};
+    GetPrivateProfileStringW(L"Export",L"SrEngine",L"",saved,static_cast<DWORD>(std::size(saved)),settings.c_str());
+    return ParseSuperResolutionEngine(WideToUtf8(saved)).value_or(kRecommendedSuperResolutionEngine);
+}
+
+// Whether RTX VSR can run an export here as far as can be told without a device:
+// this build has it, its DLL is beside the player, and the GPU is an RTX one. The
+// pass itself still says so if NGX then refuses.
+static bool VsrExportReady(const std::filesystem::path& helpers,GpuGeneration generation){
+    return VsrEngine::kBuilt&&generation!=GpuGeneration::Unsupported&&generation!=GpuGeneration::OtherNvidia&&
+           framegen_addon::RegularFile(helpers/L"nvngx_vsr.dll");
 }
 
 // The saved [Encoding] CacheQuality rung. A name this build does not know - a newer
@@ -1776,6 +1797,8 @@ struct StageExportJob {
     // Whole for the dialog. A range reaches the worker pass only; frame
     // generation then reads that pass's carrier, which covers just the range.
     NeuralRenderRange range{};
+    // RTX VSR's quality for a vsrStage plan: the comparison ladder's, saved.
+    vsr_policy::Quality vsrQuality{vsr_policy::kDefaultQuality};
     uint32_t nvencPreset{5};
     // The model's resolution for a neural pass at the source size. An export
     // that upscales runs the model on the upscaled frame, as it always has,
@@ -1841,6 +1864,21 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
         if(std::filesystem::equivalent(job.source,job.destination,sameError)&&!sameError)
             return {StageExportStatus::Refused,L"The export cannot replace its own source. Choose a new filename."};}
     const uint32_t passes=ExportStageCount(plan);
+    if(plan.vsrStage){
+        VsrUpscaleRequest request{};
+        request.source=produced;request.output=stageOne;
+        request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
+        request.quality=job.vsrQuality;request.range=job.range;
+        request.nvencPreset=job.nvencPreset;request.encode=job.quality;
+        report({1,passes,L"export.progress.pass_vsr",0,0});
+        const VsrUpscaleResult result=RunVsrUpscalePass(job.helpers,request,stop,
+            [&](const VsrUpscaleProgress& p){report({1,passes,L"export.progress.pass_vsr",p.framesWritten,p.framesTotal});});
+        if(!result.ok){
+            sweep();
+            return {result.cancelled?StageExportStatus::Cancelled:StageExportStatus::Failed,result.detail};
+        }
+        produced=stageOne;
+    }
     if(plan.workerStage){
         NeuralRenderRequest request{};
         request.sourcePath=produced;request.stagingVideoPath=stageOne;
@@ -3613,6 +3651,7 @@ private:
         job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
         job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
         job.upscalingHistory=m_upscalingHistory;
+        job.vsrQuality=m_comparison.vsrQuality;
         job.captureDither=m_captureDither;job.quality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
         job.holdDuplicates=m_frameGenHoldDuplicates;
         // Called on the export thread, which is safe for a helper that is not
@@ -5085,6 +5124,7 @@ private:
         m_nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,SettingsPath().c_str())),1,7);
         m_processingScale=ReadProcessingScale(SettingsPath());
         m_upscalingHistory=ReadUpscalingHistory(SettingsPath());
+        m_exportSelection.engine=ReadSuperResolutionEngine(SettingsPath());
         m_captureDither=GetPrivateProfileIntW(L"Encoding",L"CaptureDither",1,SettingsPath().c_str())!=0;
         m_cacheQuality=ReadCacheQuality(SettingsPath());
         m_sourceDeband=GetPrivateProfileIntW(L"Encoding",L"SourceDeband",0,SettingsPath().c_str())!=0;
@@ -6838,7 +6878,7 @@ private:
     // the settings, while this is a one-off at a size and a rate the viewer
     // picked. "Save converted video" remains the way to keep the render you are
     // already watching.
-    static constexpr int kExportDesignW=470,kExportDesignH=402;
+    static constexpr int kExportDesignW=470,kExportDesignH=436;
 
     uint32_t ExportMaxMultiplier()const{
         // 1 + the runtime's generated-frames-per-pair. Unmeasured reads as 2, the
@@ -6850,7 +6890,8 @@ private:
 
     ExportPlan CurrentExportPlan()const{
         return PlanExport(m_exportSelection,m_decoder.Width(),m_decoder.Height(),
-                          m_decoder.FrameRate(),ExportMaxMultiplier(),m_decoder.IsStillImage());
+                          m_decoder.FrameRate(),ExportMaxMultiplier(),m_decoder.IsStillImage(),
+                          VsrExportReady(ExecutableDirectory(),m_opt.detectedGpu.generation));
     }
 
     // The file this export reads. A stream has to have finished copying first:
@@ -6882,17 +6923,21 @@ private:
         CreateNeuralCheck(h,IDC_EX_UPSCALE,L"export.stages.upscale",16,32,300,L"export.tip.upscale");
         CreateNeuralCombo(h,IDC_EX_RESOLUTION,L"export.stages.resolution",70,{L"1080p",L"1440p",L"2160p"});
         {
-            const std::wstring temporal=T(L"export.stages.history_temporal"),perFrame=T(L"export.stages.history_per_frame");
-            CreateNeuralCombo(h,IDC_EX_HISTORY,L"export.stages.history",104,{temporal.c_str(),perFrame.c_str()},L"export.tip.history");
+            const std::wstring vsr=T(L"export.stages.engine_vsr"),dlss=T(L"export.stages.engine_dlss");
+            CreateNeuralCombo(h,IDC_EX_ENGINE,L"export.stages.engine",104,{vsr.c_str(),dlss.c_str()},L"export.tip.engine");
         }
-        CreateNeuralCheck(h,IDC_EX_NEURAL,L"export.stages.neural",16,146,300,L"export.tip.neural");
-        CreateNeuralCheck(h,IDC_EX_FRAMEGEN,L"export.stages.framegen",16,186,300,L"export.tip.framegen");
-        CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",224,{L"2×",L"3×",L"4×",L"5×"});
-        CreateSettingsGroupHeading(h,L"export.stages.group_result",264);
-        DialogControl(h,L"STATIC",L"",SS_LEFT,16,288,436,34,IDC_EX_SUMMARY);
-        DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,322,436,34);
-        DialogButton(h,L"export.stages.run",IDC_EX_RUN,232,364,120,30,true);
-        DialogButton(h,L"export.stages.close",IDC_EX_CLOSE,362,364,90,30);
+        {
+            const std::wstring temporal=T(L"export.stages.history_temporal"),perFrame=T(L"export.stages.history_per_frame");
+            CreateNeuralCombo(h,IDC_EX_HISTORY,L"export.stages.history",138,{temporal.c_str(),perFrame.c_str()},L"export.tip.history");
+        }
+        CreateNeuralCheck(h,IDC_EX_NEURAL,L"export.stages.neural",16,180,300,L"export.tip.neural");
+        CreateNeuralCheck(h,IDC_EX_FRAMEGEN,L"export.stages.framegen",16,220,300,L"export.tip.framegen");
+        CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",258,{L"2×",L"3×",L"4×",L"5×"});
+        CreateSettingsGroupHeading(h,L"export.stages.group_result",298);
+        DialogControl(h,L"STATIC",L"",SS_LEFT,16,322,436,34,IDC_EX_SUMMARY);
+        DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,356,436,34);
+        DialogButton(h,L"export.stages.run",IDC_EX_RUN,232,398,120,30,true);
+        DialogButton(h,L"export.stages.close",IDC_EX_CLOSE,362,398,90,30);
         SyncExportStageControls(h);
         CaptureSettingsDesignLayout(h);
     }
@@ -6907,13 +6952,17 @@ private:
         select(IDC_EX_RESOLUTION,rung);
         select(IDC_EX_MULTIPLIER,std::clamp(int(m_exportSelection.multiplier),2,5)-2);
         select(IDC_EX_HISTORY,m_upscalingHistory==UpscalingHistory::PerFrame?1:0);
+        select(IDC_EX_ENGINE,m_exportSelection.engine==SuperResolutionEngine::Dlss?1:0);
         // A rung you cannot choose and a rate you cannot reach are greyed, not
         // hidden: the control staying visible is what tells the user the stage
         // exists and why it is unavailable here.
         if(HWND c=GetDlgItem(h,IDC_EX_RESOLUTION))EnableWindow(c,m_exportSelection.upscale);
-        // Only Super Resolution on its own has a history to choose: with the model
-        // on the same carrier the pass keeps Temporal, and the tooltip says why.
-        if(HWND c=GetDlgItem(h,IDC_EX_HISTORY))EnableWindow(c,m_exportSelection.upscale&&!m_exportSelection.neural);
+        // Only Super Resolution on its own has an engine to choose: with the model on
+        // the same carrier the upscale is DLSS's. And only DLSS has a history: with the
+        // model the pass keeps Temporal, and RTX VSR has none. The tooltips say why.
+        const bool srAlone=m_exportSelection.upscale&&!m_exportSelection.neural;
+        if(HWND c=GetDlgItem(h,IDC_EX_ENGINE))EnableWindow(c,srAlone);
+        if(HWND c=GetDlgItem(h,IDC_EX_HISTORY))EnableWindow(c,srAlone&&m_exportSelection.engine==SuperResolutionEngine::Dlss);
         if(HWND c=GetDlgItem(h,IDC_EX_MULTIPLIER))EnableWindow(c,m_exportSelection.frameGeneration&&ExportMaxMultiplier()>2);
         const ExportPlan plan=CurrentExportPlan();
         std::wstring summary;
@@ -6936,6 +6985,13 @@ private:
         m_exportSelection.frameGeneration=checked(IDC_EX_FRAMEGEN);
         m_exportSelection.targetHeight=kUpscaleRungHeights[std::clamp(sel(IDC_EX_RESOLUTION,1),0,int(std::size(kUpscaleRungHeights))-1)];
         m_exportSelection.multiplier=uint32_t(std::clamp(sel(IDC_EX_MULTIPLIER,0),0,3)+2);
+        {
+            const SuperResolutionEngine engine=sel(IDC_EX_ENGINE,0)==1?SuperResolutionEngine::Dlss:SuperResolutionEngine::RtxVsr;
+            if(engine!=m_exportSelection.engine){
+                m_exportSelection.engine=engine;
+                WritePrivateProfileStringW(L"Export",L"SrEngine",Utf8ToWide(std::string(SuperResolutionEngineName(engine))).c_str(),SettingsPath().c_str());
+            }
+        }
         // One choice for playback and the export, so the menu and this row agree.
         const UpscalingHistory history=sel(IDC_EX_HISTORY,0)==1?UpscalingHistory::PerFrame:UpscalingHistory::Temporal;
         if(history!=m_upscalingHistory){SetUpscalingHistory(history);return;}
@@ -6961,7 +7017,7 @@ private:
             // drawn, movable and inert - the exact failure the neural settings
             // dialog shipped with when stacking was added.
             if(((id==IDC_EX_UPSCALE||id==IDC_EX_NEURAL||id==IDC_EX_FRAMEGEN)&&code==BN_CLICKED)||
-               ((id==IDC_EX_RESOLUTION||id==IDC_EX_MULTIPLIER||id==IDC_EX_HISTORY)&&code==CBN_SELCHANGE)){ReadExportStageControls(h);return 0;}
+               ((id==IDC_EX_RESOLUTION||id==IDC_EX_MULTIPLIER||id==IDC_EX_HISTORY||id==IDC_EX_ENGINE)&&code==CBN_SELCHANGE)){ReadExportStageControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -7004,7 +7060,7 @@ private:
         const std::filesystem::path destination=PickStageExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());
         if(destination.empty())return;
 
-        LOG("Stage export starting: upscale="<<m_exportSelection.upscale
+        LOG("Stage export starting: upscale="<<m_exportSelection.upscale<<" engine="<<SuperResolutionEngineName(m_exportSelection.engine)
             <<" history="<<UpscalingHistoryName(CarrierUpscalingHistory(m_upscalingHistory,m_exportSelection.neural))
             <<" neural="<<m_exportSelection.neural<<" framegen="<<m_exportSelection.frameGeneration
             <<" output="<<plan.outputWidth<<"x"<<plan.outputHeight<<" fps="<<plan.outputFps
@@ -11647,7 +11703,7 @@ private:
         // deletes the staging file and the output from under the running pass.
         if(ActivityBusy()||m_exportWorker.joinable()||m_frameGenWorker.joinable()){MessageBoxW(m_hwnd,L"Finish or cancel rendering, saving and frame generation before clearing the cache.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONINFORMATION);return;}
         NeuralCacheManager cache(m_cacheRoot);if(!cache.Valid()){MessageBoxW(m_hwnd,CacheFailureText().DescribeRoot(cache.LastFailure()).c_str(),T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);return;}
-        const uintmax_t bytes=cache.SizeBytes();const std::wstring prompt=L"Close playback and delete "+std::to_wstring(bytes/(1024*1024))+L" MiB of neural cache data? Local original files will be kept.";
+        const uintmax_t bytes=cache.SizeBytes();const std::wstring prompt=L"Close playback and delete the neural cache - renders, copied streams and converted videos, up to "+std::to_wstring(bytes/(1024*1024))+L" MiB? Your original files, and anything in the cache folder the player did not create, are kept.";
         if(MessageBoxW(m_hwnd,prompt.c_str(),T(L"menu.clear_neural_cache").c_str(),MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return;
         Unload();
         if(!cache.Clear())MessageBoxW(m_hwnd,L"The neural cache could not be fully cleared.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);
@@ -12741,8 +12797,12 @@ static int RunProbeCommand(const render_command::Command& command,RenderConsole&
         text("frame_generation",frameGeneration);
         if(FrameGenAddonState().loaded)text("frame_generation_addon","dlssg_sm86 ("+WideToUtf8(FrameGenAddonState().proxy)+")");
 
+        // sr runs on RTX VSR in the player wherever that can run, and on DLSS in the
+        // helper otherwise; either makes the stage available.
+        const bool vsrReady=VsrExportReady(helpers,DetectHighPerformanceGpu().generation);
+        text("sr_engines",vsrReady?(worker?"vsr,dlss":"vsr"):(worker?"dlss":"none"));
         std::vector<std::string> stages;
-        if(worker&&!rungs.empty())stages.push_back("sr");
+        if((worker||vsrReady)&&!rungs.empty())stages.push_back("sr");
         if(worker)stages.push_back("nr");
         if(!still&&(!command.capabilities||maxMultiplier>=2))stages.push_back("fg");
         list("stages",stages);
@@ -12827,12 +12887,15 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
             const FrameGenerationCapability capability=QueryFrameGenerationCapability();
             maxMultiplier=capability.available?1u+capability.multiFrameCountMax:0u;
         }
-        const ExportPlan plan=PlanExport(command.selection,width,height,fps,maxMultiplier,still);
+        ExportSelection selection=command.selection;
+        selection.engine=command.engine?*command.engine:ReadSuperResolutionEngine(settings);
+        const ExportPlan plan=PlanExport(selection,width,height,fps,maxMultiplier,still,
+                                         VsrExportReady(helpers,DetectHighPerformanceGpu().generation));
         if(!plan.valid)return refuse(loc.Get(ExportRefusalKey(plan.refusal)));
 
         NeuralRenderRange range{};
         if(command.hasRange){
-            if(!plan.workerStage)return refuse(L"--range needs the sr or nr stage.");
+            if(!plan.workerStage&&!plan.vsrStage)return refuse(L"--range needs the sr or nr stage.");
             const auto in=ParseTimecode(command.rangeStart,fps);
             const auto out=ParseTimecode(command.rangeEnd,fps);
             if(!in||!out){console.Err(L"error: --range holds a timecode this source cannot read.");return kExitBadArguments;}
@@ -12867,6 +12930,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         job.neuralSettings=neuralSettings;
         job.processingScale=command.processingScale?*command.processingScale:ReadProcessingScale(settings);
         job.upscalingHistory=command.history?*command.history:ReadUpscalingHistory(settings);
+        job.vsrQuality=vsr_policy::LoadQuality(int(GetPrivateProfileIntW(L"Comparison",L"VsrQuality",static_cast<int>(vsr_policy::kDefaultQuality),settings.c_str())));
         job.captureDither=GetPrivateProfileIntW(L"Encoding",L"CaptureDither",1,settings.c_str())!=0;
         job.quality=ReadCacheQuality(settings);
         if(!command.quality.empty())ParseEncoderQuality(command.quality,job.quality);
@@ -12881,9 +12945,10 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         // the command line, the preset and the saved settings each came from.
         if(plan.requireNeural)say(L"neural: "+Utf8ToWide(CanonicalNeuralSettings(neuralSettings)));
         say(L"encode: "+Utf8ToWide(std::string(EncoderQualityName(job.quality)))+
-            (plan.outputWidth!=width&&!plan.requireNeural?L", history "+Utf8ToWide(std::string(UpscalingHistoryName(job.upscalingHistory))):std::wstring()));
+            (plan.vsrStage?L", upscaler RTX VSR":
+             plan.outputWidth!=width&&!plan.requireNeural?L", upscaler DLSS, history "+Utf8ToWide(std::string(UpscalingHistoryName(job.upscalingHistory))):std::wstring()));
         say(L"writing "+output.wstring());
-        LOG("--render plan: upscale="<<command.selection.upscale<<" neural="<<command.selection.neural
+        LOG("--render plan: upscale="<<command.selection.upscale<<" engine="<<SuperResolutionEngineName(selection.engine)<<" neural="<<command.selection.neural
             <<" framegen="<<command.selection.frameGeneration<<" output="<<plan.outputWidth<<"x"<<plan.outputHeight
             <<" fps="<<plan.outputFps<<" range=["<<range.start100ns<<","<<range.end100ns<<") preset="
             <<(command.preset?std::string(neural_presets::kPresets[*command.preset].key):std::string("saved")));

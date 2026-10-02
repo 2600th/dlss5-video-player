@@ -5470,11 +5470,12 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
 {
     const auto plan = [](bool upscale, bool neural, bool framegen, uint32_t rung = 1440,
                          uint32_t multiplier = 2, uint32_t maxMultiplier = 2,
-                         bool still = false) {
+                         bool still = false, SuperResolutionEngine engine = SuperResolutionEngine::Dlss) {
         ExportSelection selection;
         selection.upscale = upscale; selection.neural = neural;
         selection.frameGeneration = framegen;
         selection.targetHeight = rung; selection.multiplier = multiplier;
+        selection.engine = engine;
         return PlanExport(selection, 1280, 720, 30.0, maxMultiplier, still);
     };
 
@@ -5484,7 +5485,7 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
     CHECK_EQ(uint32_t{1280}, n.outputWidth); CHECK_EQ(uint32_t{720}, n.outputHeight);
     CHECK_EQ(uint32_t{1}, ExportStageCount(n));
 
-    // Super Resolution alone: one worker pass at the target size with the
+    // DLSS Super Resolution alone: one worker pass at the target size with the
     // neural verdicts OFF, which is what makes the helper start with the
     // add-on disabled. It was refused while the helper enabled the add-on for
     // every job - an upscale-only and an upscale-plus-neural export of one clip
@@ -5535,6 +5536,35 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
     // A still image may still be upscaled and neural rendered; only generation
     // needs a successor frame.
     CHECK(PlanExport({true, true, false, 1440, 2}, 1280, 720, 30.0, 2, /*still=*/true).valid);
+
+    // RTX VSR is the recommended engine and the selection's default, and it is its
+    // own pass, in the player rather than the helper; DLSS stays the worker's.
+    CHECK(ExportSelection{}.engine == SuperResolutionEngine::RtxVsr);
+    const ExportPlan v = plan(true, false, false, 1440, 2, 2, false, SuperResolutionEngine::RtxVsr);
+    CHECK(v.valid); CHECK(v.vsrStage); CHECK(!v.workerStage); CHECK(!v.requireNeural);
+    CHECK_EQ(uint32_t{2560}, v.outputWidth); CHECK_EQ(uint32_t{1440}, v.outputHeight);
+    CHECK_EQ(uint32_t{1}, ExportStageCount(v));
+    CHECK(!u.vsrStage);
+    const ExportPlan vf = plan(true, false, true, 1440, 2, 2, false, SuperResolutionEngine::RtxVsr);
+    CHECK(vf.valid); CHECK(vf.vsrStage); CHECK(vf.frameGenStage); CHECK_EQ(uint32_t{2}, ExportStageCount(vf));
+    // With the model the upscale is its carrier's, DLSS's, whatever the engine says.
+    const ExportPlan vn = plan(true, true, false, 1440, 2, 2, false, SuperResolutionEngine::RtxVsr);
+    CHECK(vn.valid); CHECK(vn.workerStage); CHECK(!vn.vsrStage); CHECK_EQ(uint32_t{1}, ExportStageCount(vn));
+    // Where RTX VSR cannot run the plan says so rather than failing at the pass;
+    // a neural export does not need it.
+    {
+        ExportSelection selection; selection.upscale = true;
+        CHECK(PlanExport(selection, 1280, 720, 30.0, 2, false, /*vsrReady=*/false).refusal == ExportRefusal::VsrUnavailable);
+        selection.neural = true;
+        CHECK(PlanExport(selection, 1280, 720, 30.0, 2, false, /*vsrReady=*/false).valid);
+        selection.neural = false; selection.engine = SuperResolutionEngine::Dlss;
+        CHECK(PlanExport(selection, 1280, 720, 30.0, 2, false, /*vsrReady=*/false).valid);
+    }
+    CHECK(SuperResolutionEngineName(SuperResolutionEngine::RtxVsr) == "vsr");
+    CHECK(SuperResolutionEngineName(SuperResolutionEngine::Dlss) == "dlss");
+    CHECK(ParseSuperResolutionEngine("vsr") == std::optional<SuperResolutionEngine>(SuperResolutionEngine::RtxVsr));
+    CHECK(ParseSuperResolutionEngine("dlss") == std::optional<SuperResolutionEngine>(SuperResolutionEngine::Dlss));
+    CHECK(!ParseSuperResolutionEngine("bicubic"));
 
     // Blackwell's higher multiples are admitted when the runtime says so.
     const ExportPlan quad = plan(false, false, true, 1440, 4, 4);
@@ -5732,6 +5762,22 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
     const Parsed history = parse({L"--render", L"c.mp4", L"--stages", L"sr", L"--history", L"per-frame", L"--encode", L"high"});
     CHECK(history.mode == Mode::Render);
     CHECK(history.command.history == std::optional<UpscalingHistory>(UpscalingHistory::PerFrame));
+    // --history is DLSS Super Resolution's, so a script that names it keeps DLSS.
+    CHECK(history.command.engine == std::optional<SuperResolutionEngine>(SuperResolutionEngine::Dlss));
+    // --sr-engine picks the upscaler for sr without nr; empty uses the saved choice.
+    CHECK(!parse({L"--render", L"c.mp4", L"--stages", L"sr"}).command.engine);
+    const Parsed vsrEngine = parse({L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"vsr"});
+    CHECK(vsrEngine.mode == Mode::Render);
+    CHECK(vsrEngine.command.engine == std::optional<SuperResolutionEngine>(SuperResolutionEngine::RtxVsr));
+    CHECK(parse({L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"DLSS"}).command.engine ==
+          std::optional<SuperResolutionEngine>(SuperResolutionEngine::Dlss));
+    for (const auto& refusedEngine : std::initializer_list<std::vector<std::wstring>>{
+             {L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"bicubic"},
+             {L"--render", L"c.mp4", L"--stages", L"sr,nr", L"--sr-engine", L"vsr"},
+             {L"--render", L"c.mp4", L"--stages", L"nr", L"--sr-engine", L"dlss"},
+             {L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"vsr", L"--history", L"temporal"},
+             {L"--render", L"c.mp4", L"--stages", L"sr", L"--sr-engine", L"vsr", L"--sr-engine", L"dlss"}})
+        CHECK(render_command::Parse(refusedEngine).mode == Mode::BadArguments);
 
     CHECK(!plain.command.passes && !plain.command.intensity && plain.command.quality.empty() && !plain.command.history);
 
@@ -7921,6 +7967,8 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--get-url",
         L"--print",
         L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s",
+        // The end of the options: nothing after it is read as one.
+        L"--",
         std::wstring(url),
     };
 
@@ -11581,7 +11629,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
             }
         }
     }
-    if (argc != 17 || std::wstring_view(argv[1]) != L"--no-config" ||
+    if (argc != 18 || std::wstring_view(argv[1]) != L"--no-config" ||
         std::wstring_view(argv[2]) != L"--no-cache-dir" ||
         std::wstring_view(argv[3]) != L"--no-plugin-dirs" ||
         std::wstring_view(argv[4]) != L"--no-playlist" ||
@@ -11595,7 +11643,8 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         std::wstring_view(argv[12]) != L"height,vbr,abr" ||
         std::wstring_view(argv[13]) != L"--get-url" ||
         std::wstring_view(argv[14]) != L"--print" ||
-        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s") {
+        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s" ||
+        std::wstring_view(argv[16]) != L"--") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
@@ -11607,7 +11656,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         return 92;
     }
 
-    const std::wstring_view url = argv[16];
+    const std::wstring_view url = argv[17];
     if (url.find(L"stderrnoise") != std::wstring_view::npos) {
         // What a Python interpreter prints around a run that works: warnings
         // on stderr, far more of them than stdout's whole cap, with the real

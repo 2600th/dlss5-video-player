@@ -46,6 +46,8 @@ struct ExportSelection {
     // Output frames per source frame. Read only when `frameGeneration`. 2 is
     // the only value an Ada card admits; Blackwell goes further.
     uint32_t multiplier{2};
+    // Super Resolution's engine when the model does not run (UpscalingPolicy.h).
+    SuperResolutionEngine engine{kRecommendedSuperResolutionEngine};
 };
 
 enum class ExportRefusal {
@@ -55,6 +57,9 @@ enum class ExportRefusal {
     AlreadyAtTarget,
     MultiplierUnsupported,
     StillImage,
+    // RTX VSR was chosen for a Super Resolution-only export where it cannot run:
+    // a build without the RTX Video SDK, nvngx_vsr.dll missing, or no RTX GPU.
+    VsrUnavailable,
     // Super Resolution without the neural pass used to be refused here: the
     // helper enabled the add-on for every job, so an upscale-only and an
     // upscale-plus-neural export of one clip came out byte-identical at
@@ -66,9 +71,12 @@ enum class ExportRefusal {
 struct ExportPlan {
     bool valid{};
     ExportRefusal refusal{ExportRefusal::None};
-    // Stage one: the neural worker, which carries Super Resolution, the neural
-    // pass, or both. False when only frame generation was asked for.
+    // Stage one: the neural worker, which carries DLSS Super Resolution, the
+    // neural pass, or both. False when only frame generation was asked for, or
+    // when RTX VSR does the upscale.
     bool workerStage{};
+    // Stage one instead: RTX VSR's upscale, in the player (VsrUpscalePass).
+    bool vsrStage{};
     // Capture size for that stage. Equal to the source size when the export
     // does not upscale; the worker reads 0 as "source size" but this is stated
     // explicitly so a caller can show the user the number.
@@ -88,9 +96,11 @@ struct ExportPlan {
 // `maxMultiplier` is 1 + DLSSG.MultiFrameCountMax, or 0 when the runtime admits
 // no generation at all. `stillImage` refuses frame generation outright: a photo
 // has no successor frame to interpolate toward.
+// `vsrReady` is whether RTX VSR can run here at all, as far as can be known
+// without a device: the build has it, its DLL is beside the player, the GPU is RTX.
 inline ExportPlan PlanExport(const ExportSelection& selection, uint32_t sourceWidth,
                              uint32_t sourceHeight, double sourceFps, uint32_t maxMultiplier,
-                             bool stillImage)
+                             bool stillImage, bool vsrReady = true)
 {
     ExportPlan plan;
     const auto refuse = [&](ExportRefusal reason) { plan = {}; plan.refusal = reason; return plan; };
@@ -113,8 +123,11 @@ inline ExportPlan PlanExport(const ExportSelection& selection, uint32_t sourceWi
         plan.outputWidth = target.width;
         plan.outputHeight = target.height;
     }
-    // The worker runs whenever either of the first two stages was asked for.
-    plan.workerStage = selection.upscale || selection.neural;
+    // RTX VSR takes the upscale when the model does not run; the worker runs for
+    // everything else in the first two stages.
+    plan.vsrStage = selection.upscale && !selection.neural && selection.engine == SuperResolutionEngine::RtxVsr;
+    if (plan.vsrStage && !vsrReady) return refuse(ExportRefusal::VsrUnavailable);
+    plan.workerStage = (selection.upscale && !plan.vsrStage) || selection.neural;
     plan.requireNeural = selection.neural;
 
     if (selection.frameGeneration) {
@@ -136,7 +149,7 @@ inline ExportPlan PlanExport(const ExportSelection& selection, uint32_t sourceWi
 // by and what the dialog's estimate is built from.
 inline uint32_t ExportStageCount(const ExportPlan& plan)
 {
-    return (plan.workerStage ? 1u : 0u) + (plan.frameGenStage ? 1u : 0u);
+    return (plan.workerStage || plan.vsrStage ? 1u : 0u) + (plan.frameGenStage ? 1u : 0u);
 }
 
 // ---- The file the export writes -----------------------------------------

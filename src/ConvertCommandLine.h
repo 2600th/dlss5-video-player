@@ -146,7 +146,7 @@ inline Options Parse(std::span<const std::wstring> arguments)
                  argument == L"--preset" || argument == L"--processing-scale" || argument == L"--range" ||
                  argument == L"--passes" || argument == L"--intensity" || argument == L"--local-tone" ||
                  argument == L"--local-structure" || argument == L"--color-strength" || argument == L"--encode" ||
-                 argument == L"--history") {
+                 argument == L"--history" || argument == L"--sr-engine") {
             const std::wstring* given = value();
             if (!given) return bad(argument + L" needs a value.");
             for (size_t seen = 0; seen < options.renderOptions.size(); ++seen)
@@ -313,7 +313,8 @@ inline std::wstring Usage()
         L"                         --preset; unset ones keep the player's saved settings.\n"
         L"  --processing-scale N   nr without sr: 100, 75 or 50.\n"
         L"  --encode Q             standard (8-bit), high (10-bit) or lossless encode.\n"
-        L"  --history H            sr without nr: temporal or per-frame.\n"
+        L"  --sr-engine E          sr without nr: vsr (RTX VSR, recommended) or dlss.\n"
+        L"  --history H            sr without nr, DLSS only: temporal or per-frame.\n"
         L"  --range START-END      Part of each source, e.g. 0:10-0:25 or f0-f300.\n"
         L"\n"
         L"Where it goes:\n"

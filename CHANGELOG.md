@@ -30,6 +30,15 @@ decisions that still shape the code are in
 - **With the dlssg_sm86 add-on, the 4x limit says how to raise it.** The
   confirmation names `MaxGeneratedFrames=4` in `dlssg_sm86.ini` for 5x.
 
+- **Exports upscale with RTX VSR too.** **Export with DLSS stages** has an
+  **Upscaler** row for Super Resolution without the neural model: RTX VSR
+  (recommended, the default) or DLSS Super Resolution. RTX VSR runs in the
+  player on the same path playback uses, so an export scores what was measured
+  (81.35 VMAF on a clip measured at 81.4; DLSS SR 66.6 on the same clip).
+  `--render` and `dlss5-convert` take `--sr-engine vsr|dlss`; `--history`
+  alone still means DLSS, so existing scripts keep their output. `probe` lists
+  `sr_engines`, and `sr` is offered wherever either engine can run.
+
 ### Fixed
 
 - **Release notes no longer claim renders carry over between versions.** The
