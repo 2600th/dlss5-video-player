@@ -221,7 +221,7 @@ if(RTX_VIDEO_SDK)
     # brackets keep both external (/external:anglebrackets), like every NGX header.
     file(CONFIGURE OUTPUT "${GENERATED_INCLUDE_DIR}/RtxVideoSdkHeaders.h"
         CONTENT "#pragma once\n#include <nvsdk_ngx_helpers.h>\n#include <${RTX_VIDEO_SDK}/include/nvsdk_ngx_helpers_vsr.h>\n")
-    message(STATUS "NVIDIA RTX Video SDK found at ${RTX_VIDEO_SDK}; the RTX VSR comparison view is built.")
+    message(STATUS "NVIDIA RTX Video SDK found at ${RTX_VIDEO_SDK}; RTX VSR (the playback and export upscaler, and its comparison view) is built.")
 endif()
 
 # Link-time code generation for Release, where the toolset supports it. Not in

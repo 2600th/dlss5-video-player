@@ -11228,7 +11228,7 @@ private:
     }
     std::wstring BuildStatusText()const{
         // The menu path the hint names has to be the one the menu has: the
-        // cancel item lives under DLSS > Convert & save, not under File.
+        // cancel item lives under DLSS > Convert & export, not under File.
         if(m_exportWorker.joinable())return L"Exporting processed media \u00b7 DLSS > Convert & export > Cancel export to stop";
         // The conversion is the one activity that owns the whole status line:
         // it is minutes long, it is the reason the picture is not changing, and
