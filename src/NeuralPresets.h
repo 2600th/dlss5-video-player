@@ -89,12 +89,17 @@ inline constexpr Preset kPresets[] = {
      "look, not the speed.",
      NeuralSettings{0.5f, 1.0f, 0.5f, 0.0f, 1.0f, 0, 0, true}},
 
+    // Strong used to be Intensity 1.50 / tone 1.25 / structure 1.50: its Intensity
+    // rendered byte-identical to 1.00 and it landed 6 % further from the source
+    // than Natural. Tone 2.00 and structure 1.50 land 22 % further (8-41 % over six
+    // clips) - docs/measurements/knobs-upper-20261003.
     {"strong", "Strong",
-     "Raised intensity and local structure. For heavily compressed sources - "
+     "Local tone 2.00 and local structure 1.50: the model's change pushed about a "
+     "fifth further from the source than Natural. For heavily compressed sources - "
      "a low-bitrate stream - where the default leaves the artefacts visible.",
      "6.31 s measured. Every preset renders in the same time - they change the "
      "look, not the speed.",
-     NeuralSettings{1.5f, 1.25f, 1.5f, -1.0f, 1.0f, 0, 0, true}},
+     NeuralSettings{1.0f, 2.0f, 1.5f, -1.0f, 1.0f, 0, 0, true}},
 };
 
 inline constexpr size_t kPresetCount = sizeof(kPresets) / sizeof(kPresets[0]);
