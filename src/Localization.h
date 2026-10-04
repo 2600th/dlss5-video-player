@@ -343,7 +343,7 @@ private:
             {L"compare.refused.no_video", L"Open a video or photo to compare it"},
             {L"compare.refused.no_render", L"Compare views need a neural render: mark I/O, then Ctrl+R"},
             {L"compare.refused.render_starting", L"Compare views open once the neural render is playing"},
-            {L"neural.view.original", L"Original"}, {L"neural.view.rendered", L"Neural rendered"},
+            {L"neural.view.original", L"Showing the original"},
             {L"neural.sync.warning", L"The original and neural-rendered streams are out of sync."},
             // A renderer that latched itself unusable is rebuilt once with the
             // frame that was on screen; only a rebuild that fails unloads.

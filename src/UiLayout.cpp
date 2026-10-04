@@ -602,7 +602,10 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
 
     const wchar_t* configuration = L"Neural addon unavailable";
     if (status.runtimeConfiguration == PlayerRuntimeConfiguration::NeuralAddonExperimental) {
-        configuration = L"Neural addon enabled (experimental)";
+        // The state is the toolbar's own ("Neural Rendering - On"); what the line
+        // adds is the one thing the pill does not say - that the runtime is an
+        // experimental one - in 21 characters instead of 35.
+        configuration = L"DLSS 5 (experimental)";
     } else if (status.runtimeConfiguration == PlayerRuntimeConfiguration::DlssSrSafeMode) {
         configuration = L"DLSS SR safe mode";
     }
@@ -623,7 +626,7 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
     // source or the output.
     text << configuration << L" \u00b7 " << status.upscalingStatus
          << L" \u00b7 " << status.frameGenerationStatus
-         << L" \u00b7 " << status.sourceWidth << L'\u00d7' << status.sourceHeight;
+         << L" \u00b7 Source " << status.sourceWidth << L'\u00d7' << status.sourceHeight;
     if (status.outputWidth != status.sourceWidth || status.outputHeight != status.sourceHeight) {
         text << L" \u2192 " << status.outputWidth << L'\u00d7' << status.outputHeight;
     }

@@ -2126,10 +2126,11 @@ void player_status_formats_exact_runtime_and_playback_states_test()
         return text.find(part) != std::wstring::npos;
     };
     const std::wstring neural = BuildPlayerStatusText(status);
-    CHECK(shows(neural, L"Neural addon enabled"));
+    // The runtime is named as what the pill does not say: that it is experimental.
+    CHECK(shows(neural, L"DLSS 5 (experimental)"));
     CHECK(shows(neural, status.upscalingStatus));
     CHECK(shows(neural, status.frameGenerationStatus));
-    CHECK(shows(neural, L"1920\u00d71080"));
+    CHECK(shows(neural, L"Source 1920\u00d71080"));
     CHECK(shows(neural, L"3840\u00d72160"));
     CHECK(shows(neural, L"Quality"));
     // Nothing the chips carry is repeated on the line: a repeat is exactly

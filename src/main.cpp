@@ -11416,9 +11416,11 @@ private:
             status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();
             status.quality=QualityNameW(m_activeQuality);
             status.upscalingStatus=UpscalingStatus();status.frameGenerationStatus=FrameGenerationStatus();
+            // The view is named only when it is not the neural one: "Neural
+            // rendered" repeated what the Neural Rendering pill already says.
             std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural video \u00b7 "))+
-                T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+
-                L" \u00b7 "+BuildPlayerStatusText(status);
+                (m_comparisonView==ComparisonView::Neural?std::wstring{}:T(L"neural.view.original")+L" \u00b7 ")+
+                BuildPlayerStatusText(status);
             if(const std::wstring hdr=HdrStatusText();!hdr.empty())text+=L" \u00b7 "+hdr;
             if(!CachedRangeCoversSource())text+=L" \u00b7 Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);
             if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;
