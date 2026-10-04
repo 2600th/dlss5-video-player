@@ -601,6 +601,13 @@ struct PlayerAppTestAccess {
         CheckNeuralSettingsDialog(app);
     }
 
+    static void neural_preset_strip_and_apply_state_test()
+    {
+        PlayerApp& app = fixture->app;
+
+        CheckNeuralPresetStripAndApplyState(app);
+    }
+
     static void settings_ahead_notice_test()
     {
         PlayerApp& app = fixture->app;
@@ -2864,6 +2871,7 @@ struct PlayerAppTestAccess {
         UI_CASE(neural_toggle_queued_during_seek_test),
         UI_CASE(export_stages_dialog_test),
         UI_CASE(neural_settings_dialog_test),
+        UI_CASE(neural_preset_strip_and_apply_state_test),
         UI_CASE(settings_ahead_notice_test),
         UI_CASE(render_report_test),
         UI_CASE(encoder_settings_dialog_test),
@@ -4133,7 +4141,8 @@ struct PlayerAppTestAccess {
         app.AdjustWndProc(dialog, WM_HSCROLL, 0, 0);
         CHECK(std::abs(app.m_comparison.strength - 1.6f) < 0.001f);
         CHECK(std::abs(app.m_renderer->GetComparison().strength - 1.6f) < 0.001f);
-        CHECK_EQ(std::wstring(L"1.60"), ReadText(GetDlgItem(dialog, IDC_ADJ_NEURAL_STRENGTH + 100)));
+        // A percentage, as the compare bar's Mix shows the same value.
+        CHECK_EQ(std::wstring(L"160%"), ReadText(GetDlgItem(dialog, IDC_ADJ_NEURAL_STRENGTH + 100)));
         // The control cannot ask for a strength outside the range the shader composites
         // over: the trackbar clamps both ends to 0..2.
         SendMessageW(track, TBM_SETPOS, TRUE, 900);
@@ -4257,6 +4266,81 @@ struct PlayerAppTestAccess {
 
         DestroyWindow(dialog);
         CHECK(app.m_exportStagesWnd == nullptr);
+    }
+
+    // The preset strip, the line that says what Apply will do, and the way
+    // across between the two dialogs that change how the picture looks.
+    static void CheckNeuralPresetStripAndApplyState(PlayerApp& app)
+    {
+        const bool loaded = app.m_loaded, live = app.m_liveSession, cached = app.m_cachedPlayback;
+        app.m_neuralSettings = {}; app.m_renderGuides = {}; app.m_temporalSettings = {};
+        app.m_lastNeuralPreset = neural_presets::kPresetCount;
+        app.ShowNeuralSettings();
+        REQUIRE(app.m_neuralWnd != nullptr);
+        const HWND dialog = app.m_neuralWnd;
+        const HWND preset = GetDlgItem(dialog, IDC_NS_PRESET);
+        REQUIRE(preset != nullptr);
+        // The Apply line is filled the moment the dialog opens, not on the first change.
+        CHECK(!ReadText(GetDlgItem(dialog, IDC_NS_STATE)).empty());
+        const auto selected = [&] { return static_cast<size_t>(SendMessageW(preset, CB_GETCURSEL, 0, 0)); };
+        const auto itemText = [&](size_t index) {
+            wchar_t text[128]{};
+            SendMessageW(preset, CB_GETLBTEXT, index, reinterpret_cast<LPARAM>(text));
+            return std::wstring(text);
+        };
+        // Every preset, then Custom; the defaults are Standard, and its description
+        // is shown beside it.
+        CHECK_EQ(int(neural_presets::kPresetCount) + 1, int(SendMessageW(preset, CB_GETCOUNT, 0, 0)));
+        CHECK_EQ(neural_presets::kDefaultPresetIndex, selected());
+        CHECK_EQ(std::wstring(L"Standard (recommended)"), itemText(neural_presets::kDefaultPresetIndex));
+        const std::string_view description = neural_presets::kPresets[neural_presets::kDefaultPresetIndex].description;
+        CHECK_EQ(std::wstring(description.begin(), description.end()), ReadText(GetDlgItem(dialog, IDC_NS_PRESET_NOTE)));
+        // Picking Strong writes its values, as the menu does.
+        const size_t strong = neural_presets::IndexOfKey("strong");
+        SendMessageW(preset, CB_SETCURSEL, strong, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_PRESET, CBN_SELCHANGE), reinterpret_cast<LPARAM>(preset));
+        CHECK(app.m_neuralSettings == neural_presets::kPresets[strong].settings);
+        CHECK_EQ(strong, selected());
+        // Moving a control lands on Custom, which names the preset it came from.
+        SendMessageW(GetDlgItem(dialog, IDC_NS_TONE), TBM_SETPOS, TRUE, 150);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
+        CHECK_EQ(neural_presets::kPresetCount, selected());
+        CHECK_EQ(app.T(L"neural.preset.custom_from") + L"Strong", itemText(neural_presets::kPresetCount));
+        CHECK_EQ(app.T(L"neural.preset.custom_note"), ReadText(GetDlgItem(dialog, IDC_NS_PRESET_NOTE)));
+
+        // What Apply will do, said where Apply is.
+        const HWND apply = GetDlgItem(dialog, IDC_NS_APPLY);
+        const HWND state = GetDlgItem(dialog, IDC_NS_STATE);
+        app.m_loaded = false; app.m_liveSession = false; app.m_cachedPlayback = false;
+        app.RefreshNeuralApplyState();
+        CHECK_EQ(app.T(L"neural.state.unloaded"), ReadText(state));
+        CHECK(IsWindowEnabled(apply) != FALSE);
+        // A running session with exactly these settings: nothing to apply.
+        app.m_loaded = true; app.m_liveSession = true;
+        app.TakeLiveRenderSettings();
+        app.RefreshNeuralApplyState();
+        CHECK_EQ(app.T(L"neural.state.session_current"), ReadText(state));
+        CHECK(IsWindowEnabled(apply) == FALSE);
+        // A control moved since it started: Apply restarts it, and says where.
+        SendMessageW(GetDlgItem(dialog, IDC_NS_TONE), TBM_SETPOS, TRUE, 120);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
+        CHECK(ReadText(state).find(L"Apply restarts") != std::wstring::npos);
+        CHECK(ReadText(state).find(L"%s") == std::wstring::npos);
+        CHECK(IsWindowEnabled(apply) != FALSE);
+        app.m_liveSession = live; app.m_loaded = loaded; app.m_cachedPlayback = cached;
+        app.TakeLiveRenderSettings();
+
+        // Each dialog opens the other.
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_OPEN_ADJUST, BN_CLICKED), 0);
+        CHECK(app.m_adjustWnd != nullptr);
+        if (app.m_adjustWnd) {
+            app.AdjustWndProc(app.m_adjustWnd, WM_COMMAND, MAKEWPARAM(IDC_ADJ_OPEN_NEURAL, BN_CLICKED), 0);
+            CHECK(app.m_neuralWnd == dialog);
+            DestroyWindow(app.m_adjustWnd);
+        }
+        DestroyWindow(dialog);
+        app.m_neuralSettings = {};
+        app.m_lastNeuralPreset = neural_presets::kPresetCount;
     }
 
     static void CheckNeuralSettingsDialog(PlayerApp& app)
@@ -4614,8 +4698,10 @@ struct PlayerAppTestAccess {
 
     static std::wstring ReadText(HWND window)
     {
-        wchar_t text[64]{};
-        GetWindowTextW(window, text, 64);
+        // The whole text: the preset note and the Apply state line run past 64
+        // characters, and a fixed buffer compared their first 63 against the rest.
+        std::wstring text(static_cast<size_t>(std::max(0, GetWindowTextLengthW(window))) + 1, L'\0');
+        text.resize(static_cast<size_t>(GetWindowTextW(window, text.data(), static_cast<int>(text.size()))));
         return text;
     }
 

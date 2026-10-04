@@ -371,6 +371,8 @@ static constexpr int IDC_ADJ_TINT = 7106;
 static constexpr int IDC_ADJ_NEURAL_STRENGTH = 7107;
 static constexpr int IDC_ADJ_RESET = 7110;
 static constexpr int IDC_ADJ_CLOSE = 7111;
+// Opens Neural settings: the other half of "how the picture looks".
+static constexpr int IDC_ADJ_OPEN_NEURAL = 7112;
 
 static constexpr int IDC_NS_INTENSITY = 7301;
 static constexpr int IDC_NS_STRUCTURE = 7302;
@@ -390,6 +392,12 @@ static constexpr int IDC_NS_GUIDE_DEPTH = 7312;
 // The Temporal group (TemporalSettings.h).
 static constexpr int IDC_NS_SCENE_CUTS = 7340;
 static constexpr int IDC_NS_STABILITY = 7341;
+// The preset strip, the line that says what the preset does, the line that
+// says what Apply will do, and the way across to Image adjustments.
+static constexpr int IDC_NS_PRESET = 7342;
+static constexpr int IDC_NS_PRESET_NOTE = 7343;
+static constexpr int IDC_NS_STATE = 7344;
+static constexpr int IDC_NS_OPEN_ADJUST = 7345;
 static constexpr int IDC_NS_RESET = 7320;
 static constexpr int IDC_NS_APPLY = 7321;
 static constexpr int IDC_NS_CLOSE = 7322;
@@ -5761,7 +5769,8 @@ private:
         SetAdjustmentValue(h,IDC_ADJ_GAMMA,PlainValue(m_colorSettings.gamma));
         SetAdjustmentValue(h,IDC_ADJ_TEMPERATURE,SignedValue(m_colorSettings.temperature));
         SetAdjustmentValue(h,IDC_ADJ_TINT,SignedValue(m_colorSettings.tint));
-        SetAdjustmentValue(h,IDC_ADJ_NEURAL_STRENGTH,PlainValue(m_comparison.strength));
+        // A percentage, as the compare bar's Mix reads, so the two name one value one way.
+        SetAdjustmentValue(h,IDC_ADJ_NEURAL_STRENGTH,std::to_wstring(int(std::lround(m_comparison.strength*100.0f)))+L"%");
     }
 
     void SyncAdjustmentControls(HWND h){
@@ -5953,7 +5962,7 @@ private:
     // How a control follows its dialog when the dialog is resized, recorded
     // on the control when it is made. The old rule guessed the role from the
     // control's pixel width, which stops working the moment widths scale.
-    enum class DialogAnchor:int{Fixed=0,StretchTrack,RightValue,StretchNote,BottomRight};
+    enum class DialogAnchor:int{Fixed=0,StretchTrack,RightValue,StretchNote,BottomRight,BottomLeft};
     static constexpr const wchar_t* kDialogAnchorProperty=L"DLSSVideo.DialogAnchor";
     HFONT DialogFont(HWND h){
         const auto found=m_dialogFonts.find(h);if(found!=m_dialogFonts.end())return found->second;
@@ -6028,6 +6037,8 @@ private:
             // A note stretches with the window, left edge fixed.
             case DialogAnchor::StretchNote:SetWindowPos(child,nullptr,dx,dy,std::max(S(20),W-S(32)),dh,SWP_NOZORDER|SWP_NOACTIVATE);break;
             case DialogAnchor::BottomRight:SetWindowPos(child,nullptr,dx+(W-S(designWidth)),H-(S(designHeight)-dy),0,0,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE);break;
+            // A footer button on the left keeps its x and follows the bottom edge.
+            case DialogAnchor::BottomLeft:SetWindowPos(child,nullptr,dx,H-(S(designHeight)-dy),0,0,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE);break;
             case DialogAnchor::Fixed:break;
             }
         }
@@ -6112,6 +6123,8 @@ private:
         CreateSettingsGroupHeading(h,L"adjustments.group_compare",292);
         CreateAdjustmentRow(h,IDC_ADJ_NEURAL_STRENGTH,L"adjustments.neural_strength",320,L"adjustments.neural_strength.tip",100);
         DialogControl(h,L"STATIC",T(L"adjustments.note").c_str(),SS_LEFT,16,360,418,38,0,DialogAnchor::StretchNote);
+        HWND neural=DialogControl(h,L"BUTTON",T(L"adjustments.open_neural").c_str(),WS_TABSTOP|BS_OWNERDRAW,16,404,150,30,IDC_ADJ_OPEN_NEURAL,DialogAnchor::BottomLeft);
+        AddTip(h,neural,L"adjustments.tip.open_neural");
         DialogButton(h,L"adjustments.reset",IDC_ADJ_RESET,252,404,86,30);
         DialogButton(h,L"adjustments.close",IDC_ADJ_CLOSE,348,404,86,30,true);
         SyncAdjustmentControls(h);
@@ -6150,6 +6163,7 @@ private:
         case WM_COMMAND:
             if(LOWORD(w)==IDC_ADJ_RESET){m_colorSettings={};m_comparison.strength=1.0f;SyncAdjustmentControls(h);ApplyVideoAdjustments(false);ApplyComparison(true);SaveVideoSettings();return 0;}
             if(LOWORD(w)==IDC_ADJ_CLOSE){DestroyWindow(h);return 0;}
+            if(LOWORD(w)==IDC_ADJ_OPEN_NEURAL&&HIWORD(w)==BN_CLICKED){ShowNeuralSettings();return 0;}
             break;
         case WM_CLOSE:DestroyWindow(h);return 0;
         case WM_DESTROY:SaveVideoSettings();m_settingsDesignLayout.erase(h);ReleaseDialogTips(h);if(h==m_adjustWnd)m_adjustWnd=nullptr;return 0;
@@ -6168,6 +6182,76 @@ private:
             :skin_structure::IsOff(m_neuralSettings.skinStructure)?T(L"neural.settings.skin_off")
             :PlainValue(m_neuralSettings.skinStructure));
         SetAdjustmentValue(h,IDC_NS_COLOR,PlainValue(m_neuralSettings.colorStrength));
+        SyncNeuralPresetControls(h);
+        RefreshNeuralApplyState(h);
+    }
+
+    // The preset strip: the presets, then Custom - named after the preset the
+    // settings were last taken from, because "Custom" alone does not say what
+    // Revert-by-picking-it-again would bring back.
+    std::wstring CustomPresetLabel()const{
+        if(m_lastNeuralPreset>=neural_presets::kPresetCount)return T(L"neural.preset.custom");
+        std::string_view label=neural_presets::kPresets[m_lastNeuralPreset].label;
+        if(const size_t open=label.rfind(" (");open!=std::string_view::npos&&label.back()==')')label=label.substr(0,open);
+        return T(L"neural.preset.custom_from")+std::wstring(label.begin(),label.end());
+    }
+    void SyncNeuralPresetControls(HWND h){
+        HWND combo=GetDlgItem(h,IDC_NS_PRESET);if(!combo)return;
+        const size_t current=neural_presets::IndexOf(m_neuralSettings);
+        if(current<neural_presets::kPresetCount)m_lastNeuralPreset=current;
+        const std::wstring custom=CustomPresetLabel();
+        const int presets=int(neural_presets::kPresetCount);
+        if(int(SendMessageW(combo,CB_GETCOUNT,0,0))!=presets+1){
+            SendMessageW(combo,CB_RESETCONTENT,0,0);
+            for(const auto& preset:neural_presets::kPresets){
+                const std::wstring label(preset.label.begin(),preset.label.end());
+                SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));
+            }
+            SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(custom.c_str()));
+        }else{
+            wchar_t shown[128]{};
+            if(SendMessageW(combo,CB_GETLBTEXTLEN,presets,0)<LRESULT(std::size(shown)))SendMessageW(combo,CB_GETLBTEXT,presets,reinterpret_cast<LPARAM>(shown));
+            if(custom!=shown){SendMessageW(combo,CB_DELETESTRING,presets,0);SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(custom.c_str()));}
+        }
+        SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(current<neural_presets::kPresetCount?current:neural_presets::kPresetCount),0);
+        std::wstring note=T(L"neural.preset.custom_note");
+        if(current<neural_presets::kPresetCount){
+            const std::string_view description=neural_presets::kPresets[current].description;
+            note.assign(description.begin(),description.end());
+        }
+        wchar_t shownNote[512]{};GetDlgItemTextW(h,IDC_NS_PRESET_NOTE,shownNote,int(std::size(shownNote)));
+        if(note!=shownNote)SetDlgItemTextW(h,IDC_NS_PRESET_NOTE,note.c_str());
+    }
+
+    // What Apply would do to the picture on screen, said where Apply is. Each
+    // state reads what the player already tracks: the running session's own
+    // settings, the paused preview's timer and job, and whether the cached
+    // render on screen is behind the dialog.
+    struct NeuralApplyState{std::wstring text;bool applyEnabled=true;};
+    NeuralApplyState DescribeNeuralApplyState()const{
+        if(!m_loaded)return {T(L"neural.state.unloaded"),true};
+        if(m_liveSession){
+            if(CurrentRenderSettings()==m_liveRenderSettings)return {T(L"neural.state.session_current"),false};
+            std::wstring text=T(L"neural.state.session_changed");
+            if(const size_t at=text.find(L"%s");at!=std::wstring::npos)text.replace(at,2,TimeText(Position()));
+            return {text,true};
+        }
+        if(m_previewJob)return {T(L"neural.state.preview_rendering"),false};
+        if(m_previewTimer)return {T(L"neural.state.preview_soon"),true};
+        if(m_previewShown)return {T(L"neural.state.preview_shown"),true};
+        if(m_cachedPlayback)return SettingsAheadOfRender()?NeuralApplyState{T(L"neural.state.cached_ahead"),true}
+                                                          :NeuralApplyState{T(L"neural.state.cached_current"),false};
+        return {T(L"neural.state.original"),true};
+    }
+    // `dialog` is the window being built: during its WM_CREATE m_neuralWnd is
+    // not assigned yet, and the line would open empty.
+    void RefreshNeuralApplyState(HWND dialog=nullptr){
+        if(!dialog)dialog=m_neuralWnd;
+        if(!dialog||!IsWindow(dialog))return;
+        const NeuralApplyState state=DescribeNeuralApplyState();
+        wchar_t shown[512]{};GetDlgItemTextW(dialog,IDC_NS_STATE,shown,int(std::size(shown)));
+        if(state.text!=shown)SetDlgItemTextW(dialog,IDC_NS_STATE,state.text.c_str());
+        if(HWND apply=GetDlgItem(dialog,IDC_NS_APPLY);apply&&(IsWindowEnabled(apply)!=FALSE)!=state.applyEnabled)EnableWindow(apply,state.applyEnabled);
     }
 
     void SyncNeuralSettingControls(HWND h){
@@ -6292,55 +6376,68 @@ private:
     // costs and what it works from on the right. One column was 756 dip tall,
     // 1,323 px at 175%, taller than a 1080p screen's work area; this is 418.
     static constexpr int kNeuralColumn=448;
+    // The preset strip sits above both columns: a preset is the first choice
+    // and the one most people make, so it is the first thing the dialog asks.
+    static constexpr int kNeuralPresetBand=46;
     void BuildNeuralSettingControls(HWND h){
-        constexpr int right=kNeuralColumn;
-        CreateSettingsGroupHeading(h,L"neural.settings.group_look",12,0,400);
-        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",40,L"neural.tip.intensity",100,0,true);
-        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",82,L"neural.tip.structure",100,0,true);
-        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",124,L"neural.tip.tone",100,0,true);
-        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",166,L"neural.tip.skin",0,0,true);
-        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",208,L"neural.tip.color",100,0,true);
-        // NVIDIA's names, with what each measurably does beside it (docs/measurements/
-        // knobs-upper-20261003): Natural moves the picture furthest from the source.
-        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",250,{L"Default",L"Natural \u00b7 strongest change",L"Cinematic \u00b7 strong change"},L"neural.tip.style",0,230);
-        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,286,236,L"neural.tip.automask");
+        constexpr int right=kNeuralColumn,top=kNeuralPresetBand;
+        CreateNeuralCombo(h,IDC_NS_PRESET,L"neural.settings.preset",14,{},L"neural.tip.preset",0,230);
+        DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,380,8,484,36,IDC_NS_PRESET_NOTE);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_look",12+top,0,400);
+        // Ordered by how far each control measurably moves the picture
+        // (docs/measurements/knobs-upper-20261003): Style first, Intensity -
+        // which below 1.00 acts like Color strength - after the controls that
+        // do something of their own.
+        // NVIDIA's names, with what each measurably does beside it: Natural
+        // moves the picture furthest from the source.
+        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",44+top,{L"Default",L"Natural \u00b7 strongest change",L"Cinematic \u00b7 strong change"},L"neural.tip.style",0,230);
+        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",82+top,L"neural.tip.tone",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",124+top,L"neural.tip.structure",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",166+top,L"neural.tip.color",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",208+top,L"neural.tip.intensity",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",250+top,L"neural.tip.skin",0,0,true);
+        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,286+top,236,L"neural.tip.automask");
         // Stacking, which arrived with RenoDX 6.x. Its own group because it
         // costs render time rather than changing the model's look: a second
-        // pass measured 780,048 -> 932,019 bytes of output over the same
-        // 72-frame range and took 9.81 s against 8.01 s.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",12,right,400);
-        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",40,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",right);
-        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+right,74,284,L"neural.tip.chained");
-        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",112,right,400);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+right,138,116,L"neural.tip.guide_mv");
-        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+right,138,80,L"neural.tip.guide_depth");
+        // pass adds 89 % model GPU time per frame (knobs-upper-20261003).
+        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",12+top,right,400);
+        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",40+top,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",right);
+        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+right,74+top,284,L"neural.tip.chained");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",112+top,right,400);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+right,138+top,116,L"neural.tip.guide_mv");
+        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+right,138+top,80,L"neural.tip.guide_depth");
         // What the render does across time rather than to one frame: when a cut
         // resets the history. A ladder, not a slider - every rung is a measured
         // point (SceneCut.h), and Default is the one labelled recommended.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",176,right,400);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",176+top,right,400);
         {
             const std::wstring cuts[]={T(L"neural.scene_cuts.default"),T(L"neural.scene_cuts.more"),
                                        T(L"neural.scene_cuts.less"),T(L"neural.scene_cuts.off")};
-            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",204,
+            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",204+top,
                               {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts",right);
             // A ladder with Off first and the default, for the reason the policy
             // header gives: it trades detail in motion for steadiness, and a
             // default never moves down a ladder to buy something else.
             const std::wstring stability[]={T(L"neural.stability.off"),T(L"neural.stability.low"),
                                             T(L"neural.stability.medium"),T(L"neural.stability.high")};
-            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",238,
+            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",238+top,
                               {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability",right);
         }
-        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,326,848,38,0,DialogAnchor::StretchNote);
-        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,550,374,86,30);
-        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,646,374,122,30,true);
-        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,778,374,86,30);
-        AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
+        // What Apply will do to the picture on screen right now (issue #15:
+        // "the settings do not apply" was partly a picture nobody said was the
+        // previous render), then what kind of setting these are.
+        DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,16,372,848,20,IDC_NS_STATE,DialogAnchor::StretchNote);
+        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,396,848,38,0,DialogAnchor::StretchNote);
+        HWND adjust=DialogControl(h,L"BUTTON",T(L"neural.settings.open_adjustments").c_str(),WS_TABSTOP|BS_OWNERDRAW,16,442,170,30,IDC_NS_OPEN_ADJUST,DialogAnchor::BottomLeft);
+        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,550,442,86,30);
+        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,646,442,122,30,true);
+        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,778,442,86,30);
+        AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");AddTip(h,adjust,L"neural.tip.open_adjustments");
         SyncNeuralSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kNeuralDesignW=880,kNeuralDesignH=418;
+    static constexpr int kNeuralDesignW=880,kNeuralDesignH=486;
 
     // Playback takes it on the next frame (the renderer reads it per frame, and a
     // paused frame is drawn again so the picture shows it); an export takes it when
@@ -6378,6 +6475,7 @@ private:
     void ApplyNeuralPreset(size_t index){
         if(index>=neural_presets::kPresetCount)return;
         const NeuralSettings wanted=neural_presets::kPresets[index].settings;
+        m_lastNeuralPreset=index;
         if(m_neuralSettings==wanted){SyncFeatureMenuState();return;}
         m_neuralSettings=wanted;
         LOG("Neural preset \""<<std::string(neural_presets::kPresets[index].key)
@@ -6402,7 +6500,10 @@ private:
     }
 
     // Everything the neural settings dialog decides about how a render looks.
-    struct RenderSettings{NeuralSettings neural;GuideControls guides;TemporalSettings temporal;};
+    struct RenderSettings{
+        NeuralSettings neural;GuideControls guides;TemporalSettings temporal;
+        friend bool operator==(const RenderSettings&,const RenderSettings&)=default;
+    };
     RenderSettings CurrentRenderSettings()const{return {m_neuralSettings,m_renderGuides,m_temporalSettings};}
 
     // The render the picture came from is not what the dialog now holds. Only the
@@ -6474,6 +6575,14 @@ private:
             if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
+            if(id==IDC_NS_OPEN_ADJUST&&code==BN_CLICKED){ShowAdjustments();return 0;}
+            // Picking a preset writes its values into the controls, as the menu
+            // does; picking Custom keeps the settings as they are.
+            if(id==IDC_NS_PRESET&&code==CBN_SELCHANGE){
+                const auto index=static_cast<size_t>(SendMessageW(GetDlgItem(h,IDC_NS_PRESET),CB_GETCURSEL,0,0));
+                if(index<neural_presets::kPresetCount)ApplyNeuralPreset(index);else SyncNeuralPresetControls(h);
+                return 0;
+            }
             // Every combo and box the dialog builds has to be named here or it
             // is drawn, movable and inert: the control changes, nothing reads
             // it back, and the setting the user thinks they picked never
@@ -8276,7 +8385,7 @@ private:
         for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);return;}
     }
     void UpdateCachedStatus(){
-        UpdateStatusChips();SyncTimelineMedia();SyncMediaTransport();SyncStartScreen();
+        UpdateStatusChips();SyncTimelineMedia();SyncMediaTransport();SyncStartScreen();RefreshNeuralApplyState();
         const std::wstring status=BuildStatusText();if(status==m_cachedStatus)return;
         m_cachedStatus=status;if(m_hwnd){if(m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}else InvalidateRect(m_hwnd,nullptr,FALSE);}
     }
@@ -10128,14 +10237,16 @@ private:
     void SchedulePausedSettingsPreview(){
         if(!m_hwnd||!m_loaded)return;
         if(m_previewTimer){KillTimer(m_hwnd,m_previewTimer);m_previewTimer=0;}
-        if(m_playing||m_liveSession){NoteSettingsAheadOfRender();return;}
+        if(m_playing||m_liveSession){NoteSettingsAheadOfRender();RefreshNeuralApplyState();return;}
         m_previewTimer=SetTimer(m_hwnd,kPreviewTimerId,kPreviewSettleMs,nullptr);
+        RefreshNeuralApplyState();
     }
     // A seek or a resume makes a queued preview meaningless: it would render a
     // frame the player has already left.
     void CancelPausedSettingsPreview(){
         if(m_previewTimer&&m_hwnd){KillTimer(m_hwnd,m_previewTimer);}
         m_previewTimer=0;m_previewQueued=false;
+        RefreshNeuralApplyState();
     }
     void StartPausedSettingsPreview(){
         CancelPausedSettingsPreview();
@@ -12331,6 +12442,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // What every job of the session renders with, and so what its segments
     // are retained under (TakeLiveRenderSettings).
     RenderSettings m_liveRenderSettings{};
+    // The preset the Look settings were last taken from, so Custom can say
+    // which one it departed from. kPresetCount when none is known yet.
+    size_t m_lastNeuralPreset=neural_presets::kPresetCount;
     // The source and geometry the user already said yes to for a session the
     // forecast calls too slow; the question is not asked again for it.
     std::string m_livePaceConfirmedKey;
