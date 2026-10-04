@@ -6019,6 +6019,13 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
     CHECK(full.command.preset && neural_presets::kPresets[*full.command.preset].key == "gentle");
     // The default preset is "standard" since it stopped sharing a name with Style
     // Natural; "natural", the key it is saved under, still selects it.
+    // --style takes NVIDIA's three names, in any case, as Style's index.
+    const std::pair<const wchar_t*, int> styles[]{{L"default", 0}, {L"Natural", 1}, {L"CINEMATIC", 2}};
+    for (const auto& [name, index] : styles) {
+        const Parsed styled = parse({L"--render", L"a.mp4", L"--style", name});
+        CHECK(styled.command.style && *styled.command.style == index);
+    }
+    CHECK(!plain.command.style);
     for (const wchar_t* spelling : {L"standard", L"Standard", L"natural"}) {
         const Parsed named = parse({L"--render", L"a.mp4", L"--preset", spelling});
         CHECK(named.command.preset && *named.command.preset == neural_presets::kDefaultPresetIndex);
@@ -6056,6 +6063,9 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
              {L"--render", L"a.mp4", L"--stages", L"fg", L"--multiplier", L"1"},
              {L"--render", L"a.mp4", L"--multiplier", L"2"},             // no fg stage
              {L"--render", L"a.mp4", L"--preset", L"vivid"},             // unknown preset
+             {L"--render", L"a.mp4", L"--style", L"vivid"},              // unknown style
+             {L"--render", L"a.mp4", L"--style", L"natural", L"--style", L"default"},
+             {L"--render", L"a.mp4", L"--stages", L"sr", L"--style", L"natural"},  // no nr
              {L"--render", L"a.mp4", L"--stages", L"sr", L"--preset", L"natural"},  // no nr
              {L"--render", L"a.mp4", L"--range", L"10"},                 // no end
              {L"--render", L"a.mp4", L"--range", L"-10"},

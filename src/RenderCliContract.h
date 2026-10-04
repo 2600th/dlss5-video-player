@@ -27,7 +27,7 @@ inline constexpr int kExitCancelled = 5;
 // as given, once each: the player validates them.
 inline constexpr std::wstring_view kForwardedValueOptions[] = {
     L"--stages", L"--height", L"--multiplier", L"--preset", L"--processing-scale", L"--range",
-    L"--passes", L"--intensity", L"--local-tone", L"--local-structure", L"--color-strength",
+    L"--passes", L"--style", L"--intensity", L"--local-tone", L"--local-structure", L"--color-strength",
     L"--encode", L"--history", L"--sr-engine",
 };
 

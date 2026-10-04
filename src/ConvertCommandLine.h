@@ -306,6 +306,7 @@ inline std::wstring Usage()
         L"  --multiplier N         fg frames per source frame: 2 to 5. Default: 2.\n"
         L"  --preset NAME          nr look: standard, detail-only, gentle or strong.\n"
         L"  --passes N             nr passes, 1 to 4 (each one more model evaluation).\n"
+        L"  --style S              nr style: default, natural or cinematic.\n"
         L"  --intensity X          nr intensity 0-1 (above 1 renders as 1); also\n"
         L"                         --local-tone X, --local-structure X (0-2) and\n"
         L"                         --color-strength X (0-1). Each applies over --preset;\n"

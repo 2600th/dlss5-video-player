@@ -949,6 +949,12 @@ What to render, as the dialog's ticks and settings choose it:
 - `--preset` is one of `standard`, `detail-only`, `gentle` or `strong`, the
   presets in **DLSS > Neural presets** (`natural`, Standard's name before 0.28.2,
   still works). Without it the render uses the Neural settings the player saved.
+- `--style` is **Style**: `default`, `natural` or `cinematic`, applied over
+  `--preset`. Natural moves the picture furthest from the source. It also lets a
+  script render twice with two looks - `dlss5-convert clip.mp4 --style natural`,
+  then the same on `clip-dlss.mkv` with `--style default` - without changing the
+  player's saved settings; the add-on itself cannot give stacked passes different
+  styles.
 - `--passes` is **Neural passes**, `1` to `4`: the add-on stacks the model that
   many times, each pass one more model evaluation per frame. `--intensity`
   (`0` to `1`; up to `2` is accepted and renders as `1`), `--local-tone` and

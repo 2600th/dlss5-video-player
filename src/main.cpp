@@ -12789,6 +12789,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         if(command.localTone)neuralSettings.localTone=*command.localTone;
         if(command.localStructure)neuralSettings.localStructure=*command.localStructure;
         if(command.colorStrength)neuralSettings.colorStrength=*command.colorStrength;
+        if(command.style)neuralSettings.style=*command.style;
         NeuralCacheManager cache(RenderScratchRoot(settings));
         if(!cache.Valid())return failed(L"no writable cache directory for the intermediate passes.");
         const std::filesystem::path scratch=cache.Root()/L"export-stages";
