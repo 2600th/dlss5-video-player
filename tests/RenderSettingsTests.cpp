@@ -677,8 +677,34 @@ void neural_settings_round_trip_and_format_renodx_overrides()
         {"NRAutoMask", "1"}, {"NRPasses", "1"}, {"NRChainedHistory", "1"},
         // Slew, not the add-on's stable default: stable does not repeat itself
         // (docs/measurements/governor-20260924), and the cache assumes it does.
-        {"NRNormGovernor", "1"}};
+        {"NRNormGovernor", "1"},
+        // Stacked passes read their own strength keys, never NRIntensity or
+        // NRColorStrength (docs/measurements/knobs-upper-20261003); every pass
+        // gets the dialog's values.
+        {"NRPass2Intensity", "1.000000"}, {"NRPass2Color", "1.000000"},
+        {"NRPass3Intensity", "1.000000"}, {"NRPass3Color", "1.000000"},
+        {"NRPass4Intensity", "1.000000"}, {"NRPass4Color", "1.000000"}};
     CHECK(expected == defaults);
+    {
+        NeuralSettings stacked;
+        stacked.passes = 3; stacked.intensity = 0.4f; stacked.colorStrength = 0.6f;
+        const auto overrides = NeuralAddonOverridesFor(stacked);
+        const auto value = [&](std::string_view key) {
+            for (const auto& [name, text] : overrides) if (name == key) return text;
+            return std::string();
+        };
+        for (const char* pass : {"2", "3", "4"}) {
+            CHECK_EQ(std::string("0.400000"), value(std::string("NRPass") + pass + "Intensity"));
+            CHECK_EQ(std::string("0.600000"), value(std::string("NRPass") + pass + "Color"));
+        }
+        // Only a stacked render below 1.00 is a new picture, so only it gets a new
+        // key; a single pass, or a stack at full strength, keeps the key it had.
+        CHECK(CanonicalNeuralSettings(stacked).ends_with(" stackStrength=all"));
+        NeuralSettings single = stacked; single.passes = 1;
+        CHECK(CanonicalNeuralSettings(single).find("stackStrength") == std::string::npos);
+        NeuralSettings full; full.passes = 2;
+        CHECK(CanonicalNeuralSettings(full).find("stackStrength") == std::string::npos);
+    }
     // The canonical form is the neural cache key, so every field belongs in it:
     // a render at two stack passes is a different render, and one that keyed the
     // same as a single-pass render would be served from the wrong cache entry.

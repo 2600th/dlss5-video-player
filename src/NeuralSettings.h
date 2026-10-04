@@ -44,6 +44,17 @@ struct NeuralSettings {
 // never a second cache identity for the same picture.
 inline constexpr float kIntensityMax = 1.0f;
 
+// RenoDX 6.5.3 stacks the model at most four times (NRPasses 1..4).
+inline constexpr int kMaxNeuralPasses = 4;
+
+// Whether a render stacks passes with a strength control below 1.00 - the case
+// where writing NRPass{2..4}Intensity/Color changes the picture, and so the one
+// that needs its own cache identity (CanonicalNeuralSettings).
+inline bool StrengthReachesStackedPasses(const NeuralSettings& settings)
+{
+    return settings.passes > 1 && (settings.intensity != 1.0f || settings.colorStrength != 1.0f);
+}
+
 // Skin structure as DLSS-NR 310.8 reads NRSkinStructure: a negative value makes
 // skin follow Local structure (docs/measurements/knobs-upper-20261003 - at
 // structure 0.50, -1 renders byte-identical to skin 0.50), and 0.00..0.99 give

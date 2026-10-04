@@ -80,7 +80,7 @@ bool WriteKey(const std::wstring& path, const wchar_t* key, const std::string& v
 
 std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& settings)
 {
-    return {
+    std::vector<NeuralAddonOverride> overrides{
         {"NRIntensity", FormatFloat(settings.intensity)},
         {"NRLocalTone", FormatFloat(settings.localTone)},
         {"NRLocalStructure", FormatFloat(settings.localStructure)},
@@ -93,6 +93,16 @@ std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& s
         {"NRChainedHistory", settings.chainedHistory ? "1" : "0"},
         {"NRNormGovernor", std::string(kPinnedNormGovernor)},
     };
+    // Stacked passes 2..4 read their own strength keys and never NRIntensity or
+    // NRColorStrength: at 2 passes and Intensity 0.40, adding NRPass2Intensity=0.40
+    // changes the render by as much as Intensity itself does (docs/measurements/
+    // knobs-upper-20261003). Unwritten they stay at 1.00, so the dialog's two
+    // strength controls only reached the first pass. Every pass gets them.
+    for (int pass = 2; pass <= kMaxNeuralPasses; ++pass) {
+        overrides.emplace_back("NRPass" + std::to_string(pass) + "Intensity", FormatFloat(settings.intensity));
+        overrides.emplace_back("NRPass" + std::to_string(pass) + "Color", FormatFloat(settings.colorStrength));
+    }
+    return overrides;
 }
 
 bool LoadNeuralSettings(const std::filesystem::path& ini, NeuralSettings& settings)
@@ -107,7 +117,7 @@ bool LoadNeuralSettings(const std::filesystem::path& ini, NeuralSettings& settin
         ReadInt(path, L"Preset", settings.preset, 0, 3),
         ReadInt(path, L"Style", settings.style, 0, 2),
         ReadBool(path, L"AutoMask", settings.autoMask),
-        ReadInt(path, L"Passes", settings.passes, 1, 4),
+        ReadInt(path, L"Passes", settings.passes, 1, kMaxNeuralPasses),
         ReadBool(path, L"ChainedHistory", settings.chainedHistory),
     };
     // The migration of a pre-Off value: see skin_structure. The next save
@@ -145,5 +155,11 @@ std::string CanonicalNeuralSettings(const NeuralSettings& settings)
         " style=" + std::to_string(settings.style) +
         " autoMask=" + (settings.autoMask ? "1" : "0") +
         " passes=" + std::to_string(settings.passes) +
-        " chainedHistory=" + (settings.chainedHistory ? "1" : "0");
+        " chainedHistory=" + (settings.chainedHistory ? "1" : "0") +
+        // Since every pass takes the strength controls, a stacked render with
+        // either below 1.00 is a different picture from the one cached under the
+        // same settings before: those renders get their own identity. Every
+        // other render - one pass, or both at 1.00 - is byte for byte what it
+        // was and keeps its key.
+        (StrengthReachesStackedPasses(settings) ? " stackStrength=all" : "");
 }

@@ -120,6 +120,24 @@ The claims, pair by pair:
 (Clip order: `real-film-cuts`, `real-game-cuts`, `real-game-motion`, `orig-faces`,
 `orig-film-cuts-a`, `orig-game-motion`; values are mean |a − b| in 8-bit codes.)
 
+## Stacked passes and the strength controls
+
+RenoDX 6.5.3 reads separate strength keys for stack passes 2-4 (`NRPass{2..4}Intensity`,
+`NRPass{2..4}Color`, named in the add-on binary), which the player did not write. Two
+passes at Intensity 0.40 against the same with `NRPass2Intensity=0.40` added, and two
+passes at Color strength 0.50 against the same with `NRPass2Color=0.50` added:
+
+| clip | Intensity 0.40, +NRPass2Intensity | Color strength 0.50, +NRPass2Color | (2 passes, Intensity 1.00 vs 0.40) |
+|---|---|---|---|
+| `real-film-cuts` | 1.57 | 1.35 | 1.47 |
+| `real-game-motion` | 2.98 | 2.53 | 2.75 |
+| `orig-faces` | 1.94 | 1.69 | 1.77 |
+
+Adding the pass-2 key moves the picture as much as Intensity itself does, so pass 2
+does not take `NRIntensity` or `NRColorStrength`: with two or more passes the dialog's
+two strength controls reached only the first. The player now writes both keys for
+every pass, and a stacked render with either below 1.00 gets its own cache identity.
+
 ## What a setting costs
 
 Every render records the model's own GPU time per frame (`neural_gpu_ms_p50`) and the

@@ -132,6 +132,14 @@ KNOBS = [
      {"NRStyle": "1", "NRIntensity": "0.400000"}, "mv=1,depth=1"),
     ("passes-2-intensity-040", "Passes + Intensity", "2 passes, intensity 0.40",
      {"NRPasses": "2", "NRIntensity": "0.400000"}, "mv=1,depth=1"),
+    # Does pass 2 take NRIntensity / NRColorStrength, or only its own NRPass2* keys,
+    # which the player does not write? Identical to the row above means it follows.
+    ("passes-2-intensity-040-pass2", "Passes + Intensity", "2 passes, intensity 0.40, NRPass2Intensity 0.40",
+     {"NRPasses": "2", "NRIntensity": "0.400000", "NRPass2Intensity": "0.400000"}, "mv=1,depth=1"),
+    ("passes-2-color-050", "Passes + Color strength", "2 passes, color strength 0.50",
+     {"NRPasses": "2", "NRColorStrength": "0.500000"}, "mv=1,depth=1"),
+    ("passes-2-color-050-pass2", "Passes + Color strength", "2 passes, color strength 0.50, NRPass2Color 0.50",
+     {"NRPasses": "2", "NRColorStrength": "0.500000", "NRPass2Color": "0.500000"}, "mv=1,depth=1"),
     # The shipped presets as the player writes them (NeuralPresets.h), and Strong without
     # its Intensity 1.50.
     ("preset-strong", "Preset Strong", "1.50 / tone 1.25 / structure 1.50",
