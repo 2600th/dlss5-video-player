@@ -231,7 +231,7 @@ private:
             {L"export.stages.multiplier", L"Frame rate"},
             {L"export.stages.run", L"Export..."},
             {L"export.stages.close", L"Close"},
-            {L"export.stages.note", L"Stages run in NVIDIA's order: Super Resolution, then neural rendering on the upscaled frame, then frame generation on the result."},
+            {L"export.stages.note", L"Stages run in NVIDIA's order: Super Resolution, then neural rendering on the upscaled frame, then frame generation on the result. Image adjustments and Mix are not included: they change only what the screen shows."},
             {L"export.stages.group_stages", L"Stages, in the order they run"},
             {L"export.stages.group_result", L"Result"},
             {L"export.progress.title", L"Exporting with DLSS stages"},

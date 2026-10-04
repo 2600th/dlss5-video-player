@@ -325,15 +325,28 @@ they compute with both pictures, and mixing HDR light with SDR light would
 measure the tone map rather than the model. **Save comparison image**, exports
 and the cache stay SDR.
 
-**DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
-local structure, local tone, skin structure, color strength, style and automatic mask, the
-number of neural passes and whether temporal history carries between them, the
-motion-vector and depth guide switches, how readily a scene cut resets the
-render's temporal history, and how much temporal stability the render gets. The controls are grouped under **Look**, **Quality and
+**DLSS > Neural settings** (`Ctrl+N`) opens with the **Look preset**: Standard
+(recommended), Detail only, Gentle or Strong, with a line saying what the chosen one
+does. Moving any control afterwards makes it **Custom**, named after the preset it
+came from ("Custom · from Strong"); picking a preset again brings its values back.
+The same presets are under **DLSS > Neural presets**. Below it the dialog exposes
+the neural model's style, local tone, local structure, color strength, intensity,
+skin structure and automatic mask - in that order, the order of how far each one
+measurably moves the picture - the number of neural passes and whether temporal
+history carries between them, the motion-vector and depth guide switches, how
+readily a scene cut resets the render's temporal history, and how much temporal
+stability the render gets. The controls are grouped under **Look**, **Quality and
 render time**, **Guides sent to the model** and **Across frames**, so which
-ones answer the same question is visible before you read their labels. These change
-the render identity: **Apply** restarts an active session at the playhead, or
-re-previews the paused frame, while playback image adjustments remain instant.
+ones answer the same question is visible before you read their labels.
+
+These change the neural render itself, which is what conversions and exports
+write. A line above the buttons says what **Apply** will do to the picture on
+screen: during neural playback it restarts the render at the playhead with the new
+settings (Apply is greyed out when the render already uses them); while paused, the
+frame re-renders on its own once you stop changing a control, and the line says
+when the rest of the video is still the previous render. **Image adjustments...**
+opens the other dialog: brightness, contrast, colour and Mix are instant, change
+only what this screen shows, and are not written by conversions or exports.
 Writing a file is a separate action under **Convert & export**. The guide
 switches also drive the live debug views immediately. Hovering any control shows
 what it does, including which effects were measured on this runtime and what a

@@ -6714,7 +6714,7 @@ private:
     // the settings, while this is a one-off at a size and a rate the viewer
     // picked. "Save converted video" remains the way to keep the render you are
     // already watching.
-    static constexpr int kExportDesignW=470,kExportDesignH=436;
+    static constexpr int kExportDesignW=470,kExportDesignH=454;
 
     uint32_t ExportMaxMultiplier()const{
         // 1 + the runtime's generated-frames-per-pair. Unmeasured reads as 2, the
@@ -6774,9 +6774,11 @@ private:
         CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",258,{L"2×",L"3×",L"4×",L"5×"},nullptr,0,kComboW);
         CreateSettingsGroupHeading(h,L"export.stages.group_result",298);
         DialogControl(h,L"STATIC",L"",SS_LEFT,16,322,436,34,IDC_EX_SUMMARY);
-        DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,356,436,34);
-        DialogButton(h,L"export.stages.run",IDC_EX_RUN,232,398,120,30,true);
-        DialogButton(h,L"export.stages.close",IDC_EX_CLOSE,362,398,90,30);
+        // Three lines: the stage order, and that the screen-only adjustments are
+        // not part of the file.
+        DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,356,436,52);
+        DialogButton(h,L"export.stages.run",IDC_EX_RUN,232,416,120,30,true);
+        DialogButton(h,L"export.stages.close",IDC_EX_CLOSE,362,416,90,30);
         SyncExportStageControls(h);
         CaptureSettingsDesignLayout(h);
     }
