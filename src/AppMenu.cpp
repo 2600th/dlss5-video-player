@@ -740,9 +740,11 @@ void CollectMenuShortcuts(HMENU menu, const std::wstring& group, std::vector<Sho
         if (!GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item)) continue;
         if (item.fType & MFT_SEPARATOR) continue;
         if (item.hSubMenu) { CollectMenuShortcuts(item.hSubMenu, group, rows); continue; }
-        // The processing-scale rungs use the accelerator column for what each one
-        // measured ("14.8 fps"), not for a key, and the sheet listed them as keys.
+        // The processing-scale and upscaling-history rungs use the accelerator column
+        // for what each one measured ("14.8 fps", "63-94"), not for a key, and the
+        // sheet listed them as keys.
         if (item.wID >= IDM_PROCESSING_SCALE_FIRST && item.wID <= IDM_PROCESSING_SCALE_LAST) continue;
+        if (item.wID == IDM_UPSCALE_HISTORY_TEMPORAL || item.wID == IDM_UPSCALE_HISTORY_PER_FRAME) continue;
         const std::wstring_view label(text);
         const size_t tab = label.find(L'\t');
         if (tab == std::wstring_view::npos) continue;

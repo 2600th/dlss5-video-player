@@ -1083,6 +1083,11 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
     CHECK(std::none_of(rows.begin(), rows.end(), [](const app_menu::ShortcutRow& row) {
         return row.keys.find(L"fps") != std::wstring::npos;
     }));
+    // Nor are the upscaling-history rungs' measured VMAF ranges ("49-80", "63-94"),
+    // which the sheet used to list as if they were keys.
+    CHECK(std::none_of(rows.begin(), rows.end(), [](const app_menu::ShortcutRow& row) {
+        return row.keys == L"49-80" || row.keys == L"63-94";
+    }));
     CHECK(has(localizer.Get(L"shortcuts.group.keyboard"), localizer.Get(L"shortcuts.step"), L"."));
     // Groups come in menu-bar order, each one contiguous, and nothing without
     // a key is listed.
