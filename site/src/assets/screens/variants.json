@@ -144,29 +144,29 @@
                                                               "width":  960,
                                                               "format":  "avif",
                                                               "file":  "neural-strength-960.avif",
-                                                              "bytes":  17222,
-                                                              "psnrAgainstSource":  42.53
+                                                              "bytes":  24021,
+                                                              "psnrAgainstSource":  39.51
                                                           },
                                                           {
                                                               "width":  960,
                                                               "format":  "webp",
                                                               "file":  "neural-strength-960.webp",
-                                                              "bytes":  22038,
-                                                              "psnrAgainstSource":  36.77
+                                                              "bytes":  35668,
+                                                              "psnrAgainstSource":  35.7
                                                           },
                                                           {
                                                               "width":  1440,
                                                               "format":  "avif",
                                                               "file":  "neural-strength-1440.avif",
-                                                              "bytes":  32978,
-                                                              "psnrAgainstSource":  43.39
+                                                              "bytes":  40863,
+                                                              "psnrAgainstSource":  40.64
                                                           },
                                                           {
                                                               "width":  1440,
                                                               "format":  "webp",
                                                               "file":  "neural-strength-1440.webp",
-                                                              "bytes":  40494,
-                                                              "psnrAgainstSource":  36.71
+                                                              "bytes":  58676,
+                                                              "psnrAgainstSource":  36.44
                                                           }
                                                       ]
                                      },
@@ -174,32 +174,18 @@
                                          "source":  "docs/screenshots/current/neural-settings.jpg",
                                          "variants":  [
                                                           {
-                                                              "width":  960,
+                                                              "width":  882,
                                                               "format":  "avif",
-                                                              "file":  "neural-settings-960.avif",
-                                                              "bytes":  19772,
-                                                              "psnrAgainstSource":  42.48
+                                                              "file":  "neural-settings-882.avif",
+                                                              "bytes":  26681,
+                                                              "psnrAgainstSource":  39.87
                                                           },
                                                           {
-                                                              "width":  960,
+                                                              "width":  882,
                                                               "format":  "webp",
-                                                              "file":  "neural-settings-960.webp",
-                                                              "bytes":  21314,
-                                                              "psnrAgainstSource":  35.6
-                                                          },
-                                                          {
-                                                              "width":  1324,
-                                                              "format":  "avif",
-                                                              "file":  "neural-settings-1324.avif",
-                                                              "bytes":  28169,
-                                                              "psnrAgainstSource":  42.15
-                                                          },
-                                                          {
-                                                              "width":  1324,
-                                                              "format":  "webp",
-                                                              "file":  "neural-settings-1324.webp",
-                                                              "bytes":  36256,
-                                                              "psnrAgainstSource":  33.08
+                                                              "file":  "neural-settings-882.webp",
+                                                              "bytes":  31140,
+                                                              "psnrAgainstSource":  30.56
                                                           }
                                                       ]
                                      },

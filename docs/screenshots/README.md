@@ -19,8 +19,36 @@ for images that have since been replaced are in the git history of this file.
 | `current/neural-playback.jpg`, `original-comparison.jpg` | The player paused on GTA VI Trailer 2 at frame 1940 (1:04.7) at default settings, the DLSS 5 view, then neural rendering off | 2 Oct 2026, `9d0f790` |
 | `current/photo-wipe.jpg` | A *Mafia: The Old Country* trailer frame saved as a PNG and opened as a photo, in Wipe, the divider down the man's nose | 25 Sep 2026, 0.26.0 |
 | `current/subtitles.jpg` | A test subtitle file drawn over the DLSS 5 frame | 24 Sep 2026, `dced888` + `f2ae230` |
-| `current/neural-strength.jpg` | Image adjustments, with the DLSS 5 mix slider at 1.00, over the DLSS 5 frame | 24 Sep 2026, `dced888` + `f2ae230` |
-| `current/neural-settings.jpg` | The Neural settings dialog at its defaults | 24 Sep 2026, `dced888` + `f2ae230` |
+| `current/neural-strength.jpg` | Image adjustments, with the DLSS 5 mix at 100% and its "instant, only on this screen" note, over a Grand Theft Auto VI frame in the DLSS 5 view | 4 Oct 2026, `a60423b` |
+| `current/neural-settings.jpg` | The Neural settings dialog at its defaults, with the Look preset strip and the line saying what Apply will do | 4 Oct 2026, `a60423b` |
+
+## 4 October 2026 images
+
+`neural-settings.jpg` and `neural-strength.jpg`, retaken because the dialogs
+changed (the Look preset strip, the Apply line, Mix as a percentage).
+
+**Hardware and runtime.** NVIDIA GeForce RTX 5090, driver 617.14
+(`32.0.16.1714`), runtime lock `310.8.SF-v2` (ReShade 6.8.0.2155, RenoDX
+6.5.3, DLSS-NR 310.8.0 as the receipt records it).
+
+**The player.** This repository at `a60423b`, the ci-preset Release build,
+copied with the 0.28.1 package's neural runtime and tools into a new folder with
+no settings file, cache or logs, so every setting is at its default.
+
+**Display.** A 1920x1080 display at 100% scaling - the 24 September captures
+were made at 150%, which this round could not reproduce, so these are smaller:
+the dialog is 882x518 and the player 1920x1032. Each is the window's visible
+frame (DWM's extended frame bounds), copied from the screen after the player's
+own windows were raised above the desktop; the Image adjustments window is in
+its real place over the player. Saved once as JPEG at quality 95 with no chroma
+subsampling.
+
+**Source and settings.** The camera-original *Grand Theft Auto VI: An Extended
+Look* fetched by `tools/benchmark/fetch_camera_original.ps1`, cut losslessly
+enough for the shot (libx264 CRF 8) from 0:13 for 3 s, opened as a local file
+and rendered whole with Neural Rendering at defaults; the frame is the clip's
+last, a store interior, in the DLSS 5 view. Driven by posted window messages
+(Neural Rendering, Neural settings, Image adjustments).
 
 ## 2 October 2026 images
 
@@ -242,8 +270,8 @@ picture at 30.5% of its width. The window was captured by handle with
 
 ## 24 September 2026 images
 
-`subtitles.jpg`, `neural-strength.jpg` and `neural-settings.jpg` are left from
-this round. Its Wipe, Difference, 2 x 2, saved-comparison and start-screen
+`subtitles.jpg` is left from this round (`neural-strength.jpg` and
+`neural-settings.jpg` were retaken on 4 October). Its Wipe, Difference, 2 x 2, saved-comparison and start-screen
 images were replaced on 2 October; the demonstration video's player scenes and
 the social square's saved 2 x 2 PNG
 ([docs/media/README.md](../media/README.md)) are from this round too, and the

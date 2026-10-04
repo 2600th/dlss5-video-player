@@ -88,15 +88,17 @@ $singles = @(
     @{ Name = 'compare-difference'; File = 'compare-difference.jpg'; Native = 1902 }
     @{ Name = 'photo-wipe'; File = 'photo-wipe.jpg'; Native = 1902 }
     @{ Name = 'saved-comparison-2x2'; File = 'saved-comparison-2x2.png'; Native = 1449 }
-    @{ Name = 'neural-strength'; File = 'neural-strength.jpg'; Native = 1902 }
-    @{ Name = 'neural-settings'; File = 'neural-settings.jpg'; Native = 1324 }
+    @{ Name = 'neural-strength'; File = 'neural-strength.jpg'; Native = 1920 }
+    @{ Name = 'neural-settings'; File = 'neural-settings.jpg'; Native = 882 }
     @{ Name = 'subtitles'; File = 'subtitles.jpg'; Native = 1902 }
     @{ Name = 'player-start'; File = 'player-start.jpg'; Native = 1116 }
     @{ Name = 'vsr-wipe-crop'; File = 'vsr-wipe-crop.png'; Native = 1449 }
 ) | ForEach-Object {
     $_.Source = Join-Path $shots $_.File
     $_.OutDir = Join-Path $assets 'screens'
-    $_.Widths = @(960, [math]::Min(1440, $_.Native))
+    # A capture narrower than the phone width is offered at its own width only:
+    # scaling it up to 960 would invent pixels.
+    $_.Widths = if ($_.Native -lt 960) { @($_.Native) } else { @(960, [math]::Min(1440, $_.Native)) }
     $_
 }
 

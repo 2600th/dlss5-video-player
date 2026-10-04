@@ -109,7 +109,7 @@ Real, in the repository, usable without fabrication:
   `vsr-wipe.jpg` and `vsr-wipe-crop.png` (the player's plain scale against RTX
   VSR on one frame), `export-stages-vsr.jpg` (the export window with the
   Upscaler row), and `neural-strength.jpg` (the image adjustments window, from
-  24 September 2026).
+  4 October 2026).
 - `docs/media/neural-comparison-demo.mp4` (24.8 s, 1080p) with poster and WebP
   preview; `docs/media/social/card-1200x630.jpg` (1200x630 link preview).
 - Eight verification reports under `docs/` and measurement data under
