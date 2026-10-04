@@ -31,12 +31,12 @@ unscaled. [Four more, including one where the model makes the picture worse](doc
 
 ## Download
 
-**v0.28.1** (2026-10-03): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.28.1)
+**v0.28.2** (2026-10-04): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.28.2)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.28.1-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 377 MB |
-| `DLSSVideoPlayer-v0.28.1-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
+| `dlss5-video-player-v0.28.2-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 377 MB |
+| `DLSSVideoPlayer-v0.28.2-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
 
 Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run: it
 has no runtime.
@@ -47,8 +47,8 @@ The checksum shows the file arrived intact; the attestation shows this
 repository built it.
 
 ```sh
-sha256sum -c DLSSVideoPlayer-v0.28.1-core-win64.zip.sha256
-gh attestation verify DLSSVideoPlayer-v0.28.1-core-win64.zip --repo 2600th/dlss5-video-player
+sha256sum -c DLSSVideoPlayer-v0.28.2-core-win64.zip.sha256
+gh attestation verify DLSSVideoPlayer-v0.28.2-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
 Only the core zip has build provenance. CI can't fetch the neural runtime, so
@@ -227,29 +227,32 @@ published only on its
 re-uploads of DLSS 5 tools under other accounts have been reported carrying
 malware.
 
-## What's new in 0.28.1
+## What's new in 0.28.2
 
-**0.28.1** (2026-10-03). RTX Video Super Resolution becomes the upscaler, in
-playback and in exports. Renders made with 0.27.2 are reused, and from now on
-an update keeps your renders unless its notes say otherwise.
+**0.28.2** (2026-10-04). Neural settings now do what they say, and say what they
+do. Renders made with the default settings are reused.
 
-- **RTX VSR upscaling, on by default.** Wherever the window shows a video
-  larger than it is, NVIDIA's RTX Video Super Resolution makes the picture at
-  that size: 87.5 VMAF against 80.5 for a plain bicubic upscale, measured over
-  six clips ([report](https://github.com/2600th/dlss5-video-player/blob/main/docs/measurements/vsr-quality-20261002/REPORT.md)).
-  It lowers its quality, then pauses, on a GPU that cannot keep up, and
-  **DLSS > RTX VSR Upscaling** turns it off.
-- **Exports upscale with RTX VSR too.** **Export with DLSS stages** has an
-  **Upscaler** row, RTX VSR by default or DLSS Super Resolution, and
-  `dlss5-convert` takes `--sr-engine vsr|dlss`.
-- **Renders survive updates.** The render cache no longer starts over with
-  every release.
-- **Frame Generation offers only what the GPU can do**, and with the
-  dlssg_sm86 add-on on RTX 20/30 it says how to raise its 4x limit.
-- Fixes to compare labels on paused frames and in Fill, the export window's
-  text, Clear Neural Cache and the neural helper's clean-up.
+- **Apply changes the picture during neural playback** ([#15](https://github.com/2600th/dlss5-video-player/issues/15)).
+  It used to restart the render and put the previous one straight back on
+  screen. It now renders from the playhead with the new settings.
+- **Intensity and Color strength reach every neural pass.** With two or more
+  passes they changed only the first.
+- **Every control says what it was measured to do**
+  ([report](https://github.com/2600th/dlss5-video-player/blob/main/docs/measurements/knobs-upper-20261003/REPORT.md)).
+  Intensity runs 0-1, because the runtime renders anything higher exactly as
+  1.00; Style is the strongest control and costs no render time; Skin
+  structure's "Off" was "As structure".
+- **Neural settings opens with the Look preset** and a line that says what
+  Apply will do to the picture on screen. The default preset is now
+  **Standard**, and **Strong** really is stronger: 22 % further from the source
+  than Standard, against 6 % before.
+- **`dlss5-convert --style`**, so a script can render with one style and render
+  the result again with another.
+- Smaller fixes: a dead menu path in the frame generation prompt, measured
+  ranges listed as keys on the shortcuts sheet, and a shorter status line.
 
-Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.27.2 offered the
+Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.28.1 made RTX VSR the
+upscaler in playback and exports, 0.27.2 offered the
 dlssg_sm86 add-on for Frame Generation on RTX 20 and 30, 0.27.0 added
 `dlss5-convert`, the command-line converter, 0.26.2 fixed GPU decoding of
 untagged HD video, and 0.26.0 added the compare views, RTX VSR beside DLSS 5,

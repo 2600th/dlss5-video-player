@@ -7,7 +7,7 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Unreleased
+## 0.28.2 - 2026-10-04
 
 Neural settings now do what they say, and say what they do. Renders made with the
 default settings are reused; renders made with the Strong preset, with Intensity

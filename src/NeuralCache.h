@@ -33,7 +33,7 @@ enum class NeuralCacheState {
 // input or a source copy produce, and that change's commit sets it to the
 // release that ships it. The other terms (runtime, driver, model store, settings,
 // pipeline) still retire what they always did. 0.27.2 is the last release whose
-// output changed; 0.28.1 reads 0.27.2's renders. A value past the player's own
+// output changed; 0.28.2 reads 0.27.2's renders. A value past the player's own
 // version is refused by PolicyTests.
 inline constexpr std::string_view kRenderCacheRevision = "0.27.2";
 

@@ -57,7 +57,7 @@ settings all still match.
 
 ## Capabilities and Constraints
 
-Confirmed from `README.md` and `CHANGELOG.md` at 0.28.1:
+Confirmed from `README.md` and `CHANGELOG.md` at 0.28.2:
 
 - Live rendering with seek anywhere, rendered or not; nothing rendered is
   discarded on seek.
