@@ -7,6 +7,57 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Unreleased
+
+Neural settings now do what they say, and say what they do. Renders made with the
+default settings are reused; renders made with the Strong preset, with Intensity
+above 1.00, or with two or more passes below full Intensity or Color strength
+render once more.
+
+### Fixed
+
+- **Apply changes the picture during neural playback** (#15). Apply restarted the
+  render but put the previous render straight back on screen, so a change looked
+  like it did nothing until the player was restarted. It now renders from the
+  playhead with the new settings. A seek into an unrendered part of the video no
+  longer renders slider values nobody applied, either.
+- **Intensity and Color strength reach every neural pass.** With two or more passes
+  they changed only the first; passes 2-4 always ran at full strength.
+- The frame generation prompt sent people to "DLSS > Show converted file", which
+  does not exist: it is DLSS > Convert & export > Show last generated file.
+- The keyboard shortcuts sheet no longer lists the measured quality ranges of
+  DLSS > Upscaling history ("49-80", "63-94") as if they were keys.
+
+### Changed
+
+- **Intensity runs 0.00-1.00.** The runtime renders anything above 1.00 exactly as
+  1.00 (measured on six clips at every style), so the upper half of the slider did
+  nothing. A saved value above 1.00 loads as 1.00, the picture it always gave;
+  `--intensity` still accepts up to 2 and applies at most 1.
+- **Neural settings opens with the Look preset** and a line saying what it does;
+  moving a control makes it "Custom - from" the preset it came from. A line above
+  the buttons says what Apply will do to the picture on screen, and Apply is greyed
+  out when there is nothing to apply. The Look controls are in order of how far each
+  measurably moves the picture, Style first.
+- **The default preset is "Standard (recommended)"**, so it no longer shares a name
+  with Style's Natural, which is the strongest change. `--preset standard` selects
+  it, and `--preset natural` still does.
+- **Strong is Local tone 2.00 and Local structure 1.50.** The old Strong relied on
+  Intensity 1.50, which the runtime ignores, and moved the picture only 6 % further
+  from the source than Standard; the new one moves it 22 % further, in the same
+  render time.
+- Style says what each choice does ("Natural - strongest change") and that it costs
+  no render time; Skin structure's left end reads "As structure", which is what it
+  does; every Look tooltip says what the control was measured to do.
+- Neural settings and Image adjustments open each other, and each says which kind
+  it is: neural settings re-render and are what conversions write; image
+  adjustments and Mix are instant and on this screen only. Mix reads as a
+  percentage everywhere. The export dialog says image adjustments are not included.
+- `dlss5-convert --style default|natural|cinematic`, so a script can render with one
+  style and render the result again with another.
+- The status line drops what the toolbar already shows and labels the source size;
+  "Pause neural render" is "Pause conversion", which is when Space does it.
+
 ## 0.28.1 - 2026-10-03
 
 RTX Video Super Resolution becomes the upscaler, in playback and in exports.
