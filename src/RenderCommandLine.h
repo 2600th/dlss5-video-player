@@ -331,13 +331,16 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
         if (!selection.neural) return bad(L"--preset needs the nr stage.");
         const size_t found = [&] {
             for (size_t candidate = 0; candidate < neural_presets::kPresetCount; ++candidate) {
-                const std::string_view key = neural_presets::kPresets[candidate].key;
-                if (EqualsIgnoringCase(presetName, std::wstring(key.begin(), key.end()))) return candidate;
+                // The name, or the key it was saved under before a rename
+                // ("natural" for Standard), so existing scripts keep working.
+                for (const std::string_view spelling : {neural_presets::kPresets[candidate].name,
+                                                        neural_presets::kPresets[candidate].key})
+                    if (EqualsIgnoringCase(presetName, std::wstring(spelling.begin(), spelling.end()))) return candidate;
             }
             return neural_presets::kPresetCount;
         }();
         if (found == neural_presets::kPresetCount)
-            return bad(L"--preset takes natural, detail-only, gentle or strong.");
+            return bad(L"--preset takes standard, detail-only, gentle or strong.");
         command.preset = found;
     }
     if (seenHeight && !selection.upscale) return bad(L"--height needs the sr stage.");
@@ -405,7 +408,7 @@ inline std::wstring Usage()
         L"  --height N         Output height for sr: 1080, 1440 or 2160. Default: 1440.\n"
         L"  --multiplier N     Output frames per source frame for fg: 2 to 5, as far as\n"
         L"                     this GPU admits. Default: 2.\n"
-        L"  --preset NAME      Neural look for nr: natural, detail-only, gentle or strong.\n"
+        L"  --preset NAME      Neural look for nr: standard, detail-only, gentle or strong.\n"
         L"                     Default: the Neural settings saved by the player.\n"
         L"  --passes N         Neural passes for nr, 1 to 4, stacked by the add-on; each\n"
         L"                     costs one more model evaluation per frame. Default: the\n"

@@ -946,9 +946,9 @@ What to render, as the dialog's ticks and settings choose it:
   order above whatever order they are listed in. Without it, `nr`.
 - `--height` is the Super Resolution rung and `--multiplier` the frame
   generation rate, 1440 and 2 by default. Each needs its stage.
-- `--preset` is one of `natural`, `detail-only`, `gentle` or `strong`, the
-  presets in **Neural settings**. Without it the render uses the Neural
-  settings the player saved.
+- `--preset` is one of `standard`, `detail-only`, `gentle` or `strong`, the
+  presets in **DLSS > Neural presets** (`natural`, Standard's name before 0.28.2,
+  still works). Without it the render uses the Neural settings the player saved.
 - `--passes` is **Neural passes**, `1` to `4`: the add-on stacks the model that
   many times, each pass one more model evaluation per frame. `--intensity`
   (`0` to `1`; up to `2` is accepted and renders as `1`), `--local-tone` and

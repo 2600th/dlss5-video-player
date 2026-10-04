@@ -6300,7 +6300,9 @@ private:
         CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",124,L"neural.tip.tone",100,0,true);
         CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",166,L"neural.tip.skin",0,0,true);
         CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",208,L"neural.tip.color",100,0,true);
-        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",250,{L"Default",L"Natural",L"Cinematic"},L"neural.tip.style");
+        // NVIDIA's names, with what each measurably does beside it (docs/measurements/
+        // knobs-upper-20261003): Natural moves the picture furthest from the source.
+        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",250,{L"Default",L"Natural \u00b7 strongest change",L"Cinematic \u00b7 strong change"},L"neural.tip.style",0,230);
         CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,286,236,L"neural.tip.automask");
         // Stacking, which arrived with RenoDX 6.x. Its own group because it
         // costs render time rather than changing the model's look: a second

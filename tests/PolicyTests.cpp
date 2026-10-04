@@ -6014,6 +6014,12 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
     CHECK_EQ(uint32_t{2160}, full.command.selection.targetHeight);
     CHECK_EQ(uint32_t{3}, full.command.selection.multiplier);
     CHECK(full.command.preset && neural_presets::kPresets[*full.command.preset].key == "gentle");
+    // The default preset is "standard" since it stopped sharing a name with Style
+    // Natural; "natural", the key it is saved under, still selects it.
+    for (const wchar_t* spelling : {L"standard", L"Standard", L"natural"}) {
+        const Parsed named = parse({L"--render", L"a.mp4", L"--preset", spelling});
+        CHECK(named.command.preset && *named.command.preset == neural_presets::kDefaultPresetIndex);
+    }
     CHECK(full.command.hasRange);
     CHECK(full.command.rangeStart == L"0:10"); CHECK(full.command.rangeEnd == L"0:25.5");
     CHECK(full.command.output == L"D:/out/film.MKV");

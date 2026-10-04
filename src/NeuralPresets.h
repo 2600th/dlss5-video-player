@@ -32,6 +32,11 @@ struct Preset {
     // Stable key written to the ini, so a renamed label does not silently
     // change what a user had selected.
     std::string_view key;
+    // What a person types and reads: the command line's --preset value. It
+    // differs from the key only where a label was renamed - the default preset
+    // is "Standard" because NVIDIA's Style already has a Natural, the control
+    // that moves the picture furthest - and the key still parses.
+    std::string_view name;
     std::string_view label;
     // One line, shown beside the choice. Says what moves, not how good it is.
     std::string_view description;
@@ -65,24 +70,24 @@ struct Preset {
 // choosing between four rungs needs to know the choice is about the look and
 // nothing else.
 
-// `Natural` first: it is the shipped default, and the order is the order the
-// UI offers them in.
+// `Standard` (key `natural`) first: it is the shipped default, and the order is
+// the order the UI offers them in.
 inline constexpr Preset kPresets[] = {
-    {"natural", "Natural (recommended)",
+    {"natural", "standard", "Standard (recommended)",
      "Every control at its default. The render the project measures and the "
      "screenshots were taken with.",
      "6.30 s measured. Every preset renders in the same time - they change the "
      "look, not the speed.",
      NeuralSettings{}},
 
-    {"detail-only", "Detail only",
+    {"detail-only", "detail-only", "Detail only",
      "Keeps the source colour and lets the model change structure alone - "
      "NRColorStrength to 0. For material whose grade you do not want touched.",
      "6.31 s measured. Every preset renders in the same time - they change the "
      "look, not the speed.",
      NeuralSettings{1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 0, 0, true}},
 
-    {"gentle", "Gentle",
+    {"gentle", "gentle", "Gentle",
      "Half intensity and softer local structure. For faces and film grain, "
      "where a full-strength render is the one that reads as waxy.",
      "6.30 s measured. Every preset renders in the same time - they change the "
@@ -93,7 +98,7 @@ inline constexpr Preset kPresets[] = {
     // rendered byte-identical to 1.00 and it landed 6 % further from the source
     // than Natural. Tone 2.00 and structure 1.50 land 22 % further (8-41 % over six
     // clips) - docs/measurements/knobs-upper-20261003.
-    {"strong", "Strong",
+    {"strong", "strong", "Strong",
      "Local tone 2.00 and local structure 1.50: the model's change pushed about a "
      "fifth further from the source than Natural. For heavily compressed sources - "
      "a low-bitrate stream - where the default leaves the artefacts visible.",
