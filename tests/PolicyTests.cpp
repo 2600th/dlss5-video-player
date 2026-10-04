@@ -2801,7 +2801,7 @@ void debug_view_popup_contains_all_existing_views_and_selection_test()
     CHECK_EQ(4, menu ? GetMenuItemCount(menu) : 0);
     std::vector<MenuEntry> entries;
     if (menu) collect_menu_entries(menu, entries);
-    CHECK(has_menu_entry(entries, L"Final output\t1", app_menu::IDM_VIEW_FINAL));
+    CHECK(has_menu_entry(entries, L"Final image\t1", app_menu::IDM_VIEW_FINAL));
     CHECK(has_menu_entry(entries, L"DLSS input\t2", app_menu::IDM_VIEW_INPUT));
     CHECK(has_menu_entry(entries, L"Motion vectors\t3", app_menu::IDM_VIEW_MV));
     CHECK(has_menu_entry(entries, L"Depth\t4", app_menu::IDM_VIEW_DEPTH));
@@ -2823,7 +2823,9 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(has_menu_entry(entries, L"Mark Out\tO", app_menu::IDM_MARK_OUT));
     CHECK(has_menu_entry(entries, L"Clear Marks\tShift+I / Shift+O", app_menu::IDM_CLEAR_MARKS));
     CHECK(has_menu_entry(entries, L"Go to timecode...\tCtrl+G", app_menu::IDM_GOTO_TIMECODE));
-    CHECK(has_menu_entry(entries, L"Pause neural render\tSpace", app_menu::IDM_PAUSE_NEURAL_RENDER));
+    // Space pauses a running conversion and plays/pauses otherwise; the item says
+    // which of the two it is, so the sheet listing Space twice reads as two jobs.
+    CHECK(has_menu_entry(entries, L"Pause conversion\tSpace", app_menu::IDM_PAUSE_NEURAL_RENDER));
     CHECK(has_menu_entry(entries, L"Preview this frame (neural)\tF", app_menu::IDM_PREVIEW_FRAME));
     CHECK(has_menu_entry(entries, L"Preview 4 s clip (neural)\tShift+F", app_menu::IDM_PREVIEW_CLIP));
     // Conversion writes a file; it lives in its own submenu beside saving.

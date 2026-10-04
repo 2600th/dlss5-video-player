@@ -34,7 +34,8 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
 {
     HMENU menu = CreatePopupMenu();
     if (!menu) return nullptr;
-    AppendMenuW(menu, MF_STRING, IDM_VIEW_FINAL, L"Final output\t1");
+    // The same names as Video > Final image and the rest: one name per view.
+    AppendMenuW(menu, MF_STRING, IDM_VIEW_FINAL, L"Final image\t1");
     AppendMenuW(menu, MF_STRING, IDM_VIEW_INPUT, L"DLSS input\t2");
     AppendMenuW(menu, MF_STRING, IDM_VIEW_MV, L"Motion vectors\t3");
     AppendMenuW(menu, MF_STRING, IDM_VIEW_DEPTH, L"Depth\t4");

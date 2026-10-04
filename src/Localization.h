@@ -40,7 +40,7 @@ private:
             {L"subtitles.dialog", L"Load a subtitle file"}, {L"subtitles.filter", L"Subtitles"},
             {L"subtitles.failed", L"The subtitle file could not be read"}, {L"subtitles.delay", L"Subtitle delay "},
             {L"menu.mark_in", L"Mark In\tI"}, {L"menu.mark_out", L"Mark Out\tO"}, {L"menu.clear_marks", L"Clear Marks\tShift+I / Shift+O"},
-            {L"menu.goto_timecode", L"Go to timecode...\tCtrl+G"}, {L"menu.pause_neural_render", L"Pause neural render\tSpace"},
+            {L"menu.goto_timecode", L"Go to timecode...\tCtrl+G"}, {L"menu.pause_neural_render", L"Pause conversion\tSpace"},
             {L"menu.video", L"Video"}, {L"menu.aspectfit", L"Original aspect ratio (Fit)\tA"}, {L"menu.aspectfill", L"Fill without stretching (Crop)"}, {L"menu.aspect_pixels", L"1:1 pixels"},
             {L"menu.youtube_quality", L"YouTube source quality"}, {L"menu.youtube_quality_auto", L"Auto (up to 1440p, highest bitrate)"},
             {L"menu.youtube_quality_2160", L"2160p"}, {L"menu.youtube_quality_1440", L"1440p"}, {L"menu.youtube_quality_1080", L"1080p"},
