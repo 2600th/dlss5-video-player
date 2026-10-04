@@ -12861,7 +12861,7 @@ void neural_presets_round_trip_and_default_to_the_shipped_settings_test()
 
         // Inside the ranges NeuralSettings.cpp clamps to on load. Outside them
         // a preset cannot round-trip through the ini.
-        CHECK(preset.settings.intensity >= 0.0f && preset.settings.intensity <= 2.0f);
+        CHECK(preset.settings.intensity >= 0.0f && preset.settings.intensity <= kIntensityMax);
         CHECK(preset.settings.localTone >= 0.0f && preset.settings.localTone <= 2.0f);
         CHECK(preset.settings.localStructure >= 0.0f && preset.settings.localStructure <= 2.0f);
         // Off or a value the runtime acts on - never one it renders as Off -

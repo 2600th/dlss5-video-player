@@ -688,7 +688,7 @@ void neural_settings_round_trip_and_format_renodx_overrides()
              CanonicalNeuralSettings(NeuralSettings{}));
 
     NeuralSettings tuned;
-    tuned.intensity = 1.05f;
+    tuned.intensity = 0.75f;
     tuned.localTone = 0.5f;
     tuned.localStructure = 1.5f;
     tuned.skinStructure = 0.25f;
@@ -699,7 +699,7 @@ void neural_settings_round_trip_and_format_renodx_overrides()
     tuned.passes = 3;
     tuned.chainedHistory = false;
     const auto tunedOverrides = NeuralAddonOverridesFor(tuned);
-    CHECK_EQ(std::string("1.050000"), tunedOverrides[0].second);
+    CHECK_EQ(std::string("0.750000"), tunedOverrides[0].second);
     CHECK_EQ(std::string("0.250000"), tunedOverrides[3].second);
     CHECK_EQ(std::string("2"), tunedOverrides[5].second);
     CHECK_EQ(std::string("0"), tunedOverrides[7].second);
@@ -722,12 +722,13 @@ void neural_settings_round_trip_and_format_renodx_overrides()
     const auto text = Read(ini);
     CHECK(text.find("[Playback]") != std::string::npos);
     CHECK(text.find("[NeuralSettings]") != std::string::npos);
-    CHECK(text.find("Intensity=1.050000") != std::string::npos);
+    CHECK(text.find("Intensity=0.750000") != std::string::npos);
     // Out-of-range and partial entries clamp and keep defaults elsewhere.
     Write(ini, "[NeuralSettings]\r\nIntensity=9\r\nSkinStructure=-4\r\nPreset=7\r\nAutoMask=5\r\n");
     NeuralSettings clamped;
     CHECK(LoadNeuralSettings(ini, clamped));
-    CHECK_EQ(2.0f, clamped.intensity);
+    // Intensity holds at what the runtime applies (kIntensityMax), not the add-on's 2.
+    CHECK_EQ(kIntensityMax, clamped.intensity);
     CHECK_EQ(-1.0f, clamped.skinStructure);
     CHECK_EQ(3, clamped.preset);
     CHECK(clamped.autoMask);
@@ -735,9 +736,10 @@ void neural_settings_round_trip_and_format_renodx_overrides()
     CHECK_EQ(0, clamped.style);
 }
 
-// Skin structure is Off plus 0.00..0.99 because that is what RenoDX 6.5.3 acts
-// on: every negative value and +1.00 render the default picture byte for byte
-// (docs/measurements/knobs-653-20260924). A value an older build saved from the
+// Skin structure is follow-structure (kOff) plus 0.00..0.99: a negative value makes
+// skin follow Local structure, so at the default structure every negative value and
+// +1.00 render the default picture byte for byte (docs/measurements/
+// knobs-653-20260924, knobs-upper-20261003). A value an older build saved from the
 // -1..1 slider loads as what it always rendered as, and Off is still written as
 // the -1.000000 the default has always sent, so the default render keeps its key.
 void skin_structure_is_off_or_what_the_runtime_acts_on()

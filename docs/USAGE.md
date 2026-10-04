@@ -390,10 +390,23 @@ change still costs a full re-render. It remains in `DLSSVideoPlayer.ini` as
 `[NeuralSettings] Preset` so runtime-comparison work can still drive it, and it
 remains part of the render identity so a runtime that does honour it cannot be
 served a stale cache entry. Skin structure only acts
-between 0.00 and 0.99 and only with Automatic mask on, so its slider reads **Off**
-(the default) at the left end and 0.00 to 0.99 after it, and it is greyed out with
-"Mask off" while Automatic mask is off; it keeps its value for when the mask comes
-back. See [Benchmark](BENCHMARK.md).
+with Automatic mask on: its slider reads **As structure** (the default) at the left
+end, where skin follows Local structure, and 0.00 to 0.99 after it, which gives skin
+its own value; it is greyed out with "Mask off" while Automatic mask is off and keeps
+its value for when the mask comes back.
+
+**Intensity** runs 0.00 to 1.00. The runtime applies no more than 1.00 - 1.30, 1.50
+and 2.00 render byte-identical to 1.00 at every style - so a value above it saved by
+an earlier version loads as 1.00, which is the picture it always rendered. Intensity
+and **Color strength** both fade the model's change back towards the source and act
+almost alike on this runtime (identical at 0.00); neither reaches the source, since
+0.00 keeps about half of the change. **Local tone** and **Local structure** keep
+their 0.00-2.00 range: above 1.00, tone pushes the picture further from the source
+and structure changes detail without moving it further away. For a stronger look
+than the default, **Style**, **Neural passes** and the **Strong** preset (Local tone
+2.00, Local structure 1.50) are the controls that measurably add. See
+[the measurement](measurements/knobs-upper-20261003/REPORT.md) and
+[Benchmark](BENCHMARK.md).
 
 Photos support PNG, JPEG, BMP, TIFF and static WebP. They remain paused on the
 single processed frame; the cache uses a one-second carrier without adding
@@ -937,9 +950,10 @@ What to render, as the dialog's ticks and settings choose it:
   presets in **Neural settings**. Without it the render uses the Neural
   settings the player saved.
 - `--passes` is **Neural passes**, `1` to `4`: the add-on stacks the model that
-  many times, each pass one more model evaluation per frame. `--intensity`,
-  `--local-tone` and `--local-structure` (`0` to `2`) and `--color-strength`
-  (`0` to `1`) are the rest of Neural settings' **Look** group. Each needs `nr`
+  many times, each pass one more model evaluation per frame. `--intensity`
+  (`0` to `1`; up to `2` is accepted and renders as `1`), `--local-tone` and
+  `--local-structure` (`0` to `2`) and `--color-strength` (`0` to `1`) are the
+  rest of Neural settings' **Look** group. Each needs `nr`
   and applies over `--preset`; one not given keeps the preset's or the saved
   value. For example, three stacked passes of the strong look:
   `dlss5-convert clip.mp4 --preset strong --passes 3`.

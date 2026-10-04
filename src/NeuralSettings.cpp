@@ -99,7 +99,7 @@ bool LoadNeuralSettings(const std::filesystem::path& ini, NeuralSettings& settin
 {
     const std::wstring path = AbsoluteIni(ini);
     const bool present[]{
-        ReadFloat(path, L"Intensity", settings.intensity, 0.0f, 2.0f),
+        ReadFloat(path, L"Intensity", settings.intensity, 0.0f, kIntensityMax),
         ReadFloat(path, L"LocalTone", settings.localTone, 0.0f, 2.0f),
         ReadFloat(path, L"LocalStructure", settings.localStructure, 0.0f, 2.0f),
         ReadFloat(path, L"SkinStructure", settings.skinStructure, -1.0f, 1.0f),

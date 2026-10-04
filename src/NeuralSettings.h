@@ -11,9 +11,10 @@
 // ranges follow the add-on's persisted [RenoDX.DLSS5] controls as exercised by
 // the MIT-licensed DLSS5-Feeder project, confirmed against the pinned build's
 // own overlay strings, and echoed in RenoDX's "active settings" log line.
-// Ranges: intensity/localTone/localStructure 0..2, skinStructure Off or
-// 0..0.99 (skin_structure below), colorStrength 0..1, preset 0..3, style 0..2,
-// passes 1..4.
+// Ranges: intensity 0..1 (kIntensityMax below; the add-on takes 0..2 but the
+// runtime applies no more than 1), localTone/localStructure 0..2, skinStructure
+// follow-structure or 0..0.99 (skin_structure below), colorStrength 0..1,
+// preset 0..3, style 0..2, passes 1..4.
 //
 // `passes` and `chainedHistory` arrived with RenoDX 6.x and have no 4.70
 // equivalent. Stacking is the one place where an offline video render and a
@@ -25,7 +26,7 @@ struct NeuralSettings {
     float intensity{1.0f};       // NRIntensity
     float localTone{1.0f};       // NRLocalTone
     float localStructure{1.0f};  // NRLocalStructure
-    float skinStructure{-1.0f};  // NRSkinStructure; -1 is skin_structure::kOff
+    float skinStructure{-1.0f};  // NRSkinStructure; -1 (skin_structure::kOff) follows localStructure
     float colorStrength{1.0f};   // NRColorStrength
     int preset{0};               // NRPreset
     int style{0};                // NRStyle
@@ -36,24 +37,34 @@ struct NeuralSettings {
     friend bool operator==(const NeuralSettings&, const NeuralSettings&) = default;
 };
 
-// Skin structure as RenoDX 6.5.3 actually reads NRSkinStructure
-// (docs/measurements/knobs-653-20260924): 0.00, 0.25, 0.50 and 0.99 each apply
-// the term, while every negative value tried (-1.00, -0.50, -0.01) and exactly
-// +1.00 render the default picture byte for byte, and with NRAutoMask=0 no value
-// changes anything. The add-on's "-1..1, negative smooths" is not what runs, so
-// the control is Off plus 0.00..0.99. Off is written as -1.000000, the value the
-// player has always shipped, so the default render and its cache key stay put.
+// The most Intensity the runtime applies. DLSS-NR 310.8 (the pinned 310.8.SF-v2) renders 1.30, 1.50 and
+// 2.00 byte-identical to 1.00 at every style (docs/measurements/
+// knobs-upper-20261003), although RenoDX 6.5.3 accepts 0..2 and passes the value
+// through. Everything that sets Intensity holds it here, so a value above it is
+// never a second cache identity for the same picture.
+inline constexpr float kIntensityMax = 1.0f;
+
+// Skin structure as DLSS-NR 310.8 reads NRSkinStructure: a negative value makes
+// skin follow Local structure (docs/measurements/knobs-upper-20261003 - at
+// structure 0.50, -1 renders byte-identical to skin 0.50), and 0.00..0.99 give
+// skin its own value; with NRAutoMask=0 no value changes anything. The earlier
+// table (knobs-653-20260924) saw every negative value and +1.00 render the
+// default only because structure was 1.00 there. The dialog's left end, kOff,
+// is that "follow structure" and is labelled so; it is written as -1.000000,
+// the value the player has always shipped, so the default render and its cache
+// key stay put. +1.00 is a real value (skin 1.00) that Normalize still folds
+// into kOff: the same picture at the default structure, not at others.
 namespace skin_structure {
 inline constexpr float kOff = -1.0f;
 inline constexpr float kMax = 0.99f;
-// The dialog's trackbar: 0 is Off, 1..100 are 0.00..0.99 in steps of 0.01.
+// The dialog's trackbar: 0 follows structure, 1..100 are 0.00..0.99 in steps of 0.01.
 inline constexpr int kSliderMax = 100;
 
 inline bool IsOff(float value) { return !(value >= 0.0f && value < 1.0f); }
 
-// What a saved or hand-edited value means now: a value the runtime renders as
-// off becomes Off, and anything else is held inside 0..0.99. Idempotent, and it
-// changes no rendered byte for any value the table measured.
+// What a saved or hand-edited value means now: any negative value follows
+// structure and becomes kOff, +1.00 and above fold into it too (see above), and
+// anything else is held inside 0..0.99. Idempotent.
 inline float Normalize(float value)
 {
     if (IsOff(value)) return kOff;

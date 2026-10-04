@@ -430,15 +430,21 @@ What the table decides in the UI:
 - **Color strength changes the image**: 0.20 moves more of the picture than
   Intensity at 0.40, so the dialog shows it as a 0.00-1.00 slider (default 1.00).
 - **The render preset is inert**, on a third runtime now, and stays hidden.
-- **Skin structure only has a range of 0.00 to 0.99.** Every negative value and
-  exactly +1.00 render the shipped picture, byte for byte; 0.00, 0.25, 0.50 and 0.99
-  each change it, and by less as they rise. So the shipped −1.00 means *off*, half of
-  the dialog's −1..+1 slider is inert, and the add-on's own overlay text ("negative
-  smooths, positive enhances, 0 = neutral") does not describe what the runtime does.
-  The dialog's slider offers exactly that: **Off** at its left end, then 0.00 to
-  0.99, greyed out with "Mask off" while Automatic mask is off. Off is written as
-  −1.00, and a saved negative value or +1.00 loads as Off, which is what it renders
-  as.
+- **Skin structure's negative values follow Local structure.** Every negative value and
+  exactly +1.00 render the shipped picture byte for byte here because structure is
+  1.00 in this table; at structure 0.50, −1.00 renders byte-identical to skin 0.50
+  ([knobs-upper report](measurements/knobs-upper-20261003/REPORT.md)). 0.00, 0.25,
+  0.50 and 0.99 each give skin its own value, and the add-on's own overlay text
+  ("negative smooths, positive enhances, 0 = neutral") does not describe what the
+  runtime does. The dialog's slider reads **As structure** at its left end, written
+  as −1.00, then 0.00 to 0.99, greyed out with "Mask off" while Automatic mask is off;
+  a saved negative value or +1.00 loads as As structure.
+- **Intensity stops at 1.00.** 1.30, 1.50 and 2.00 render byte-identical to 1.00 on
+  six clips at every style, so the slider is 0.00-1.00 and a saved value above it
+  loads as 1.00. Below 1.00 it acts almost exactly like Color strength (identical at
+  0.00). The upper halves of Local tone and Local structure are live; the Strong
+  preset, which leaned on Intensity 1.50, is now Local tone 2.00 and Local structure
+  1.50 ([knobs-upper report](measurements/knobs-upper-20261003/REPORT.md)).
 - **Skin structure needs the automatic mask**: with `NRAutoMask=0` its value changes
   nothing, which matches the add-on's description of the mask ("so the
   Character/Skin Structure response applies to them"), and the mask's tooltip says so.

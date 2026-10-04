@@ -6171,7 +6171,7 @@ private:
     }
 
     void SyncNeuralSettingControls(HWND h){
-        SetTrack(h,IDC_NS_INTENSITY,0,200,int(std::lround(m_neuralSettings.intensity*100.0f)));
+        SetTrack(h,IDC_NS_INTENSITY,0,int(std::lround(kIntensityMax*100.0f)),int(std::lround(m_neuralSettings.intensity*100.0f)));
         SetTrack(h,IDC_NS_STRUCTURE,0,200,int(std::lround(m_neuralSettings.localStructure*100.0f)));
         SetTrack(h,IDC_NS_TONE,0,200,int(std::lround(m_neuralSettings.localTone*100.0f)));
         SetTrack(h,IDC_NS_SKIN,0,skin_structure::kSliderMax,skin_structure::SliderPosition(m_neuralSettings.skinStructure));
@@ -12667,7 +12667,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         // Each knob given on the command line wins over the preset or the
         // saved settings; the ones not given keep theirs.
         if(command.passes)neuralSettings.passes=*command.passes;
-        if(command.intensity)neuralSettings.intensity=*command.intensity;
+        if(command.intensity)neuralSettings.intensity=std::min(*command.intensity,kIntensityMax);
         if(command.localTone)neuralSettings.localTone=*command.localTone;
         if(command.localStructure)neuralSettings.localStructure=*command.localStructure;
         if(command.colorStrength)neuralSettings.colorStrength=*command.colorStrength;
