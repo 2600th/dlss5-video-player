@@ -665,6 +665,13 @@ struct PlayerAppTestAccess {
         CheckLiveRenderFailureLimit(app);
     }
 
+    static void live_session_keeps_the_settings_it_rendered_with_test()
+    {
+        PlayerApp& app = fixture->app;
+
+        CheckLiveSessionKeepsItsRenderSettings(app);
+    }
+
     static void job_source_key_guard_test()
     {
         PlayerApp& app = fixture->app;
@@ -2866,6 +2873,7 @@ struct PlayerAppTestAccess {
         UI_CASE(unload_drops_deferred_toggle_test),
         UI_CASE(live_job_directory_failure_test),
         UI_CASE(live_render_failure_limit_test),
+        UI_CASE(live_session_keeps_the_settings_it_rendered_with_test),
         UI_CASE(job_source_key_guard_test),
         UI_CASE(stream_conversion_uses_the_acquired_copy_test),
         UI_CASE(live_out_of_sync_hands_back_test),
@@ -3567,6 +3575,52 @@ struct PlayerAppTestAccess {
         app.DropRetainedLiveSegments();
         app.m_liveRenderFailures = 0; app.m_neuralNotice.clear(); app.m_liveRange = {};
         app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested; app.m_seeking = seeking;
+    }
+
+    // Issue 15: Apply during an active session changed nothing on screen. The
+    // dialog writes m_neuralSettings as its sliders move, and the session read
+    // them when it stopped, so the frames it had rendered with the previous
+    // settings were set aside under the new settings' key - and the restart
+    // Apply makes adopted them as already rendered. The session now keeps the
+    // settings it started with: every job it starts renders from them, and its
+    // frames are set aside under their key.
+    static void CheckLiveSessionKeepsItsRenderSettings(PlayerApp& app)
+    {
+        const PlayerApp::RenderSettings saved = app.CurrentRenderSettings();
+        app.m_neuralSettings = {}; app.m_renderGuides = {}; app.m_temporalSettings = {};
+        app.TakeLiveRenderSettings();
+        const std::string rendered = app.LiveRetentionKey();
+
+        // Apply's dialog, before the button: the sliders have already moved.
+        app.m_neuralSettings.intensity = 2.0f; app.m_neuralSettings.colorStrength = 0.0f;
+        app.m_renderGuides = GuideControls{false, true};
+        CHECK(app.LiveRetentionKey() != rendered);
+
+        // A job the session starts now - the next hole after a seek - renders
+        // what the session started with; any other job renders the dialog.
+        const PlayerApp::RenderSettings live = app.JobRenderSettings(NeuralJobKind::Live);
+        CHECK(live.neural == NeuralSettings{});
+        CHECK(live.guides == GuideControls{});
+        CHECK(app.JobRenderSettings(NeuralJobKind::Preview).neural == app.m_neuralSettings);
+
+        // Stopping sets its frames aside under the key of what rendered them,
+        // so the restart Apply makes cannot adopt them.
+        const auto directory = app.SettingsPath().parent_path() / L"live-settings-retained";
+        std::filesystem::create_directories(directory);
+        app.m_liveSession = true; app.m_liveDirectory = directory;
+        app.m_liveSegments = std::make_shared<NeuralSegmentIndex>();
+        NeuralSegment part{}; part.path = directory / L"part.mkv"; part.runId = 1;
+        part.frameCount = 30; part.end100ns = 10000000;
+        app.m_liveSegments->Append(part);
+        app.ReleaseLiveSession(true);
+        CHECK(app.m_retainedSegments != nullptr);
+        CHECK_EQ(rendered, app.m_retainedKey);
+        CHECK(app.m_retainedKey != app.LiveRetentionKey());
+
+        app.DropRetainedLiveSegments();
+        CHECK(!std::filesystem::exists(directory));
+        app.m_neuralSettings = saved.neural; app.m_renderGuides = saved.guides; app.m_temporalSettings = saved.temporal;
+        app.TakeLiveRenderSettings();
     }
 
     // A live pair that fell out of sync used to put a modal up from inside

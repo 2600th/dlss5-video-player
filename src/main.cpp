@@ -6399,6 +6399,10 @@ private:
             style,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
     }
 
+    // Everything the neural settings dialog decides about how a render looks.
+    struct RenderSettings{NeuralSettings neural;GuideControls guides;TemporalSettings temporal;};
+    RenderSettings CurrentRenderSettings()const{return {m_neuralSettings,m_renderGuides,m_temporalSettings};}
+
     // The render the picture came from is not what the dialog now holds. Only the
     // export path noticed this before, so a settings change made during playback
     // left the previous render on screen with nothing saying so. A shown settings
@@ -9759,9 +9763,21 @@ private:
     // What makes retained coverage reusable: same source at the same geometry,
     // same neural settings, same guides. Anything else and the frames on disk
     // are not the frames the user would get now.
-    std::string LiveRetentionKey()const{
-        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettings(m_neuralSettings)+"|"+CanonicalGuideControls(m_renderGuides)+
-               "|"+CanonicalTemporalSettings(m_temporalSettings);
+    std::string RetentionKeyFor(const RenderSettings& render)const{
+        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettings(render.neural)+"|"+CanonicalGuideControls(render.guides)+
+               "|"+CanonicalTemporalSettings(render.temporal);
+    }
+    std::string LiveRetentionKey()const{return RetentionKeyFor(CurrentRenderSettings());}
+    // A live session renders with the settings it started with. The dialog
+    // writes m_neuralSettings as its sliders move, before Apply, so reading
+    // them later labelled frames with settings that never made them: a
+    // session stopped by Apply set the previous render aside under the new
+    // settings' key, and the restart adopted it as already rendered - Apply
+    // changed nothing on screen (issue 15). A job started mid-session for the
+    // next hole read the moved sliders too, and mixed two looks in one index.
+    void TakeLiveRenderSettings(){m_liveRenderSettings=CurrentRenderSettings();}
+    RenderSettings JobRenderSettings(NeuralJobKind kind)const{
+        return kind==NeuralJobKind::Live?m_liveRenderSettings:CurrentRenderSettings();
     }
     // Deletes the segment files a published run retired (ReplaceRun), except
     // one a live decoder still has open or is opening: that one goes on a later
@@ -9860,7 +9876,8 @@ private:
         // wherever on the timeline they sit. Requiring the playhead to be inside
         // them is what deleted a rendered tail the moment the user seeked back in
         // front of it, and then re-rendered ground that was already there.
-        const std::string key=LiveRetentionKey();
+        TakeLiveRenderSettings();
+        const std::string key=RetentionKeyFor(m_liveRenderSettings);
         bool adopt=m_retainedSegments&&m_retainedKey==key&&!m_retainedSegments->Empty();
         // A published run is served from its cache entry, which lives outside
         // the session directory: another instance's eviction can take it while
@@ -9916,7 +9933,7 @@ private:
         JoinRetiringNeuralWorker();
         const bool retain=retainSegments&&m_liveSegments&&!m_liveSegments->Empty()&&!m_liveDirectory.empty();
         if(retain){
-            m_retainedSegments=m_liveSegments;m_retainedDirectory=m_liveDirectory;m_retainedRange=m_liveRange;m_retainedKey=LiveRetentionKey();
+            m_retainedSegments=m_liveSegments;m_retainedDirectory=m_liveDirectory;m_retainedRange=m_liveRange;m_retainedKey=RetentionKeyFor(m_liveRenderSettings);
             const auto covered=m_retainedSegments->CoveredRanges();
             std::string spans;
             for(const CoverageSpan& span:covered){
@@ -10073,7 +10090,7 @@ private:
         if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         const VideoFrame frame=*m_synchronizedPlayback.VisibleFrame();
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
-        m_cachedPlayback=true;m_cachedRange=m_liveRange;m_cachedSettings=m_neuralSettings;m_cachedGuides=m_renderGuides;m_cachedTemporal=m_temporalSettings;m_cachedReceiptPath.clear();m_neuralPath.clear();
+        m_cachedPlayback=true;m_cachedRange=m_liveRange;m_cachedSettings=m_liveRenderSettings.neural;m_cachedGuides=m_liveRenderSettings.guides;m_cachedTemporal=m_liveRenderSettings.temporal;m_cachedReceiptPath.clear();m_neuralPath.clear();
         if(!RenderVideoFrame(frame,true)){LOG("Active neural playback could not present its first pair.");m_synchronizedPlayback.Close();m_cachedPlayback=false;m_comparisonView=ComparisonView::Original;return false;}
         RememberRenderedCachedPair();m_cachedPresentedFrames=1;m_currentSec=double(frame.timestamp100ns)*1e-7;m_guideReset=false;m_dlssReset=false;
         if(Audio().Start(m_path,m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!wasPlaying);}
@@ -10681,7 +10698,8 @@ private:
             NeuralJobInputs job;
             job.target=m_hwnd;job.generation=generation;job.mediaUrl=mediaUrl;job.audioUrl=audioUrl;job.displayTitle=displayTitle;job.pageUrl=pageUrl;job.sourceKind=sourceKind;job.sourceQuality=sourceQuality;
             job.gpu=m_opt.detectedGpu.generation;job.driverVersion=m_opt.detectedGpu.driverVersion;job.moduleDirectory=ExecutableDirectory();job.cacheRoot=m_cacheRoot;
-            job.guides=m_renderGuides;job.temporal=m_temporalSettings;job.settings=m_neuralSettings;job.pauseEvent=m_neuralPauseEvent;
+            const RenderSettings render=JobRenderSettings(kind);
+            job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.pauseEvent=m_neuralPauseEvent;
             job.gpuColorConversion=m_gpuColorConversion;job.gpuSourceConversion=m_gpuSourceConversion;job.nvencPreset=m_nvencPreset;job.processingScale=m_processingScale;job.captureDither=m_captureDither;job.cacheQuality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
             job.reuseSourceKey=reuseSourceKey;job.expectedDurationSeconds=expectedDurationSeconds;job.range=range;job.prepareOnly=prepareOnly;
             // The background acquisition of this very source, when one is in
@@ -12308,6 +12326,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // seeks. Coverage itself lives in the index, as a set of rendered regions;
     // these two are only the intent.
     NeuralRenderRange m_liveRange{},m_liveTarget{};
+    // What every job of the session renders with, and so what its segments
+    // are retained under (TakeLiveRenderSettings).
+    RenderSettings m_liveRenderSettings{};
     // The source and geometry the user already said yes to for a session the
     // forecast calls too slow; the question is not asked again for it.
     std::string m_livePaceConfirmedKey;
