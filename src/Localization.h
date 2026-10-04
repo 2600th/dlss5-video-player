@@ -12,8 +12,12 @@ public:
         return key ? std::wstring(key) : std::wstring();
     }
 
-private:
     using Map = std::unordered_map<std::wstring, std::wstring>;
+    // Every English string, for the tests that check what the strings claim
+    // (a menu path they name has to exist).
+    static const Map& All() { return EnglishDefaults(); }
+
+private:
 
     static const Map& EnglishDefaults() {
         static const Map strings = {
@@ -191,7 +195,7 @@ private:
             {L"framegen.addon.failed.write", L"%s could not be written beside the player. Move the player to a folder you can write to and try again."},
             // %u is the multiplier, then the source and target rates as text so
             // one formatter renders every rate the user sees.
-            {L"framegen.confirm", L"Generate %u\u00d7 the frames of this video: %s fps \u2192 %s fps.\n\nThe converted file is kept with the player's converted videos; DLSS > Show converted file opens it. Playback switches to it when the conversion finishes.\n\nStart the conversion?"},
+            {L"framegen.confirm", L"Generate %u\u00d7 the frames of this video: %s fps \u2192 %s fps.\n\nThe converted file is kept with the player's converted videos; DLSS > Convert & export > Show last generated file opens it. Playback switches to it when the conversion finishes.\n\nStart the conversion?"},
             // Appended when the generated rate does not divide the refresh. The
             // two holds are one scan-out apart, which is the same unevenness
             // the source is already being shown with - see FrameRatePolicy.h.
@@ -205,7 +209,7 @@ private:
             {L"export.worker_failed", L"Saving could not start. Try again."},
             {L"framegen.cache_failed", L"The converted file could not be created where the player keeps its converted videos. Check that the cache folder is writable."},
             {L"framegen.failed", L"The conversion did not finish, so nothing was written and your video is unchanged.\n\nSee DLSSVideoPlayer.log for what the runtime reported."},
-            {L"framegen.finished_elsewhere", L"The conversion finished for a video you have since left, so playback was left alone.\n\nDLSS > Show converted file opens the new file."},
+            {L"framegen.finished_elsewhere", L"The conversion finished for a video you have since left, so playback was left alone.\n\nDLSS > Convert & export > Show last generated file opens the new file."},
             {L"framegen.reveal_failed", L"The converted file could not be shown. It may have been moved or deleted."},
             {L"export.title.failed", L"Save failed"},
             {L"export.title.complete", L"Save complete"},

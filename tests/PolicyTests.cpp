@@ -1117,6 +1117,98 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
     DestroyMenu(bar);
 }
 
+// A message that sends someone to "DLSS > Something" has to name a menu that
+// exists. Two did not: "DLSS > Convert & save" (fixed in 4f3150a) and the frame
+// generation prompt's "DLSS > Show converted file". Every string is read the way a
+// person reads it - from a top-level menu, each " > " stepping into the item whose
+// visible label comes next - and the walk has to find every step it is given.
+void menu_paths_named_in_text_exist_test()
+{
+    struct Node {
+        std::wstring label;
+        std::vector<Node> children;
+    };
+    const auto plain = [](std::wstring_view text) {
+        text = text.substr(0, std::min(text.size(), text.find(L'\t')));
+        std::wstring out;
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == L'&') {
+                if (i + 1 < text.size() && text[i + 1] == L'&') { out.push_back(L'&'); ++i; }
+                continue;
+            }
+            out.push_back(text[i]);
+        }
+        return out;
+    };
+    const auto read = [&](auto& self, HMENU menu) -> std::vector<Node> {
+        std::vector<Node> nodes;
+        const int count = GetMenuItemCount(menu);
+        for (int index = 0; index < count; ++index) {
+            wchar_t text[256]{};
+            MENUITEMINFOW item{sizeof(item)};
+            item.fMask = MIIM_FTYPE | MIIM_SUBMENU | MIIM_STRING;
+            item.dwTypeData = text;
+            item.cch = static_cast<UINT>(std::size(text));
+            if (!GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item) || (item.fType & MFT_SEPARATOR)) continue;
+            nodes.push_back(Node{plain(text), item.hSubMenu ? self(self, item.hSubMenu) : std::vector<Node>{}});
+        }
+        return nodes;
+    };
+    const Localizer localizer;
+    const HMENU bar = app_menu::CreateMenuBar(localizer, true);
+    REQUIRE(bar != nullptr);
+    std::vector<Node> top = read(read, bar);
+    DestroyMenu(bar);
+    // A command that relabels itself while it runs is reachable under both labels:
+    // Generate frames becomes "Cancel frame generation" during a conversion.
+    for (Node& menu : top)
+        if (menu.label == L"DLSS") menu.children.push_back(Node{localizer.Get(L"menu.cancel_frame_generation"), {}});
+    // A path may leave out an item's trailing qualifier: "RTX VSR Upscaling" names
+    // "RTX VSR Upscaling (recommended)".
+    const auto spelled = [](const std::wstring& label) {
+        const size_t open = label.rfind(L" (");
+        return open != std::wstring::npos && label.back() == L')' ? label.substr(0, open) : label;
+    };
+
+    size_t walked = 0;
+    std::wstring broken;
+    for (const auto& [key, text] : Localizer::All()) {
+        for (const Node& menu : top) {
+            const std::wstring start = menu.label + L" > ";
+            for (size_t at = text.find(start); at != std::wstring::npos; at = text.find(start, at + 1)) {
+                if (at > 0 && std::iswalpha(text[at - 1])) continue;
+                const Node* node = &menu;
+                size_t pos = at + start.size();
+                for (;;) {
+                    const Node* next = nullptr;
+                    size_t length = 0;
+                    for (const Node& child : node->children) {
+                        for (const std::wstring& name : {child.label, spelled(child.label)}) {
+                            if (!name.empty() && text.compare(pos, name.size(), name) == 0 && name.size() > length) {
+                                next = &child;
+                                length = name.size();
+                            }
+                        }
+                    }
+                    if (!next) {
+                        broken += key + L": " + text.substr(at, 60) + L" | ";
+                        break;
+                    }
+                    ++walked;
+                    pos += length;
+                    if (text.compare(pos, 3, L" > ") != 0) break;
+                    pos += 3;
+                    node = next;
+                }
+            }
+        }
+    }
+    if (!broken.empty()) std::wcerr << L"menu paths that do not exist: " << broken << L'\n';
+    CHECK(broken.empty());
+    // The strings do name menu paths; a walk that found none would prove nothing.
+    CHECK(walked >= 5);
+}
+
 void keyboard_cheat_sheet_flows_whole_groups_into_columns_test()
 {
     const shortcut_sheet::Metrics metrics{20, 30, 10, 300, 24, 16, 36, 20};
@@ -15711,6 +15803,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(timeline_hover_says_where_and_what_the_render_map_says_there_test),
     TEST_CASE(timeline_thumbnails_are_bucketed_cached_and_cheap_to_ask_for_test),
     TEST_CASE(keyboard_cheat_sheet_is_read_from_the_menus_test),
+    TEST_CASE(menu_paths_named_in_text_exist_test),
     TEST_CASE(keyboard_cheat_sheet_flows_whole_groups_into_columns_test),
     TEST_CASE(dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test),
     TEST_CASE(media_controls_ask_for_a_state_and_push_the_timeline_sparingly_test),
