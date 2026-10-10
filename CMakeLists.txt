@@ -309,7 +309,11 @@ add_library(player_neural OBJECT
     src/NeuralCache.cpp src/NeuralCache.h
     src/RuntimeLock.cpp src/RuntimeLock.h
     src/OfflineNeuralRenderer.cpp src/OfflineNeuralRenderer.h
-    src/ReShadeConfig.cpp src/ReShadeConfig.h)
+    src/ReShadeConfig.cpp src/ReShadeConfig.h
+    src/AmdLmxxfApi.h
+    src/AmdLmxxfPolicy.h
+    src/AmdLmxxfSession.h
+    src/AmdLmxxfRuntime.cpp src/AmdLmxxfRuntime.h)
 # What only the player links.
 add_library(player_app OBJECT
     src/AppMenu.cpp src/AppMenu.h
@@ -554,6 +558,14 @@ if(BUILD_TESTING)
     add_executable(ReleaseApiCompileTests tests/ReleaseApiCompileTests.cpp)
     target_link_libraries(ReleaseApiCompileTests PRIVATE dlss_video_player_common)
     add_test(NAME ReleaseApiCompileTests COMMAND ReleaseApiCompileTests)
+
+    # Pure ABI/table contract; no player objects or GPU are needed.
+    add_executable(AmdLmxxfApiTests tests/AmdLmxxfApiTests.cpp
+        src/AmdLmxxfApi.h src/AmdLmxxfPolicy.h src/AmdLmxxfSession.h)
+    target_compile_features(AmdLmxxfApiTests PRIVATE cxx_std_20)
+    target_compile_options(AmdLmxxfApiTests PRIVATE /W4 /WX /permissive- /EHsc /Zc:__cplusplus)
+    target_include_directories(AmdLmxxfApiTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    add_test(NAME AmdLmxxfApiTests COMMAND AmdLmxxfApiTests)
 
     # The two executables that ship link the runtime statically (see
     # CMAKE_MSVC_RUNTIME_LIBRARY at the top), because no package carries the
