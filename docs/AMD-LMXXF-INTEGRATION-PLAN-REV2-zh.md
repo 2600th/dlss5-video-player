@@ -10,6 +10,8 @@ _核对基线：播放器 `f42cb39` / 0.28.2，本地方案修订日期 2026-10-
 - 已加入运行时 session 调用状态机：`src/AmdLmxxfSession.h`。
 - 已加入 Windows 动态加载器：`src/AmdLmxxfRuntime.h/.cpp`。
 - 已加入 `AmdLmxxfApiTests`，当前在 Mac 上直接编译通过。
+- Windows 11 迁移和安装步骤见
+  [`WIN11-DEVELOPMENT-SETUP-zh.md`](WIN11-DEVELOPMENT-SETUP-zh.md)。
 - D3D12 设备探针、资源上传和真实 runtime 预检尚未实现。
 
 ## 1. 修订结论
