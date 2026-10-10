@@ -82,6 +82,7 @@ Get-ChildItem -Path C:\ -Filter amdhip64_7.dll -Recurse -ErrorAction SilentlyCon
 ```powershell
 winget install --id Git.Git -e
 winget install --id Kitware.CMake -e
+winget install --id Ninja-build.Ninja -e
 winget install --id Python.Python.3.13 -e
 winget install --id MSYS2.MSYS2 -e
 ```
@@ -91,6 +92,7 @@ winget install --id MSYS2.MSYS2 -e
 ```powershell
 git --version
 cmake --version
+ninja --version
 python --version
 ```
 
@@ -148,7 +150,77 @@ architecture = x64
 
 所以最稳妥的是完整安装 `14.44`。
 
-### 4.3 如果只有 Visual Studio 2026
+### 4.3 只装命令行工具链的最小方案
+
+不需要安装 Visual Studio IDE。最小方案是：
+
+```text
+Visual Studio 2022 Build Tools
+独立安装的 CMake
+独立安装的 Git
+Windows PowerShell
+```
+
+Build Tools 使用 Visual Studio 安装器，但不会安装 IDE。命令行中仍可获得：
+
+```text
+cl.exe
+link.exe
+lib.exe
+msbuild.exe
+dumpbin.exe
+rc.exe
+```
+
+推荐组件：
+
+```text
+Microsoft.VisualStudio.Workload.VCTools
+Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+Microsoft.VisualStudio.Component.Windows11SDK.26100
+MSVC v143 - VS 2022 C++ x64/x86 build tools (v14.44)
+```
+
+如果使用 Visual Studio Installer 的 `vs_BuildTools.exe`，可以使用：
+
+```powershell
+.\vs_BuildTools.exe --quiet --wait --norestart --nocache `
+  --installPath "C:\BuildTools" `
+  --add Microsoft.VisualStudio.Workload.VCTools `
+  --includeRecommended
+```
+
+随后打开 Visual Studio Installer，确认 **MSVC v143 14.44** 和
+**Windows 11 SDK 10.0.26100** 已安装。`--includeRecommended` 不保证
+一定选中精确的 14.44 工具集，而 `CMakePresets.json` 的 `vs2022`
+preset 会精确请求它。
+
+不使用 `CMakePresets` 时，可以用独立 CMake：
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
+```
+
+如果希望使用 Ninja 而不是 MSBuild generator，必须在 Build Tools 的
+Developer Command Prompt 中运行，确保 `cl.exe`、`rc.exe` 和 Windows SDK
+变量已经初始化：
+
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Ninja 可以使用，但当前 `CMakePresets.json` 没有 Ninja preset，正式验证
+仍建议使用 Visual Studio 17 2022 generator。
+
+只安装 MinGW 不能构建 `DLSSVideoPlayer.exe` 和 `NeuralWorker.exe`。MinGW
+只能构建独立的 `LmxxfNrRuntime.dll`，以及当前纯头文件形式的
+`AmdLmxxfApiTests`。
+
+### 4.4 如果只有 Visual Studio 2026
 
 仓库的 `build_windows.bat` 可以识别：
 
@@ -175,7 +247,7 @@ Windows SDK 10.0.26100
 
 为准。
 
-### 4.4 安装后检查
+### 4.5 安装后检查
 
 打开：
 
@@ -661,6 +733,7 @@ D:\work\
 [ ] Windows 11 x64
 [ ] RX 9070 XT / gfx1201 或 RX 9060 / gfx1200
 [ ] Adrenalin 提供 amdhip64_7.dll
+[ ] Visual Studio IDE 可不安装
 [ ] Visual Studio 2022 Build Tools
 [ ] MSVC v143 14.44
 [ ] Windows SDK 10.0.26100
