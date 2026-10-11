@@ -1,4 +1,5 @@
 #include "CrashDump.h"
+#include "AmdNeuralSettingsDocument.h"
 #include "GuideFiles.h"
 #include "NarrowText.h"
 #include "NeuralWorker.h"
@@ -777,6 +778,137 @@ void temporal_settings_reach_the_helper_only_off_their_defaults_test()
         if (unknown[index] == L"--temporal") unknown[index + 1] = L"cuts=sometimes,stability=off";
     const auto unknownView = view(unknown);
     CHECK(!neural_worker_detail::ParseWorkerArguments(unknownView).has_value());
+}
+
+// The AMD backend's two strength controls. They are the only settings that
+// backend reads at all - it loads no proxy and no ReShade.ini - so they travel on
+// its own command line, off their defaults only, and the parent's settings
+// document changes with them. Three things have to hold: a job that leaves them
+// alone builds the line this helper has always taken, every value the two
+// controls can produce survives the round trip float for float (the parent keyed
+// the render on that float), and a value they cannot produce is refused rather
+// than clamped into one that renders under the parent's key.
+void amd_strengths_reach_the_helper_only_off_their_defaults_test()
+{
+    const HANDLE metadata = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(123));
+    auto view = [](const std::vector<std::wstring>& arguments) {
+        std::vector<std::wstring_view> values{L"NeuralWorker.exe"};
+        for (const auto& argument : arguments) values.emplace_back(argument);
+        return values;
+    };
+    NeuralRenderRequest request = TestRequest(L"source.mkv");
+    request.backend = NeuralBackend::Amd;
+    const auto plain = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
+    for (const auto& argument : plain) {
+        CHECK(argument != L"--amd-transfer-strength");
+        CHECK(argument != L"--amd-color-strength");
+    }
+    const auto plainView = view(plain);
+    const auto parsedPlain = neural_worker_detail::ParseWorkerArguments(plainView);
+    CHECK(parsedPlain.has_value());
+    if (parsedPlain) {
+        CHECK_EQ(1.0f, parsedPlain->request.settings.intensity);
+        CHECK_EQ(1.0f, parsedPlain->request.settings.colorStrength);
+    }
+
+    // Every value the two controls can produce, through the line and back.
+    for (const float strength : {0.0f, 0.01f, 0.4f, 0.7f, 0.99f}) {
+        request.settings.intensity = strength;
+        request.settings.colorStrength = strength;
+        const auto tuned = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
+        const auto tunedView = view(tuned);
+        const auto parsedTuned = neural_worker_detail::ParseWorkerArguments(tunedView);
+        CHECK(parsedTuned.has_value());
+        if (parsedTuned) {
+            CHECK_EQ(strength, parsedTuned->request.settings.intensity);
+            CHECK_EQ(strength, parsedTuned->request.settings.colorStrength);
+        }
+    }
+    // Back at the defaults the line is byte-for-byte the one above, which is what
+    // keeps a default job on the wire contract every earlier helper accepted.
+    request.settings.intensity = 1.0f;
+    request.settings.colorStrength = 1.0f;
+    const auto back = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
+    CHECK(std::ranges::equal(back, plain));
+
+    // One control moving while the other stays put sends one flag, and the other
+    // comes back at its default rather than at whatever a previous job left.
+    request.settings.colorStrength = 0.25f;
+    const auto colorOnly = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
+    CHECK(std::find(colorOnly.begin(), colorOnly.end(), L"--amd-transfer-strength") == colorOnly.end());
+    const auto colorOnlyView = view(colorOnly);
+    const auto parsedColorOnly = neural_worker_detail::ParseWorkerArguments(colorOnlyView);
+    CHECK(parsedColorOnly.has_value());
+    if (parsedColorOnly) {
+        CHECK_EQ(1.0f, parsedColorOnly->request.settings.intensity);
+        CHECK_EQ(0.25f, parsedColorOnly->request.settings.colorStrength);
+    }
+
+    // Refused, not clamped. The range is the one the controls can produce; a
+    // NaN is refused by the same predicate rather than by the accident of which
+    // side of a comparison it lands on.
+    const auto withTransfer = [&](std::wstring_view value) {
+        // `plain` as it is, so view() adds the one executable name it expects.
+        std::vector<std::wstring> line = plain;
+        line.emplace_back(L"--amd-transfer-strength");
+        line.emplace_back(value);
+        return line;
+    };
+    CHECK(neural_worker_detail::ParseWorkerArguments(view(withTransfer(L"0.5"))).has_value());
+    CHECK(!neural_worker_detail::ParseWorkerArguments(view(withTransfer(L"1.5"))).has_value());
+    CHECK(!neural_worker_detail::ParseWorkerArguments(view(withTransfer(L"-0.25"))).has_value());
+    CHECK(!neural_worker_detail::ParseWorkerArguments(view(withTransfer(L"nan"))).has_value());
+
+    // Nothing is sent on NVIDIA, where the same settings reach the helper by the
+    // ReShade.ini the parent writes: one setting stated on two carriers is how
+    // the two come to disagree.
+    NeuralRenderRequest nvidia = TestRequest(L"source.mkv");
+    nvidia.settings.intensity = 0.5f;
+    const auto nvidiaLine = neural_worker_detail::BuildWorkerArguments(nvidia, metadata, nullptr, false);
+    CHECK(std::find(nvidiaLine.begin(), nvidiaLine.end(), L"--amd-transfer-strength") == nvidiaLine.end());
+}
+
+// The AMD job's settings document is the cache key's settings term. It changes
+// when the two strengths change - they are the model's input on this backend -
+// and it must NOT change for the panel's other controls, which this backend never
+// reads: a key term that moved for them would retire a render every time a
+// slider did nothing.
+void amd_settings_document_covers_exactly_the_two_strengths_test()
+{
+    // Byte-identical to the document every AMD render before the strengths were
+    // wired up was keyed under, so those cache entries all stay valid.
+    CHECK_EQ(std::string("backend=amd-lmxxf\n"
+                         "temporal=off\n"
+                         "motion=constant(0,0)\n"
+                         "depth=constant(1)\n"),
+             AmdNeuralSettingsDocument(NeuralSettings{}));
+
+    NeuralSettings tuned;
+    tuned.intensity = 0.7f;
+    CHECK(AmdNeuralSettingsDocument(tuned) != AmdNeuralSettingsDocument(NeuralSettings{}));
+    CHECK(AmdNeuralSettingsDocument(tuned).find("transfer=0.700000") != std::string::npos);
+    // The second slider moving is a second document, so neither render can be
+    // answered from the other's entry.
+    NeuralSettings both = tuned;
+    both.colorStrength = 0.4f;
+    CHECK(AmdNeuralSettingsDocument(both) != AmdNeuralSettingsDocument(tuned));
+    CHECK(AmdNeuralSettingsDocument(both).find("color=0.400000") != std::string::npos);
+    // Stable: the same settings twice are the same document, which is what makes
+    // it a key term rather than a nonce.
+    CHECK_EQ(AmdNeuralSettingsDocument(both), AmdNeuralSettingsDocument(both));
+    // The add-on's own tuning is not read on this backend, so it is not keyed.
+    // Every one of these changes an NVIDIA render and none of them changes one
+    // here.
+    NeuralSettings panel = both;
+    panel.localTone = 0.5f;
+    panel.localStructure = 1.5f;
+    panel.skinStructure = 0.3f;
+    panel.style = 2;
+    panel.preset = 3;
+    panel.passes = 4;
+    panel.autoMask = false;
+    panel.chainedHistory = false;
+    CHECK_EQ(AmdNeuralSettingsDocument(both), AmdNeuralSettingsDocument(panel));
 }
 
 // The benchmark's guide sources (P2.4) come off the helper's line before the shared
@@ -3445,6 +3577,8 @@ int wmain(int argc, wchar_t** argv)
     helper_main_parser_accepts_normal_and_restarted_contracts_test();
     the_frame_rate_reaches_the_helper_exactly_test();
     temporal_settings_reach_the_helper_only_off_their_defaults_test();
+    amd_strengths_reach_the_helper_only_off_their_defaults_test();
+    amd_settings_document_covers_exactly_the_two_strengths_test();
     benchmark_guide_sources_leave_the_shared_parser_canonical_test();
     guide_files_round_trip_the_estimator_grid_bit_for_bit_test();
     cancellation_of_running_child_is_bounded_test();

@@ -526,10 +526,51 @@ color = SDR BGRA
 exposure = nullptr
 pre_exposure = 1
 exposure_scale = 1
-transfer_strength = 1
-color_strength = 1
+transfer_strength = 播放器的 Intensity（0..1，默认 1）
+color_strength = 播放器的 Color strength（0..1，默认 1）
 model_scale = 1
 ```
+
+**已落地**：`transfer_strength` / `color_strength` 不再写死 1，而是接到播放器
+Neural settings 面板的 Intensity 与 Color strength 两个控件。通路是
+`NeuralRenderRequest::settings` → worker 命令行 `--amd-transfer-strength` /
+`--amd-color-strength`（**只在非默认时发**，所以默认 job 的命令行与该键存在之前
+逐字节相同）→ `RunAmdJob` 写进 `AmdLmxxfEvaluatorConfig` → 每帧 `MakeFrameInfo`。
+两者都是**逐帧输入**而不是 bring-up 状态，所以适配器复用已建好的 evaluator 时会把
+它们重新下发（`SetFrameStrength`），而不是因为一个滑块重建设备。
+
+同一对数值也进入 `AmdNeuralSettingsDocument`（cache key 的 settings 项），同样
+**只在非默认时写**：默认渲染的 key 与接线前逐字节相同，盘上已有的 AMD 缓存全部保持
+有效；任一项离开默认值就是一份新的渲染身份——否则"拖动滑块却命中上一档的缓存"。
+收据（`receipt.json`）里也记这两个数：digest 覆盖它们，但读不回来。
+
+`model_scale` 仍是 1：播放器没有对应控件，写死是诚实的。
+
+**实测读数**（本机 RX 9070 XT / gfx1201，`--render --neural-backend amd`，合成源，
+静止与运动各一）：
+
+- **`transfer_strength` 不驱动画面。** 固定 `color_strength=0`，把 transfer 取
+  1.00 / 0.50 / 0.00 渲染三次，输出**逐像素完全相同**（`ffmpeg psnr` 报 `y:inf`）。
+  静止源与运动源各测一次，结论一致。所以 Intensity 滑块在 AMD 上是"接了线但这份
+  runtime 不响应"，**不是**没接、也不是坏了——它将来会被响应的可能性仍然存在，
+  所以接线保留。
+- **`color_strength` 驱动画面。** 同一输入下 0.00 与 1.00 相差 **23.6 dB**（静止源）
+  / **24.2 dB**（运动源）PSNR。
+- **`color_strength` 就是闪烁的那个旋钮。** 对一个完全静止的源（同一张 PNG 循环
+  3 秒）测"相邻帧之间"的 Y PSNR，也就是画面在时间上有多不稳：
+
+  | 输入 / 输出 | 逐帧 Y PSNR |
+  |---|---|
+  | 源本身 | 96.6 dB |
+  | AMD 渲染，`color_strength=0.00` | 94.6 dB |
+  | AMD 渲染，`color_strength=1.00` | **49.1 dB** |
+
+  源本身帧间只差编码噪声（96.6 dB）：`0.00` 几乎与源一样稳（94.6 dB），而 `1.00`
+  让相邻帧相差 49 dB —— 静止画面上这就是肉眼可见的闪烁。运动源上三者接近
+  （源 25.2 / `0.00` 25.1 / `1.00` 26.2 dB），因为源自身的帧间差把模型的部分盖住了；
+  这与 5.3 节"静止档最差 1.64×"、以及"闪烁在低运动区域最明显"是同一条结论。
+- **接线前 AMD 路径固定 `color_strength = 1`**，也就是一直在用不稳的那一端。接线后
+  它由播放器的 Color strength 决定，**0.00 是更稳的一端**。
 
 后续如果需要曝光，可接播放器的 SDR 曝光估算，但必须进入 cache key。
 

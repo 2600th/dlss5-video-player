@@ -162,6 +162,13 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
     json += ",\"prerollFrames\":" + std::to_string(request.prerollFrames);
     json += ",\"guides\":" + Quoted(CanonicalGuideControls(request.guides));
     json += ",\"temporal\":" + Quoted(CanonicalTemporalSettings(request.temporal));
+    // The two strengths, which the settings digest covers but cannot be read
+    // back from. Spelled out here because this file is the record of what a
+    // render ran with, and on the AMD backend they are the only settings there
+    // are: a receipt that named a digest and no value would make "which render
+    // is this" a question about a hash.
+    json += ",\"transferStrength\":" + Number(request.settings.intensity);
+    json += ",\"colorStrength\":" + Number(request.settings.colorStrength);
     json += ",\"frameRetryLimit\":" + std::to_string(request.frameRetryLimit);
     json += "}";
 

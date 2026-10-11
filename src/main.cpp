@@ -122,6 +122,9 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 // architecture, so which module set a card would get is asked before the pack is
 // offered behind the D key (and again on the start screen, from the same call).
 #include "AmdLmxxfPolicy.h"
+// What an AMD render's cache key is taken from: the settings that reach this
+// backend's model rather than the add-on's ReShade panel, which it never reads.
+#include "AmdNeuralSettingsDocument.h"
 #include "RuntimeModulePolicy.h"
 #include "UpscalingPolicy.h"
 #include "NeuralMotionPolicy.h"
@@ -2249,29 +2252,21 @@ static std::wstring DescribeAmdRuntimeVerified(std::span<const AmdRuntimeCheck> 
 }
 
 // The AMD job's settings document, which is what the staged neural-settings.ini
-// holds and what the cache key's settings term is a digest of.
+// holds and what the cache key's settings term is a digest of. Its body lives in
+// AmdNeuralSettingsDocument.h beside the other pure policies so it can be tested
+// without a runtime; what belongs here is why the job hands it what it hands it:
+// the job's OWN settings rather than a file the helper will rewrite. Nothing on
+// this backend reads a ReShade.ini, so the request is what the render runs with
+// and the document is taken from it directly - which is also why Publish
+// re-reads no INI here (see its note) and why AnswerFromCache's key has a term
+// that changes when a strength does.
 //
-// There is no INI here and nothing to rewrite per job: this backend's knobs
-// travel in the request, and the ones it has are the evaluator's - where its
-// guides come from and whether the temporal model runs. So this document says
-// exactly that, in the terms the worker will use, rather than transcribing the
-// ReShade panel the backend never reads. Those panel values are deliberately not
-// hashed in either: a key term that changes no pixel would retire a render every
-// time a slider moved, and the job's log line names them as asked-for instead.
-//
-// Today it is one constant, because the live player cannot ask for file guides
-// (GuideFiles.h: the estimator's own field, or nothing) and the AMD backend has
-// no estimator, so its guides are the constants and its temporal model is off.
-// The day a caller can ask for either, this document changes with the request
-// that carries it - which is why it is a document rather than a literal in the
-// key.
-static std::string AmdNeuralSettingsDocument()
-{
-    return "backend=amd-lmxxf\n"
-           "temporal=off\n"
-           "motion=constant(0,0)\n"
-           "depth=constant(1)\n";
-}
+// Guides and the temporal model are still constants in the document, because the
+// live player cannot ask for file guides (GuideFiles.h: the estimator's own
+// field, or nothing) and this backend has no estimator - so its guides are the
+// constants and its temporal model is off. The day a caller can ask for either,
+// this document changes with the request that carries it, which is why it is a
+// document rather than a literal in the key.
 
 // Everything a neural job reads, captured on the UI thread when it starts:
 // the job thread never touches PlayerApp. The two pointers are owned by the
@@ -2524,9 +2519,18 @@ private:
         // named mutex derived from the directory, so it costs the tree nothing.
         lease_.emplace(runtimeDirectory_);
         if(!lease_->Held()){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("AMD neural runtime is in use by another render; refusing to share it.");return false;}
-        settingsSnapshot_=AmdNeuralSettingsDocument();
+        settingsSnapshot_=AmdNeuralSettingsDocument(in_.settings);
         settingsDigest_=Sha256Bytes(*settingsSnapshot_);
         if(!settingsDigest_){completion_->result.detail=L"The neural settings digest could not be computed.";return false;}
+        // Printed because the two strengths are in the cache key and in no
+        // result field, so "the dial does nothing" is a claim neither the key
+        // nor the result summary can settle on its own. The panel's other
+        // controls are named on the same line so that a reader who sees them
+        // asked for here and nowhere in the render can tell an ignored control
+        // from an unset one - on this backend they are ignored, by design.
+        LOG("AMD neural settings: "<<CanonicalNeuralSettings(in_.settings)
+            <<" -- this backend reads transfer="<<in_.settings.intensity
+            <<" and color="<<in_.settings.colorStrength<<"; nothing else on this line reaches it.");
         return true;
     }
 
@@ -2715,6 +2719,12 @@ private:
         {std::ofstream settingsFile(*staging_/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot_->data(),static_cast<std::streamsize>(settingsSnapshot_->size()));if(!settingsFile){cache_.MarkInvalid(*staging_);completion_->result.detail=L"The neural settings snapshot could not be staged.";return false;}}
         const auto& range=in_.range;
         NeuralRenderRequest request{nullptr,sourcePath_,liveIndex?liveDirectory/L"neural.mkv":*staging_/L"neural.mkv",width_,height_,fps_,duration_};request.jobId=in_.generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps_);request.guides=in_.guides;request.temporal=in_.temporal;request.pauseEvent=in_.pauseEvent;request.segmentFrames=liveIndex?in_.segmentFrames:0u;request.firstSegmentFrames=liveIndex?in_.firstSegmentFrames:0u;request.gpuColorConversion=in_.gpuColorConversion;request.nvencPreset=in_.nvencPreset;request.gpuSourceConversion=in_.gpuSourceConversion;request.processingScale=in_.processingScale;request.captureDither=in_.captureDither;request.quality=in_.cacheQuality;request.sourceDeband=in_.sourceDeband;request.suppliedExposure=in_.suppliedExposure;
+        // On the wire for the AMD backend alone: BuildWorkerArguments emits
+        // nothing for these on NVIDIA, where the helper is told them by the
+        // ReShade.ini written above instead. Sent because this backend has no
+        // such file and the request is the only carrier left for the two
+        // strengths its model takes.
+        request.settings=in_.settings;
         // Which backend runs the pass, and - on the AMD one - the tree it loads
         // its module from. The worker executable is not on this line for the
         // reason the export gives: one binary serves both backends and always
@@ -6663,6 +6673,12 @@ private:
     static constexpr int kNeuralPresetBand=46;
     void BuildNeuralSettingControls(HWND h){
         constexpr int right=kNeuralColumn,top=kNeuralPresetBand;
+        // Which backend this panel is describing. Only two of these controls
+        // reach an AMD render at all, so the panel says which ones once and
+        // those two carry their own text: the same eight inert sliders beside
+        // two live ones, all explained in NVIDIA's terms, teach the user the
+        // wrong thing about both halves.
+        const bool amd=m_opt.neuralBackend==NeuralBackend::Amd;
         CreateNeuralCombo(h,IDC_NS_PRESET,L"neural.settings.preset",14,{},L"neural.tip.preset",0,230);
         DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,380,8,484,36,IDC_NS_PRESET_NOTE);
         CreateSettingsGroupHeading(h,L"neural.settings.group_look",12+top,0,400);
@@ -6675,8 +6691,8 @@ private:
         CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",44+top,{L"Default",L"Natural \u00b7 strongest change",L"Cinematic \u00b7 strong change"},L"neural.tip.style",0,230);
         CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",82+top,L"neural.tip.tone",100,0,true);
         CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",124+top,L"neural.tip.structure",100,0,true);
-        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",166+top,L"neural.tip.color",100,0,true);
-        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",208+top,L"neural.tip.intensity",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",166+top,amd?L"neural.tip.color.amd":L"neural.tip.color",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",208+top,amd?L"neural.tip.intensity.amd":L"neural.tip.intensity",100,0,true);
         CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",250+top,L"neural.tip.skin",0,0,true);
         CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,286+top,236,L"neural.tip.automask");
         // Stacking, which arrived with RenoDX 6.x. Its own group because it
@@ -6709,7 +6725,7 @@ private:
         // "the settings do not apply" was partly a picture nobody said was the
         // previous render), then what kind of setting these are.
         DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,16,372,848,20,IDC_NS_STATE,DialogAnchor::StretchNote);
-        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,396,848,38,0,DialogAnchor::StretchNote);
+        DialogControl(h,L"STATIC",T(amd?L"neural.settings.note.amd":L"neural.settings.note").c_str(),SS_LEFT,16,396,848,38,0,DialogAnchor::StretchNote);
         HWND adjust=DialogControl(h,L"BUTTON",T(L"neural.settings.open_adjustments").c_str(),WS_TABSTOP|BS_OWNERDRAW,16,442,170,30,IDC_NS_OPEN_ADJUST,DialogAnchor::BottomLeft);
         HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,550,442,86,30);
         HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,646,442,122,30,true);

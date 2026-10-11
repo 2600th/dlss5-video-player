@@ -975,7 +975,7 @@ bool AmdLmxxfEvaluator::SubmitFrameLease(const std::vector<uint8_t>& bgra, bool 
     LmxxfNrFrameInfo frameInfo =
         amd_lmxxf::MakeFrameInfo(color_.Get(), width_, height_,
                                  static_cast<uint32_t>(kColorState), list_.Get(), 1, frameId,
-                                 frameId);
+                                 frameId, config_.transferStrength, config_.colorStrength);
 
     amd_lmxxf::TemporalGuides guides;
     guides.motion = motion_.Get();
@@ -1154,7 +1154,8 @@ bool AmdLmxxfEvaluator::SubmitFrame(const std::vector<uint8_t>& bgra, bool reset
     const uint64_t frameId = ++frameIndex_;
     const LmxxfNrFrameInfo frameInfo =
         amd_lmxxf::MakeFrameInfo(color_.Get(), width_, height_,
-                                 static_cast<uint32_t>(kColorState), list_.Get(), 1, frameId, frameId);
+                                 static_cast<uint32_t>(kColorState), list_.Get(), 1, frameId, frameId,
+                                 config_.transferStrength, config_.colorStrength);
     // Every call from here on goes through the Session, because that is what
     // advances its phase machine. Calling the raw table entries directly leaves
     // the phase stuck at Prepared, so a later Retire refuses as out-of-order
