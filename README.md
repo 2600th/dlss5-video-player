@@ -1,81 +1,109 @@
-# DLSS 5 Video Player
+# DLSS 5 Video Player — AMD
 
-**Put any video through NVIDIA's DLSS 5 neural renderer, and check every frame
-against the original.**
+**Put any video through DLSS 5's neural renderer on an AMD Radeon, and check
+every frame against the original.**
+
+> [!NOTE]
+> **A fork of [DLSS 5 Video Player](https://github.com/2600th/dlss5-video-player)
+> with an AMD backend added.** Everything below — the player, the compare views,
+> the render cache, the export pipeline, the documentation — is upstream's, and
+> still works as it always did on an RTX card. What this fork adds is a second
+> neural backend: the same neural pass runs on an RDNA 4 Radeon through
+> `LmxxfNrRuntime`, with no NVIDIA add-on, no NGX and no ReShade.
+> [What the AMD backend does, and does not do](#on-an-amd-card) ·
+> [integration plan and status, in Chinese](docs/AMD-LMXXF-INTEGRATION-PLAN-REV2-zh.md) ·
+> [the runtime package](third_party/lmxxf/README.md)
 
 [![25-second DLSS 5 Video Player demonstration: a 007 First Light face split between the source and the player's render, GTA VI playing with the divider, then the player's Difference, Side by side and loupe views, and a render filling the timeline while the video plays](docs/media/neural-comparison-preview.webp)](docs/media/neural-comparison-demo.mp4)
 
 **[Watch the 25-second video](docs/media/neural-comparison-demo.mp4)** (1080p, no
-sound): *007 First Light* and *GTA VI* Trailer 2 rendered at default settings on
-an RTX 4080 SUPER, then the Difference, Side by side and loupe views.
+sound), captured on the NVIDIA backend: *007 First Light* and *GTA VI* Trailer 2
+rendered at default settings on an RTX 4080 SUPER, then the Difference, Side by
+side and loupe views. The player and its compare views are the same on either
+backend; what differs is what each one can run. See
+[On an AMD card](#on-an-amd-card).
 
-A free, open-source player for Windows and RTX cards. Open a video, photo or
-GIF and press `D`: within seconds the render plays while the rest of the video
-renders behind you, and the original is one key away on the same frame. Other
-DLSS 5 tools convert files or filter the desktop live; this one renders the
-whole video progressively, keeps every frame, and shows you what the model
-changed, and where it didn't help.
-[How it compares](docs/RELATED_PROJECTS.md).
+A free, open-source player for Windows. Open a video, a photo or a GIF and press
+`D`: within seconds the render plays while the rest of the video renders behind
+you, and the original is one key away on the same frame. Other DLSS 5 tools
+convert files or filter the desktop live; this one renders the whole video
+progressively, keeps every frame, and shows you what the model changed, and where
+it didn't help. [How it compares](docs/RELATED_PROJECTS.md).
 
-[Website](https://2600th.github.io/dlss5-video-player/) · [Download](#download) · [First run](#first-run) · [Usage guide](docs/USAGE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
+[Upstream project](https://github.com/2600th/dlss5-video-player) · [On an AMD card](#on-an-amd-card) · [Build it](#building-and-contributing) · [First run](#first-run) · [Usage guide](docs/USAGE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 ![007 First Light, one frame: the source on the left, the same frame from the player's render at default settings on the right, identical unscaled 700x880 crops](docs/media/stills/007-first-light-bond.png)
 
 One source frame (left) and the same frame of the player's render (right),
-unscaled. [Four more, including one where the model makes the picture worse](docs/media/README.md#comparison-stills).
+unscaled, on the NVIDIA backend. [Four more, including one where the model makes
+the picture worse](docs/media/README.md#comparison-stills).
 
 > [!IMPORTANT]
-> Community project, not an NVIDIA product. The neural runtime is a modified,
-> unsigned community build. Neural rendering needs an NVIDIA RTX card and driver
-> 610.47 or newer. Notices: [THIRD_PARTY.md](THIRD_PARTY.md).
+> Community project, not an NVIDIA or an AMD product. The neural runtime on
+> either backend is a modified, unsigned community build. On the NVIDIA backend
+> neural rendering needs an RTX card and driver 610.47 or newer; on the AMD
+> backend it needs an RDNA 4 Radeon and the runtime package, which this
+> repository does not ship — see [On an AMD card](#on-an-amd-card). Notices:
+> [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## On an AMD card
+
+This fork's addition. Neural rendering runs through `LmxxfNrRuntime.dll` — the
+AMD runtime — instead of the NVIDIA add-on. The player picks the backend itself at
+startup: if the NVIDIA layout is absent and the AMD runtime package is present and
+matches the manifests it ships, neural rendering is offered on it. It is not a
+menu choice, because a machine has one of the two.
+`--neural-backend amd` does the same from the command line.
+
+| | AMD backend |
+| --- | --- |
+| GPUs | RDNA 4 (`gfx1200`, `gfx1201`); measured on an RX 9070 XT |
+| Stages it can run | Neural rendering (`nr`) alone. **No** upscaling and **no** frame generation — so no RTX VSR, no DLSS Super Resolution, no DLSS-G |
+| Input size | The runtime admits up to 1920×1080 by pixel budget. A 1440p or 4K source has to be scaled down before it reaches the runtime |
+| Processing scale | Must be 100%. The runtime returns the frame at the size it was given, so a reduction would be silently ignored; this player refuses instead |
+| Passes | 1 |
+| Temporal model | Off. This backend has no guide estimator, so the motion and depth guides are constants and the render is spatial |
+| Colour | SDR. 10-bit and HDR are not wired on this path |
+| Speed | ≈21 ms a frame end-to-end at 1080p on an RX 9070 XT, against a 33.3 ms budget at 30 fps. 900, 1440 and 4K are unmeasured |
+| What it needs | The `amd-neural-runtime/` package (≈600 MiB, not in this repository) beside the module directory, or named by `DLSS5_AMD_RUNTIME_DIR` |
+| Add-on, ReShade, `dxgi.dll` | None. This backend loads no proxy and registers no add-on |
+
+Measured on an RX 9070 XT: the player resolves and logs the pack at startup, the
+offline export writes a file, and a range render with preroll — the shape a live
+session uses — passes. **Not yet verified:** the `D` key itself end to end, a
+cache hit after one, and half-hour continuous playback. The
+[integration plan](docs/AMD-LMXXF-INTEGRATION-PLAN-REV2-zh.md) (Chinese) records
+what was measured, on what, and what was not.
+
+The NVIDIA path is untouched by any of this, and is still how you get upscaling,
+frame generation and the 10-bit ladder. The rest of this README describes the
+player as a whole and holds for both backends.
 
 ## Download
 
-**v0.28.2** (2026-10-04): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.28.2)
+**This fork has no releases, and a source zip of it would not run on its own.**
+The AMD runtime package is 600 MiB and is not in this repository, so there is no
+backend in the source tree — the same reason upstream's "Source code" zip won't
+run. Build it: [Build and test](docs/BUILDING.md). For the AMD backend, put the
+`amd-neural-runtime/` package beside the module directory
+([what is in it](third_party/lmxxf/README.md)).
 
-| Package | What is in it | Size |
-| --- | --- | --- |
-| `dlss5-video-player-v0.28.2-win64.zip` | Player plus the neural runtime and RTX VSR. This is the one you want. | 377 MB |
-| `DLSSVideoPlayer-v0.28.2-core-win64.zip` | Player only, no neural runtime or RTX VSR. | 36 MB |
-
-Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run: it
-has no runtime.
-
-### Check what you downloaded
-
-The checksum shows the file arrived intact; the attestation shows this
-repository built it.
-
-```sh
-sha256sum -c DLSSVideoPlayer-v0.28.2-core-win64.zip.sha256
-gh attestation verify DLSSVideoPlayer-v0.28.2-core-win64.zip --repo 2600th/dlss5-video-player
-```
-
-Only the core zip has build provenance. CI can't fetch the neural runtime, so
-the complete zip is assembled on the maintainer's machine. Once it is uploaded,
-the `attest-release-asset` workflow signs its digest, and `gh attestation
-verify` on it shows that this repository vouches for those exact bytes, not
-that CI built them. Either zip's `PACKAGE_MANIFEST.txt` names the commit it was
-built from, and the packager refuses a tree with uncommitted changes or a
-release that is not built from its tag. If you would rather not trust the
-maintainer's machine, take the core zip and add the runtime yourself:
-[docs/BUILDING.md](docs/BUILDING.md).
-
-Before the first run, `verify_package.ps1` (in the zip) checks every unpacked
-file against the package manifest and shows which binaries are signed. From the
-unpacked folder:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_package.ps1
-```
+Upstream publishes signed builds of the NVIDIA version on
+[its releases page](https://github.com/2600th/dlss5-video-player/releases), with
+a `.sha256` beside each zip, GitHub attestations of what that repository built,
+and a `verify_package.ps1` that checks the unpacked files against the package
+manifest. Those are the upstream project's, not this fork's, and none of them has
+an AMD backend.
 
 ## First run
 
-1. Unzip into a **new, empty folder**. Keep `neural-runtime/` next to the exe.
+1. Keep `neural-runtime/` next to the exe. (Upstream's zips say to unpack into a
+   new, empty folder first.) On the AMD backend the `amd-neural-runtime/`
+   package has to be reachable as well — see [On an AMD card](#on-an-amd-card).
 2. Run `DLSSVideoPlayer.exe`. The player is not code-signed, so Windows may
-   say "Windows protected your PC": choose **More info > Run anyway**, after
-   [checking the download](#check-what-you-downloaded) if you want to be sure
-   it is this project's.
+   say "Windows protected your PC": choose **More info > Run anyway**. This fork
+   has no signed builds to check against, so if you did not build it yourself,
+   know where the binary came from.
 3. Open a file (`Ctrl+O`), paste a public YouTube link (`Ctrl+L`), or pick
    something from **File > Game trailers**.
 4. Press `D`. It buffers for a few seconds, then plays the render.
@@ -100,7 +128,8 @@ the whole video. Press `D` at the start to get one.
 - **Compares against NVIDIA's own upscaler.** `R` shows RTX Video Super
   Resolution of the original as a view of its own and in the 2 × 2; `Shift+R`
   compares the other views against it. In the complete download, or a build
-  made with the RTX Video SDK.
+  made with the RTX Video SDK. **NVIDIA backend only** — the AMD backend has no
+  upscaler to compare against.
 - **Saves the evidence.** **File > Save comparison image** writes exactly what
   the picture shows, with a footer recording the video, frame, view, neural
   settings and runtime.
@@ -124,7 +153,9 @@ the whole video. Press `D` at the start to get one.
   well above a plain scaler and DLSS Super Resolution on video
   ([measurement](docs/measurements/vsr-quality-20261002/REPORT.md)). DLSS Super
   Resolution can still upscale playback to 1080p, 1440p or 2160p; it is off by
-  default (see [Limits](#limits)).
+  default (see [Limits](#limits)). **Both are NVIDIA backend features:** the AMD
+  backend runs the model at the source size, so its processing scale has to stay
+  at 100%.
 - **Plays like a player.** AC-3, E-AC-3 and DTS passthrough to a receiver, and
   Windows media controls with taskbar thumbnail buttons.
 - **Comes with test material.** Seven official game trailers, chosen for faces,
@@ -207,9 +238,14 @@ As of 2026-10-02, from each project's README, releases and issues (details in
 | Keeps audio / subtitles / chapters on export | Yes / yes / yes | Yes / no / yes | Audio yes | Audio and subtitles yes | Audio yes |
 | HDR | HDR shown on HDR displays; exports are SDR | 10-bit HDR export, SDR→HDR | HDR10 recording (experimental capture) | HDR kept, HEVC Main10 export | HDR10/HLG export |
 | Command line | `dlss5-convert`: files, folders, JSON report | `VE_CLI.exe` | No; a GUI queue | Not documented | Not documented |
-| Download | 377 MB (36 MB without the neural runtime) | 726 MB | 230 MB | 409 MB | 580 MB lite |
-| Verifying the download | SHA-256, GitHub attestations, a file manifest and a verifier script | GitHub's per-file digest | SHA256SUMS and a runtime manifest | SHA-256 files | Runtime hashes |
+| Download | None in this fork; upstream's is 377 MB (36 MB without the neural runtime) | 726 MB | 230 MB | 409 MB | 580 MB lite |
+| Verifying the download | Upstream's: SHA-256, GitHub attestations, a file manifest and a verifier script | GitHub's per-file digest | SHA256SUMS and a runtime manifest | SHA-256 files | Runtime hashes |
 | Licence | MIT | Source-available, its own terms | PolyForm Strict (non-commercial) | GPL-3.0 (AGPL for its streaming part) | MIT |
+
+> Every row above describes the player on the **NVIDIA backend**, which is what
+> upstream built and what this comparison was written against. On the AMD backend
+> the neural pass runs alone — no upscaling, no frame generation — see
+> [On an AMD card](#on-an-amd-card).
 
 Of the five, only this player keeps the render, so a seek lands on rendered
 frames and a video you come back to is already done. It compares the render
@@ -220,14 +256,17 @@ built. Its upscaler was chosen by measurement, and the
 [report](docs/measurements/vsr-quality-20261002/REPORT.md) is public.
 
 None of these projects is an NVIDIA product, and each runs the neural pass on a
-runtime build NVIDIA has not published for this use, this one included (see
-[Check what you downloaded](#check-what-you-downloaded)). This player is
-published only on its
-[releases page](https://github.com/2600th/dlss5-video-player/releases);
+runtime build NVIDIA has not published for this use, this one included. Upstream
+publishes its own builds only on
+[its releases page](https://github.com/2600th/dlss5-video-player/releases);
 re-uploads of DLSS 5 tools under other accounts have been reported carrying
-malware.
+malware. This fork publishes nothing — see [Download](#download).
 
 ## What's new in 0.28.2
+
+Upstream's release notes for the player this fork is built on. The fork itself
+has no release and no version of its own yet; its changes are the AMD backend
+above and are not in any numbered release.
 
 **0.28.2** (2026-10-04). Neural settings now do what they say, and say what they
 do. Renders made with the default settings are reused.
@@ -266,7 +305,7 @@ subtitles, HDR, the render quality ladder and `--render`.
 | Play or pause | `Space` |
 | Neural rendering on or off | `D` |
 | Compare views | `C` / `Shift+C` step the mode; `X` swaps sides; `[` and `]` change the Mix |
-| RTX VSR view; compare against it | `R`; `Shift+R` |
+| RTX VSR view; compare against it | `R`; `Shift+R` (NVIDIA backend) |
 | Zoom, loupe | `Z` / `Shift+Z` zoom in and out at the pointer; `L` loupe |
 | Save the view as a PNG | `Ctrl+Shift+S` |
 | Subtitles; earlier, later | `V`; `H`, `J` |
@@ -286,7 +325,8 @@ Settings persist between launches. A fresh install starts with neural rendering
 on, RTX VSR Upscaling on, DLSS Upscaling off, and DLSS's output and YouTube
 quality on **Auto**: the
 largest resolution your monitor can show, and the best YouTube stream up to
-1440p.
+1440p. The two upscaling settings do nothing on the AMD backend, which renders at
+the source size and does not upscale.
 
 The [usage guide](docs/USAGE.md) covers the rest, including frame generation
 and the cache. The trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
@@ -295,7 +335,9 @@ and the cache. The trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md
 
 The player paused on one frame of *007 First Light* rendered at default
 settings: the first four on an RTX 5090 at 100% display scaling, the next three
-on an RTX 4080 SUPER at 150%. Click any image for full size.
+on an RTX 4080 SUPER at 150%. All of them are the NVIDIA backend — upstream's
+captures, kept because the player and its compare views are the same on either
+backend. Click any image for full size.
 
 ![A 960x540 copy of 007 First Light in Wipe, compared against RTX VSR: the player's plain scale of the original left of a divider down the face, RTX VSR at High right of it, both tags at the top; an unscaled crop of the player's picture](docs/screenshots/current/vsr-wipe-crop.png)
 
@@ -337,16 +379,18 @@ how the toggle works, not what every source will gain.
 
 ## Limits
 
-- **Speed.** On an RTX 5090 a live session costs about 6.8 ms a frame at
-  1080p30, 9.9 ms at 1440p30 and 23 ms at 4K30, all faster than the video
-  plays. An RTX 4080 SUPER measured 15.3 ms at 1080p30 on 0.16.0 and has not
-  been re-measured since. 4K depends on the file. After your first session the
-  player knows your GPU and warns you before a video it expects to fall behind
-  on.
-- **Driver 610.47 or newer.** Older drivers refuse neural rendering on any card,
-  and the player tells you up front. See
+- **Speed (NVIDIA backend).** On an RTX 5090 a live session costs about 6.8 ms a
+  frame at 1080p30, 9.9 ms at 1440p30 and 23 ms at 4K30, all faster than the
+  video plays. An RTX 4080 SUPER measured 15.3 ms at 1080p30 on 0.16.0 and has
+  not been re-measured since. 4K depends on the file. After your first session
+  the player knows your GPU and warns you before a video it expects to fall
+  behind on. The AMD backend's numbers are in
+  [On an AMD card](#on-an-amd-card).
+- **Driver 610.47 or newer (NVIDIA backend).** Older drivers refuse neural
+  rendering on any card, and the player tells you up front. See
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
-- **Which GPU does what:**
+  The AMD backend does not go through the NVIDIA driver's neural stack at all.
+- **Which RTX GPU does what (NVIDIA backend):**
 
   | GPU | Neural rendering | RTX VSR upscaling | DLSS Super Resolution | Frame generation |
   | --- | --- | --- | --- | --- |
@@ -359,7 +403,9 @@ how the toggle works, not what every source will gain.
   rendering on a modified community runtime on every generation, RTX 50
   included. RTX VSR costs about 1.5 ms for a 1080p frame
   and 2.7 ms for a 1440p one at High on an RTX 5090; slower cards pay more, and
-  the player lowers its quality for a video it cannot keep up with.
+  the player lowers its quality for a video it cannot keep up with. For the AMD
+  backend, [On an AMD card](#on-an-amd-card) has its own table, and the rest of
+  this list holds for both unless it says otherwise.
 - **Depth is estimated from the picture**, and so is motion on cards without
   the optical flow engine. Expect some artifacts.
 - **DLSS Super Resolution doesn't beat a plain scaler on video.** Against
@@ -367,11 +413,12 @@ how the toggle works, not what every source will gain.
   use it for its look, not for detail. RTX VSR, the default upscaler, is the
   one that adds detail: 87.5 VMAF against bicubic's 80.5 and DLSS's 74.9 over
   the same kind of test.
-- **Frame generation writes a new file.** It takes time and disk space, and a
-  stream has to be copied locally first. NVIDIA supports it on RTX 40 and 50
-  cards; on RTX 20 and 30 the player offers to download the community
-  [dlssg_sm86 add-on](docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on),
-  which is unofficial and not bundled.
+- **Frame generation writes a new file (NVIDIA backend).** It takes time and disk
+  space, and a stream has to be copied locally first. NVIDIA supports it on
+  RTX 40 and 50 cards; on RTX 20 and 30 the player offers to download the
+  community [dlssg_sm86 add-on](docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on),
+  which is unofficial and not bundled. The AMD backend does not generate frames
+  at all.
 - **Save converted video copies the cached render as it is**: 8-bit at the
   default Standard quality, 10-bit at High or Lossless, without adjustments,
   upscaling or HDR. Use **Export with DLSS stages** to bake in a larger size.
@@ -396,21 +443,32 @@ how the toggle works, not what every source will gain.
 
 ## Building and contributing
 
-C++20, Win32, Direct3D 12, FFmpeg and NVIDIA NGX.
+C++20, Win32, Direct3D 12, FFmpeg, and on top of that one of two neural
+runtimes: NVIDIA NGX on the NVIDIA backend, or `LmxxfNrRuntime` on the AMD one.
 
 - [Build and test](docs/BUILDING.md), [runtime setup](docs/DLSS5_SETUP.md)
 - [Architecture](docs/ARCHITECTURE.md), [technical overview](TECHNICAL_OVERVIEW.md)
-- Hardware test records: the `VERIFICATION-*.md` files in [docs](docs/)
+- The AMD backend: [integration plan and status](docs/AMD-LMXXF-INTEGRATION-PLAN-REV2-zh.md) (Chinese), and [the runtime package](third_party/lmxxf/README.md)
+- Hardware test records: the `VERIFICATION-*.md` files in [docs](docs/) — upstream's, on the NVIDIA backend
 - [Contributing](CONTRIBUTING.md): the checks a pull request must pass
 
-**Reporting a bug:** open an [issue](https://github.com/2600th/dlss5-video-player/issues)
-with the version, GPU, driver, the video's size and frame rate, steps to
-reproduce, and log excerpts. Remove private paths and signed media URLs from
-logs first.
+**Reporting a bug:** open an [issue](https://github.com/myth2loki/dlss5-video-player-on-amd/issues)
+in this fork, and say which backend. On AMD, give the GPU, where the runtime
+package came from, and the excerpt from `DLSSVideoPlayer.log` — the log is a file
+beside the exe, not console output. An upstream NVIDIA-backend bug belongs on
+upstream's [tracker](https://github.com/2600th/dlss5-video-player/issues), which
+is the one that reaches the player's author. Remove private paths and signed
+media URLs from logs first.
 
 ## Credits and license
 
-Started from [DLSS 5 Video Player by Jessica Natalia Mods](https://gitlab.com/JessicaNataliaMods/dlss-5-video-player/).
+A fork of [DLSS 5 Video Player](https://github.com/2600th/dlss5-video-player) by
+2600th, which in turn started from
+[DLSS 5 Video Player by Jessica Natalia Mods](https://gitlab.com/JessicaNataliaMods/dlss-5-video-player/).
+The player, its compare views and its documentation are upstream's work; what this
+fork adds is the AMD backend.
 
 Project source is [MIT](LICENSE). Third-party binaries, game footage and
-trademarks keep their own terms; see [THIRD_PARTY.md](THIRD_PARTY.md).
+trademarks keep their own terms; see [THIRD_PARTY.md](THIRD_PARTY.md). The AMD
+runtime package and its model weights are their own drop, described in
+[third_party/lmxxf](third_party/lmxxf/README.md).
