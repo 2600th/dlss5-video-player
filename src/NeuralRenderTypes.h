@@ -44,6 +44,31 @@ constexpr std::optional<NeuralBackend> ParseNeuralBackend(std::string_view name)
     return std::nullopt;
 }
 
+// Whether this backend's render reads the Neural settings dialog at all.
+//
+// The question is not whether the panel is enabled but whether a value on it
+// can reach a pixel, and that is a property of the backend rather than of the
+// dialog:
+//
+//   * Nvidia - yes, all of it. The values are written into the ReShade.ini the
+//     helper loads (NeuralAddonOverridesFor) and they are a term of the render
+//     key, so any of them can change what comes back.
+//   * Amd - no, none of them. This backend loads no proxy and reads no INI; its
+//     evaluator's config is the runtime directory, the guide sources and the
+//     temporal switches, and the job's key is AmdNeuralSettingsDocument(), which
+//     takes no settings argument. Nothing in the dialog is an input to an AMD
+//     render, which is why a live session does not restart for one (see
+//     MainFrame::ApplyNeuralSettings: the restart costs a cold start, and for
+//     its whole duration the session is down and the original plays).
+//
+// A caller may ask this only about a picture a render would produce. It is not a
+// statement that the panel is inert for the user - the values are still saved
+// and still reach an NVIDIA render on a machine that has one.
+constexpr bool BackendReadsNeuralSettings(NeuralBackend backend) noexcept
+{
+    return backend == NeuralBackend::Nvidia;
+}
+
 enum class NeuralRenderPhase {
     CheckingCache,
     Acquiring,

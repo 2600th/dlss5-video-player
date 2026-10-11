@@ -3423,8 +3423,25 @@ void a_throwing_process_created_hook_leaks_no_handles_test()
     DWORD after = 0;
     CHECK(GetProcessHandleCount(GetCurrentProcess(), &after) != FALSE);
     // A leak is two handles a launch; a little slack for the rest of the process.
-    CHECK(after < before + kLaunches);
-    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+     CHECK(after < before + kLaunches);
+     CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+ }
+
+// Which backends' renders read the Neural settings dialog, which is what decides
+// whether pressing Apply may restart a live session: a restart cannot change a
+// picture the values do not reach, while it does cost a cold start with the
+// original playing through it (MainFrame::ApplyNeuralSettings).
+//
+// This is two assertions over a constexpr, and it earns its place by being the
+// thing that fails when someone makes the predicate wrong rather than the thing
+// that tests it: the day an AMD value is wired into the dialog - the strengths
+// were, once, and were reverted - this must be flipped in the same change, or
+// the value will not reach a running session at all and "I moved it and nothing
+// happened" comes back in the other direction.
+void live_apply_restarts_only_a_session_whose_render_reads_the_dialog_test()
+{
+    CHECK(BackendReadsNeuralSettings(NeuralBackend::Nvidia));
+    CHECK(!BackendReadsNeuralSettings(NeuralBackend::Amd));
 }
 
 } // namespace
@@ -3502,5 +3519,6 @@ int wmain(int argc, wchar_t** argv)
     a_throwing_progress_callback_still_ends_the_helper_test();
     a_throwing_progress_callback_drops_the_resident_session_test();
     a_throwing_process_created_hook_leaks_no_handles_test();
+    live_apply_restarts_only_a_session_whose_render_reads_the_dialog_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

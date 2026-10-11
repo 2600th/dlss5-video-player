@@ -6827,6 +6827,21 @@ private:
     void ApplyNeuralSettings(){
         SaveVideoSettings();
         if(m_liveSession){
+            // On a backend whose render reads none of these values, restarting
+            // cannot change one frame of what comes back - the job's key is the
+            // settings document it was started with, and the AMD document takes
+            // no settings (BackendReadsNeuralSettings) - while the restart
+            // itself IS visible: it costs a cold start, and for its whole
+            // duration the session is down and the original plays, so the
+            // picture changes character and changes back. A driven session
+            // measured two such restarts at 7.1 s and 16.7 s, attach=1.9 s and
+            // 11.1 s of them, both of them begun by pressing Apply on a panel
+            // whose values this backend never reads. Saving the values is all
+            // there is to do here, and it is done above.
+            if(!BackendReadsNeuralSettings(m_opt.neuralBackend)){
+                LOG("Neural settings applied at "<<Position()<<" s; this backend's render reads none of them, so the active session is left running.");
+                return;
+            }
             // The restart must not leave a queued seek behind: it would run
             // after the new session paused for its buffer and resume the
             // original underneath the loader.
