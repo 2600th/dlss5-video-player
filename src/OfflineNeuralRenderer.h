@@ -5,7 +5,6 @@
 #include "GuideFiles.h"
 #include "MediaPipeline.h"
 #include "NeuralRenderTypes.h"
-#include "NeuralSettings.h"
 #include "TemporalGuides.h"
 #include "TemporalMetrics.h"
 #include "TemporalSettings.h"
@@ -159,18 +158,6 @@ struct NeuralRenderRequest {
     // NeuralDirectEncodeSmoke GPU tests that hold it to that). Auto for every job
     // the player starts; only the benchmark and those tests name a path.
     EncoderPath encoderPath{EncoderPath::Auto};
-    // The player's neural settings, which on Amd are part of the wire contract
-    // rather than bookkeeping: this backend loads no proxy and reads no
-    // ReShade.ini, so the two of them the runtime has a place for - the detail
-    // and colour strengths - have nowhere else to come from. The rest are the
-    // add-on's own tuning and this backend never reads them at all.
-    //
-    // On NVIDIA the helper is told the same settings by a different route - the
-    // parent writes them into the ReShade.ini the helper loads - and
-    // BuildWorkerArguments emits nothing for this field on that backend, so its
-    // command line is byte-identical to the one it took before the field
-    // existed.
-    NeuralSettings settings{};
 };
 
 struct NeuralRenderProgress {

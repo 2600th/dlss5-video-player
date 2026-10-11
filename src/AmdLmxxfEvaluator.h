@@ -82,20 +82,6 @@ struct AmdLmxxfEvaluatorConfig {
     // lease flag in on top of it.
     uint32_t createFlags{0};
 
-    // The two strength terms LmxxfNrFrameInfo carries, which are the detail and
-    // colour controls the user moves. 1.0 is the runtime's own default, so a job
-    // that never touches them - and every job before they were wired up - puts
-    // the same frame info on the wire as it always did.
-    //
-    // Neither is bring-up state, which is why neither is in the adapter's reuse
-    // key even though both live on this struct: the runtime reads them per
-    // frame, so a reused session takes a new value with nothing rebuilt. That is
-    // also why the adapter re-applies them to an evaluator it reuses - a config
-    // written for the second job would otherwise never reach the session the
-    // first one armed (AmdLmxxfEvaluatorAdapter::Initialize).
-    float transferStrength{1.0f};
-    float colorStrength{1.0f};
-
     // The offline temporal experiment (docs/AMD-LMXXF-INTEGRATION-PLAN-REV2-zh.md
     // section 5.3). The runtime only engages its temporal model under the
     // recording-lease lifecycle, so this changes the create flags AND the
@@ -159,15 +145,6 @@ public:
 
     bool Initialize(HWND renderWindow, uint32_t width, uint32_t height, uint32_t outputWidth,
                     uint32_t outputHeight, double fps, const GuideControls& guides) override;
-    // The strength terms of the frames this evaluator will produce. Per-frame
-    // inputs rather than bring-up state, so a caller that only moved a slider
-    // calls this on the evaluator it already has instead of asking for a new
-    // one: see AmdLmxxfEvaluatorConfig::transferStrength.
-    void SetFrameStrength(float transfer, float color) noexcept
-    {
-        config_.transferStrength = transfer;
-        config_.colorStrength = color;
-    }
     bool Submit(const OfflineDecodedFrame& frame, const FrameIdentity& id, bool capture,
                 OfflineEvaluation& out) override;
     bool FeatureCreated() const override;

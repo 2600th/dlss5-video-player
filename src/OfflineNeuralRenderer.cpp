@@ -2883,14 +2883,7 @@ struct AmdLmxxfEvaluatorAdapter {
         // state, and there is no upscale, so the size and the job model are the
         // whole inheritance question and a match means there is nothing to rebuild.
         reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory;
-        // A reused evaluator keeps the config it was built with, and the two
-        // strength terms on that config are per-frame inputs rather than
-        // bring-up state - so they are re-applied here instead of being made
-        // part of the match. Without this the second job of a session would
-        // render with the first job's sliders, which is the "the dial does
-        // nothing" failure this backend already had once for a different
-        // reason.
-        if(reused){evaluator->SetFrameStrength(config.transferStrength,config.colorStrength);return true;}
+        if(reused)return true;
         captured.clear();
         evaluator=std::make_unique<AmdLmxxfEvaluator>(config);
         width=w;height=h;broughtUpTemporal=config.temporalHistory;
@@ -3659,13 +3652,6 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // Asking for the leases without them would fuse two constants into content
     // that moves, which is a result about a still scene no caller asked for.
     state.amdEvaluator.config.temporalHistory=fileGuides;
-    // The user's two strength controls, which on this backend reach the model
-    // through LmxxfNrFrameInfo rather than through a ReShade.ini - this backend
-    // loads no proxy and reads no INI, so the request is the only way they can
-    // arrive. They are per-frame inputs, so the adapter hands them to a reused
-    // evaluator rather than treating them as bring-up state.
-    state.amdEvaluator.config.transferStrength=request.settings.intensity;
-    state.amdEvaluator.config.colorStrength=request.settings.colorStrength;
     // What this backend cannot be asked for. Each is a benchmark switch that
     // exists to change what the NVIDIA path renders, and here it would change
     // nothing at all - a run that reported the flag's arm while rendering the
@@ -3690,11 +3676,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // one it made cannot tell them apart. The temporal mode is on this line
     // because it is the one setting whose effect is otherwise invisible: it is
     // not in any result field, and a spatial render of moving content looks like
-    // a temporal one in every number this job publishes. The strengths are here
-    // for the same reason in the other direction: they are in the cache key and
-    // nowhere in the result, so a run that moved one has no other place to say
-    // so - and "the dial did nothing" is a claim only these two numbers can
-    // settle.
+    // a temporal one in every number this job publishes.
     LOG("Neural backend: "<<NeuralBackendName(request.backend)
         <<" runtime="<<state.amdEvaluator.config.runtimeDirectory.string()
         <<" guides=motion:"<<(state.amdEvaluator.config.motionGuideDirectory.empty()
@@ -3703,8 +3685,6 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
             ?std::string("constant"):state.amdEvaluator.config.depthGuideDirectory.string())
         <<" temporal="<<(fileGuides?"on, under the recording-lease lifecycle"
             :"off, this backend has no guide estimator and this job brought no guide files")
-        <<" transfer-strength="<<state.amdEvaluator.config.transferStrength
-        <<" color-strength="<<state.amdEvaluator.config.colorStrength
         <<" feature18-receipt=not-applicable, this backend has no ReShade log");
 
     // Read before the per-job reset, so a bring-up the previous job left armed is

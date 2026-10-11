@@ -136,12 +136,6 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         request.quality=job.quality;
         request.sourceDeband=job.sourceDeband;
         request.suppliedExposure=job.suppliedExposure;
-        // The same settings RenderAddonOverrides writes into the helper's
-        // ReShade.ini below, stated once more on the request. On NVIDIA that
-        // copy is not read - the INI is what the helper loads - and on Amd it is
-        // the only copy there is: the strengths reach the model through the
-        // frame info there, and nothing on this backend reads an INI.
-        request.settings=job.neuralSettings;
         request.requireNeural=plan.requireNeural;
         request.backend=plan.backend;
         const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;

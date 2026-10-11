@@ -120,18 +120,6 @@ std::wstring FpsText(double fps)
     return std::wstring(buffer, written.ptr);
 }
 
-// The same shortest round-trip text for a float, for the same reason. A
-// strength is a knob the user set and the parent keyed the render on, so the
-// text form has to read back as the float it was taken from: six decimals turn
-// 0.700001 into a different value on the wire than the one the key names.
-std::wstring FloatText(float value)
-{
-    char buffer[64];
-    const auto written = std::to_chars(buffer, buffer + sizeof(buffer), value);
-    if (written.ec != std::errc{}) return std::to_wstring(value);
-    return std::wstring(buffer, written.ptr);
-}
-
 std::wstring HandleText(HANDLE handle)
 {
     return std::to_wstring(reinterpret_cast<uintptr_t>(handle));
@@ -952,14 +940,6 @@ bool ValidRequest(const NeuralRenderRequest& request)
     if (request.upscalingHistory != kDefaultUpscalingHistory &&
         (request.requireNeural || !request.outputWidth ||
          (request.outputWidth == request.width && request.outputHeight == request.height))) return false;
-    // A strength is either the default or something the UI can produce. The NaN
-    // form is refused here rather than left to the comparison below, which is
-    // false for every NaN and would read as "out of range" only by accident of
-    // which side it is written on.
-    const auto inStrengthRange=[](float value){
-        return std::isfinite(value) && value >= 0.0f && value <= kIntensityMax;};
-    if (!inStrengthRange(request.settings.intensity) ||
-        !inStrengthRange(request.settings.colorStrength)) return false;
     return true;
 }
 
@@ -1339,20 +1319,6 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
             arguments.emplace_back(L"--amd-runtime-dir");
             arguments.emplace_back(request.amdRuntimeDirectory.wstring());
         }
-        // The two strength controls, which only this backend reads out of the
-        // request: an NVIDIA helper is told them by the ReShade.ini the parent
-        // writes, and stating one setting twice on two carriers is how the two
-        // come to disagree. Absent at their defaults, so a job that leaves them
-        // alone - and every job before these keys existed - builds the line it
-        // always did.
-        if (request.settings.intensity != 1.0f) {
-            arguments.emplace_back(L"--amd-transfer-strength");
-            arguments.emplace_back(FloatText(request.settings.intensity));
-        }
-        if (request.settings.colorStrength != 1.0f) {
-            arguments.emplace_back(L"--amd-color-strength");
-            arguments.emplace_back(FloatText(request.settings.colorStrength));
-        }
     }
     // Absent means 100, the source size, which is every job before the rungs.
     if (request.processingScale != kDefaultProcessingScale) {
@@ -1493,7 +1459,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
                CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, NeuralBackendKey,
-               AmdRuntimeDirectoryKey, AmdTransferStrengthKey, AmdColorStrengthKey, KeyCount };
+               AmdRuntimeDirectoryKey, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1519,12 +1485,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // said it would rather than a second resolution that happens to agree.
         // An AMD line without it is one an older player built and lets the
         // helper resolve the pack itself, which is what it did before.
-        L"--amd-runtime-dir",
-        // The strength controls, sent with the AMD backend and only off their
-        // defaults. Before these keys the AMD helper had no strength input at
-        // all, so absence is not a value this build has to guess at: it is the
-        // 1.0 the runtime defaults to, which is what those jobs rendered.
-        L"--amd-transfer-strength", L"--amd-color-strength"};
+        L"--amd-runtime-dir"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1657,23 +1618,6 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
     // the backend without it leaves the field empty, which RunAmdJob reads as
     // "resolve one", exactly what the helper did before the key existed.
     if (values[AmdRuntimeDirectoryKey]) request.amdRuntimeDirectory = *values[AmdRuntimeDirectoryKey];
-    // Absent means 1.0, the runtime's own default and the value every AMD job
-    // rendered before these keys existed. A value outside the range the UI can
-    // produce is refused rather than clamped: the parent keyed the render on the
-    // number it sent, and a helper that quietly rendered a different one would
-    // publish that render under the parent's key.
-    if (values[AmdTransferStrengthKey]) {
-        double transfer = 0.0;
-        if (!ParseDouble(*values[AmdTransferStrengthKey], transfer) || !(transfer >= 0.0) ||
-            !(transfer <= static_cast<double>(kIntensityMax))) return std::nullopt;
-        request.settings.intensity = static_cast<float>(transfer);
-    }
-    if (values[AmdColorStrengthKey]) {
-        double color = 0.0;
-        if (!ParseDouble(*values[AmdColorStrengthKey], color) || !(color >= 0.0) ||
-            !(color <= static_cast<double>(kIntensityMax))) return std::nullopt;
-        request.settings.colorStrength = static_cast<float>(color);
-    }
     if (values[ProcessingScale]) {
         uint64_t percent = 0;
         if (!ParseUnsigned(*values[ProcessingScale], percent) || percent > UINT32_MAX ||
