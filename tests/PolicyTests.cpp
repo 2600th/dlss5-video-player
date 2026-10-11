@@ -1438,6 +1438,67 @@ void start_screen_names_a_loaded_frame_generation_addon_test()
     CHECK(!OfferSafeMode(lines, false));
 }
 
+// The same panel on the other backend: the other set of questions. A pack carries
+// its own runtime and is precompiled per GPU architecture, so an RTX generation,
+// an NGX driver floor and an RTX VSR row are answers about a product this machine
+// is not running - and the pack is not "not installed" on the machine that is.
+void start_screen_on_the_amd_backend_asks_the_pack_and_not_ngx_test()
+{
+    using namespace start_screen;
+    Facts facts{};
+    facts.backend = NeuralBackend::Amd;
+    facts.gpuVendorId = amd_lmxxf::kAmdVendorId;
+    facts.gpu = L"AMD Radeon RX 9070 XT";
+    // Deliberately a fresh Blackwell card and a driver below the floor: the NVIDIA
+    // lines would pass and fail respectively on these, and none of them may read
+    // either field.
+    facts.generation = GpuGeneration::Rtx50Blackwell;
+    facts.driverVersion = L"32.0.15.6614";   // 566.14, below the floor
+    facts.runtime = RuntimeState::Verified;
+    facts.runtimeVersion = L"208 files";
+    facts.frameGenAddon = L"version.dll";
+    facts.rtxVsr = VsrState::On;
+    facts.fps1080 = 47.0;
+    const auto lines = CapabilityLines(facts);
+    const auto value = [&](const wchar_t* label) {
+        const auto found = std::find_if(lines.begin(), lines.end(),
+                                        [&](const Line& line) { return line.label == label; });
+        return found == lines.end() ? std::wstring{} : found->value;
+    };
+    // The card is named with the module set the pack would load for it, which is
+    // what takes the RTX generation's place here.
+    CHECK(value(L"GPU") == L"AMD Radeon RX 9070 XT · gfx1201");
+    CHECK(lines[0].mark == Mark::Pass);
+    // The floor is not applied and not mentioned: this driver would fail the line
+    // above it on the other backend.
+    CHECK(value(L"Driver") == L"32.0.15.6614 · this backend sets no minimum");
+    CHECK(lines[1].mark == Mark::Info);
+    // Verified against the document this tree is actually held to, and the detail
+    // is what it publishes - a count of digests, not a version.
+    CHECK(value(L"Neural runtime") == L"Present · matches the pack's own SHA256SUMS (208 files)");
+    // Neither NGX feature has a row, whatever the facts say about them.
+    CHECK(value(L"RTX VSR").empty());
+    CHECK(value(L"Frame Generation").empty());
+    // The forecast line is here because this machine measured one; the NVIDIA
+    // prior that backs it on the other backend is not used.
+    CHECK(value(L"Neural render") == L"about 47 fps at 1080p");
+    CHECK(!OfferSafeMode(lines, false));
+
+    // An AMD card no module set covers is the screen's answer rather than the
+    // first frame's refusal, and it offers the way out like any other failure.
+    Facts unmatched = facts;
+    unmatched.gpu = L"AMD Radeon RX 7900 XTX";
+    const auto unsupported = CapabilityLines(unmatched);
+    CHECK(unsupported[0].mark == Mark::Fail);
+    CHECK(unsupported[0].value == L"AMD Radeon RX 7900 XTX · no gfx1200/gfx1201 modules for this card");
+    CHECK(OfferSafeMode(unsupported, false));
+    // A drifted pack fails the way a drifted lock does, naming the tree that moved.
+    Facts drifted = facts;
+    drifted.runtime = RuntimeState::Drifted;
+    CHECK(CapabilityLines(drifted)[2].mark == Mark::Fail);
+    CHECK(CapabilityLines(drifted)[2].value == L"Present · a file differs from the pack's manifests");
+}
+
 // Issue #14: 0.27.0 pins the player's load-time imports to System32, so the
 // dlssg_for_sm86 proxy beside it was never loaded. It is loaded by full path
 // instead - only when its own ini marks it as that add-on, and never under a
@@ -15847,6 +15908,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(taskbar_thumbnail_buttons_are_fixed_and_follow_the_player_test),
     TEST_CASE(start_screen_checks_say_what_passed_and_what_failed_test),
     TEST_CASE(start_screen_names_a_loaded_frame_generation_addon_test),
+    TEST_CASE(start_screen_on_the_amd_backend_asks_the_pack_and_not_ngx_test),
     TEST_CASE(render_cache_revision_is_a_release_no_later_than_this_one_test),
     TEST_CASE(command_argument_quoting_round_trips_through_argv_test),
     TEST_CASE(segment_names_refuse_devices_and_trailing_dots_test),

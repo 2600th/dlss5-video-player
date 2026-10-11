@@ -118,6 +118,10 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 // Only for ResolveRuntimeDirectory: --capabilities has to describe the tree the
 // named backend will load, and the AMD one is not in the helper package.
 #include "AmdLmxxfRuntime.h"
+// The card's half of the same question: a pack is precompiled per GPU
+// architecture, so which module set a card would get is asked before the pack is
+// offered behind the D key (and again on the start screen, from the same call).
+#include "AmdLmxxfPolicy.h"
 #include "RuntimeModulePolicy.h"
 #include "UpscalingPolicy.h"
 #include "NeuralMotionPolicy.h"
@@ -1404,41 +1408,60 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
         // nothing added to it, and a second backend is something added.
         if(!options.safeMode) {
             if(std::filesystem::path amdRuntime=amd_lmxxf::ResolveRuntimeDirectory({});!amdRuntime.empty()) {
-                // Verified here, once, for the reason the layout above is read
-                // here: what the D key offers has to be a runtime that would
-                // actually render, or the refusal arrives after the user pressed
-                // it. The same check runs again per job against the same files,
-                // and Sha256FileCached means the second one is not paid twice.
-                const std::vector<AmdRuntimeCheck> checks=VerifyAmdRuntimeLock(amdRuntime,{});
+                // The card first, and before the manifests are hashed: the pack is
+                // precompiled per GPU architecture and hands the runtime the
+                // matching module set, so a card no set covers has nothing to run
+                // - and hashing 200 files to answer a question the card already
+                // settled is work spent on a tree about to be refused.
+                const amd_lmxxf::KernelTarget modules=amd_lmxxf::SelectKernelTarget(
+                    amd_lmxxf::ClassifyGpu(options.detectedGpu.vendorId,options.detectedGpu.description),
+                    options.detectedGpu.description);
                 std::error_code helperError;
                 const std::filesystem::path helper=executable.parent_path()/L"neural-runtime"/L"NeuralWorker.exe";
                 const bool helperPresent=std::filesystem::is_regular_file(helper,helperError)&&!helperError;
-                size_t published=0;
-                for(const AmdRuntimeCheck& check:checks)if(check.digestPublished)++published;
-                if(!AmdRuntimeLockSatisfied(checks)) {
-                    // Named, not swallowed: the same tree is refused per job, and
-                    // a user told here does not have to press D to find out.
+                if(modules==amd_lmxxf::KernelTarget::Unsupported) {
+                    // Named for the same reason the drift below is: this card has
+                    // no module set to load, so the D key would offer a render the
+                    // runtime refuses on its first frame.
                     LOG("AMD neural runtime found at "<<WideToUtf8(amdRuntime.wstring())
-                        <<" but it does not match its own manifests: "<<WideToUtf8(DescribeAmdRuntimeLockDrift(checks))
-                        <<"; neural rendering will be refused.");
-                }else if(!helperPresent) {
-                    // The pack holds modules; the helper process is what loads
-                    // them, and it ships in the NVIDIA-layout package because one
-                    // binary serves both backends.
-                    LOG("AMD neural runtime found at "<<WideToUtf8(amdRuntime.wstring())
-                        <<" but "<<WideToUtf8(helper.wstring())
-                        <<" is missing; the model runs in that helper, so neural rendering is unavailable.");
+                        <<" but "<<WideToUtf8(options.detectedGpu.description)
+                        <<" is not a GPU it ships modules for (gfx1200/gfx1201 only); neural rendering is unavailable.");
                 }else{
-                    options.amdRuntimeDirectory=amdRuntime;
-                    options.neuralBackend=NeuralBackend::Amd;
-                    options.neuralAddonRequested=true;
-                    options.neuralAddonConfigured=true;
-                    LOG("AMD neural runtime available; backend="<<NeuralBackendName(options.neuralBackend)
-                        <<" runtime="<<WideToUtf8(amdRuntime.wstring())
-                        <<" verified="<<published<<" files against the pack's own SHA256SUMS, plus LmxxfNrRuntime.dll by presence"
-                        <<" helper="<<WideToUtf8(helper.wstring())
-                        <<" GPU="<<WideToUtf8(options.detectedGpu.description));
-                    return StartupResult::Continue;
+                    // Verified here, once, for the reason the layout above is read
+                    // here: what the D key offers has to be a runtime that would
+                    // actually render, or the refusal arrives after the user
+                    // pressed it. The same check runs again per job against the
+                    // same files, and Sha256FileCached means the second one is not
+                    // paid twice.
+                    const std::vector<AmdRuntimeCheck> checks=VerifyAmdRuntimeLock(amdRuntime,{});
+                    size_t published=0;
+                    for(const AmdRuntimeCheck& check:checks)if(check.digestPublished)++published;
+                    if(!AmdRuntimeLockSatisfied(checks)) {
+                        // Named, not swallowed: the same tree is refused per job,
+                        // and a user told here does not have to press D to find out.
+                        LOG("AMD neural runtime found at "<<WideToUtf8(amdRuntime.wstring())
+                            <<" but it does not match its own manifests: "<<WideToUtf8(DescribeAmdRuntimeLockDrift(checks))
+                            <<"; neural rendering will be refused.");
+                    }else if(!helperPresent) {
+                        // The pack holds modules; the helper process is what loads
+                        // them, and it ships in the NVIDIA-layout package because
+                        // one binary serves both backends.
+                        LOG("AMD neural runtime found at "<<WideToUtf8(amdRuntime.wstring())
+                            <<" but "<<WideToUtf8(helper.wstring())
+                            <<" is missing; the model runs in that helper, so neural rendering is unavailable.");
+                    }else{
+                        options.amdRuntimeDirectory=amdRuntime;
+                        options.neuralBackend=NeuralBackend::Amd;
+                        options.neuralAddonRequested=true;
+                        options.neuralAddonConfigured=true;
+                        LOG("AMD neural runtime available; backend="<<NeuralBackendName(options.neuralBackend)
+                            <<" runtime="<<WideToUtf8(amdRuntime.wstring())
+                            <<" verified="<<published<<" files against the pack's own SHA256SUMS, plus LmxxfNrRuntime.dll by presence"
+                            <<" modules="<<amd_lmxxf::KernelTargetName(modules)
+                            <<" helper="<<WideToUtf8(helper.wstring())
+                            <<" GPU="<<WideToUtf8(options.detectedGpu.description));
+                        return StartupResult::Continue;
+                    }
                 }
             }
         }
@@ -2110,6 +2133,13 @@ struct StartScreenRequest {
     struct Recent{std::string renderKey,sourceKey;bool youtube{};};
     std::vector<Recent> recent;
     int thumbnailWidth{};
+    // Which backend the runtime line is about, and where the AMD pack is. The two
+    // backends keep their runtime in different trees and hold it to different
+    // documents, so the screen cannot ask one question and take whatever file it
+    // finds: on an AMD machine the NVIDIA question answers "not installed" about
+    // the pack that is running.
+    NeuralBackend backend{NeuralBackend::Nvidia};
+    std::filesystem::path amdRuntimeDirectory;
 };
 struct StartScreenAnswers {
     std::mutex mutex;
@@ -2131,6 +2161,33 @@ static start_screen::RuntimeState CheckNeuralRuntime(const std::filesystem::path
     return RuntimeLockSatisfied(checks)?start_screen::RuntimeState::Verified:start_screen::RuntimeState::Drifted;
 }
 
+// The other backend's runtime: the same question asked of the other tree, and the
+// reason it is a second function rather than a branch is that nothing is shared
+// between them. The pack ships its own manifests beside its modules, so "verified"
+// here means every digest those manifests publish still recomputes - which is the
+// only claim anything maintains for that tree (RuntimeLock.h), and the reason the
+// line's detail is a count of published digests rather than a version: this pack
+// publishes no version to report.
+//
+// A drifted pack is reported, not swallowed. It was verified at startup or the
+// backend would not have been selected, but the files can move under a running
+// player, and this screen exists to be the answer before the D key rather than
+// after it. The check runs on the caller's own thread, where the lock check for
+// the other backend already runs, and costs a re-hash only of what changed:
+// Sha256FileCached holds every file the startup probe read.
+static start_screen::RuntimeState CheckAmdRuntime(const std::filesystem::path& runtimeDirectory, std::stop_token stop,
+                                                  std::wstring& detail)
+{
+    if(runtimeDirectory.empty())return start_screen::RuntimeState::Absent;
+    const std::vector<AmdRuntimeCheck> checks=VerifyAmdRuntimeLock(runtimeDirectory,stop);
+    if(stop.stop_requested())return start_screen::RuntimeState::Checking;
+    if(!AmdRuntimeLockSatisfied(checks))return start_screen::RuntimeState::Drifted;
+    size_t published=0;
+    for(const AmdRuntimeCheck& check:checks)if(check.digestPublished)++published;
+    detail=std::to_wstring(published)+L" files";
+    return start_screen::RuntimeState::Verified;
+}
+
 static void GatherStartScreen(StartScreenRequest request,std::shared_ptr<StartScreenAnswers> answers,uint64_t generation,
                               HWND window,UINT message,std::stop_token stop)
 {
@@ -2138,10 +2195,15 @@ static void GatherStartScreen(StartScreenRequest request,std::shared_ptr<StartSc
         {std::scoped_lock lock(answers->mutex);if(answers->generation!=generation)return false;apply(*answers);}
         PostMessageW(window,message,0,0);return true;
     };
-    const auto runtime=CheckNeuralRuntime(request.moduleDirectory,stop);
+    std::wstring runtimeDetail;
+    start_screen::RuntimeState runtime=start_screen::RuntimeState::Checking;
+    if(request.backend==NeuralBackend::Amd)runtime=CheckAmdRuntime(request.amdRuntimeDirectory,stop,runtimeDetail);
+    else{
+        runtime=CheckNeuralRuntime(request.moduleDirectory,stop);
+        runtimeDetail=Utf8ToWide(EmbeddedRuntimeLock().runtimeVersion);
+    }
     if(stop.stop_requested())return;
-    const std::wstring version=Utf8ToWide(EmbeddedRuntimeLock().runtimeVersion);
-    if(!publish([&](StartScreenAnswers& a){a.runtime=runtime;a.runtimeVersion=version;}))return;
+    if(!publish([&](StartScreenAnswers& a){a.runtime=runtime;a.runtimeVersion=runtimeDetail;}))return;
     const std::filesystem::path ffmpeg=request.moduleDirectory/L"ffmpeg.exe";
     std::error_code toolError;const bool haveFfmpeg=std::filesystem::is_regular_file(ffmpeg,toolError);
     for(const auto& recent:request.recent){
@@ -7998,15 +8060,27 @@ private:
     start_screen::Facts StartScreenFacts()const{
         start_screen::Facts facts{};
         facts.gpu=m_opt.detectedGpu.description;facts.generation=m_opt.detectedGpu.generation;
+        facts.gpuVendorId=m_opt.detectedGpu.vendorId;facts.backend=m_opt.neuralBackend;
         facts.driverVersion=m_opt.detectedGpu.driverVersion;facts.safeMode=m_opt.safeMode;
-        if(FrameGenAddonState().loaded){facts.frameGenAddon=FrameGenAddonState().proxy;facts.frameGenAddonPinned=FrameGenAddonState().pinned;}
-        facts.rtxVsr=!VsrEngine::kBuilt?start_screen::VsrState::NotInBuild
-                    :!framegen_addon::RegularFile(ExecutableDirectory()/L"nvngx_vsr.dll")?start_screen::VsrState::MissingRuntime
-                    :m_playbackVsr?start_screen::VsrState::On:start_screen::VsrState::Off;
+        // Every fact below is about the runtime behind the D key, and there is one
+        // of those. The add-on is loaded by the ReShade proxy and the VSR feature
+        // is created through NGX; the AMD backend does neither, so on it these are
+        // not "absent" but unanswered, and the panel drops the lines rather than
+        // filling them from the other backend's silence.
+        if(facts.backend==NeuralBackend::Nvidia){
+            if(FrameGenAddonState().loaded){facts.frameGenAddon=FrameGenAddonState().proxy;facts.frameGenAddonPinned=FrameGenAddonState().pinned;}
+            facts.rtxVsr=!VsrEngine::kBuilt?start_screen::VsrState::NotInBuild
+                        :!framegen_addon::RegularFile(ExecutableDirectory()/L"nvngx_vsr.dll")?start_screen::VsrState::MissingRuntime
+                        :m_playbackVsr?start_screen::VsrState::On:start_screen::VsrState::Off;
+        }
         {std::scoped_lock lock(m_startAnswers->mutex);facts.runtime=m_startAnswers->runtime;facts.runtimeVersion=m_startAnswers->runtimeVersion;}
         // The live-session forecast, which is measured on this machine once a
         // session has run and otherwise a measured prior for the generation;
-        // with neither it says nothing and neither does this.
+        // with neither it says nothing and neither does this. The prior is
+        // NVIDIA's - it is a scale on an RTX 5090's cost - so on the AMD backend,
+        // whose card classifies as no generation at all, only a session this
+        // machine has actually run can put a number here. That is the intent: the
+        // forecast is the one line the screen could invent, and it does not.
         const double prior=RenderPacePrior(m_opt.detectedGpu.generation);
         const auto at=[&](uint32_t width,uint32_t height)->std::optional<double>{
             const auto forecast=playback_timing::ForecastLiveRender(width,height,30.0,m_renderPace,prior);
@@ -8097,6 +8171,7 @@ private:
         m_startRequested=true;m_startRequestedKeys=keys;
         if(m_startWorker.joinable()){m_startWorker.request_stop();m_startWorker.join();}
         StartScreenRequest request{ExecutableDirectory(),m_cacheRoot,{},Dip(start_screen::kTileWidthDip)};
+        request.backend=m_opt.neuralBackend;request.amdRuntimeDirectory=m_opt.amdRuntimeDirectory;
         if(m_recent)for(const auto& entry:m_recent->Entries())if(!entry.renderKey.empty())request.recent.push_back({entry.renderKey,entry.sourceKey,entry.youtube});
         uint64_t generation=0;
         {std::scoped_lock lock(m_startAnswers->mutex);generation=++m_startAnswers->generation;m_startAnswers->renders.clear();}

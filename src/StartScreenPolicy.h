@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "AmdLmxxfPolicy.h"
+#include "NeuralRenderTypes.h"
 #include "RuntimePolicy.h"
 #include "UiLayout.h"
 
@@ -41,10 +43,15 @@ struct Facts {
     std::wstring driverVersion;   // DXGI's form, "32.0.16.1047"
     bool safeMode{};
     RuntimeState runtime{RuntimeState::Checking};
-    std::wstring runtimeVersion;  // the lock's, when verified
+    // What "verified" was measured against, in the terms the backend verifies in:
+    // the embedded lock's version string, or the count of digests the pack
+    // publishes, because that is the identity an AMD render is held to.
+    std::wstring runtimeVersion;
     // Frames per second the live render is forecast to manage, only when a
     // measurement or a measured prior backs it. Nothing is printed otherwise:
-    // an invented number here is the question the screen exists to answer.
+    // an invented number here is the question the screen exists to answer. The
+    // prior is per RTX generation, so on the AMD backend only a session this
+    // machine has itself run can fill these.
     std::optional<double> fps1080;
     std::optional<double> fps1440;
     // The dlssg_sm86 proxy loaded at startup (FrameGenAddon.h), by file name;
@@ -55,6 +62,17 @@ struct Facts {
     // build loads too - a user put it there - and the line says so.
     bool frameGenAddonPinned{true};
     VsrState rtxVsr{VsrState::Unknown};
+    // Which backend is running, decided once at startup (main.cpp) and not by a
+    // setting: a machine has one of the two, and each line below is a fact about
+    // that one. The driver floor, the RTX VSR row and the frame-generation add-on
+    // are the NVIDIA backend's questions; a card's architecture modules are the
+    // AMD backend's. Asking either of the other answers nothing true - the pack
+    // is not "not installed" on the machine that is running it.
+    NeuralBackend backend{NeuralBackend::Nvidia};
+    // DXGI's vendor id for the card above, which is how the AMD backend tells
+    // which cards it has modules for. Unused by the NVIDIA lines, which classify
+    // by the generation instead.
+    uint32_t gpuVendorId{};
 };
 
 enum class Mark { Pass, Fail, Info, Pending };
@@ -72,42 +90,110 @@ inline std::wstring FpsText(double fps)
     return L"about " + std::to_wstring(static_cast<long long>(std::lround(fps))) + L" fps";
 }
 
+// The module set the pack would load for a card, as a word: `KernelTargetName`
+// in AmdLmxxfPolicy.h is the one place those names live, and it is ASCII by
+// construction, so widening it is the identity and no codec is involved.
+inline std::wstring KernelTargetWideName(amd_lmxxf::KernelTarget target)
+{
+    const std::string_view name = amd_lmxxf::KernelTargetName(target);
+    return std::wstring(name.begin(), name.end());
+}
+
 inline std::vector<Line> CapabilityLines(const Facts& facts)
 {
     std::vector<Line> lines;
-    const bool rtx = facts.generation != GpuGeneration::Unsupported && facts.generation != GpuGeneration::OtherNvidia;
-    lines.push_back(Line{L"GPU", facts.gpu.empty() ? L"No NVIDIA GPU found" :
-                         rtx ? facts.gpu : facts.gpu + L" · not an RTX GPU, so no DLSS",
-                         rtx ? Mark::Pass : Mark::Fail});
-    const std::wstring floor = FormatNvidiaDriverVersion(kNeuralDriverFloor);
-    if (const auto version = ParseNvidiaDriverVersion(facts.driverVersion)) {
-        const bool meets = !(*version < kNeuralDriverFloor);
-        lines.push_back(Line{L"Driver", FormatNvidiaDriverVersion(*version) +
-                             (meets ? L" · meets the " + floor + L" minimum"
-                                    : L" · neural rendering needs " + floor + L" or newer"),
-                             meets ? Mark::Pass : Mark::Fail});
+    // The two backends answer different questions, and neither's answer means
+    // anything for the other: an RTX generation and an NGX driver floor say
+    // nothing about a pack that carries its own runtime and its own precompiled
+    // modules, and a module set says nothing about feature 18. So every line one
+    // of them cannot answer is written out per backend rather than printed from a
+    // default that only one of them means.
+    const bool amd = facts.backend == NeuralBackend::Amd;
+    if (amd) {
+        // What this backend needs of a card is its architecture: the pack is
+        // precompiled per one and hands the runtime the matching module set, so
+        // the card is named with the set it would get. The same two fields decide
+        // at startup whether the D key is offered at all (main.cpp), so this line
+        // and that key agree by construction rather than by being kept in step.
+        // A card no set covers is named here rather than becoming a refusal on
+        // its first frame.
+        const amd_lmxxf::KernelTarget modules =
+            amd_lmxxf::SelectKernelTarget(amd_lmxxf::ClassifyGpu(facts.gpuVendorId, facts.gpu), facts.gpu);
+        if (facts.gpu.empty())
+            lines.push_back(Line{L"GPU", L"No GPU found", Mark::Fail});
+        else if (modules == amd_lmxxf::KernelTarget::Unsupported)
+            lines.push_back(Line{L"GPU", facts.gpu + L" · no gfx1200/gfx1201 modules for this card", Mark::Fail});
+        else
+            lines.push_back(Line{L"GPU", facts.gpu + L" · " + KernelTargetWideName(modules), Mark::Pass});
+        // The floor below is NGX's: feature 18 is serviced by the NVIDIA driver,
+        // which is why the player refuses a render under it. Nothing on this
+        // backend reads a driver version - the model runs in the pack it ships
+        // with - so the version is reported and no verdict is attached to it.
+        // What the pack itself needs of a driver is not a number this project has
+        // measured, and this line does not invent one.
+        lines.push_back(Line{L"Driver", (facts.driverVersion.empty() ? std::wstring(L"Not reported") : facts.driverVersion) +
+                             L" · this backend sets no minimum", Mark::Info});
     } else {
-        lines.push_back(Line{L"Driver", L"Version not reported · " + floor + L" or newer is needed", Mark::Info});
+        const bool rtx = facts.generation != GpuGeneration::Unsupported && facts.generation != GpuGeneration::OtherNvidia;
+        lines.push_back(Line{L"GPU", facts.gpu.empty() ? L"No NVIDIA GPU found" :
+                             rtx ? facts.gpu : facts.gpu + L" · not an RTX GPU, so no DLSS",
+                             rtx ? Mark::Pass : Mark::Fail});
+        const std::wstring floor = FormatNvidiaDriverVersion(kNeuralDriverFloor);
+        if (const auto version = ParseNvidiaDriverVersion(facts.driverVersion)) {
+            const bool meets = !(*version < kNeuralDriverFloor);
+            lines.push_back(Line{L"Driver", FormatNvidiaDriverVersion(*version) +
+                                 (meets ? L" · meets the " + floor + L" minimum"
+                                        : L" · neural rendering needs " + floor + L" or newer"),
+                                 meets ? Mark::Pass : Mark::Fail});
+        } else {
+            lines.push_back(Line{L"Driver", L"Version not reported · " + floor + L" or newer is needed", Mark::Info});
+        }
     }
+    // "Matches" is a claim about whichever document this backend is actually held
+    // to, and each says its own: the lock compiled into this binary, or the
+    // manifests the pack ships beside its modules, which is the only claim
+    // anything maintains for that tree.
+    const std::wstring verified = amd ? std::wstring(L"Present · matches the pack's own SHA256SUMS")
+                                      : std::wstring(L"Present · matches the lock");
     switch (facts.runtime) {
     case RuntimeState::Checking: lines.push_back(Line{L"Neural runtime", L"Checking…", Mark::Pending}); break;
-    case RuntimeState::Absent: lines.push_back(Line{L"Neural runtime", L"Not installed · DLSS Super Resolution only", Mark::Info}); break;
-    case RuntimeState::Incomplete: lines.push_back(Line{L"Neural runtime", L"Incomplete · reinstall the package", Mark::Fail}); break;
+    case RuntimeState::Absent:
+        // One absence, two meanings, and each would be wrong on the other
+        // backend: no NVIDIA runtime is this player with its upscaler alone, and
+        // no pack is no neural rendering at all.
+        lines.push_back(Line{L"Neural runtime", amd ? std::wstring(L"Not installed · neural rendering is unavailable")
+                                                    : std::wstring(L"Not installed · DLSS Super Resolution only"),
+                             Mark::Info});
+        break;
+    case RuntimeState::Incomplete:
+        lines.push_back(Line{L"Neural runtime", amd ? std::wstring(L"Incomplete · reinstall the pack")
+                                                    : std::wstring(L"Incomplete · reinstall the package"),
+                             Mark::Fail});
+        break;
     case RuntimeState::Verified:
-        lines.push_back(Line{L"Neural runtime", L"Present · matches the lock" +
+        lines.push_back(Line{L"Neural runtime", verified +
                              (facts.runtimeVersion.empty() ? std::wstring{} : L" (" + facts.runtimeVersion + L")"), Mark::Pass});
         break;
-    case RuntimeState::Drifted: lines.push_back(Line{L"Neural runtime", L"Present · a file differs from the lock", Mark::Fail}); break;
+    case RuntimeState::Drifted:
+        lines.push_back(Line{L"Neural runtime", amd ? std::wstring(L"Present · a file differs from the pack's manifests")
+                                                    : std::wstring(L"Present · a file differs from the lock"), Mark::Fail});
+        break;
     }
     if (facts.safeMode) lines.push_back(Line{L"Mode", L"Safe mode · neural add-on off for this launch", Mark::Info});
-    switch (facts.rtxVsr) {
+    // RTX VSR is NGX's and this backend loads no NGX, so on it the row has no fact
+    // behind it at all. Left out rather than shown as unavailable, the same way it
+    // is on a build without VSR: the panel says what this machine can do, and "not
+    // on this backend" is a sentence about the other one.
+    if (!amd) switch (facts.rtxVsr) {
     case VsrState::Unknown: break;
     case VsrState::On: lines.push_back(Line{L"RTX VSR", L"Upscales playback shown larger than the video", Mark::Pass}); break;
     case VsrState::Off: lines.push_back(Line{L"RTX VSR", L"Off · DLSS > RTX VSR Upscaling turns it on", Mark::Info}); break;
     case VsrState::NotInBuild: lines.push_back(Line{L"RTX VSR", L"Not in this build · the complete download has it", Mark::Info}); break;
     case VsrState::MissingRuntime: lines.push_back(Line{L"RTX VSR", L"nvngx_vsr.dll is missing beside the player", Mark::Info}); break;
     }
-    if (!facts.frameGenAddon.empty())
+    // The add-on likewise: it is a ReShade proxy `version.dll`, and this backend
+    // loads no proxy, so the fact behind this row cannot exist on it.
+    if (!amd && !facts.frameGenAddon.empty())
         lines.push_back(Line{L"Frame Generation", facts.frameGenAddonPinned
             ? std::wstring(L"dlssg_sm86 add-on found and loaded · unofficial RTX 20/30 support")
             : std::wstring(L"dlssg_sm86 add-on loaded · not the build the player installs (its digest is in the log)"), Mark::Info});

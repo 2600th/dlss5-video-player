@@ -963,6 +963,26 @@ resident helper：先禁用，每个任务独立 worker
 >   AMD 的配置在请求里走，没有文件可读。原来的无条件复读会让**每一次** AMD 发布
 >   失败。缓存清单同时记下 `backend`，`IsReusableNeuralCacheManifest` 按后端分流，
 >   AMD 条目因此可以读回来。
+> - **启动页的能力面板按后端问问题**（`StartScreenPolicy.h`）。那五行原来全是
+>   NVIDIA 的问题：GPU 行按 RTX 世代分类、Driver 行套 610.47 门限、还有 RTX VSR
+>   行与插帧 add-on 行。这些在 AMD 机器上都不是"另一个答案"而是**另一个产品的
+>   问题**——包自带 runtime 并按 GPU 架构预编译，门限是 NGX 的，VSR 与 add-on
+>   都要 proxy/NGX，而这个后端两样都不碰；"Neural runtime 未安装"更是对着
+>   正在运行的那棵树说的。于是 `Facts` 带上 `backend` 与 `gpuVendorId`，每行按
+>   后端写：GPU 行改说**这张卡会拿到哪个模块集**（`SelectKernelTarget`，与启动
+>   选路是同一个纯函数、同样两个字段，所以行与 D 键不可能各说一套），
+>   Driver 行只报 DXGI 给的版本并写明**这个后端不设门限**，RTX VSR 与插帧行在
+>   AMD 上**整行不出现**（缺行是这块面板既有的"没有事实可说"写法，不是"不可用"，
+>   见 `VsrState::Unknown`），runtime 行改说"与包自带的 `SHA256SUMS` 一致
+>   （N 个文件）"，且这次核对在启动页自己的线程上重跑一遍——包可能在运行中被
+>   改动，这一行要在按 D 之前就是答案。
+> - **启动选路同步加了一关：显卡**。包是按架构预编译的，一张没有对应模块集的卡
+>   跑不了它。不加这一关，面板会一边把那张卡标红一边照旧点亮 D 键，而选路本身
+>   也只看"包在不在"——装了本仓库的开发机上，NVIDIA 卡同样会被选成 AMD 后端。
+>   现在 `SelectKernelTarget` 不认的卡在启动时就被点名
+>   （`is not a GPU it ships modules for (gfx1200/gfx1201 only)`），并回到
+>   "没有神经渲染"的那条路。顺序放在校验清单之前：卡都不认，就没必要先哈希
+>   200 个文件。
 >
 > **实测（RX 9070 XT / gfx1201）：**
 >
@@ -1005,6 +1025,7 @@ resident helper：先禁用，每个任务独立 worker
 > | 打开、播放、导出原片 | ✅ |
 > | 神经渲染完成 | ✅ 离线 `--render` exit 0；范围渲染（直播的形状）硬件冒烟 exit 0 |
 > | 神经渲染**复用** | ✅ 缓存身份按后端分流，AMD 条目可读回 |
+> | 启动页能力面板 | ✅ 按后端出题：AMD 上不出现 NGX 门限 / RTX VSR / 插帧行 |
 > | 播放器内 `D` 键直播 | ✅ 已接线（启动选路 + 每 job 分流 + 单进程 helper + 发布） |
 > | NVIDIA 不受影响 | ✅ 见下 |
 > | 不装 `dxgi.dll` / ReShade | ✅ AMD 路径整块跳过 add-on 契约 |
