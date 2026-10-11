@@ -76,11 +76,6 @@ std::wstring UnlockedRuntimeModulesRefusal(const std::filesystem::path& runtimeD
     return unlocked?runtime_modules::UnlockedModulesRefusal(*unlocked):std::wstring{};
 }
 
-std::wstring AmdRuntimeLockRefusal(std::span<const AmdRuntimeCheck> checks){
-    if(AmdRuntimeLockSatisfied(checks))return {};
-    return L"The AMD neural runtime does not match its own manifests: "+DescribeAmdRuntimeLockDrift(checks);
-}
-
 std::wstring StageExportRuntimeRefusal(const std::filesystem::path& runtimeDirectory,const RuntimeLock& lock,
                                        std::stop_token stop,NeuralBackend backend){
     // The two backends do not share a tree, a loader or a set of digests, so they
@@ -160,6 +155,11 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
             :job.helpers/L"neural-runtime";
         if(plan.backend==NeuralBackend::Amd&&runtimeDirectory.empty())
             return {StageExportStatus::Refused,L"The AMD neural runtime directory could not be resolved; set DLSS5_AMD_RUNTIME_DIR or put amd-neural-runtime beside the module."};
+        // Told to the helper rather than resolved a second time there: this is
+        // the tree the refusal below checks and the tree this render reports, so
+        // one resolution is what keeps "what was verified" and "what was loaded"
+        // the same directory rather than two that agree today.
+        request.amdRuntimeDirectory=plan.backend==NeuralBackend::Amd?runtimeDirectory:std::filesystem::path{};
         // Refused on what refuses a live render, before anything is written:
         // a file that drifted from the lock, or a module the lock does not
         // name beside feature 18. A Super Resolution-only pass too (P1.33): it

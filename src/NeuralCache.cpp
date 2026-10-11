@@ -181,6 +181,20 @@ public:
         return value && *value == expected && Expect(':');
     }
 
+    // The next key without consuming anything, the `,` in front of it included:
+    // every extension here follows a required field, so the separator is part of
+    // what "is this extension present" means. Nothing is left consumed either
+    // way - the caller still reads the comma through Expect(',') - so this is a
+    // question, not a step. Would-be bug: peeking at the raw position answers
+    // "no key" for every manifest that has one, because the next byte is a comma.
+    std::optional<std::string> PeekKey()
+    {
+        const size_t mark = position_;
+        const auto key = Expect(',') ? String() : std::nullopt;
+        position_ = mark;
+        return key;
+    }
+
     std::optional<std::string> String()
     {
         SkipSpace();
@@ -1176,6 +1190,17 @@ std::optional<std::string> BuildRuntimeDigest(
     return Sha256Bytes(canonical);
 }
 
+std::optional<std::string> BuildRuntimeDigest(
+    const std::filesystem::path& moduleDirectory,
+    const std::vector<std::wstring>& relativeFiles,
+    std::stop_token stop)
+{
+    std::vector<std::wstring_view> views;
+    views.reserve(relativeFiles.size());
+    for (const std::wstring& file : relativeFiles) views.push_back(file);
+    return BuildRuntimeDigest(moduleDirectory, std::span<const std::wstring_view>(views), stop);
+}
+
 std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest)
 {
     std::string json = "{\"schema\":" + std::to_string(manifest.schema) +
@@ -1217,6 +1242,11 @@ std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest)
             "\",\"installation\":\"" + JsonEscape(environment.installation) +
             "\",\"driver\":\"" + JsonEscape(environment.driver) +
             "\",\"models\":\"" + JsonEscape(environment.modelStore) + "\"}";
+    // For the same reason, and written only for a backend that is not the
+    // default: an entry published by this player before the field existed and
+    // one published by it on NVIDIA today are the same bytes.
+    if (manifest.backend != NeuralBackend::Nvidia)
+        json += ",\"backend\":\"" + JsonEscape(NeuralBackendName(manifest.backend)) + "\"";
     return json + "}\n";
 }
 
@@ -1262,18 +1292,31 @@ std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view byt
             !ReadIntegerField(cursor, "historyResets", manifest.historyResets) ||
             !ReadStringField(cursor, "receiptDigest", manifest.receiptDigest, false))
             return std::nullopt;
-        // The one optional extension: the key environment, fixed and ordered
-        // like everything before it. An empty object is not something this
-        // code writes, so it is refused rather than read as "not recorded".
-        if (cursor.Expect(',')) {
+        // The optional extensions, in the order this code writes them: the key
+        // environment, then the backend. Each is written only when it says
+        // something the default does not, so a manifest carrying neither - every
+        // entry published before either existed - still parses exactly as it did.
+        // An empty environment object is not something this code writes, so it is
+        // refused rather than read as "not recorded".
+        if (cursor.PeekKey() == "environment") {
             NeuralCacheEnvironment& environment = manifest.environment;
-            if (!cursor.Key("environment") || !cursor.Expect('{') ||
+            if (!cursor.Expect(',') || !cursor.Key("environment") || !cursor.Expect('{') ||
                 !ReadStringField(cursor, "application", environment.application) ||
                 !ReadStringField(cursor, "installation", environment.installation) ||
                 !ReadStringField(cursor, "driver", environment.driver) ||
                 !ReadStringField(cursor, "models", environment.modelStore, false) ||
                 !cursor.Expect('}') || !environment.Recorded())
                 return std::nullopt;
+        }
+        if (cursor.PeekKey() == "backend") {
+            std::string backend;
+            if (!cursor.Expect(',') || !ReadStringField(cursor, "backend", backend))
+                return std::nullopt;
+            // Refused rather than defaulted: a name this code does not write is a
+            // manifest asking to be read as something this code cannot produce.
+            const auto parsed = ParseNeuralBackend(backend);
+            if (!parsed) return std::nullopt;
+            manifest.backend = *parsed;
         }
     } else {
         // Schema 4 included, whose field list schema 5 keeps: those entries are
@@ -1319,6 +1362,29 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest)
     // frames were captured - a second witness to frameCount, not a copy of it.
     // Resubmits (the receipt gate, frame retries) evaluate a frame more than
     // once, so it may exceed the frame count; it may never fall short of it.
+    // What vouches for an entry is not the same on both backends, and the
+    // difference is the three columns below: created, armed before capture and an
+    // evaluation observed are an add-on's log counters, and the backend that
+    // loads no add-on has no log for them to be counted in. Asked of every entry,
+    // as they were before the backend was recorded, they refuse everything the
+    // AMD backend publishes - including a render it just finished and verified.
+    //
+    // What is asked of an AMD entry instead is the pair that needs no add-on: the
+    // backend's own evaluation tally covers every frame, and every frame it wrote
+    // is verified neural output. Both come from the evaluator, which is the one
+    // witness both backends have. The three add-on columns are required to be the
+    // negative rather than merely ignored: an entry labelled AMD whose manifest
+    // claims the add-on ran was written by something that does not agree with
+    // itself, and serving it would publish frames on a claim nothing checked.
+    if (manifest.backend == NeuralBackend::Amd) {
+        return IsHexDigest(manifest.sourceDigest) && IsHexDigest(manifest.neuralDigest) &&
+               IsHexDigest(manifest.runtimeDigest) &&
+               (manifest.schema == kLegacySchema || IsHexDigest(manifest.receiptDigest)) &&
+               manifest.nativeEvaluations >= manifest.frameCount &&
+               manifest.verifiedNeuralFrames == manifest.frameCount &&
+               !manifest.feature18Created && !manifest.feature18ArmedBeforeCapture &&
+               manifest.observedFeature18Evaluations == 0;
+    }
     return IsHexDigest(manifest.sourceDigest) && IsHexDigest(manifest.neuralDigest) &&
            IsHexDigest(manifest.runtimeDigest) && manifest.feature18Created &&
            manifest.feature18ArmedBeforeCapture &&

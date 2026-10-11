@@ -136,6 +136,21 @@ std::span<const std::wstring_view> LockedRuntimeFileNames();
 // build changes it, so it is hashed into the identity and never pinned.
 std::span<const std::wstring_view> LockPinnedRuntimeFileNames();
 
+// The AMD runtime's identity files, discovered by walking the pack instead of
+// declared by the build: this backend's runtime is a tree of modules and weights
+// rather than a list packaging/runtime-lock.json embeds, so a pack that gains a
+// module changes this render's identity without anyone editing a list. Paths are
+// relative to `runtimeDirectory` and sorted, and the list is empty when the tree
+// cannot be walked - which BuildRuntimeDigest reports as a runtime it cannot
+// identify, the same way it reports a missing locked file.
+//
+// One directory is left out. `shaders/shader-cache/` holds compiled DXBC named
+// after the hash of the source beside it: it is a build product of the .hlsl in
+// the same tree, written by the runtime on first use. Hashing it would make a
+// render's identity depend on whether that cache had been warmed yet, so two
+// runs of one pack producing the same pixels would key differently.
+std::vector<std::wstring> AmdRuntimeIdentityFiles(const std::filesystem::path& runtimeDirectory);
+
 // Where the model-store term of the render identity came from.
 enum class NeuralModelStoreSource {
     ModelContents,  // at least one resolved root was enumerated and digested

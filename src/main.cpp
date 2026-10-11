@@ -1259,6 +1259,16 @@ struct AppOptions {
     bool safeMode=false;
     bool neuralAddonRequested=false;
     bool neuralAddonConfigured=false;
+    // Which backend a neural render runs on. One binary carries both, and the
+    // bootstrap is what decides: the NVIDIA layout if it is there, else the AMD
+    // pack if that is. Not a user choice, because the two are not alternatives -
+    // a machine has one of them.
+    NeuralBackend neuralBackend{NeuralBackend::Nvidia};
+    // The AMD pack the bootstrap resolved and verified. Empty on NVIDIA; on AMD
+    // it is the tree every job renders against, so the tree a render reports is
+    // the tree the player said it would use rather than one resolved again
+    // somewhere else.
+    std::filesystem::path amdRuntimeDirectory;
     bool argumentsOk=false;
     DetectedGpu detectedGpu;
     std::vector<std::wstring> userArguments;
@@ -1384,6 +1394,54 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
     if(layout==NeuralRuntimeLayout::Absent) {
         options.neuralAddonRequested=false;
         options.neuralAddonConfigured=false;
+        // An absent NVIDIA layout is not a machine that cannot render neurally.
+        // The AMD backend stages its pack outside the helper package and loads no
+        // proxy, so it has no ReShade.ini, no dxgi.dll and no add-on for the
+        // classification above to see - and the D key is offered or withheld on
+        // the answer, exactly as it is on the NVIDIA layout.
+        //
+        // Safe mode is the one answer that does not change: it is this player with
+        // nothing added to it, and a second backend is something added.
+        if(!options.safeMode) {
+            if(std::filesystem::path amdRuntime=amd_lmxxf::ResolveRuntimeDirectory({});!amdRuntime.empty()) {
+                // Verified here, once, for the reason the layout above is read
+                // here: what the D key offers has to be a runtime that would
+                // actually render, or the refusal arrives after the user pressed
+                // it. The same check runs again per job against the same files,
+                // and Sha256FileCached means the second one is not paid twice.
+                const std::vector<AmdRuntimeCheck> checks=VerifyAmdRuntimeLock(amdRuntime,{});
+                std::error_code helperError;
+                const std::filesystem::path helper=executable.parent_path()/L"neural-runtime"/L"NeuralWorker.exe";
+                const bool helperPresent=std::filesystem::is_regular_file(helper,helperError)&&!helperError;
+                size_t published=0;
+                for(const AmdRuntimeCheck& check:checks)if(check.digestPublished)++published;
+                if(!AmdRuntimeLockSatisfied(checks)) {
+                    // Named, not swallowed: the same tree is refused per job, and
+                    // a user told here does not have to press D to find out.
+                    LOG("AMD neural runtime found at "<<WideToUtf8(amdRuntime.wstring())
+                        <<" but it does not match its own manifests: "<<WideToUtf8(DescribeAmdRuntimeLockDrift(checks))
+                        <<"; neural rendering will be refused.");
+                }else if(!helperPresent) {
+                    // The pack holds modules; the helper process is what loads
+                    // them, and it ships in the NVIDIA-layout package because one
+                    // binary serves both backends.
+                    LOG("AMD neural runtime found at "<<WideToUtf8(amdRuntime.wstring())
+                        <<" but "<<WideToUtf8(helper.wstring())
+                        <<" is missing; the model runs in that helper, so neural rendering is unavailable.");
+                }else{
+                    options.amdRuntimeDirectory=amdRuntime;
+                    options.neuralBackend=NeuralBackend::Amd;
+                    options.neuralAddonRequested=true;
+                    options.neuralAddonConfigured=true;
+                    LOG("AMD neural runtime available; backend="<<NeuralBackendName(options.neuralBackend)
+                        <<" runtime="<<WideToUtf8(amdRuntime.wstring())
+                        <<" verified="<<published<<" files against the pack's own SHA256SUMS, plus LmxxfNrRuntime.dll by presence"
+                        <<" helper="<<WideToUtf8(helper.wstring())
+                        <<" GPU="<<WideToUtf8(options.detectedGpu.description));
+                    return StartupResult::Continue;
+                }
+            }
+        }
         LOG("Experimental neural runtime absent; continuing in native DLAA developer mode.");
         return StartupResult::Continue;
     }
@@ -2112,6 +2170,47 @@ static void GatherStartScreen(StartScreenRequest request,std::shared_ptr<StartSc
     }
 }
 
+// What an AMD pack was verified against, in one line, for the receipt and the
+// log. The rows are the check's own business - DescribeAmdRuntimeLockDrift names
+// what failed - and this is the one place a reader learns what an AMD render was
+// held to, because the receipt's lock section names no file on this backend.
+static std::wstring DescribeAmdRuntimeVerified(std::span<const AmdRuntimeCheck> checks)
+{
+    size_t published=0,presenceOnly=0;
+    for(const AmdRuntimeCheck& check:checks)(check.digestPublished?published:presenceOnly)++;
+    std::wstring text=L"the pack's own SHA256SUMS: ";
+    text+=std::to_wstring(published);
+    text+=L" files hashed, ";
+    text+=std::to_wstring(presenceOnly);
+    text+=L" present only (the DLL has no published digest)";
+    return text;
+}
+
+// The AMD job's settings document, which is what the staged neural-settings.ini
+// holds and what the cache key's settings term is a digest of.
+//
+// There is no INI here and nothing to rewrite per job: this backend's knobs
+// travel in the request, and the ones it has are the evaluator's - where its
+// guides come from and whether the temporal model runs. So this document says
+// exactly that, in the terms the worker will use, rather than transcribing the
+// ReShade panel the backend never reads. Those panel values are deliberately not
+// hashed in either: a key term that changes no pixel would retire a render every
+// time a slider moved, and the job's log line names them as asked-for instead.
+//
+// Today it is one constant, because the live player cannot ask for file guides
+// (GuideFiles.h: the estimator's own field, or nothing) and the AMD backend has
+// no estimator, so its guides are the constants and its temporal model is off.
+// The day a caller can ask for either, this document changes with the request
+// that carries it - which is why it is a document rather than a literal in the
+// key.
+static std::string AmdNeuralSettingsDocument()
+{
+    return "backend=amd-lmxxf\n"
+           "temporal=off\n"
+           "motion=constant(0,0)\n"
+           "depth=constant(1)\n";
+}
+
 // Everything a neural job reads, captured on the UI thread when it starts:
 // the job thread never touches PlayerApp. The two pointers are owned by the
 // player and outlive the job, which the UI thread joins before touching them.
@@ -2148,6 +2247,14 @@ struct NeuralJobInputs {
     NeuralPreflightKey preflightKey;
     NeuralPreflightLatch* preflightLatch{};
     ResidentNeuralHelper* residentHelper{};
+    // Which backend renders this job, and the AMD pack to render it out of. The
+    // two travel together: a job on the AMD backend has no ReShade layout to
+    // prepare and no feature-18 probe to pay for, and one on NVIDIA has no pack
+    // to resolve. Both are captured here rather than read from the player, on the
+    // same rule as everything else in this struct: the job thread never touches
+    // PlayerApp.
+    NeuralBackend backend{NeuralBackend::Nvidia};
+    std::filesystem::path amdRuntimeDirectory;
     std::shared_ptr<NeuralColdStartRecord> coldStart;
     bool gpuColorConversion{},gpuSourceConversion{};
     uint32_t nvencPreset{},processingScale{};
@@ -2290,6 +2397,7 @@ private:
     // The runtime this job renders with: its digest, its lock, its lease, and
     // the add-on settings written for this job and read back as its identity.
     bool PrepareRuntime(){
+        if(in_.backend==NeuralBackend::Amd)return PrepareAmdRuntime();
         runtimeDirectory_=in_.moduleDirectory/L"neural-runtime";
         const auto runtimeStarted=std::chrono::steady_clock::now();
         runtimeDigest_=BuildRuntimeDigest(runtimeDirectory_,LockedRuntimeFileNames(),stop_);if(!runtimeDigest_){completion_->result.cancelled=stop_.stop_requested();completion_->result.detail=L"The configured neural runtime is incomplete.";return false;}
@@ -2312,6 +2420,51 @@ private:
         std::wstring settingsError;settingsSnapshot_=ReadNeuralAddonSettingsSnapshot(runtimeDirectory_/L"ReShade.ini",&settingsError);
         if(!settingsSnapshot_){completion_->result.detail=settingsError.empty()?L"The neural settings could not be read.":settingsError;return false;}
         settingsDigest_=Sha256Bytes(*settingsSnapshot_);if(!settingsDigest_){completion_->result.detail=L"The neural settings digest could not be computed.";return false;}
+        return true;
+    }
+
+    // The same four things for the AMD pack: a digest over its tree, a
+    // verification against the manifests it ships, a lease, and the settings
+    // document above. What is absent is as much of the answer as what is here -
+    // no ReShade.ini is read or written, no add-on is configured, and no
+    // feature-18 probe is paid for.
+    bool PrepareAmdRuntime(){
+        runtimeDirectory_=in_.amdRuntimeDirectory;
+        const auto runtimeStarted=std::chrono::steady_clock::now();
+        // Discovered rather than declared: this backend's runtime is a tree of
+        // modules and weights, and the manifests inside it name their own
+        // digests. AmdRuntimeIdentityFiles leaves out the runtime's derived
+        // shader cache, so a warmed cache cannot change a render's identity.
+        // 565 MiB of weights are hashed here on the first job of a session;
+        // Sha256FileCached makes every later job in it free.
+        const std::vector<std::wstring> identity=AmdRuntimeIdentityFiles(runtimeDirectory_);
+        runtimeDigest_=BuildRuntimeDigest(runtimeDirectory_,identity,stop_);
+        if(!runtimeDigest_){completion_->result.cancelled=stop_.stop_requested();completion_->result.detail=L"The configured AMD neural runtime is incomplete.";return false;}
+        const auto lockStarted=std::chrono::steady_clock::now();
+        const std::vector<AmdRuntimeCheck> checks=VerifyAmdRuntimeLock(runtimeDirectory_,stop_);
+        if(stop_.stop_requested())return Cancelled();
+        LOG("AMD neural runtime identified: digest "<<std::chrono::duration_cast<std::chrono::milliseconds>(lockStarted-runtimeStarted).count()
+            <<" ms over "<<identity.size()<<" files, lock check "<<std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-lockStarted).count()<<" ms.");
+        // Checked per job and not only at startup: the tree is the one thing a
+        // user can edit between two renders, and the player's own bootstrap said
+        // what it would use.
+        if(std::wstring refusal=AmdRuntimeLockRefusal(checks);!refusal.empty()){
+            LOG("AMD neural runtime drift; render refused: "<<WideToUtf8(DescribeAmdRuntimeLockDrift(checks)));
+            completion_->result.failure=NeuralRenderFailure::Preflight;
+            completion_->result.detail=std::move(refusal);
+            return false;
+        }
+        runtimeLockNote_=DescribeAmdRuntimeVerified(checks);
+        // One writer at a time, for a smaller reason than on NVIDIA and the same
+        // one in kind: nothing in this tree is rewritten per job, but the runtime
+        // compiles into shaders/ on first use, and two players sharing one pack
+        // is not a configuration this backend has been tested in. The lease is a
+        // named mutex derived from the directory, so it costs the tree nothing.
+        lease_.emplace(runtimeDirectory_);
+        if(!lease_->Held()){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("AMD neural runtime is in use by another render; refusing to share it.");return false;}
+        settingsSnapshot_=AmdNeuralSettingsDocument();
+        settingsDigest_=Sha256Bytes(*settingsSnapshot_);
+        if(!settingsDigest_){completion_->result.detail=L"The neural settings digest could not be computed.";return false;}
         return true;
     }
 
@@ -2380,6 +2533,7 @@ private:
     // driver floor, a stray module, a latched failure, and the feature-18
     // probe itself, paid once per runtime and driver.
     bool ClearPreflight(){
+        if(in_.backend==NeuralBackend::Amd)return ClearAmdPreflight();
         const auto& driverNotice=in_.driverNotice;const auto& preflightKey=in_.preflightKey;auto* preflightLatch=in_.preflightLatch;
         // A driver below the floor cannot create feature 18 at all,
         // so do not pay five seconds for a probe to learn that.
@@ -2443,6 +2597,46 @@ private:
         return true;
     }
 
+    // What refuses an AMD render before a helper is asked for one. Everything the
+    // NVIDIA path checks above is a property of feature 18 or of the ReShade
+    // stack - the driver floor, a module the embedded lock does not name beside
+    // the proxy, a five-second probe whose answer is per runtime-and-driver - and
+    // this backend loads neither a proxy nor an add-on, so none of it is a
+    // question here. What is left is what a worker would have nowhere to put:
+    // refused now, in the words the offline path refuses them in, rather than
+    // after a process start and a device bring-up.
+    bool ClearAmdPreflight(){
+        const auto refuse=[&](NeuralRenderFailure failure,const wchar_t* detail){
+            completion_->result.failure=failure;completion_->result.detail=detail;
+            LOG("AMD neural render refused before the helper: "<<WideToUtf8(completion_->result.detail));
+            return false;
+        };
+        // The runtime admits a fixed box and returns the frame at the size it was
+        // given, so a reduction would be silently ignored - which is the one
+        // failure mode this codebase refuses to have. The player can set this
+        // from the menu, so on this backend it is a refusal rather than a rung.
+        // An upscale is not refused here for the opposite reason: the live path
+        // renders at the source size and has no output size to hand over.
+        if(in_.processingScale!=kDefaultProcessingScale)
+            return refuse(NeuralRenderFailure::Protocol,
+                L"The AMD backend runs the model at the source size; set the processing scale to 100% to render neurally with it.");
+        // The pack is the backend's; the process that loads it is the helper
+        // package's, because one binary serves both backends (see the bootstrap).
+        // Named here because the alternative is an opaque Win32 error from the
+        // launch, and the user cannot fix what is not named.
+        workerExecutable_=in_.moduleDirectory/L"neural-runtime"/L"NeuralWorker.exe";
+        std::error_code error;
+        if(!std::filesystem::is_regular_file(workerExecutable_,error)||error)
+            return refuse(NeuralRenderFailure::Preflight,
+                L"The isolated neural helper executable is missing; the AMD pack renders in that process and cannot run without it.");
+        // No probe and no preflight JSON: this backend has no feature to arm and
+        // nothing to latch per runtime-and-driver. Its equivalence - is this tree
+        // the tree that was verified - is answered by the lock check above, per
+        // job, against the files themselves.
+        preflightJson_.clear();
+        return true;
+    }
+
     // The render itself, in the staging directory under the key, by the
     // resident helper (launched or reused). An active session's segments are
     // published into its index as the helper finalizes them.
@@ -2459,7 +2653,12 @@ private:
         {std::ofstream settingsFile(*staging_/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot_->data(),static_cast<std::streamsize>(settingsSnapshot_->size()));if(!settingsFile){cache_.MarkInvalid(*staging_);completion_->result.detail=L"The neural settings snapshot could not be staged.";return false;}}
         const auto& range=in_.range;
         NeuralRenderRequest request{nullptr,sourcePath_,liveIndex?liveDirectory/L"neural.mkv":*staging_/L"neural.mkv",width_,height_,fps_,duration_};request.jobId=in_.generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps_);request.guides=in_.guides;request.temporal=in_.temporal;request.pauseEvent=in_.pauseEvent;request.segmentFrames=liveIndex?in_.segmentFrames:0u;request.firstSegmentFrames=liveIndex?in_.firstSegmentFrames:0u;request.gpuColorConversion=in_.gpuColorConversion;request.nvencPreset=in_.nvencPreset;request.gpuSourceConversion=in_.gpuSourceConversion;request.processingScale=in_.processingScale;request.captureDither=in_.captureDither;request.quality=in_.cacheQuality;request.sourceDeband=in_.sourceDeband;request.suppliedExposure=in_.suppliedExposure;
-        receipt_.emplace(NeuralRenderReceiptInputs{preflightJson_,lockChecks_,request,{},renderKey_,*settingsDigest_,*runtimeDigest_,std::chrono::system_clock::now(),{}});
+        // Which backend runs the pass, and - on the AMD one - the tree it loads
+        // its module from. The worker executable is not on this line for the
+        // reason the export gives: one binary serves both backends and always
+        // comes from the helper package, while the module is the backend's.
+        request.backend=in_.backend;request.amdRuntimeDirectory=in_.amdRuntimeDirectory;
+        receipt_.emplace(NeuralRenderReceiptInputs{preflightJson_,lockChecks_,request,{},renderKey_,*settingsDigest_,*runtimeDigest_,std::chrono::system_clock::now(),{},runtimeLockNote_});
         NeuralSegmentSink sink{};
         if(liveIndex){
             // Every finalized segment is playable on arrival; the
@@ -2555,7 +2754,16 @@ private:
             completion_->result.detail=L"The rendered segments could not be joined into a cache entry.";return false;
         }
         const double concatMs=msSince(publishStart);
-        const auto finalSettings=ReadNeuralAddonSettingsSnapshot(runtimeDirectory_/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot_){cache_.MarkInvalid(*staging_);completion_->result.ok=false;completion_->result.detail=L"Neural settings changed during rendering. Try the render again.";return false;}
+        // The NVIDIA path re-reads the INI it wrote before the render: the helper
+        // is a separate process that rewrites that file as it loads, so the file
+        // is the only thing that says what the job actually ran with. An AMD job
+        // writes no such file - its configuration travels in the request - so
+        // there is nothing to re-read and the document PrepareRuntime hashed is
+        // still the truth about it. Reading a ReShade.ini that this backend never
+        // wrote would fail every publish instead, which is what it did.
+        if(in_.backend==NeuralBackend::Nvidia){
+            const auto finalSettings=ReadNeuralAddonSettingsSnapshot(runtimeDirectory_/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot_){cache_.MarkInvalid(*staging_);completion_->result.ok=false;completion_->result.detail=L"Neural settings changed during rendering. Try the render again.";return false;}
+        }
         const std::string receiptJson=BuildNeuralRenderReceiptJson(*receipt_);const auto receiptDigest=Sha256Bytes(receiptJson);
         {std::ofstream receiptFile(*staging_/L"receipt.json",std::ios::binary|std::ios::trunc);receiptFile.write(receiptJson.data(),static_cast<std::streamsize>(receiptJson.size()));if(!receiptFile||!receiptDigest){cache_.MarkInvalid(*staging_);completion_->result.ok=false;completion_->result.detail=L"The neural render receipt could not be staged.";return false;}}
         const auto probeStart=std::chrono::steady_clock::now();
@@ -2563,6 +2771,12 @@ private:
         const double probeMs=msSince(probeStart);
         if(stop_.stop_requested()){cache_.MarkInvalid(*staging_);completion_->result.cancelled=true;completion_->result.ok=false;completion_->result.detail=L"Neural render was cancelled.";return false;}
         NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest_;manifest.runtimeDigest=*runtimeDigest_;manifest.encoder=neural_job::CacheEncoderName(completion_->result.encoder);manifest.width=width_;manifest.height=height_;manifest.frameCount=completion_->result.frameCount;manifest.duration100ns=completion_->result.duration100ns;manifest.nativeEvaluations=completion_->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion_->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion_->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion_->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion_->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
+        // Which backend vouches for this entry. The three feature-18 columns
+        // above are the negative on the AMD one because it loads no add-on, and
+        // the reuse verdict asks a different pair of questions of an entry that
+        // says so - see IsReusableNeuralCacheManifest. Without this the publish
+        // gate refuses every AMD render at the moment it finishes.
+        manifest.backend=in_.backend;
         manifest.settingsDigest=*settingsDigest_;manifest.rangeStart100ns=range.start100ns;manifest.rangeEnd100ns=range.end100ns;manifest.guides=identity_.guides;manifest.jobId=in_.generation;manifest.historyResets=completion_->result.historyResets;manifest.receiptDigest=*receiptDigest;
         // The key's environment terms, so eviction can tell this entry from one a driver
         // update, a model refresh or an upgrade of this installation has orphaned.
@@ -2627,6 +2841,9 @@ private:
     std::filesystem::path runtimeDirectory_;
     std::optional<std::string> runtimeDigest_;
     std::vector<RuntimeLockCheck> lockChecks_;
+    // What the AMD pack was verified against, for the receipt's lock section.
+    // Empty on NVIDIA, where lockChecks_ above speaks for itself.
+    std::wstring runtimeLockNote_;
     std::optional<NeuralRuntimeLease> lease_;
     std::optional<std::string> settingsSnapshot_,settingsDigest_;
     // AnswerFromCache
@@ -10816,6 +11033,12 @@ private:
             NeuralJobInputs job;
             job.target=m_hwnd;job.generation=generation;job.mediaUrl=mediaUrl;job.audioUrl=audioUrl;job.displayTitle=displayTitle;job.pageUrl=pageUrl;job.sourceKind=sourceKind;job.sourceQuality=sourceQuality;
             job.gpu=m_opt.detectedGpu.generation;job.driverVersion=m_opt.detectedGpu.driverVersion;job.moduleDirectory=ExecutableDirectory();job.cacheRoot=m_cacheRoot;
+            // Which backend renders this job, decided once at startup: a machine
+            // has one of the two, and the tree named here is the one the
+            // bootstrap verified. A job on the AMD backend runs a single-process
+            // helper rather than the resident one, which is what ResidentCanCarry
+            // reports from the request.
+            job.backend=m_opt.neuralBackend;job.amdRuntimeDirectory=m_opt.amdRuntimeDirectory;
             const RenderSettings render=JobRenderSettings(kind);
             job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.pauseEvent=m_neuralPauseEvent;
             job.gpuColorConversion=m_gpuColorConversion;job.gpuSourceConversion=m_gpuSourceConversion;job.nvencPreset=m_nvencPreset;job.processingScale=m_processingScale;job.captureDither=m_captureDither;job.cacheQuality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
@@ -11308,7 +11531,9 @@ private:
         if(committed)NoteResolvedSourceQuality(completion->result);
     }
     PlayerRuntimeStatus RuntimeStatus()const{
-        return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());
+        return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,
+            m_opt.neuralBackend==NeuralBackend::Amd,
+            m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());
     }
     // Lead-in state of an active session, in front of everything else because it
     // is why playback is waiting.

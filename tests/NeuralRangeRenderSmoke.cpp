@@ -47,7 +47,9 @@
 // at the small size and finishes in seconds.
 #include "NeuralWorker.h"
 #include "OfflineNeuralRenderer.h"
+#include "AmdLmxxfRuntime.h"
 #include "ReShadeConfig.h"
+#include "RuntimeLock.h"
 #include "UpscalingPolicy.h"
 
 #include <windows.h>
@@ -447,9 +449,21 @@ int wmain(int argc, wchar_t** argv)
     // ... --encoder-path-cost WxH [seconds] [repeats]
     const bool measureEncoder =
         (argc >= 6 && argc <= 8) && std::wstring_view(argv[4]) == L"--encoder-path-cost";
-    if (argc != 4 && !measureScale && !directIdentity && !measureEncoder) {
+    // <ffmpeg-directory> <NeuralWorker.exe> <output-directory> amd [runtime-directory]
+    //
+    // The same range on the AMD backend. It is registered separately because the
+    // two backends do not share a skip condition - this one needs a LmxxfNrRuntime
+    // pack, not an RTX card - and because what it can assert differs: there is no
+    // add-on, so there is no ReShade log, no feature-18 receipt and no calibrated
+    // timing floor, and what the render rests on instead is the runtime's own
+    // per-frame tally (see NvidiaEvidenceRequired in OfflineNeuralRenderer). Left
+    // in this file rather than a new one because the shape under test - a range
+    // render with a full preroll, which is what a live session performs - is the
+    // same one, and it is the shape whose coverage this test exists for.
+    const bool amdBackend = argc >= 5 && std::wstring_view(argv[4]) == L"amd";
+    if (argc != 4 && !measureScale && !directIdentity && !measureEncoder && !amdBackend) {
         std::wcerr << L"Usage: NeuralRangeRenderSmoke <ffmpeg-directory> "
-                      L"<NeuralWorker.exe> <output-directory>\n";
+                      L"<NeuralWorker.exe> <output-directory> [amd [runtime-directory]]\n";
         return 2;
     }
     const auto helpers = fs::absolute(argv[1]);
@@ -479,6 +493,26 @@ int wmain(int argc, wchar_t** argv)
         return MeasureProcessingScale(helpers, worker, root, width, height, seconds > 0.0 ? seconds : 10.0);
     }
 
+    // The pack, and the lock the player holds it to. Skipped rather than failed
+    // when there is none: this test is registered on the same `gpu` label as the
+    // RTX ones, and a machine with a Radeon and no pack, or an RTX and no AMD
+    // interest, is a machine the question does not apply to. 125 is the shell
+    // convention this suite already uses for "could not execute".
+    fs::path amdRuntime;
+    if (amdBackend) {
+        amdRuntime = argc >= 6 ? fs::absolute(argv[5]) : amd_lmxxf::ResolveRuntimeDirectory({});
+        if (amdRuntime.empty()) {
+            std::wcout << L"skipped: no AMD neural runtime; pass its directory or set "
+                          L"DLSS5_AMD_RUNTIME_DIR\n";
+            return gpu_test_gate::kSkipExitCode;
+        }
+        if (std::wstring refusal = AmdRuntimeLockRefusal(VerifyAmdRuntimeLock(amdRuntime, {}));
+            !refusal.empty()) {
+            std::wcerr << L"FAIL: " << refusal << L'\n';
+            return 1;
+        }
+    }
+
     // testsrc2 rather than a flat pattern: the model is given interior detail
     // to work on, so a pass-through result cannot read as a render.
     const auto source = root / L"range-source.mp4";
@@ -499,6 +533,16 @@ int wmain(int argc, wchar_t** argv)
     // Left at the shipped default rather than lowered: the default is what
     // live playback uses, and the preroll is the thing under test.
     request.prerollFrames = kDefaultPrerollFrames;
+    if (amdBackend) {
+        request.backend = NeuralBackend::Amd;
+        // Told rather than resolved by the helper, exactly as the player tells it:
+        // the tree this test checked the lock of is the tree the render must load,
+        // and letting the helper resolve its own would make those two facts
+        // unconnected. Standard quality is stated for the same reason the player
+        // states it - the NVENC rungs are not on this backend.
+        request.amdRuntimeDirectory = amdRuntime;
+        request.quality = EncoderQuality::Standard;
+    }
 
     const auto started = std::chrono::steady_clock::now();
     const NeuralRenderResult result = RunNeuralWorker(worker, request);
@@ -514,7 +558,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     std::wcout << L"range render [" << kRangeStart100ns / 1e7 << L',' << kRangeEnd100ns / 1e7
-               << L") s: ok=" << result.ok
+               << L") s on " << NeuralBackendName(request.backend) << L": ok=" << result.ok
                << L" frames=" << result.frameCount << L'/' << kExpectedFrames
                << L" verified=" << result.verifiedNeuralFrames
                << L" native_evaluations=" << result.nativeEvaluations
@@ -524,13 +568,23 @@ int wmain(int argc, wchar_t** argv)
                << L" elapsed=" << elapsed << L"s\n"
                << L"evidence: " << root.wstring() << L'\n';
 
+    // What vouches for the frames is not the same on both backends. NVIDIA's is
+    // the add-on's receipt: a feature-18 evaluation armed before capture and a
+    // complete evidence set. This backend loads no add-on, and asking it for
+    // those is asking it to produce a log it has no writer for - so the claim
+    // rests on the runtime's own per-frame tally, which every backend keeps, and
+    // on the three add-on columns being the negative rather than merely ignored.
+    const bool verified = amdBackend
+        ? !result.feature18ArmedBeforeCapture && !result.evidence.feature18Created &&
+          !result.evidence.feature18Evaluated
+        : result.feature18ArmedBeforeCapture && result.evidence.Valid();
     if (result.ok && !result.cancelled && result.frameCount == kExpectedFrames &&
-        result.nativeEvaluations > 0 && result.verifiedNeuralFrames == result.frameCount &&
-        result.feature18ArmedBeforeCapture && result.evidence.Valid())
+        result.nativeEvaluations > 0 && result.verifiedNeuralFrames == result.frameCount && verified)
         return 0;
 
     std::wcerr << L"FAIL: the range render did not produce " << kExpectedFrames
-               << L" verified feature-18 frames. detail=" << result.detail << L'\n';
+               << L" verified " << NeuralBackendName(request.backend) << L" frames. detail="
+               << result.detail << L'\n';
     if (const std::wstring complaint = WorksetPoolComplaint(root / L"ReShade.log");
         !complaint.empty())
         std::wcerr << L"CAUSE: " << complaint << L"\n"

@@ -2128,6 +2128,15 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     const std::wstring neural = BuildPlayerStatusText(status);
     // The runtime is named as what the pill does not say: that it is experimental.
     CHECK(shows(neural, L"DLSS 5 (experimental)"));
+    // The same state on the AMD pack names the state and not NVIDIA's product:
+    // the pack is not DLSS, and a line that said it was would name a thing that
+    // is not on the machine.
+    status.runtimeConfiguration = PlayerRuntimeConfiguration::AmdNeuralExperimental;
+    const std::wstring amdNeural = BuildPlayerStatusText(status);
+    CHECK(shows(amdNeural, L"Neural Rendering (experimental)"));
+    CHECK(!shows(amdNeural, L"DLSS 5"));
+    CHECK(!shows(amdNeural, L"Neural addon"));
+    status.runtimeConfiguration = PlayerRuntimeConfiguration::NeuralAddonExperimental;
     CHECK(shows(neural, status.upscalingStatus));
     CHECK(shows(neural, status.frameGenerationStatus));
     CHECK(shows(neural, L"Source 1920\u00d71080"));
@@ -2165,18 +2174,27 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     status.dlssState = PlayerDlssState::ScalerFallback;
     CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode"));
 
-    const PlayerRuntimeStatus neuralActive = ResolvePlayerRuntimeStatus(false, true, true, true);
+    const PlayerRuntimeStatus neuralActive = ResolvePlayerRuntimeStatus(false, true, false, true, true);
     CHECK_EQ(PlayerRuntimeConfiguration::NeuralAddonExperimental, neuralActive.configuration);
     CHECK_EQ(PlayerDlssState::Active, neuralActive.dlssState);
-    const PlayerRuntimeStatus neuralFallback = ResolvePlayerRuntimeStatus(false, true, false, true);
+    const PlayerRuntimeStatus neuralFallback = ResolvePlayerRuntimeStatus(false, true, false, false, true);
     CHECK_EQ(PlayerRuntimeConfiguration::NeuralAddonExperimental, neuralFallback.configuration);
     CHECK_EQ(PlayerDlssState::ScalerFallback, neuralFallback.dlssState);
-    const PlayerRuntimeStatus safeActive = ResolvePlayerRuntimeStatus(true, false, true, true);
+    const PlayerRuntimeStatus safeActive = ResolvePlayerRuntimeStatus(true, false, false, true, true);
     CHECK_EQ(PlayerRuntimeConfiguration::DlssSrSafeMode, safeActive.configuration);
     CHECK_EQ(PlayerDlssState::Active, safeActive.dlssState);
-    const PlayerRuntimeStatus safeFallback = ResolvePlayerRuntimeStatus(true, false, true, false);
+    const PlayerRuntimeStatus safeFallback = ResolvePlayerRuntimeStatus(true, false, false, true, false);
     CHECK_EQ(PlayerRuntimeConfiguration::DlssSrSafeMode, safeFallback.configuration);
     CHECK_EQ(PlayerDlssState::ScalerFallback, safeFallback.dlssState);
+
+    // The backend only renames the configured state; it cannot turn an
+    // unconfigured runtime into a configured one, which is why it is read
+    // inside the neuralAddonConfigured arm alone.
+    const PlayerRuntimeStatus amdActive = ResolvePlayerRuntimeStatus(false, true, true, true, true);
+    CHECK_EQ(PlayerRuntimeConfiguration::AmdNeuralExperimental, amdActive.configuration);
+    CHECK_EQ(PlayerDlssState::Active, amdActive.dlssState);
+    const PlayerRuntimeStatus amdUnconfigured = ResolvePlayerRuntimeStatus(false, false, true, true, true);
+    CHECK_EQ(PlayerRuntimeConfiguration::NeuralAddonUnavailable, amdUnconfigured.configuration);
 }
 
 void playback_timeline_follows_the_presented_frame_test()

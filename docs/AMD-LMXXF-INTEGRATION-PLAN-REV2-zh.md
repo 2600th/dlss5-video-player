@@ -894,12 +894,20 @@ resident helper：先禁用，每个任务独立 worker
 > `submit` 241 ms/帧（含首帧预热），`local-vram` 1343 MiB / 15416 MiB。
 > 同一个二进制不带 `--neural-backend` 仍走 NVIDIA 路径且行为不变。
 >
-> **仍然缺的，按重要度：**
+> **已经补上的（2026-10-11 第二轮）：**
 >
-> 1. **AMD 缓存身份（§8）没做。** `IsReusableNeuralCacheManifest` 仍要求
->    `feature18Created && feature18ArmedBeforeCapture && observedFeature18Evaluations > 0`，
->    所以 AMD 渲染出的缓存条目**读不回来**（fail-closed，不会服务错误的帧，
->    但每次都要重渲染）。
+> 1. ~~**AMD 缓存身份（§8）没做。**~~ **已做。** `NeuralCacheManifest` 加了一个
+>    可选 `backend` 字段（写在 `environment` 之后，**只在非默认时写**，所以 NVIDIA
+>    条目与加这个字段之前逐字节相同，加之前写下的条目读回来即 NVIDIA）。
+>    `IsReusableNeuralCacheManifest` 按后端分流：AMD 条目问的是**不需要 add-on 的
+>    那一对**——runtime 自己的逐帧计数覆盖了每一帧，且每一帧都是 verified neural
+>    output——同时要求三列 add-on 计数**取反**（`!feature18Created &&
+>    !feature18ArmedBeforeCapture && observedFeature18Evaluations == 0`）而不是忽略：
+>    一个自称 AMD 却记着 add-on 跑过的条目是自相矛盾的，服务它等于发布没人核对过的帧。
+> 3. ~~**直播（`D` 键）没接。**~~ **已接。** 走的是与离线同一条 `RunJob`，见下。
+>
+> **仍然缺的：**
+>
 > 2. **时序模型在播放器路径上不可达。** runtime 只在 recording-lease 生命周期下
 >    跑时序模型，而它融合的 guide 是调用方给的，这个后端没有 estimator——
 >    这是 §5.3 明确留给后续阶段的"贵的那一半"。所以 AMD 导出目前是**纯空间**渲染，
@@ -908,10 +916,10 @@ resident helper：先禁用，每个任务独立 worker
 >    时序没跑和时序跑了但报 `off` 是两件事，不能都留空。
 >    带 guide 文件的基准（`mv=file:`/`depth=file:`）会打开 lease 生命周期，
 >    这是 `AmdLmxxfEvaluatorSmoke` run 6/7 测过的路径。
-> 3. **直播（`D` / 播放器内 `D` 键）没接。** 当前只有 `--render` 离线导出。
 > 4. **阶段 D 的捕获策略没接**：`CapturePixelFormat` 固定 BGRA，
 >    NV12/P010 的 GPU 转换路径在 AMD 上不存在，编码器因此选 H.264 软件路径
 >    或 FFV1（`RunJob` 里的 `selected` 分支），NVENC 直连不可能。
+> 5. **pace prior 没做**（§12 性能里的 AMD 专用档），直播目前用通用预算。
 
 ### 阶段 D：直播和导出
 
@@ -920,6 +928,66 @@ resident helper：先禁用，每个任务独立 worker
 - 做 AMD 专用 pace prior。
 
 退出条件：30 分钟连续播放无 worker 死锁、无设备移除、无缓存错误。
+
+> **直播已接线（2026-10-11 第二轮），离线导出的产物不变。**
+>
+> 广播路径与离线共用 `NeuralRenderRequest` 和 `OfflineNeuralRenderer::Run`，
+> 所以这一轮没有第二套渲染代码，只有"这个 job 用哪个后端"这一条线：
+>
+> - **启动时选一次后端**（`RunNeuralAddonBootstrap`）。NVIDIA 布局分类为
+>   `Absent` 时不再直接落到 DLAA 模式，而是先探 AMD：`ResolveRuntimeDirectory`
+>   解出包 → `VerifyAmdRuntimeLock` 对着包自带的 `SHA256SUMS` 校验 →
+>   检查同包内的 `NeuralWorker.exe`。三样都过就把 `neuralAddonConfigured`
+>   置真并记下这个目录。D 键的可用性、状态行、`--capabilities` 都读这个标志，
+>   所以**一次判定，处处一致**。安全模式仍然排除在外：它是"什么都没加的这个
+>   播放器"，第二个后端正是"加的东西"。
+> - **每个 job 的 runtime 与预检按后端分流**（`NeuralJobRun::PrepareAmdRuntime` /
+>   `ClearAmdPreflight`）。AMD 侧：runtime 身份文件由**遍历包**得到
+>   （`AmdRuntimeIdentityFiles`，跳过 runtime 自己写的 `shaders/shader-cache/`，
+>   否则"缓存有没有热过"会改变渲染身份），逐 job 重校锁，租约仍是命名互斥量。
+>   被跳过的是整块 NVIDIA 预检——驱动门限、`UnlockedRuntimeModules`、
+>   五秒 feature-18 探针——它们问的都是 add-on 或 feature 18 的性质，
+>   这个后端两样都没有。**留下的两条拒绝**是"不支持即拒绝"而不是近似：
+>   `processing-scale != 100`（runtime 只收固定盒子，缩小会被静默忽略）与
+>   任何放大。
+> - **常驻会话对 AMD 直接判不可行**（`ResidentCanCarry` 对 Amd 返回 false），
+>   于是 `RunJob` 落到单进程 `RunNeuralWorker`，与 `NeuralWorkerMain` 里
+>   "AMD 没有常驻会话"的拒绝同源。判在这里而不是让它去撞拒绝，是因为
+>   常驻 helper 是 NVIDIA 的启动行拉起来的（已经加载了 proxy、armed 了 add-on），
+>   把 job 的后端通过命令通道告诉它，正好是那个进程明确拒绝的情况。
+> - **包目录随后端一起过 wire**（`--amd-runtime-dir`）。父进程已经解出并校验过
+>   一棵树，让 helper 自己再解一次，两者只是"碰巧一致"；传过去才是
+>   "渲染加载的就是播放器说它要用的那棵"。缺这个键是旧版父进程的情况，
+>   helper 退回自己解，和加这个键之前一样。
+> - **发布时不再复读 `ReShade.ini`**。NVIDIA 路径要复读是因为 helper 会重写它；
+>   AMD 的配置在请求里走，没有文件可读。原来的无条件复读会让**每一次** AMD 发布
+>   失败。缓存清单同时记下 `backend`，`IsReusableNeuralCacheManifest` 按后端分流，
+>   AMD 条目因此可以读回来。
+>
+> **实测（RX 9070 XT / gfx1201）：**
+>
+> - 播放器启动：`AMD neural runtime available; backend=amd-lmxxf
+>   runtime=…\amd-neural-runtime verified=208 files against the pack's own
+>   SHA256SUMS, plus LmxxfNrRuntime.dll by presence helper=…\neural-runtime\
+>   NeuralWorker.exe GPU=AMD Radeon RX 9070 XT`。随后 D 之前的预渲染 job 走到
+>   `AMD neural runtime identified: digest 1565 ms over 610 files, lock check 261 ms`，
+>   再 `Neural cache miss`（AMD 第一次渲染，缓存还空）。
+> - **范围渲染（直播每次执行的形状）已有硬件冒烟**：`NeuralRangeRenderSmoke`
+>   加了 `amd [runtime-directory]` 分支，注册为 `NeuralRangeRenderAmdSmoke`
+>   （`gpu` 标签，无包时 125 SKIP，所以 RTX 机器上跑这一条是跳过而不是变红）。
+>   实测 `<ffmpeg> <NeuralWorker.exe> <out> amd amd-neural-runtime` exit 0：
+>   `frames=72/72 verified=72 native_evaluations=72 feature18_armed=0
+>   evidence_valid=0 preroll=60 elapsed=12.3s`——**72 帧全部经 runtime 求值**，
+>   而两条 add-on 判据是**取反**通过的（这正是 §7.1 里 AMD 证据集的内容）。
+>   640x360、24 fps 下 12.3 s / 72 帧 ≈ 170 ms/帧（含 bring-up），
+>   这张卡上 1080p 的端到端数据见 §12。
+>
+> **实测没覆盖的部分（要说清楚）：** 上面走的是 `RunNeuralWorker`，也就是
+> 播放器 live session 用的那一条；`NeuralJobRun` 里的
+> `PrepareAmdRuntime`/`ClearAmdPreflight` 只有启动与预渲染阶段被实机走到
+> （日志见上），**D 键之后的分段产出与缓存命中还没有实机跑过**——
+> 需要 GUI 按键，本轮没有可用的自动化。所以 §12 的退出条件
+> （30 分钟连续播放）**仍未验证**。
 
 ## 12. 验收标准
 
@@ -930,13 +998,25 @@ resident helper：先禁用，每个任务独立 worker
 - NVIDIA 构建和测试完全不受影响。
 - 不安装 `dxgi.dll` 或 ReShade。
 
-> **2026-10-11 的状态：** 前两条半。AMD 神经渲染**能出片**（离线导出 exit 0），
-> 但**不能复用**（缓存身份未做，见 §11 阶段 C）。"NVIDIA 不受影响"已按基线核对：
-> `ctest --preset quick` 18 项里 2 项失败（`PolicyTests` 的 yt-dlp fixture、
-> `RenderSettingsTests:857` 的 symlink 拒删），**在未改动的 HEAD 上失败得一模一样**，
-> 且失败点全在 YouTube resolver 与缓存符号链接，与神经后端无关。
-> `NeuralWorkerTests` 含本轮新增的 5 条 AMD 协议断言，exit 0。
-> 全量构建 0 error / 0 warning（`/W4 /WX`）。
+> **2026-10-11 的状态（第二轮结束后）：**
+>
+> | 条 | 状态 |
+> |---|---|
+> | 打开、播放、导出原片 | ✅ |
+> | 神经渲染完成 | ✅ 离线 `--render` exit 0；范围渲染（直播的形状）硬件冒烟 exit 0 |
+> | 神经渲染**复用** | ✅ 缓存身份按后端分流，AMD 条目可读回 |
+> | 播放器内 `D` 键直播 | ✅ 已接线（启动选路 + 每 job 分流 + 单进程 helper + 发布） |
+> | NVIDIA 不受影响 | ✅ 见下 |
+> | 不装 `dxgi.dll` / ReShade | ✅ AMD 路径整块跳过 add-on 契约 |
+> | 30 分钟连续直播 | ❌ **未验证**（需要 GUI 按键，本轮没有自动化） |
+>
+> "NVIDIA 不受影响"仍是逐项核对的结论，不是推断：`ctest --preset quick` 18 项里
+> 2 项失败（`PolicyTests` 的 yt-dlp fixture、`RenderSettingsTests:857` 的
+> symlink 拒删），**在未改动的 HEAD 上失败得一模一样**；失败点全在 YouTube
+> resolver 与缓存符号链接，与神经后端无关。同一台机器上默认（NVIDIA）分支的
+> `NeuralRangeRenderSmoke` 仍停在 `Unable to determine a readable ReShade.ini size`
+> ——它本来的环境性失败。`NeuralWorkerTests` exit 0（含此前新增的 5 条 AMD
+> 协议断言）。全量构建 0 error / 0 warning（`/W4 /WX`）。
 
 ### 性能
 
@@ -958,11 +1038,43 @@ resident helper：先禁用，每个任务独立 worker
 >   而 `width*height` 不超过 `1920*1080` 的超宽输入也接受，但 1440p/4K
 >   超预算，需要先用播放器的缩放路径落到预算内再送进去。
 
+> **直播的形状（范围渲染，2026-10-11 第二轮，RX 9070 XT）：**
+> `NeuralRangeRenderSmoke … amd amd-neural-runtime` 在 640x360、24 fps 上渲染
+> `[1,4)` 秒、带 60 帧 preroll：72 帧 **12.3 s 全部完成**（含 helper 启动与
+> bring-up），即 ≈170 ms/帧。这是含冷启动的数，不是稳态。
+> **这个尺寸下的结论只能说明"范围+preroll 这条形状在 AMD 上走得通"**，
+> 1080p 能否跟上 30 fps 要看上面那条 21 ms/帧的稳态数据，而它来自整片渲染
+> （无 preroll、无分段）。
+
 ### 稳定性
 
-- 连续 30 分钟渲染。
-- seek、暂停、取消、设备移除和 worker 重启。
-- 权重、模块或 runtime 换版本后必须缓存失效。
+- 连续 30 分钟渲染。**未做。**
+- seek、暂停、取消、设备移除和 worker 重启。**未做。**
+- 权重、模块或 runtime 换版本后必须缓存失效。**机制已有**：runtime 身份是
+  遍历整包算出的摘要（`AmdRuntimeIdentityFiles` + `BuildRuntimeDigest`），
+  换模块或权重即换身份；锁校验换成每 job 一次，漂移的树在启动和每个 job
+  两处被拒。
+
+**已知 flaky 测试（既有，与本轮改动无关）：** `NeuralPrerenderTests` 的
+`quarantined_entries_are_kept_for_inspection_then_reaped_test` 会间歇在
+`:1993`（期望 `SweepStaging()==1`，实得 `0`）和 `:1994`（隔离目录仍存在）
+两处失败。机制已静态确认，不是猜测：`RemoveTreeBefore`（`NeuralCache.cpp:753`）
+在 `now() >= deadline` 时直接 `return false` 且不删任何东西，而
+`deadline = started + kSweepBudget`（100 ms），`started` 取在 `SweepStaging()`
+顶部、**在枚举候选目录之前**（`NeuralCache.cpp:1454` vs 1484 的循环）。于是
+「枚举 `staging/` + 逐条 `last_write_time` + 排序」只要耗掉 100 ms，循环就一次
+都不删、`removed` 保持 0——正是上述两条断言的样子。本机 `fs::remove` /
+`last_write_time` 实测会间歇耗时 100–1459 ms（临时 DIAG 读数），所以这个窗口
+是够得着的。
+
+产品行为本身是设计如此（预算含枚举，超时就把活留给下一次 sweep，最坏是不删），
+**脆的是测试的假设**——"5 个文件的目录必须在一个预算内删掉"。判定它既有的依据
+是 A/B：`git stash` 到未改动 HEAD 构建的基线二进制，同一窗口内 3 次跑出
+**2 失败 1 通过**，而带本轮改动的二进制 3 次全过；上一轮会话里方向正好相反
+（基线过、带改动失败）。两个二进制都各自出现在失败与通过的**两侧**，所以它是
+环境时序噪声，不是本轮引入，也不是本轮修复。要收拾的话应改测试（把"预算内
+必须删掉"换成"重试到删掉"），而不是把预算改成不含枚举——那会让 UI 线程上
+多花的时间不再受约束。
 
 ## 13. 最终判断
 
@@ -976,9 +1088,14 @@ resident helper：先禁用，每个任务独立 worker
 已实测：阶段 A、B 在 RX 9070 XT（gfx1201）上跑通，1080p30 × 300 帧全绿
         阶段 C 的接线 + 阶段 D 的离线导出已跑通：`--render --stages nr
         --neural-backend amd` 真出片（1080p H.264，exit 0，8 帧）
-剩余未知：AMD 缓存身份（能出片但不能复用）、AMD 时序模型（缺 guide estimator，
-          当前为纯空间渲染且日志明写）、播放器内直播、
-          900/1440/4K 输入、30 分钟连续渲染、设备移除恢复
+        （第二轮）缓存身份按后端分流，AMD 条目可读回；
+        播放器启动即在 AMD 后端上完成选路（日志 verified=208 files）；
+        范围渲染 + preroll（直播的形状）硬件冒烟 exit 0：72/72 帧、
+        72 次求值、feature18_armed=0
+剩余未知：AMD 时序模型（缺 guide estimator，当前为纯空间渲染且日志明写）、
+          900/1440/4K 输入、30 分钟连续直播、设备移除恢复、
+          AMD 专用 pace prior、
+          D 键之后的分段产出与缓存命中（需 GUI 按键，本轮无自动化）
 ```
 
 如果按上述边界实施，可以保留播放器现有的缓存、对比、导出和时间轴逻辑，

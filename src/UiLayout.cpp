@@ -606,6 +606,11 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
         // adds is the one thing the pill does not say - that the runtime is an
         // experimental one - in 21 characters instead of 35.
         configuration = L"DLSS 5 (experimental)";
+    } else if (status.runtimeConfiguration == PlayerRuntimeConfiguration::AmdNeuralExperimental) {
+        // The AMD pack is not DLSS and saying it is would name a thing that is
+        // not on the machine. "Neural Rendering (experimental)" says the same
+        // two facts about the state without borrowing NVIDIA's product name.
+        configuration = L"Neural Rendering (experimental)";
     } else if (status.runtimeConfiguration == PlayerRuntimeConfiguration::DlssSrSafeMode) {
         configuration = L"DLSS SR safe mode";
     }
@@ -659,6 +664,7 @@ std::wstring BuildPlayerWindowTitle(std::wstring_view appTitle,
 
 PlayerRuntimeStatus ResolvePlayerRuntimeStatus(bool safeMode,
                                                bool neuralAddonConfigured,
+                                               bool amdNeuralBackend,
                                                bool dlssEnabled,
                                                bool dlssFeatureCreated)
 {
@@ -666,7 +672,12 @@ PlayerRuntimeStatus ResolvePlayerRuntimeStatus(bool safeMode,
     if (safeMode) {
         status.configuration = PlayerRuntimeConfiguration::DlssSrSafeMode;
     } else if (neuralAddonConfigured) {
-        status.configuration = PlayerRuntimeConfiguration::NeuralAddonExperimental;
+        // Both are "neural rendering is on"; what differs is the name of the
+        // runtime, and the line under the pill says which one. Read only here,
+        // so an unconfigured runtime never reports a backend it did not load.
+        status.configuration = amdNeuralBackend
+            ? PlayerRuntimeConfiguration::AmdNeuralExperimental
+            : PlayerRuntimeConfiguration::NeuralAddonExperimental;
     }
     status.dlssState = dlssEnabled && dlssFeatureCreated
         ? PlayerDlssState::Active : PlayerDlssState::ScalerFallback;

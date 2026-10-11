@@ -1310,6 +1310,15 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         const std::string_view name = NeuralBackendName(request.backend);
         arguments.emplace_back(L"--neural-backend");
         arguments.emplace_back(name.begin(), name.end());
+        // The pack the player resolved and verified, so the helper loads the tree
+        // that was checked rather than resolving a second one that happens to
+        // agree. Only on this backend, and only when the player has an answer:
+        // an empty path is the older-player case ParseWorkerArguments reads back
+        // as "resolve it yourself".
+        if (!request.amdRuntimeDirectory.empty()) {
+            arguments.emplace_back(L"--amd-runtime-dir");
+            arguments.emplace_back(request.amdRuntimeDirectory.wstring());
+        }
     }
     // Absent means 100, the source size, which is every job before the rungs.
     if (request.processingScale != kDefaultProcessingScale) {
@@ -1450,7 +1459,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
                CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, NeuralBackendKey,
-               KeyCount };
+               AmdRuntimeDirectoryKey, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1470,7 +1479,13 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // Absent means the NVIDIA backend, which is what every helper before
         // this key existed ran. The value is the canonical name, and a name the
         // helper does not know is a malformed request rather than the default.
-        L"--neural-backend"};
+        L"--neural-backend",
+        // Sent with the AMD backend and never without it: the tree the player
+        // resolved and verified at startup, so the render loads what the player
+        // said it would rather than a second resolution that happens to agree.
+        // An AMD line without it is one an older player built and lets the
+        // helper resolve the pack itself, which is what it did before.
+        L"--amd-runtime-dir"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1597,6 +1612,12 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         if (!backend) return std::nullopt;
         request.backend = *backend;
     }
+    // The player's own answer to "which pack", passed rather than resolved again
+    // here. The two agree by construction today, but only this way is it the
+    // tree the player verified that a render loads; an older player that sends
+    // the backend without it leaves the field empty, which RunAmdJob reads as
+    // "resolve one", exactly what the helper did before the key existed.
+    if (values[AmdRuntimeDirectoryKey]) request.amdRuntimeDirectory = *values[AmdRuntimeDirectoryKey];
     if (values[ProcessingScale]) {
         uint64_t percent = 0;
         if (!ParseUnsigned(*values[ProcessingScale], percent) || percent > UINT32_MAX ||
@@ -1731,6 +1752,16 @@ std::optional<std::vector<std::byte>> FrameJobCommand(const std::filesystem::pat
 // longest handle values a launch can produce.
 bool ResidentCanCarry(const std::filesystem::path& executable, const NeuralRenderRequest& request)
 {
+    // The AMD backend runs one job per process and says so in its own words when
+    // it is started as a helper session (see NeuralWorkerMain). A resident
+    // session would be worse than refused: the helper holding it was started by
+    // the NVIDIA launch line - it loaded the proxy and armed the add-on before
+    // any job arrived - and the job's backend would only reach it through the
+    // command channel, which is exactly the case that process refuses. So the
+    // plan is SingleShot, decided here rather than discovered by a refusal, and
+    // a job's backend never has to be believed by a process that cannot check
+    // it.
+    if (request.backend == NeuralBackend::Amd) return false;
     const HANDLE widest = reinterpret_cast<HANDLE>(std::numeric_limits<uintptr_t>::max());
     return FrameJobCommand(executable, request, widest, widest, true).has_value();
 }

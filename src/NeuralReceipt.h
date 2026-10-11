@@ -22,6 +22,14 @@ struct NeuralRenderReceiptInputs {
     std::string runtimeDigest;
     std::chrono::system_clock::time_point started;
     std::chrono::system_clock::time_point finished;
+    // What was verified about the runtime on a backend whose lock is not the
+    // embedded document, which is only the AMD one: it has no embedded lock to
+    // satisfy because its digests ship inside the pack (see RuntimeLock.h), so
+    // `lockChecks` is empty and this says in words what took its place. An empty
+    // note - every NVIDIA render - leaves the lock object and the log line
+    // exactly as they were. Appended, so an existing positional initialiser
+    // still binds every field it names.
+    std::wstring runtimeLockNote;
 };
 
 // {"schema":1, jobId, renderKey, settingsDigest, runtimeDigest, started,

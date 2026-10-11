@@ -330,6 +330,12 @@ std::wstring DescribeAmdRuntimeLockDrift(std::span<const AmdRuntimeCheck> checks
     return description;
 }
 
+std::wstring AmdRuntimeLockRefusal(std::span<const AmdRuntimeCheck> checks)
+{
+    if (AmdRuntimeLockSatisfied(checks)) return {};
+    return L"The AMD neural runtime does not match its own manifests: " + DescribeAmdRuntimeLockDrift(checks);
+}
+
 bool RuntimeLockSatisfied(std::span<const RuntimeLockCheck> checks)
 {
     if (checks.empty()) return false;

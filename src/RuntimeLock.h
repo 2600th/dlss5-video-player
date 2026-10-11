@@ -121,3 +121,11 @@ bool AmdRuntimeLockSatisfied(std::span<const AmdRuntimeCheck> checks);
 // The same shape as DescribeRuntimeLockDrift, for the same reason: a refusal has
 // to name the file that differs rather than the fact that one did.
 std::wstring DescribeAmdRuntimeLockDrift(std::span<const AmdRuntimeCheck> checks);
+
+// What a user is told when an AMD tree does not match the manifests it ships,
+// or empty when it does. Here rather than beside the NVIDIA refusal in
+// StageExport.h because it is not only the export path that asks: the live
+// player checks the same tree against the same list and has to say the same
+// sentence about it, and two wordings of one refusal is two things to keep in
+// step.
+std::wstring AmdRuntimeLockRefusal(std::span<const AmdRuntimeCheck> checks);

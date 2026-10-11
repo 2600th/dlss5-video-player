@@ -359,6 +359,34 @@ std::span<const std::wstring_view> LockPinnedRuntimeFileNames()
     return std::span<const std::wstring_view>(kLockedRuntimeFiles).first(kLockPinnedRuntimeFileCount);
 }
 
+std::vector<std::wstring> AmdRuntimeIdentityFiles(const std::filesystem::path& runtimeDirectory)
+{
+    namespace fs = std::filesystem;
+    std::vector<std::wstring> files;
+    std::error_code error;
+    for (fs::recursive_directory_iterator it(runtimeDirectory, error), end; it != end; it.increment(error)) {
+        if (error) return {};
+        // Skipped by directory rather than filtered by name, so a warmed cache
+        // costs this walk nothing: the iterator never descends into it. The
+        // comparison is case-insensitive because the spelling of a directory
+        // the runtime creates is not this codebase's to fix.
+        std::error_code kindError;
+        const bool directory = it->is_directory(kindError);
+        if (!kindError && directory && LowerWide(it->path().filename().wstring()) == L"shader-cache") {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (!it->is_regular_file(kindError) || kindError) continue;
+        const fs::path relative = fs::relative(it->path(), runtimeDirectory, kindError);
+        if (kindError) return {};
+        files.push_back(relative.generic_wstring());
+    }
+    // Sorted unconditionally: BuildRuntimeDigest sorts what it is given anyway,
+    // and a caller logging or diffing the set wants one order for one tree.
+    std::ranges::sort(files, {}, LowerWide);
+    return files;
+}
+
 const char* NeuralModelStoreSourceName(NeuralModelStoreSource source) noexcept
 {
     const size_t index = static_cast<size_t>(source);

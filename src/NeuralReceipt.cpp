@@ -188,7 +188,13 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
         json += ",\"actualSha256\":" + Quoted(check.actualSha256);
         json += ",\"actualFileVersion\":" + QuotedWide(check.actualFileVersion) + "}";
     }
-    json += "]}";
+    json += "]";
+    // `satisfied` above is the embedded lock's verdict and stays false here: on
+    // the AMD backend that lock was not applied, which is not the same as a lock
+    // that held. The note is what a reader needs instead, and it is written only
+    // when there is one, so an NVIDIA receipt is byte-identical to before it.
+    if (!inputs.runtimeLockNote.empty()) json += ",\"note\":" + QuotedWide(inputs.runtimeLockNote);
+    json += "}";
 
     json += ",\"result\":{\"ok\":";
     json += Bool(result.ok);
@@ -307,7 +313,16 @@ std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs
     if (RuntimeLockSatisfied(inputs.lockChecks)) {
         line += "ok";
     } else if (inputs.lockChecks.empty()) {
+        // Not a lock that held: one that was never applied. The AMD backend has
+        // no embedded document, so the note says what it was verified against
+        // instead, and it is the length of this word's parenthetical rather than
+        // its absence that changes.
         line += "unverified";
+        if (!inputs.runtimeLockNote.empty()) {
+            line += "(";
+            line += utf8_text::FromWide(inputs.runtimeLockNote);
+            line += ")";
+        }
     } else {
         line += "drift(";
         bool first = true;

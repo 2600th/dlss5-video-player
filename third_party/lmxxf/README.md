@@ -44,6 +44,32 @@ LmxxfNrGetApi(3, 176) -> 0  OK
 - **换回 ABI 1 的 runtime（例如 AMDNR v0.3.5.x）需要同时把本目录的头换回
   `a9b7a521` 版本，否则 `LmxxfNrGetApi` 会在协商阶段被拒。**
 
+## 播放器侧的接入（2026-10-11 起）
+
+一个二进制带两条神经后端，job 自己说它要哪条（`--neural-backend nvidia|amd`）。
+AMD 这一侧的形态，写在这里是因为它改变了"怎么放这个包"：
+
+- **包的定位**：`src/AmdLmxxfRuntime.cpp` 的 `ResolveRuntimeDirectory()`，顺序是
+  显式目录 → 环境变量 `DLSS5_AMD_RUNTIME_DIR` → 模块目录及其父/祖父下的
+  `amd-neural-runtime`（helper 多一层 `neural-runtime/`，也认）。
+  播放器启动时解一次并**把结果随 job 传给 helper**（wire 上的
+  `--amd-runtime-dir`），所以渲染加载的就是启动时校验过的那棵树。
+- **锁是包自带的清单**：`VerifyAmdRuntimeLock` 重算每个 `SHA256SUMS` 条目
+  （`lmxxf-modules/`、`gfx1200|gfx1201/`、`native-game-tiled-assets/HIP/`）。
+  `LmxxfNrRuntime.dll` 本身**只有存在性检查**——它不像其它模块那样有已发布的摘要，
+  可信来源是获取它的那个包，不是这个函数。校验放在启动一次 + 每 job 一次。
+- **渲染身份排除 `shaders/shader-cache/`**：那是 runtime 首次使用时按源码哈希
+  写出来的编译产物（真正的源码 `.hlsl` 在同一棵树里、照常计入）。
+  把它算进身份，会让"缓存热过没有"改变一次渲染的缓存键。
+- **没有 ReShade / 没有 add-on**：`ReShade.ini`、`dxgi.dll`、feature 18 的
+  log 计数器在这个后端都不存在，所以证据链换成 runtime 自己的逐帧计数
+  （每捕获一帧必须至少求值一次）加上"三列 add-on 计数取反"。
+  详见 `docs/AMD-LMXXF-INTEGRATION-PLAN-REV2-zh.md` §7.1。
+- **一个进程一个 job**：不服务常驻 helper 会话（`NeuralWorkerMain.cpp` 明确拒绝）。
+  租约仍是按包目录派生的命名互斥量，所以两个播放器不会同时用一棵树。
+- **只在源尺寸跑**：runtime 收固定盒子、按原尺寸返回，所以任何放大和
+  `processing-scale != 100` 都是**拒绝**而不是近似。
+
 上游 `lmxxf` 代码采用 MIT 许可证。`TheAutomatic/dlss-5-amd-project` 自述
 GPL-3.0（基于 GPL-3.0 的 OptiScaler），**本目录只固定接口声明，不含其实现**；
 自用/研究无碍，公开分发需留意 copyleft。NVIDIA 权重和第三方运行时不属于

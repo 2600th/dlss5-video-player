@@ -107,6 +107,20 @@ add_test(NAME MediaGpuSmoke COMMAND MediaGpuSmoke
     "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
 add_test(NAME NeuralRangeRenderSmoke COMMAND NeuralRangeRenderSmoke
     "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/neural-range-smoke")
+# The same range on the AMD backend, which is what a live session performs on a
+# Radeon and what nothing else covers: it loads no add-on, so the frames rest on
+# the runtime's own per-frame tally rather than on feature 18's receipt, and it
+# runs one job per process. Registered only where the pack is in the checkout -
+# it is 600 MiB and not in git - and the test itself skips with 125 when no pack
+# resolves, because this label is run on RTX machines too.
+if(EXISTS "${CMAKE_SOURCE_DIR}/amd-neural-runtime/LmxxfNrRuntime.dll")
+    add_test(NAME NeuralRangeRenderAmdSmoke COMMAND NeuralRangeRenderSmoke
+        "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>"
+        "${CMAKE_BINARY_DIR}/neural-range-amd-smoke" amd
+        "${CMAKE_SOURCE_DIR}/amd-neural-runtime")
+    set_tests_properties(NeuralRangeRenderAmdSmoke PROPERTIES
+        LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 300)
+endif()
 # Direct NVENC encoding (P3.7) writes the packets the encoder child writes, which
 # is what lets it share the child's cache key. The first proves it on raw frames
 # at the encoder, NV12 and P010, with nothing else in the way; the second inside

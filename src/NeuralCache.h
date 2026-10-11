@@ -140,6 +140,19 @@ struct NeuralCacheManifest {
     // recorded and absent otherwise, so every manifest written before it
     // still parses - and those entries stay reusable.
     NeuralCacheEnvironment environment;
+    // Optional, schema 5, renders only: which backend produced the entry.
+    // Written after `environment` and only when it is not the default, so an
+    // NVIDIA manifest is byte-for-byte what every earlier writer produced, and
+    // an entry from before this field existed reads as NVIDIA.
+    //
+    // It is here because what vouches for a render is not the same on both
+    // backends: `feature18Created`, `feature18ArmedBeforeCapture` and
+    // `observedFeature18Evaluations` count an add-on's log, and the AMD backend
+    // loads no add-on and has no log, so those three are the negative on every
+    // AMD entry. Requiring them - which is what the reuse verdict did before
+    // this field existed - refuses every render that backend publishes. See
+    // IsReusableNeuralCacheManifest for what is asked instead.
+    NeuralBackend backend{NeuralBackend::Nvidia};
 
     friend bool operator==(const NeuralCacheManifest&, const NeuralCacheManifest&) = default;
 };
@@ -240,6 +253,14 @@ constexpr uint32_t KeyedNvencPreset(uint32_t nvencPreset, EncoderQuality quality
 std::optional<std::string> BuildRuntimeDigest(
     const std::filesystem::path& moduleDirectory,
     std::span<const std::wstring_view> relativeFiles,
+    std::stop_token stop = {});
+// The same digest for a file set that was discovered rather than declared: the
+// AMD pack is walked (AmdRuntimeIdentityFiles) and what comes back is a vector,
+// which a span of views cannot borrow. One implementation serves both, so the
+// digest of the same files cannot depend on how their list was obtained.
+std::optional<std::string> BuildRuntimeDigest(
+    const std::filesystem::path& moduleDirectory,
+    const std::vector<std::wstring>& relativeFiles,
     std::stop_token stop = {});
 std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest);
 std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view bytes);

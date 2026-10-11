@@ -67,6 +67,11 @@ struct IdleSurfaceLayout {
 
 enum class PlayerRuntimeConfiguration {
     NeuralAddonExperimental,
+    // The same state on the other backend: neural rendering is on, and the
+    // runtime behind it is the AMD pack rather than the NVIDIA add-on. A
+    // separate value because the line names which one is running - "DLSS 5
+    // (experimental)" over an AMD pack would name a thing that is not there.
+    AmdNeuralExperimental,
     DlssSrSafeMode,
     NeuralAddonUnavailable,
 };
@@ -201,8 +206,11 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status);
 std::wstring BuildPlayerWindowTitle(std::wstring_view appTitle,
                                     std::wstring_view mediaTitle,
                                     size_t maxCharacters);
+// `amdNeuralBackend` is read only when `neuralAddonConfigured` is: it selects
+// which of the two experimental states the configured runtime is reported as.
 PlayerRuntimeStatus ResolvePlayerRuntimeStatus(bool safeMode,
                                                bool neuralAddonConfigured,
+                                               bool amdNeuralBackend,
                                                bool dlssEnabled,
                                                bool dlssFeatureCreated);
 bool ExecuteGuardedRehook(int dialogResult, const std::function<void()>& requestRecreate);
