@@ -313,7 +313,9 @@ add_library(player_neural OBJECT
     src/AmdLmxxfApi.h
     src/AmdLmxxfPolicy.h
     src/AmdLmxxfSession.h
-    src/AmdLmxxfRuntime.cpp src/AmdLmxxfRuntime.h)
+    src/AmdLmxxfRuntime.cpp src/AmdLmxxfRuntime.h
+    # Stage B: the AMD backend behind the renderer's INeuralFrameEvaluator seam.
+    src/AmdLmxxfEvaluator.cpp src/AmdLmxxfEvaluator.h)
 # What only the player links.
 add_library(player_app OBJECT
     src/AppMenu.cpp src/AppMenu.h

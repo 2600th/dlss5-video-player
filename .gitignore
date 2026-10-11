@@ -27,6 +27,11 @@
 /streamline/
 /Streamline/
 
+# AMD Lmxxf neural runtime pack: third-party runtime DLL, user-supplied weights and
+# HSACO modules, staged locally under amd-neural-runtime/ (606 MB, checksums in the
+# SHA256SUMS manifests that ship inside it). Never redistributed, never committed.
+/amd-neural-runtime/
+
 # Runtime files that should not be committed
 *.dll
 *.exe
@@ -80,3 +85,10 @@ site/dist/
 
 # Browser-automation session logs (Playwright MCP) written into the working directory
 /.playwright-mcp/
+
+# AMD Lmxxf smoke output written next to the working directory: the stage A probe
+# frame, the stage B evaluator frames, and any captured run log. Regenerate with
+# the corresponding smoke; one rule covers the family so a new smoke cannot
+# quietly start committing megabytes of PNG.
+/amd-lmxxf-*.png
+/amd-lmxxf-*.log

@@ -315,6 +315,8 @@ inline std::wstring Usage()
         L"  --encode Q             standard (8-bit), high (10-bit) or lossless encode.\n"
         L"  --sr-engine E          sr without nr: vsr (RTX VSR, recommended) or dlss.\n"
         L"  --history H            sr without nr, DLSS only: temporal or per-frame.\n"
+        L"  --neural-backend B     What runs nr: nvidia (default) or amd. The AMD\n"
+        L"                         backend runs nr alone, at the source size.\n"
         L"  --range START-END      Part of each source, e.g. 0:10-0:25 or f0-f300.\n"
         L"\n"
         L"Where it goes:\n"

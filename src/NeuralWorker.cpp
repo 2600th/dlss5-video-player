@@ -305,10 +305,17 @@ public:
     // default: the parent always knows which question it asked, and a reader
     // that took either answer let a resident job stop on a preflight receipt
     // and then read its result out of an empty slot.
+    // `backend` is which verification set a result on this stream is judged by,
+    // and unlike `expecting` it has a default, because its default is the strict
+    // one: only a job stream decodes a Result (a probe's stream ends on the
+    // other terminal kind), every result stream this parent opens is a job's, and
+    // reading an AMD render against NVIDIA's set rejects it rather than accepting
+    // it. A job on another backend names itself; one that forgets fails closed.
     MetadataReader(MetadataStream expecting, OfflineNeuralRenderer::ProgressCallback progress,
-                   NeuralSegmentSink segments, NeuralColdStartCallback timeline = {})
+                   NeuralSegmentSink segments, NeuralColdStartCallback timeline = {},
+                   NeuralBackend backend = NeuralBackend::Nvidia)
         : expecting_(expecting), progress_(std::move(progress)), segments_(std::move(segments)),
-          timeline_reported_(std::move(timeline)) {}
+          timeline_reported_(std::move(timeline)), backend_(backend) {}
 
     // Bounded by kMetadataDrainByteBudget. This is the first statement of
     // every Pump iteration, ahead of the stop check, so a version that ran
@@ -440,7 +447,7 @@ private:
                 // doing what this parent told it to do.
                 case WireKind::Result: {
                     if (expecting_ != MetadataStream::Job) { malformed_ = true; return false; }
-                    auto result = DecodeResult(payload);
+                    auto result = DecodeResult(payload, backend_);
                     if (!result) { malformed_ = true; return false; }
                     result_ = std::move(result);
                     break;
@@ -518,6 +525,7 @@ private:
     OfflineNeuralRenderer::ProgressCallback progress_;
     NeuralSegmentSink segments_;
     NeuralColdStartCallback timeline_reported_;
+    NeuralBackend backend_{NeuralBackend::Nvidia};
     std::optional<uint64_t> lastSegmentIndex_;
     std::vector<std::byte> bytes_;
     std::vector<std::byte> taken_;   // one drain's bytes, kept for its capacity
@@ -1081,7 +1089,7 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
                                           const std::function<void()>& processCreated,
                                           const NeuralColdStartCallback& helperTimeline)
 {
-    MetadataReader reader(MetadataStream::Job, progress, segments, helperTimeline);
+    MetadataReader reader(MetadataStream::Job, progress, segments, helperTimeline, request.backend);
     bool restartRequested = false;
     NeuralRenderResult result = RunHelperOnce(executable, request, stop,
         configurationRestarted, reader, processCreated, restartRequested);
@@ -1296,6 +1304,13 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"--require-neural");
         arguments.emplace_back(L"0");
     }
+    // Absent means the NVIDIA backend, which is what this helper has always run,
+    // so an NVIDIA job's command line is byte-identical to before this key.
+    if (request.backend != NeuralBackend::Nvidia) {
+        const std::string_view name = NeuralBackendName(request.backend);
+        arguments.emplace_back(L"--neural-backend");
+        arguments.emplace_back(name.begin(), name.end());
+    }
     // Absent means 100, the source size, which is every job before the rungs.
     if (request.processingScale != kDefaultProcessingScale) {
         arguments.emplace_back(L"--processing-scale");
@@ -1434,7 +1449,8 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
-               CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, KeyCount };
+               CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, NeuralBackendKey,
+               KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1450,7 +1466,11 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // Capture-side quality switches: absent is what every earlier helper did.
         L"--capture-dither", L"--cache-quality", L"--deband", L"--supplied-exposure",
         // Benchmark-only, absent on every line the player builds.
-        L"--encoder-path"};
+        L"--encoder-path",
+        // Absent means the NVIDIA backend, which is what every helper before
+        // this key existed ran. The value is the canonical name, and a name the
+        // helper does not know is a malformed request rather than the default.
+        L"--neural-backend"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1569,6 +1589,13 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         if (!ParseUnsigned(*values[RequireNeural], neuralRequired) || neuralRequired > 1)
             return std::nullopt;
         request.requireNeural = neuralRequired == 1;
+    }
+    // Absent means the NVIDIA backend, as every helper before this key ran.
+    if (values[NeuralBackendKey]) {
+        const auto backend = ParseNeuralBackend(
+            narrow_text::StrictAscii(*values[NeuralBackendKey]).value_or(std::string{}));
+        if (!backend) return std::nullopt;
+        request.backend = *backend;
     }
     if (values[ProcessingScale]) {
         uint64_t percent = 0;
@@ -1888,7 +1915,8 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
         // Per job, because a resident helper reports a timeline per job: the
         // first one measures a process starting, every later one measures only
         // the phase it actually paid for.
-        MetadataReader reader(MetadataStream::Job, hooks.progress, hooks.segments, hooks.helperTimeline);
+        MetadataReader reader(MetadataStream::Job, hooks.progress, hooks.segments, hooks.helperTimeline,
+                              request.backend);
         // The reader outlives every judgement below, so a timeline or a VRAM
         // sample that arrived before a crash, a cancel or a rejected result is
         // still reported: the breakdown of a run that failed is the whole

@@ -75,6 +75,9 @@ struct Command {
     // Super Resolution's engine for sr without nr; empty uses the saved choice.
     // --history alone implies dlss, the engine it belongs to.
     std::optional<SuperResolutionEngine> engine;
+    // Which neural backend --stages nr runs on. Absent means the default, which
+    // is what every command line before this option asked for.
+    std::optional<NeuralBackend> backend;
     // One of kProcessingScaleRungs; empty uses the saved processing scale.
     std::optional<uint32_t> processingScale;
     // Stages, output rung and multiplier, in the dialog's own vocabulary so the
@@ -193,7 +196,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
          seenHeight = false, seenMultiplier = false, seenOut = false, seenQuiet = false,
          seenScale = false, seenPasses = false, seenIntensity = false, seenTone = false,
          seenStructure = false, seenColor = false, seenEncode = false, seenHistory = false, seenEngine = false,
-         seenStyle = false;
+         seenStyle = false, seenBackend = false;
     std::wstring_view presetName;
     // What the dialog opens with: the neural pass alone.
     command.selection = ExportSelection{};
@@ -310,6 +313,18 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             for (const wchar_t c : value) lower.push_back(c < 0x80 ? static_cast<char>(std::towlower(c)) : '?');
             command.engine = ParseSuperResolutionEngine(lower);
             if (!command.engine) return bad(L"--sr-engine takes vsr or dlss.");
+        } else if (argument == L"--neural-backend") {
+            if (!once(seenBackend)) return bad(L"--neural-backend was given twice.");
+            // The vendor's own word, or the runtime's name. Both spellings of one
+            // thing are accepted here and nowhere else: the wire and the log carry
+            // the canonical one, so a receipt never has two names to disagree on.
+            if (EqualsIgnoringCase(value, L"nvidia") || EqualsIgnoringCase(value, L"ngx")) {
+                command.backend = NeuralBackend::Nvidia;
+            } else if (EqualsIgnoringCase(value, L"amd") || EqualsIgnoringCase(value, L"lmxxf")) {
+                command.backend = NeuralBackend::Amd;
+            } else {
+                return bad(L"--neural-backend takes nvidia or amd.");
+            }
         } else if (argument == L"--history") {
             if (!once(seenHistory)) return bad(L"--history was given twice.");
             command.history = ParseUpscalingHistory(value == L"temporal" ? "temporal" : value == L"per-frame" ? "per-frame" : "");
@@ -334,6 +349,9 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             return bad(L"Unknown argument: " + argument);
         }
     }
+    // Applied before the checks below, so they judge the backend this job will
+    // actually run on rather than the default.
+    if (command.backend) command.selection.backend = *command.backend;
     const ExportSelection& selection = command.selection;
     // Options that only mean something to a stage that was not asked for are
     // refused rather than ignored: a --height on an export that does not
@@ -379,6 +397,11 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     // through the worker pass, whose carrier already covers just that range.
     if (command.hasRange && !selection.upscale && !selection.neural)
         return bad(L"--range needs the sr or nr stage: frame generation alone converts the whole file.");
+    // The AMD runtime admits a fixed box and returns the frame at the size it was
+    // given, and it generates no frames at all. Said here, where a script can see
+    // why, rather than inside the worker after it has decoded a frame.
+    if (selection.backend == NeuralBackend::Amd && (selection.upscale || selection.frameGeneration))
+        return bad(L"--neural-backend amd runs the nr stage alone: it does not upscale and generates no frames.");
     parsed.mode = Mode::Render;
     return parsed;
 }
@@ -445,6 +468,9 @@ inline std::wstring Usage()
         L"                     saved setting, 100 unless changed.\n"
         L"  --range START-END  Render only this part, e.g. 0:10-0:25 or f0-f300. Needs sr\n"
         L"                     or nr. Default: the whole source.\n"
+        L"  --neural-backend B What runs nr: nvidia (default) or amd. The AMD backend is\n"
+        L"                     LmxxfNrRuntime.dll, for a Radeon; it runs nr alone, at the\n"
+        L"                     source size, and does not upscale or generate frames.\n"
         L"  --out FILE         The file to write, in the container its extension names:\n"
         L"                     .mkv or .mp4 for a video, also .gif for an animation,\n"
         L"                     .png or .jpg for a photo. An existing file is replaced.\n"

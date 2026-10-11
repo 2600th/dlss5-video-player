@@ -28,11 +28,22 @@
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "DLSSBackend.h"
+// The AMD backend. Included unconditionally rather than behind a build option:
+// one binary carries both and the request selects between them, so a build that
+// can render on an RTX card can also render on a Radeon without being rebuilt.
+#include "AmdLmxxfEvaluator.h"
 #include "FrameResample.h"
 #include "NvencDirect.h"
 #include "NvencDirectPolicy.h"
 #include "UpscalingPolicy.h"
 #include "NeuralMotionPolicy.h"
+
+const char* NeuralBackendName(NeuralBackend backend) noexcept
+{
+    // The strings are what a log line and a receipt carry, so they are the names
+    // a person reads rather than an enum's spelling.
+    return backend == NeuralBackend::Amd ? "amd-lmxxf" : "nvidia-ngx";
+}
 
 namespace {
 
@@ -1055,7 +1066,12 @@ public:
                         L"The neural add-on ran in a job that asked for Super Resolution alone, "
                         L"so its frames are not Super Resolution-only output.");
         }
-        if(request_.requireNeural&&!result_.evidence.Valid()){
+        // The next three read evidence only NVIDIA supplies - the add-on's receipt
+        // and its calibrated timing floor - so they belong to that backend; see
+        // NvidiaEvidenceRequired. The per-frame verdict after them is asked of
+        // every backend, and it is what keeps a neural claim honest where no
+        // receipt exists to be read.
+        if(NvidiaEvidenceRequired()&&!result_.evidence.Valid()){
             return Fail(NeuralRenderFailure::Neural,
                         L"Feature 18 runtime evidence was incomplete or contained a later failure.");
         }
@@ -1069,15 +1085,17 @@ public:
         // backend's own count as well, which is per process, monotonic, and has to
         // have advanced at least once for every frame this attempt captured - the
         // count the cache entry then carries as its own evidence.
-        if(request_.requireNeural&&!evaluatorReused_&&
+        if(NvidiaEvidenceRequired()&&!evaluatorReused_&&
            result_.evidence.highestObservedEvaluation<=successfulAttemptBaseline_){
             return Fail(NeuralRenderFailure::Neural,
                         L"Feature 18 runtime evidence did not advance after captured rendering.");
         }
-        // The backend's count is NGX's own tally of Evaluate calls, which is the
-        // Super Resolution carrier whichever job this is. A job that asked for
-        // Super Resolution alone is held to it too: a captured frame NGX never
-        // evaluated is the source at its own size, not an upscale.
+        // The backend's count is the runtime's own tally of Evaluate calls, which
+        // is the Super Resolution carrier whichever job this is. A job that asked
+        // for Super Resolution alone is held to it too: a captured frame the
+        // runtime never evaluated is the source at its own size, not an upscale.
+        // This is the verdict that needs no receipt, so it is also the one an
+        // AMD job's neural claim rests on.
         if(attempt.neuralEvaluations<attempt.frames){
             std::wostringstream detail;
             if(request_.requireNeural){
@@ -1091,7 +1109,11 @@ public:
             }
             return Fail(NeuralRenderFailure::Neural,detail.str());
         }
-        if(request_.requireNeural&&!NeuralTimingClearsFloor(result_.timing,outputWidth_,outputHeight_)){
+        // The floor is NVIDIA's: it was calibrated from NGX's own per-frame GPU
+        // time on NVIDIA silicon, so a job on a backend running a different model
+        // on different hardware is not measured against it - see
+        // NvidiaEvidenceRequired. Its timing is still recorded and still reported.
+        if(NvidiaEvidenceRequired()&&!NeuralTimingClearsFloor(result_.timing,outputWidth_,outputHeight_)){
             std::wostringstream detail;
             detail<<std::fixed<<std::setprecision(2)
                   <<L"The neural pass did not run: median neural GPU time was "<<result_.timing.neuralGpuMsP50
@@ -1111,6 +1133,27 @@ public:
     }
 
 private:
+    // Whether this job's neural claim rests on evidence only NVIDIA can supply:
+    // the feature-18 receipt the ReShade add-on writes into its own log, and the
+    // neural GPU-time floor calibrated for NGX's model on NVIDIA silicon. Neither
+    // exists on a backend that loads no add-on and runs a different model, so
+    // neither is asked of one - the gate says so by naming the backend rather
+    // than by clearing request_.requireNeural. That flag is not a switch for
+    // these verdicts: it says what the job's frames ARE - neural output rather
+    // than the carrier alone - and the result carries it back to the parent in
+    // exactly that sense, so clearing it to switch a threshold off relabels every
+    // frame the job wrote and the parent refuses the render as an answer to a
+    // question it did not ask (NeuralWorker.cpp, AcceptResult).
+    //
+    // What a job without that evidence is held to instead is the verdicts that
+    // were never NVIDIA's: the runtime's own evaluation tally must have advanced
+    // once per captured frame, and the result must carry that many verified
+    // frames - which is what the wire's neural claim is checked against.
+    bool NvidiaEvidenceRequired() const noexcept
+    {
+        return request_.requireNeural && request_.backend != NeuralBackend::Amd;
+    }
+
     // Puts the job back at its capture start for another pass at the same frames;
     // the result to return instead when it cannot.
     std::optional<NeuralRenderResult> RestartForRetry(const wchar_t* sourceFailure, const wchar_t* evidenceFailure)
@@ -1123,7 +1166,7 @@ private:
         }
         const NeuralRuntimeEvidence retryEvidence=
             ParseNeuralRuntimeEvidence(evidenceProvider_());
-        if(request_.requireNeural&&!retryEvidence.Valid())return Fail(NeuralRenderFailure::Neural, evidenceFailure);
+        if(NvidiaEvidenceRequired()&&!retryEvidence.Valid())return Fail(NeuralRenderFailure::Neural, evidenceFailure);
         return std::nullopt;
     }
 
@@ -1882,13 +1925,18 @@ private:
     // before that would encode the un-upscaled source. Everything from here to
     // the capture is about feature 18 - the add-on's arming, the re-hook that
     // coaxes it and the log baseline the receipt gate reads - and a job that
-    // runs with the add-on disabled has none of it to wait for.
+    // has none of it to wait for is one whose evidence source does not exist:
+    // the add-on disabled (requireNeural false) or a backend with no add-on at
+    // all (NvidiaEvidenceRequired). Such a job skips the phase rather than
+    // running it against a log that never arrives, and waits for the carrier
+    // feature by its own account of itself - evaluator_.FeatureCreated, which
+    // the priming loop above already read.
     std::optional<NeuralRenderResult> ArmBeforeCapture()
     {
-        const NeuralRenderRequest& request = request_;
+        const bool receipts = NvidiaEvidenceRequired();
         NeuralRuntimeEvidence armedEvidence;
-        if (request.requireNeural) armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider_());
-        if (request.requireNeural && !armedEvidence.Valid() && primed_ > 0 && evaluator_.RequestFeatureRehook()) {
+        if (receipts) armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider_());
+        if (receipts && !armedEvidence.Valid() && primed_ > 0 && evaluator_.RequestFeatureRehook()) {
             // The add-on arms its NGX detours asynchronously, and a build that
             // missed the very first CreateFeature stays in a standby state until it
             // sees another one. One hook-visible re-create clears that. It belongs
@@ -1912,12 +1960,16 @@ private:
                 if (armedEvidence.Valid()) break;
             }
         }
-        if (request.requireNeural && !armedEvidence.Valid()) {
+        if (receipts && !armedEvidence.Valid()) {
             source_.Close();
             return Fail(NeuralRenderFailure::Neural,
                         L"Feature 18 inline interception was not armed before frame capture.");
         }
-        result_.feature18ArmedBeforeCapture=request.requireNeural;
+        // False on a job with no add-on to arm, which is the claim the wire
+        // carries for that job: DecodeResult holds a neural result on the other
+        // backend to the opposite - an AMD render that reported an arm would be
+        // claiming a backend it is not running.
+        result_.feature18ArmedBeforeCapture=receipts;
         // Priming is what creates feature 18 and what the add-on arms its detours
         // on; a retained feature skips the loop above entirely, so on that path
         // nothing this phase names happened and it reports nothing rather than a
@@ -1932,7 +1984,7 @@ private:
         // gate), so only the first capture pass of a fresh evaluator can be held
         // to it; a reused evaluator and a software-encoder retry are held to the
         // backend's own count and the timing floor instead.
-        holdToLogReceipt_=request.requireNeural&&!evaluatorReused_;
+        holdToLogReceipt_=receipts&&!evaluatorReused_;
         return std::nullopt;
     }
 
@@ -2118,8 +2170,15 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // which breaks exact source/neural pairing and cache validation. libx264's
     // yuv444p path preserves odd image dimensions. The Lossless rung is FFV1 at
     // any size, and ShouldRetryWithSoftware never retries it.
+    //
+    // An AMD job starts on libx264 for a blunter reason: NVENC is NVIDIA's
+    // encoder, so the hevc_nvenc attempt could only ever fail, and the retry
+    // ladder below would then re-read the source from frame zero to reach the
+    // encoder it could have started on. One attempt instead of two, and the same
+    // packets - the retry path's own claim is that it writes the same output.
     EncoderKind selected = request.quality == EncoderQuality::Lossless ? EncoderKind::Ffv1
-        : (request.width % 2 || request.height % 2) ? EncoderKind::H264Software : EncoderKind::HevcNvenc;
+        : (request.backend == NeuralBackend::Amd || request.width % 2 || request.height % 2)
+            ? EncoderKind::H264Software : EncoderKind::HevcNvenc;
     AttemptResult attempt = job.RunAttempt(selected);
     // A direct NVENC session that failed mid-render goes to the ffmpeg child
     // first (P3.7); a benchmark that named a path gets no fallback at all.
@@ -2763,6 +2822,155 @@ struct ProductionEvaluatorAdapter {
     const SceneCutAccounting& SceneCuts()const{return guides.SceneCuts();}
 };
 
+// The AMD backend behind the same duck-typed surface NeuralRenderJob drives, so
+// an AMD export runs the same pipelined control flow a production job does. That
+// is what InjectedEvaluatorAdapter exists to guarantee for a test, and it is why
+// this is more than a second entry point into AmdLmxxfEvaluator: the job's retry,
+// preroll, receipt and per-frame verdict logic is the thing being reused, and it
+// is the part that has been burned in on NVIDIA hardware.
+//
+// The AMD evaluator is synchronous - one Submit is the whole frame including its
+// readback - so the async shape here is the queue InjectedEvaluatorAdapter keeps
+// rather than D3D12Renderer's readback ring of captures in flight.
+//
+// Everything NGX-specific is ABSENT rather than stubbed, and the job discovers
+// that through its own `if constexpr (requires {...})` probes:
+//   - no PrepareDirectEncode, so the encoder never takes the direct-surface path
+//     and every frame travels the readback this adapter already hands back;
+//   - no SceneCuts, so the report carries no scene-cut tally. Honest rather than
+//     blank: this path is fed an explicit guide field, not an estimator whose
+//     cut detection there would be something to report;
+//   - no StageDetail/ResetStageDetail, because there are no host-side stages to
+//     attribute time to - the whole frame is one runtime call.
+// Five are answered because the job reads them unconditionally:
+//   - CapturePixelFormat is Bgra: there is no NV12/P010 GPU conversion here, so
+//     a job that asked for one is asked to stop asking (see Retained::Run);
+//   - FeatureCreated is the runtime's own bring-up state. AmdLmxxfEvaluator
+//     documents why a prepared session IS the capability on this backend;
+//   - EvaluationCount and NeuralEvaluations are the SAME number here. They are
+//     separate members on the production adapter because NGX's own tally and the
+//     add-on's log disagree and the gap between them is evidence; on one backend
+//     with one counter there is no gap to carry, and reporting two values that
+//     could drift would imply one that cannot exist.
+struct AmdLmxxfEvaluatorAdapter {
+    // Filled by Retained before the first Initialize: the runtime directory and
+    // the log sink. The evaluator brings up its own device and queue.
+    AmdLmxxfEvaluatorConfig config{};
+    std::unique_ptr<AmdLmxxfEvaluator> evaluator;
+    std::deque<JobEvaluation> captured{};
+    // The size this evaluator was brought up for, and which job model it was
+    // created in. The runtime admits a box and arms its chain against it, and
+    // nothing on this path resizes afterwards, so a job that differs is a new
+    // evaluator. The job model is here for the same reason and in the stronger
+    // form: temporalHistory is a create flag, decided once at Create and not
+    // changeable afterwards, so a job that asks for the leases after one that did
+    // not would be handed a session that cannot run them - and would report a
+    // healthy spatial render for it. The guide directories are deliberately NOT
+    // part of this: the evaluator reads them per frame, so they are inputs rather
+    // than bring-up state, and each frame either finds its file or fails.
+    uint32_t width{},height{};
+    bool broughtUpTemporal{};
+    bool reused=false;
+    // Why the last bring-up failed, kept because a failed Initialize drops the
+    // evaluator and LastFailure() would then have nothing left to ask.
+    NeuralRenderFailure broughtUpFailure{NeuralRenderFailure::None};
+
+    bool Reused()const{return reused;}
+    bool Initialize(HWND,uint32_t w,uint32_t h,uint32_t ow,uint32_t oh,double fps,
+                    const GuideControls& guides,PixelLayout,const SourceColorDescription&){
+        if(!ow||!oh){ow=w;oh=h;}
+        // The guides are per-frame inputs on this path rather than bring-up
+        // state, and there is no upscale, so the size and the job model are the
+        // whole inheritance question and a match means there is nothing to rebuild.
+        reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory;
+        if(reused)return true;
+        captured.clear();
+        evaluator=std::make_unique<AmdLmxxfEvaluator>(config);
+        width=w;height=h;broughtUpTemporal=config.temporalHistory;
+        if(evaluator->Initialize(nullptr,w,h,ow,oh,fps,guides))return true;
+        broughtUpFailure=evaluator->LastFailure();
+        LOG("AMD neural runtime did not come up for "<<w<<"x"<<h<<": "<<evaluator->LastError());
+        evaluator.reset();
+        return false;
+    }
+    bool Submit(const JobFrame& frame,const FrameIdentity& id,bool capture,JobEvaluation& out){
+        if(!evaluator)return false;
+        OfflineEvaluation evaluation;
+        if(!evaluator->Submit(OfflineDecodedFrame{frame.bgra,frame.timestamp100ns,frame.discontinuity,
+                                                 frame.frameNumber,frame.sourceGeneration},
+                              id,capture,evaluation))return false;
+        out.bgra=std::move(evaluation.bgra);out.id=evaluation.id;
+        out.neuralGpuMs=evaluator->LastNeuralGpuMs();return true;
+    }
+    // The pixels are already resident by the time this returns, so what the job
+    // gains here is the same thing production gains: the identity the evaluator
+    // stamped travels with them and is judged at the drain rather than here.
+    bool SubmitAsync(const JobFrame& frame,const FrameIdentity& id,JobEvaluation& out){
+        if(!Submit(frame,id,true,out))return false;
+        captured.push_back(out);
+        out.id=FrameIdentity{id.frameNumber,id.pts100ns,id.sourceGeneration,
+                             out.id.historyGeneration,id.jobId,out.id.reset};
+        return true;
+    }
+    uint32_t Pending()const{return uint32_t(captured.size());}
+    // The queue above, not a pool: this is how far the job may run ahead, and the
+    // evaluator has already been paid for by the time an entry lands in it.
+    static constexpr uint32_t MaxPending(){return 2u;}
+    static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Bgra;}
+    bool ResolveOldest(std::vector<uint8_t>& pixels,FrameIdentity& id,double& captureMs){
+        if(captured.empty())return false;
+        pixels=std::move(captured.front().bgra);id=captured.front().id;captured.pop_front();
+        // Zero because the capture was resolved inside Submit, so there is no
+        // readback left to account for at the drain. Reported rather than left
+        // unset: the report's capture column would otherwise inherit whatever the
+        // previous frame's producer wrote.
+        captureMs=0.0;return true;
+    }
+    void DiscardPending(){captured.clear();}
+    bool FeatureCreated()const{return evaluator&&evaluator->FeatureCreated();}
+    uint64_t EvaluationCount()const{return evaluator?evaluator->EvaluationCount():0;}
+    uint64_t NeuralEvaluations()const{return evaluator?evaluator->NeuralEvaluations():0;}
+    // Forwards to the session's own ResetHistory rather than dropping the
+    // evaluator, so a cut or a range start restarts the accumulation without
+    // paying the module load and the arming again.
+    void ResetTemporal(){if(evaluator)evaluator->ResetTemporal();captured.clear();}
+    // There is no hook and no add-on to re-create a feature for on this backend;
+    // AmdLmxxfEvaluator's own comment on FeatureCreated covers why the priming
+    // loop this serves never runs here.
+    bool RequestFeatureRehook()const{return false;}
+    NeuralRenderFailure LastFailure()const{
+        return evaluator?evaluator->LastFailure():broughtUpFailure;
+    }
+    uint64_t PeakLocalVideoMemoryMiB()const{return evaluator?evaluator->PeakLocalVideoMemoryMiB():0;}
+    // The point sample, which is what SampleMemoryFootprint asks for. Production
+    // answers the same question off the D3D12Renderer it owns.
+    uint64_t CurrentLocalVideoMemoryMiB()const{
+        return evaluator?evaluator->CurrentLocalVideoMemoryMiB():0;
+    }
+    // Per-job state on an evaluator about to serve another job. The evaluator is
+    // KEPT, unlike production's device: its whole cost is the module load and the
+    // session arming, and the runtime's history is restarted through the per-frame
+    // reset flag the job's first submit carries, so a rebuild would buy nothing.
+    void ResetForJob(const GuideControls&){DiscardPending();}
+    // Nothing here hands a workset back: this backend has no NGX feature for an
+    // idle helper to release. False says "not released" rather than "nothing to
+    // release", which is the same answer a production adapter gives when its
+    // renderer is gone, so the caller's two-footprint comparison still reads.
+    bool ReleaseFeatureForIdle()const{return false;}
+    void Release(){DiscardPending();evaluator.reset();reused=false;
+                   width=height=0;broughtUpFailure=NeuralRenderFailure::None;}
+    // Diagnostics the evaluator keeps and this struct would otherwise hide. Views
+    // rather than copies, and empty rather than a dummy value with no evaluator:
+    // a caller that logs them gets nothing to print, which is the truth.
+    std::string_view HistoryStatus()const{return evaluator?evaluator->HistoryStatus():std::string_view{};}
+    std::string_view LiveRuntimeStatus()const{return evaluator?evaluator->LiveRuntimeStatus():std::string_view{};}
+    uint64_t TemporalFrames()const{return evaluator?evaluator->TemporalFrames():0;}
+    uint64_t GuideFrames()const{return evaluator?evaluator->GuideFrames():0;}
+    std::string LocalVideoMemoryNote()const{
+        return evaluator?evaluator->LocalVideoMemoryNote():std::string("no evaluator is up");
+    }
+};
+
 // WriteFrame pushes a whole frame, over 30 MB at 4K, into ffmpeg's stdin and blocks
 // whenever the encoder falls behind. Running it on a feeder thread is the missing half of
 // the decoder's frame queue: decode, neural evaluation and encode now all overlap.
@@ -3228,6 +3436,16 @@ struct OfflineNeuralRenderer::Retained {
         : evidence(std::move(runtimeDirectory)) {}
     ProductionSourceAdapter source;
     ProductionEvaluatorAdapter evaluator;
+    // The AMD backend, held BESIDE the production adapter rather than selected in
+    // its place. Two reasons: a session that renders on one card and then the
+    // other should not have to rebuild for the second, and keeping the NVIDIA
+    // adapter unconditionally constructed is what makes it impossible for the AMD
+    // branch to change the NVIDIA path's behaviour - it is never reached.
+    //
+    // Nothing is brought up here. AmdLmxxfEvaluatorAdapter's evaluator stays null
+    // until an AMD job calls Initialize, so a build that never runs one pays for
+    // a struct and no device.
+    AmdLmxxfEvaluatorAdapter amdEvaluator;
     ProductionEncoderAdapter encoder;
     SessionEvidence evidence;
 };
@@ -3244,8 +3462,14 @@ OfflineNeuralRenderer::MemoryFootprint OfflineNeuralRenderer::SampleMemoryFootpr
 {
     MemoryFootprint footprint;
     if (!retained_) return footprint;
-    footprint.localVramMiB = retained_->evaluator.CurrentLocalVideoMemoryMiB();
-    footprint.featureArmed = retained_->evaluator.FeatureCreated();
+    // The device that is resident right now, which is whichever backend's the
+    // last job left behind. Only one of the two adapters ever holds one, so
+    // asking the other would answer a structural zero rather than a measurement.
+    const bool amd = lastBackend_ == NeuralBackend::Amd;
+    footprint.localVramMiB = amd ? retained_->amdEvaluator.CurrentLocalVideoMemoryMiB()
+                                 : retained_->evaluator.CurrentLocalVideoMemoryMiB();
+    footprint.featureArmed = amd ? retained_->amdEvaluator.FeatureCreated()
+                                 : retained_->evaluator.FeatureCreated();
     return footprint;
 }
 
@@ -3253,7 +3477,11 @@ OfflineNeuralRenderer::IdleFeatureRelease OfflineNeuralRenderer::ReleaseIdleFeat
 {
     IdleFeatureRelease observed;
     observed.before = SampleMemoryFootprint();
-    if (retained_) observed.released = retained_->evaluator.ReleaseFeatureForIdle();
+    if (retained_) {
+        observed.released = lastBackend_ == NeuralBackend::Amd
+            ? retained_->amdEvaluator.ReleaseFeatureForIdle()
+            : retained_->evaluator.ReleaseFeatureForIdle();
+    }
     // Sampled after the attempt either way: a release that could not drain the
     // queue still has to report what the adapter says, because "nothing moved"
     // is what separates a refused release from a runtime that declined to free.
@@ -3291,6 +3519,7 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     }
     if(!retained_)retained_=std::make_unique<Retained>(ModuleDirectory());
     Retained& state=*retained_;
+    lastBackend_=request.backend;
     // A job that unwound without closing its decoder must not leave the next
     // one an open one; every other path already closes it.
     state.source.Close();
@@ -3298,6 +3527,11 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     // The reduction reads BGRA; an NV12 source would reach it in the wrong
     // layout, so a reduced job decodes to BGRA whatever the setting says.
     state.source.gpuConversion=request.gpuSourceConversion&&!state.source.reduction.Active();
+    // Split here, after the source is configured and before any evaluator is:
+    // everything above is the decoder both backends share, and everything below
+    // is NGX's own configuration.
+    if(request.backend==NeuralBackend::Amd)
+        return RunAmdJob(request,state,std::move(progress),stop,segments,std::move(coldStart));
     state.evaluator.gpuColorConversion=request.gpuColorConversion;
     {
         const ProcessingInput model=ProcessingSize(request.width,request.height,request.processingScale);
@@ -3347,5 +3581,140 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     residency_=state.evaluator.Reused()
         ?(inheritedArmedFeature?Residency::FeatureReused:Residency::FeatureRecreated)
         :inheritedArmedFeature?Residency::FeatureRecreated:Residency::Initialized;
+    return result;
+}
+
+// One job on the AMD backend. A separate function rather than a branch inside
+// Run, because the two paths differ in more than a table of settings: this one
+// has no ReShade receipt to open, no feature-18 arming to wait for, no upscale
+// carrier and no direct-NVENC surfaces to hand the encoder. Folded together,
+// every NVIDIA line would read as though it might be conditional on the backend.
+//
+// What it does share is everything that decides whether the output is honest.
+// RunJob's preroll, its retry ladder, its per-frame verdicts and its encoder
+// handoff are the same code, reached with an evaluator of a different type -
+// which is the whole point of the duck-typed surface, and the reason this can be
+// added without touching any of it.
+NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& request,
+                                                   Retained& state, ProgressCallback progress,
+                                                   std::stop_token stop,
+                                                   const NeuralSegmentSink& segments,
+                                                   NeuralColdStartCallback coldStart)
+{
+    // The two things this backend cannot do, refused before a device comes up
+    // rather than after. The runtime admits a fixed box and returns the frame at
+    // the size it was given, so an upscale is not something it can be asked for,
+    // and a processing-scale reduction would be silently ignored - which is the
+    // one failure mode this codebase refuses to have.
+    if(request.processingScale!=100)
+        return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
+            .detail=L"The AMD backend runs the model at the source size; a processing scale below 100 is not implemented for it."};
+    const uint32_t outputWidth=request.outputWidth?request.outputWidth:request.width;
+    const uint32_t outputHeight=request.outputHeight?request.outputHeight:request.height;
+    if(outputWidth!=request.width||outputHeight!=request.height)
+        return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
+            .detail=L"The AMD backend does not upscale; an output larger than the source is not implemented for it."};
+
+    // The job goes to RunJob unchanged. It used to go as a copy with
+    // requireNeural cleared, which switched NVIDIA's receipt verdicts off - and
+    // relabelled the render at the same time, because that flag is also what the
+    // result says about its own frames: the helper published every AMD job as
+    // "Super Resolution-only" and the parent refused it as the answer to a
+    // question it had not asked. The backend, not the claim, is what decides
+    // which evidence a job is held to; see NvidiaEvidenceRequired in
+    // NeuralRenderJob.
+    state.amdEvaluator.config.runtimeDirectory=
+        amd_lmxxf::ResolveRuntimeDirectory(request.amdRuntimeDirectory);
+    // Deliberately no log sink. This evaluator logs per call and per frame - the
+    // guide line, every ABI status - and that log file is the one SessionEvidence
+    // measures to decide whether a helper may serve another job. A backend whose
+    // chatter is not evidence has no business growing it. Failures still surface:
+    // the adapter logs the bring-up error itself and RunJob reports the detail.
+    state.amdEvaluator.config.log={};
+    // Guides from files, when a benchmark asked for them. AmdLmxxfEvaluator takes
+    // its two directories directly rather than through guide_files::Sources, so
+    // the mapping is spelled out: this is the path run 6 and run 7 measured, and
+    // a zero-field arm differs from a true-field arm only in one directory's
+    // contents. An empty directory is not a fallback, it is the constant, which
+    // is why an unhonourable request is refused below rather than mapped onto one.
+    state.amdEvaluator.config.motionGuideDirectory =
+        request.guideFiles.motion==guide_files::MotionSource::File
+            ?request.guideFiles.motionDirectory:std::filesystem::path{};
+    state.amdEvaluator.config.depthGuideDirectory =
+        request.guideFiles.depthFromFile?request.guideFiles.depthDirectory:std::filesystem::path{};
+    const bool fileGuides=!state.amdEvaluator.config.motionGuideDirectory.empty()||
+                          !state.amdEvaluator.config.depthGuideDirectory.empty();
+    // The runtime engages its temporal model under the recording-lease lifecycle
+    // and nowhere else, and the guides it fuses are the caller's. This backend
+    // has no estimator - that is the expensive half docs/AMD-LMXXF-INTEGRATION-
+    // PLAN-REV2-zh.md section 5.3 leaves to a later stage - so the only job that
+    // can ask for the temporal model is one that brought the guides as files.
+    // Asking for the leases without them would fuse two constants into content
+    // that moves, which is a result about a still scene no caller asked for.
+    state.amdEvaluator.config.temporalHistory=fileGuides;
+    // What this backend cannot be asked for. Each is a benchmark switch that
+    // exists to change what the NVIDIA path renders, and here it would change
+    // nothing at all - a run that reported the flag's arm while rendering the
+    // other one is a measurement of neither. The estimator itself is not on this
+    // list: it is what a caller who supplied files for one guide and left the
+    // other out is already asking for, and the constant is this backend's honest
+    // answer to it.
+    if(request.guideFiles.motion==guide_files::MotionSource::Cpu)
+        return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
+            .detail=L"The AMD backend has no CPU block matcher; motion must come from guide files or be the constant."};
+    if(!request.guideFiles.dumpDirectory.empty())
+        return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
+            .detail=L"The AMD backend consumes guides rather than producing them; a guide dump asks for the estimator's field, which it does not have."};
+    if(request.guideFiles.zeroMotionTest)
+        return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
+            .detail=L"The zero-motion test tunes the neural motion policy, which the AMD backend does not run."};
+    if(state.amdEvaluator.config.runtimeDirectory.empty())
+        return NeuralRenderResult{.failure=NeuralRenderFailure::Preflight,
+            .detail=L"The AMD neural runtime directory could not be resolved; set DLSS5_AMD_RUNTIME_DIR or put amd-neural-runtime beside the module."};
+    // One line per job, for the reason production writes one: two renders that
+    // differ only here are different pictures, and a log that does not say which
+    // one it made cannot tell them apart. The temporal mode is on this line
+    // because it is the one setting whose effect is otherwise invisible: it is
+    // not in any result field, and a spatial render of moving content looks like
+    // a temporal one in every number this job publishes.
+    LOG("Neural backend: "<<NeuralBackendName(request.backend)
+        <<" runtime="<<state.amdEvaluator.config.runtimeDirectory.string()
+        <<" guides=motion:"<<(state.amdEvaluator.config.motionGuideDirectory.empty()
+            ?std::string("constant"):state.amdEvaluator.config.motionGuideDirectory.string())
+        <<" depth:"<<(state.amdEvaluator.config.depthGuideDirectory.empty()
+            ?std::string("constant"):state.amdEvaluator.config.depthGuideDirectory.string())
+        <<" temporal="<<(fileGuides?"on, under the recording-lease lifecycle"
+            :"off, this backend has no guide estimator and this job brought no guide files")
+        <<" feature18-receipt=not-applicable, this backend has no ReShade log");
+
+    // Read before the per-job reset, so a bring-up the previous job left armed is
+    // reported as inherited rather than as this job's cost.
+    const bool inheritedArmedDevice=state.amdEvaluator.FeatureCreated();
+    state.amdEvaluator.ResetForJob(request.guides);
+    // False because there is no feature to inherit on this backend: the job pays
+    // the module load and the session arming every time. The reuse that exists
+    // here is the device - AmdLmxxfEvaluatorAdapter::Reused reports it, and that
+    // is what Residency reports below.
+    state.evidence.BeginJob(false);
+    NeuralRenderResult result=RunJob(request,std::move(progress),stop,state.source,
+        state.amdEvaluator,state.encoder,std::ref(state.evidence),
+        []{return SteadyClock::now();},
+        [pauseEvent=request.pauseEvent]{
+            return pauseEvent&&WaitForSingleObject(pauseEvent,0)==WAIT_OBJECT_0;
+        },segments,std::move(coldStart));
+    residency_=state.amdEvaluator.Reused()
+        ?(inheritedArmedDevice?Residency::FeatureReused:Residency::FeatureRecreated)
+        :Residency::Initialized;
+    // The runtime's own view of the job, which is otherwise only reachable from
+    // inside the evaluator. history= is the one that says whether the temporal
+    // model ran at all; it reports "off" and no error when it does not, and it is
+    // empty when no lease frame ran - which is not the same thing as "off", so it
+    // is spelled out rather than left blank.
+    const std::string history=state.amdEvaluator.TemporalFrames()
+        ?std::string(state.amdEvaluator.HistoryStatus()):std::string("not-asked(no lease frame ran)");
+    LOG("AMD neural render: history="<<history
+        <<" lease-frames="<<state.amdEvaluator.TemporalFrames()
+        <<" guide-frames="<<state.amdEvaluator.GuideFrames()
+        <<" local-vram="<<state.amdEvaluator.LocalVideoMemoryNote());
     return result;
 }

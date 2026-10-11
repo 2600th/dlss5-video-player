@@ -271,10 +271,20 @@ endif()
 # "skipped" would hide the regressions a GPU runner exists to catch. Each
 # smoke opens with gpu_test_gate::SkipWithoutGpu(), so `ctest -L gpu` on a
 # machine with no adapter skips rather than reporting five hard failures.
-set_tests_properties(UpscalingGpuSmoke UpscalingSrQualitySmoke DebugViewGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
-    FrameGenerationSmoke FrameGenerationSmokeTextured FrameGenerationSmokeSceneCut
-    FrameGenerationSmokeStreamSource NeuralRangeRenderSmoke NvencDirectIdentitySmoke NeuralDirectEncodeSmoke
-    TurnedDecodeGpuSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125)
+set(HARDWARE_GPU_SMOKES
+    UpscalingGpuSmoke UpscalingSrQualitySmoke DebugViewGpuSmoke MediaGpuSmoke DlssgProbeSmoke
+    DlssgEvaluateSmoke FrameGenerationSmoke NeuralRangeRenderSmoke NvencDirectIdentitySmoke
+    NeuralDirectEncodeSmoke TurnedDecodeGpuSmoke)
+# The three clip-driven frame-generation variants are only registered inside the
+# FFMPEG guard above, because their clips are generated with ffmpeg.exe at build
+# time. Naming them here unconditionally is a configure error - set_tests_properties
+# fails on a test nobody registered - and FFmpeg is optional at configure time
+# (see FFMPEG_STAGED_DIR), so a tree without it has to configure anyway.
+if(EXISTS "${FFMPEG_STAGED_DIR}/ffmpeg.exe")
+    list(APPEND HARDWARE_GPU_SMOKES
+        FrameGenerationSmokeTextured FrameGenerationSmokeSceneCut FrameGenerationSmokeStreamSource)
+endif()
+set_tests_properties(${HARDWARE_GPU_SMOKES} PROPERTIES LABELS gpu SKIP_RETURN_CODE 125)
 # Seconds on an RTX 5090 - the trigger is the preroll, not the pixel count,
 # so this stays at 640x360. The ceiling is for a slower card, not for a
 # hang; a hang is what the timeout is meant to catch.
@@ -318,3 +328,40 @@ set_tests_properties(ExportMatrixSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 12
 # FrameGenerationSmoke decodes, generates and encodes a whole clip, so it
 # belongs with the two smokes that render rather than with the 300 s probes.
 set_tests_properties(UpscalingGpuSmoke UpscalingSrQualitySmoke MediaGpuSmoke FrameGenerationSmoke PROPERTIES TIMEOUT 900)
+
+# Stage A of docs/AMD-LMXXF-INTEGRATION-PLAN-REV2-zh.md: the only target that
+# loads the third-party LmxxfNrRuntime.dll and drives it against a real device.
+# It needs an AMD RDNA4 adapter and the runtime pack staged under
+# amd-neural-runtime/ - a blob the repository deliberately does not carry and
+# never commits - so it is labelled `gpu` and skips (125) when the pack is
+# absent. The quick preset excludes the label; the hardware preset runs it.
+# The pack's location is compiled in, because ctest's working directory is the
+# build tree and the pack lives beside the sources.
+dlss_video_player_test(AmdLmxxfRuntimeProbe tests/AmdLmxxfRuntimeProbe.cpp)
+target_compile_definitions(AmdLmxxfRuntimeProbe PRIVATE
+    "DLSS5_AMD_RUNTIME_DIR=\"${CMAKE_SOURCE_DIR}/amd-neural-runtime\"")
+add_test(NAME AmdLmxxfRuntimeProbe COMMAND AmdLmxxfRuntimeProbe)
+set_tests_properties(AmdLmxxfRuntimeProbe PROPERTIES LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 300)
+
+# Stage B of the same plan: src/AmdLmxxfEvaluator.h driven through the offline
+# renderer's injection path, so the job's source restart, seek reset, pipelined
+# capture ring, encoder-failure retry and result verdicts are the ones the smoke
+# exercises - with the real LmxxfNrRuntime.dll behind the evaluator and a
+# synthetic 1080p30 source in front of it. Same AMD RDNA4 adapter and the same
+# staged amd-neural-runtime pack as the probe above, so it skips (125) on a
+# machine without them. The long run is 300 frames (10 s at 30 fps), which is
+# stage B's own exit criterion, and the timeout is for a slower card rather than
+# for a hang - a hang is what the timeout is meant to catch.
+dlss_video_player_test(AmdLmxxfEvaluatorSmoke tests/AmdLmxxfEvaluatorSmoke.cpp)
+# Run 7 measures on decoded video, so it needs a decoder and a clip. Both are
+# repository assets rather than installed ones: ffmpeg is staged into external/ by
+# tools/fetch_ffmpeg_helpers.ps1 and the clip is tracked in git. The test skips the
+# run when either is absent instead of failing, so a checkout without the staged
+# tools still runs everything else on this target.
+target_compile_definitions(AmdLmxxfEvaluatorSmoke PRIVATE
+    "DLSS5_AMD_RUNTIME_DIR=\"${CMAKE_SOURCE_DIR}/amd-neural-runtime\""
+    "DLSS5_FFMPEG_PATH=\"${CMAKE_SOURCE_DIR}/external/ffmpeg/bin/ffmpeg.exe\""
+    "DLSS5_REAL_CLIP_PATH=\"${CMAKE_SOURCE_DIR}/tools/benchmark/fixtures/demo-capture-20260912.mp4\"")
+add_test(NAME AmdLmxxfEvaluatorSmoke COMMAND AmdLmxxfEvaluatorSmoke)
+set_tests_properties(AmdLmxxfEvaluatorSmoke PROPERTIES
+    LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 1800)

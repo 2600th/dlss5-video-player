@@ -61,8 +61,15 @@ std::wstring UnlockedRuntimeModulesRefusal(const std::filesystem::path& runtimeD
 // Both, the lock first, which is the order a live render meets them in. Empty
 // when neither refuses. A cancelled check leaves hashes unverified and so
 // reads as drift; the caller asks its stop token before believing it.
+//
+// `backend` picks the lock AND the tree it is checked against, because the two
+// stacks have nothing in common to check: the NVIDIA one is an embedded document
+// about a directory of third-party ReShade and Streamline files, and the AMD one
+// is the digest manifests the runtime's own sync tool writes beside its modules.
+// Asking either about the other's tree fails every row, which is exactly what an
+// AMD job used to get before this parameter existed.
 std::wstring StageExportRuntimeRefusal(const std::filesystem::path& runtimeDirectory, const RuntimeLock& lock,
-                                       std::stop_token stop);
+                                       std::stop_token stop, NeuralBackend backend = NeuralBackend::Nvidia);
 
 // Everything a neural render writes into the add-on's [RenoDX.DLSS5]: the
 // Neural settings, and the model's place against the carrier's upscale that

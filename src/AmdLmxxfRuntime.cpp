@@ -1,9 +1,58 @@
 #include "AmdLmxxfRuntime.h"
 
+#include "PlatformPaths.h"
+
 #include <system_error>
 #include <utility>
 
 namespace amd_lmxxf {
+
+std::filesystem::path ResolveRuntimeDirectory(const std::filesystem::path& explicitDirectory)
+{
+    namespace fs = std::filesystem;
+    const auto holdsRuntime = [](const fs::path& directory) {
+        if (directory.empty()) return false;
+        std::error_code error;
+        return fs::is_regular_file(directory / L"LmxxfNrRuntime.dll", error) && !error;
+    };
+    if (!explicitDirectory.empty())
+        return holdsRuntime(explicitDirectory) ? explicitDirectory : fs::path{};
+    // Not getenv: the name is ASCII but the value is a Windows path, so the wide
+    // API is the one that cannot mangle it. Retried because the value can change
+    // between the size query and the read.
+    std::wstring fromEnvironment;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const DWORD needed = GetEnvironmentVariableW(L"DLSS5_AMD_RUNTIME_DIR", nullptr, 0);
+        if (needed == 0) break;
+        fromEnvironment.assign(needed, L'\0');
+        const DWORD length =
+            GetEnvironmentVariableW(L"DLSS5_AMD_RUNTIME_DIR", fromEnvironment.data(), needed);
+        if (length < needed) {
+            fromEnvironment.resize(length);
+            break;
+        }
+        fromEnvironment.clear();
+    }
+    if (!fromEnvironment.empty()) {
+        const fs::path candidate(fromEnvironment);
+        if (holdsRuntime(candidate)) return candidate;
+    }
+    const fs::path module = platform_paths::ModuleDirectory().value_or(fs::path{});
+    if (!module.empty()) {
+        // A packaged helper sits in `neural-runtime/` beside the player, and the
+        // runtime tree ships beside the player, not inside the helper - so the
+        // first candidate is that parent. The two above it are the checkout
+        // layout, where the tree is at the repository root and the executable is
+        // two directories below it: build/<config>[/neural-runtime].
+        const fs::path base = module.filename() == L"neural-runtime" ? module.parent_path() : module;
+        for (const fs::path& candidate : {base / L"amd-neural-runtime",
+                                          base.parent_path() / L"amd-neural-runtime",
+                                          base.parent_path().parent_path() / L"amd-neural-runtime"})
+            if (holdsRuntime(candidate)) return candidate;
+    }
+    return {};
+}
+
 namespace {
 
 std::wstring FailureText(RuntimeFailure failure, std::wstring_view detail)
@@ -112,18 +161,25 @@ bool Runtime::Load(const std::filesystem::path& runtimeDirectory, std::wstring* 
         return false;
     }
 
+    // One call, one contract. The table this header declares is the table the
+    // runtime must hand back: the size is part of the ABI, and the runtime
+    // rejects anything else rather than truncating. Retrying with a shorter
+    // legacy table is not a downgrade path - the runtime answers
+    // INVALID_ARGUMENT, and the tail it never wrote would be indistinguishable
+    // from a populated one.
     api_.struct_size = sizeof(api_);
     const auto getApiFn = reinterpret_cast<int32_t (*)(uint32_t, LmxxfNrApi*)>(getApi);
-    int32_t result = getApiFn(LMXXF_NR_ABI_VERSION, &api_);
-    if (result == static_cast<int32_t>(LMXXF_NR_INVALID_ARGUMENT)) {
-        api_ = {};
-        api_.struct_size = LMXXF_NR_API_V1_SIZE;
-        result = getApiFn(LMXXF_NR_ABI_VERSION, &api_);
-    }
+    const int32_t result = getApiFn(LMXXF_NR_ABI_VERSION, &api_);
     if (result != static_cast<int32_t>(LMXXF_NR_OK)) {
         if (error) {
-            *error = FailureText(RuntimeFailure::GetApiFailed,
-                                 L"status=" + std::to_wstring(result));
+            std::wstring detail = L"status=" + std::to_wstring(result);
+            detail += L" (" + WideAscii(LmxxfNrStatusName(result)) + L")";
+            detail += L"; this build pins abi_version ";
+            detail += std::to_wstring(LMXXF_NR_ABI_VERSION);
+            detail += L" with a ";
+            detail += std::to_wstring(sizeof(LmxxfNrApi));
+            detail += L"-byte table";
+            *error = FailureText(RuntimeFailure::GetApiFailed, detail);
         }
         Unload();
         return false;

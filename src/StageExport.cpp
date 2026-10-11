@@ -6,6 +6,7 @@
 #include <string_view>
 #include <system_error>
 
+#include "AmdLmxxfRuntime.h"
 #include "FrameGenerationPass.h"
 #include "Log.h"
 #include "NeuralWorker.h"
@@ -75,7 +76,18 @@ std::wstring UnlockedRuntimeModulesRefusal(const std::filesystem::path& runtimeD
     return unlocked?runtime_modules::UnlockedModulesRefusal(*unlocked):std::wstring{};
 }
 
-std::wstring StageExportRuntimeRefusal(const std::filesystem::path& runtimeDirectory,const RuntimeLock& lock,std::stop_token stop){
+std::wstring AmdRuntimeLockRefusal(std::span<const AmdRuntimeCheck> checks){
+    if(AmdRuntimeLockSatisfied(checks))return {};
+    return L"The AMD neural runtime does not match its own manifests: "+DescribeAmdRuntimeLockDrift(checks);
+}
+
+std::wstring StageExportRuntimeRefusal(const std::filesystem::path& runtimeDirectory,const RuntimeLock& lock,
+                                       std::stop_token stop,NeuralBackend backend){
+    // The two backends do not share a tree, a loader or a set of digests, so they
+    // do not share a lock. The NVIDIA branch is unchanged; the AMD one checks the
+    // tree against the SHA256SUMS the runtime ships with itself.
+    if(backend==NeuralBackend::Amd)
+        return AmdRuntimeLockRefusal(VerifyAmdRuntimeLock(runtimeDirectory,stop));
     const auto checks=VerifyRuntimeLock(runtimeDirectory,lock,stop);
     if(std::wstring refusal=RuntimeLockRefusal(checks);!refusal.empty())return refusal;
     return UnlockedRuntimeModulesRefusal(runtimeDirectory,lock);
@@ -130,6 +142,7 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         request.sourceDeband=job.sourceDeband;
         request.suppliedExposure=job.suppliedExposure;
         request.requireNeural=plan.requireNeural;
+        request.backend=plan.backend;
         const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;
         if(upscales){
             request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
@@ -139,15 +152,27 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         const wchar_t* passKey=plan.requireNeural
             ?(plan.outputWidth!=job.sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
             :L"export.progress.pass_sr";
-        const auto runtimeDirectory=job.helpers/L"neural-runtime";
+        // Which tree this job's backend loads its module from. The worker
+        // executable always comes from the helper package; only the module the
+        // job loads is backend-specific, and on AMD it is not in that package.
+        const std::filesystem::path runtimeDirectory=plan.backend==NeuralBackend::Amd
+            ?amd_lmxxf::ResolveRuntimeDirectory({})
+            :job.helpers/L"neural-runtime";
+        if(plan.backend==NeuralBackend::Amd&&runtimeDirectory.empty())
+            return {StageExportStatus::Refused,L"The AMD neural runtime directory could not be resolved; set DLSS5_AMD_RUNTIME_DIR or put amd-neural-runtime beside the module."};
         // Refused on what refuses a live render, before anything is written:
         // a file that drifted from the lock, or a module the lock does not
         // name beside feature 18. A Super Resolution-only pass too (P1.33): it
         // is not presented as neural, but its helper loads the same proxy and
         // Streamline modules from this directory, and the helper's own check
         // of stray modules at startup came after the settings were written.
+        //
+        // The lock argument is the NVIDIA document and is not read on the AMD
+        // path, which checks the resolved tree against its own manifests; it is
+        // still materialised here because the embedded lock is a build artifact
+        // both branches of this one call site share.
         {
-            const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,job.runtimeLock?*job.runtimeLock:EmbeddedRuntimeLock(),stop);
+            const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,job.runtimeLock?*job.runtimeLock:EmbeddedRuntimeLock(),stop,plan.backend);
             if(stop.stop_requested())return {StageExportStatus::Cancelled,{}};
             if(!refusal.empty()){
                 LOG("Stage export refused before the helper: "<<utf8_text::FromWide(refusal));
@@ -156,27 +181,38 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         }
         // One writer at a time, exactly as a live render: the settings written
         // below and the helper's proxy log are shared per runtime directory, and
-        // `--render` can run beside a player that is rendering.
+        // `--render` can run beside a player that is rendering. The lease is a
+        // named mutex derived from the directory, so on AMD it serialises AMD
+        // jobs against each other and costs the tree nothing on disk.
         NeuralRuntimeLease runtimeLease(runtimeDirectory);
         if(!runtimeLease.Held())
             return {StageExportStatus::Refused,L"Another neural render is using the experimental runtime. Wait for it to finish, then try again."};
-        // An idle resident helper from an earlier live job still holds the
-        // device, its feature-18 workset and the runtime's ReShade.log. A
-        // second helper beside it risks the VRAM a small card does not have,
-        // and moves the proxy's log to ReShade.log1 where the evidence reader
-        // may not look. It goes first, as it does before a preflight probe -
-        // under the lease, which every job thread that uses it also holds.
-        if(job.releaseResidentHelper)job.releaseResidentHelper();
-        // The add-on state the job needs, with the neural settings when it runs
-        // the model. The helper checks the same state itself and relaunches when
-        // it had to change it; writing it here first saves that relaunch.
-        const auto overrides=plan.requireNeural
-            ?RenderAddonOverrides(runtimeDirectory/L"ReShade.ini",job.neuralSettings,request.processingScale)
-            :std::vector<NeuralAddonOverride>{};
-        const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",plan.requireNeural,overrides);
-        if(!configured.ok){
-            LOG("Stage export could not prepare the neural add-on: "<<utf8_text::FromWide(configured.error));
-            return {StageExportStatus::Failed,L"The neural settings could not be prepared."};
+        // Everything between the lease and the launch belongs to the ReShade
+        // stack: an idle resident helper standing down, and the add-on state a
+        // job writes into ReShade.ini. The AMD backend has neither - its module
+        // is loaded by the helper process itself and configured from the request
+        // the worker was handed - so an AMD job goes from the lease straight to
+        // the launch rather than through two steps that would write into a
+        // directory with no ReShade.ini and wait on a helper that is not there.
+        if(plan.backend==NeuralBackend::Nvidia){
+            // An idle resident helper from an earlier live job still holds the
+            // device, its feature-18 workset and the runtime's ReShade.log. A
+            // second helper beside it risks the VRAM a small card does not have,
+            // and moves the proxy's log to ReShade.log1 where the evidence reader
+            // may not look. It goes first, as it does before a preflight probe -
+            // under the lease, which every job thread that uses it also holds.
+            if(job.releaseResidentHelper)job.releaseResidentHelper();
+            // The add-on state the job needs, with the neural settings when it runs
+            // the model. The helper checks the same state itself and relaunches when
+            // it had to change it; writing it here first saves that relaunch.
+            const auto overrides=plan.requireNeural
+                ?RenderAddonOverrides(runtimeDirectory/L"ReShade.ini",job.neuralSettings,request.processingScale)
+                :std::vector<NeuralAddonOverride>{};
+            const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",plan.requireNeural,overrides);
+            if(!configured.ok){
+                LOG("Stage export could not prepare the neural add-on: "<<utf8_text::FromWide(configured.error));
+                return {StageExportStatus::Failed,L"The neural settings could not be prepared."};
+            }
         }
         report({1,passes,passKey,0,0});
         const NeuralRenderResult result=RunNeuralWorker(job.helpers/L"neural-runtime"/L"NeuralWorker.exe",request,

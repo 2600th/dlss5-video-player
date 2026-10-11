@@ -92,6 +92,26 @@ struct NeuralRenderRequest {
     // published as neural; this job makes the opposite claim and is held to
     // that instead: no feature-18 evaluation may appear in its session log.
     bool requireNeural{true};
+    // Which backend decides what the flag above is a claim ABOUT and, more
+    // precisely, which evidence is asked of the job at all. That mechanism is
+    // NVIDIA's add-on and its log plus NGX's own per-frame GPU time, so on Amd
+    // neither the receipt nor the calibrated timing floor can exist no matter how
+    // healthy the job is - the job is not held to either, and is held instead to
+    // the verdicts that were never NVIDIA's: the runtime's own evaluation count
+    // must have advanced at least once per captured frame, and the result must
+    // carry that many verified frames. Both read the evaluator, not a log.
+    //
+    // The flag above is left standing on Amd rather than cleared to skip those
+    // verdicts. It is not a switch for them: it says the output is neural, it is
+    // published to the parent in exactly that sense (NeuralRenderResult::neural),
+    // and clearing it would mislabel every frame the job wrote.
+    NeuralBackend backend{NeuralBackend::Nvidia};
+    // Where LmxxfNrRuntime.dll and its module tree live, for an AMD job. Empty
+    // (the normal case) means resolve it: DLSS5_AMD_RUNTIME_DIR, then
+    // `amd-neural-runtime` beside the module or beside the helper package's
+    // parent. Set it to pin a specific tree - a second runtime version, or a
+    // checkout the environment does not name. Ignored on the NVIDIA backend.
+    std::filesystem::path amdRuntimeDirectory;
     // The resolution the model runs at, as a percentage of the source: one of
     // kProcessingScaleRungs (UpscalingPolicy.h). Below 100 the job area-reduces
     // each frame to ProcessingSize, runs the carrier as true Super Resolution
@@ -379,4 +399,15 @@ private:
     struct Retained;
     std::unique_ptr<Retained> retained_;
     Residency residency_{Residency::Initialized};
+    // Which backend the last production Run selected, so the device questions
+    // above - footprint and idle release - ask the adapter that has a device.
+    // Meaningless before the first Run, when there is nothing resident either.
+    NeuralBackend lastBackend_{NeuralBackend::Nvidia};
+    // One job on the AMD backend. Split out rather than inlined into Run because
+    // the per-job configuration and the verdicts differ enough that sharing the
+    // body would mean every NVIDIA line read as if it might be conditional.
+    NeuralRenderResult RunAmdJob(const NeuralRenderRequest& request, Retained& state,
+                                 ProgressCallback progress, std::stop_token stop,
+                                 const NeuralSegmentSink& segments,
+                                 NeuralColdStartCallback coldStart);
 };

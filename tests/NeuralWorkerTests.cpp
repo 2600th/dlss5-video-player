@@ -1989,26 +1989,26 @@ void protocol_rejects_inconsistent_results_test()
     okWithFailure.evidence = {true, true, true, true, false, 1};
     okWithFailure.frameCount = okWithFailure.nativeEvaluations = okWithFailure.verifiedNeuralFrames = 1;
     okWithFailure.duration100ns = 1;
-    CHECK(DecodeResult(EncodeResult(okWithFailure)).has_value());
+    CHECK(DecodeResult(EncodeResult(okWithFailure), NeuralBackend::Nvidia).has_value());
     okWithFailure.failure = NeuralRenderFailure::GpuStall;
-    CHECK(!DecodeResult(EncodeResult(okWithFailure)).has_value());
+    CHECK(!DecodeResult(EncodeResult(okWithFailure), NeuralBackend::Nvidia).has_value());
     NeuralRenderResult failedWithoutKind;
-    CHECK(!DecodeResult(EncodeResult(failedWithoutKind)).has_value());
+    CHECK(!DecodeResult(EncodeResult(failedWithoutKind), NeuralBackend::Nvidia).has_value());
     NeuralRenderResult cancelledWrongKind;
     cancelledWrongKind.cancelled = true;
     cancelledWrongKind.failure = NeuralRenderFailure::Source;
-    CHECK(!DecodeResult(EncodeResult(cancelledWrongKind)).has_value());
+    CHECK(!DecodeResult(EncodeResult(cancelledWrongKind), NeuralBackend::Nvidia).has_value());
     cancelledWrongKind.failure = NeuralRenderFailure::Cancelled;
-    CHECK(DecodeResult(EncodeResult(cancelledWrongKind)).has_value());
+    CHECK(DecodeResult(EncodeResult(cancelledWrongKind), NeuralBackend::Nvidia).has_value());
     // The reserved bytes are the only growth room left in WireResult; a helper that
     // writes anything there is not speaking this version of the protocol.
     // Byte 10 became superResolutionOnly; the five after it are still reserved.
     auto reservedInUse = EncodeResult(cancelledWrongKind);
     reservedInUse[11] = std::byte{1};
-    CHECK(!DecodeResult(reservedInUse).has_value());
+    CHECK(!DecodeResult(reservedInUse, NeuralBackend::Nvidia).has_value());
     auto notBoolean = EncodeResult(cancelledWrongKind);
     notBoolean[10] = std::byte{2};
-    CHECK(!DecodeResult(notBoolean).has_value());
+    CHECK(!DecodeResult(notBoolean, NeuralBackend::Nvidia).has_value());
 
     // A neural result round-trips as neural, and zero on the wire - what every
     // helper that wrote byte 10 as reserved produced - still reads as neural.
@@ -2016,7 +2016,7 @@ void protocol_rejects_inconsistent_results_test()
     neural.failure = NeuralRenderFailure::None;
     const auto encodedNeural = EncodeResult(neural);
     CHECK(encodedNeural[10] == std::byte{0});
-    const auto decodedNeural = DecodeResult(encodedNeural);
+    const auto decodedNeural = DecodeResult(encodedNeural, NeuralBackend::Nvidia);
     CHECK(decodedNeural.has_value() && decodedNeural->neural);
 
     // Super Resolution alone: no verified neural frame, nothing armed, no
@@ -2028,7 +2028,7 @@ void protocol_rejects_inconsistent_results_test()
     upscaleOnly.duration100ns = 1;
     const auto encodedUpscale = EncodeResult(upscaleOnly);
     CHECK(encodedUpscale[10] == std::byte{1});
-    const auto decodedUpscale = DecodeResult(encodedUpscale);
+    const auto decodedUpscale = DecodeResult(encodedUpscale, NeuralBackend::Nvidia);
     CHECK(decodedUpscale.has_value());
     if (decodedUpscale) {
         CHECK(!decodedUpscale->neural);
@@ -2040,17 +2040,41 @@ void protocol_rejects_inconsistent_results_test()
     // evaluating is not an upscale-only render, and cannot be accepted as one.
     NeuralRenderResult claimsVerified = upscaleOnly;
     claimsVerified.verifiedNeuralFrames = 5;
-    CHECK(!DecodeResult(EncodeResult(claimsVerified)).has_value());
+    CHECK(!DecodeResult(EncodeResult(claimsVerified), NeuralBackend::Nvidia).has_value());
     NeuralRenderResult claimsArmed = upscaleOnly;
     claimsArmed.feature18ArmedBeforeCapture = true;
-    CHECK(!DecodeResult(EncodeResult(claimsArmed)).has_value());
+    CHECK(!DecodeResult(EncodeResult(claimsArmed), NeuralBackend::Nvidia).has_value());
     NeuralRenderResult addonRan = upscaleOnly;
     addonRan.evidence.feature18Evaluated = true;
-    CHECK(!DecodeResult(EncodeResult(addonRan)).has_value());
+    CHECK(!DecodeResult(EncodeResult(addonRan), NeuralBackend::Nvidia).has_value());
     // And a neural result is still held to the whole verification set.
     NeuralRenderResult neuralWithoutEvidence = neural;
     neuralWithoutEvidence.evidence = {};
-    CHECK(!DecodeResult(EncodeResult(neuralWithoutEvidence)).has_value());
+    CHECK(!DecodeResult(EncodeResult(neuralWithoutEvidence), NeuralBackend::Nvidia).has_value());
+
+    // The AMD backend has no add-on, so its neural claim is proved by the
+    // runtime's own tally instead of by a receipt - and the two sets do not
+    // substitute for one another, which is the whole reason the decoder is told
+    // which backend answered.
+    NeuralRenderResult amdNeural;
+    amdNeural.ok = true;
+    amdNeural.frameCount = amdNeural.nativeEvaluations = amdNeural.verifiedNeuralFrames = 5;
+    amdNeural.duration100ns = 1;
+    CHECK(DecodeResult(EncodeResult(amdNeural), NeuralBackend::Amd).has_value());
+    // Read against NVIDIA's set it is missing everything that set is made of.
+    CHECK(!DecodeResult(EncodeResult(amdNeural), NeuralBackend::Nvidia).has_value());
+    // A runtime that evaluated fewer frames than were captured is the AMD
+    // equivalent of an unproven neural claim, and is refused.
+    NeuralRenderResult amdTallyShort = amdNeural;
+    amdTallyShort.nativeEvaluations = 4;
+    CHECK(!DecodeResult(EncodeResult(amdTallyShort), NeuralBackend::Amd).has_value());
+    // Reporting an arm on a backend with no add-on to arm means the helper ran
+    // the other stack, so the result names a backend the parent did not launch.
+    NeuralRenderResult amdClaimingArm = amdNeural;
+    amdClaimingArm.feature18ArmedBeforeCapture = true;
+    CHECK(!DecodeResult(EncodeResult(amdClaimingArm), NeuralBackend::Amd).has_value());
+    // The Super Resolution-only claim is the same absence on both backends.
+    CHECK(DecodeResult(encodedUpscale, NeuralBackend::Amd).has_value());
     NeuralRenderProgress recoveringWithoutKind;
     recoveringWithoutKind.phase = NeuralRenderPhase::Recovering;
     const WireProgress wire = EncodeProgress(recoveringWithoutKind);

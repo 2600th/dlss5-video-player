@@ -15,6 +15,35 @@
 #include <string>
 #include <string_view>
 
+// Which neural backend a job runs on. Selected per job rather than per build:
+// this binary carries both, so a machine with no NGX is not a machine that has
+// to be given a different player.
+//
+// Nvidia is the default, which is what keeps every existing caller - and so
+// every path that has been verified on hardware - byte-identical to before this
+// choice existed. Nothing selects Amd unless it says so.
+//
+// It lives here, in the leaf value types, because it is now part of a job's
+// description: the command line, the export plan, the worker's wire and the
+// cache key all carry it, and none of them should have to include the
+// orchestrator to name it.
+enum class NeuralBackend { Nvidia, Amd };
+
+// The canonical name: what a log line, the worker's wire and (from stage C) a
+// receipt carry. One spelling per backend, because two that can be confused is
+// how a cache entry ends up describing a render that was not made.
+const char* NeuralBackendName(NeuralBackend backend) noexcept;
+
+// The inverse, for a wire field. Absent means the default rather than a guess,
+// so nullopt here is a malformed request and not a silent fall back.
+constexpr std::optional<NeuralBackend> ParseNeuralBackend(std::string_view name) noexcept
+{
+    using namespace std::literals;
+    if (name == "nvidia-ngx"sv) return NeuralBackend::Nvidia;
+    if (name == "amd-lmxxf"sv) return NeuralBackend::Amd;
+    return std::nullopt;
+}
+
 enum class NeuralRenderPhase {
     CheckingCache,
     Acquiring,

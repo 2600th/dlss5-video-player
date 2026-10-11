@@ -608,7 +608,15 @@ inline std::vector<std::byte> EncodeResult(const NeuralRenderResult& result)
 // Decodes and validates a result payload. A successful result must carry a
 // complete, self-consistent verification set; anything else is rejected so a
 // malformed helper can never publish a render.
-inline std::optional<NeuralRenderResult> DecodeResult(std::span<const std::byte> payload)
+//
+// `backend` is which verification set a neural claim is held to, and it is not a
+// default: the parent always knows which helper it launched, and the two sets
+// share no field - reading an AMD render against the NVIDIA one rejects every AMD
+// job, and reading an NVIDIA render against the AMD one accepts a helper that
+// never armed its add-on. Only the neural arm differs; a Super Resolution-only
+// job states the same absence on both.
+inline std::optional<NeuralRenderResult> DecodeResult(std::span<const std::byte> payload,
+                                                      NeuralBackend backend)
 {
     if (payload.size() < sizeof(WireResult)) return std::nullopt;
     WireResult wire{};
@@ -667,7 +675,21 @@ inline std::optional<NeuralRenderResult> DecodeResult(std::span<const std::byte>
     // blank: no frame verified as neural, nothing armed, and no feature-18
     // evaluation in the session log - a carrier-only job whose add-on ran
     // anyway produced neural pixels under a label that says otherwise.
-    if (result.ok && result.neural &&
+    //
+    // The neural arm asks for the set that backend can produce. NVIDIA's is the
+    // feature-18 receipt: every captured frame verified, the add-on's detours
+    // armed before capture, and a session log with no failure in it. An AMD job
+    // has no add-on, so its proof is the one the protocol already carries for
+    // both: the runtime's own evaluation tally and the frames it verified. Its
+    // feature-18 fields must then be empty - a helper that reported an arm is
+    // reporting the other backend, and the parent refuses that rather than
+    // publish frames produced by a stack it did not ask for.
+    if (result.ok && result.neural && backend == NeuralBackend::Amd &&
+        (result.verifiedNeuralFrames < result.frameCount ||
+         result.nativeEvaluations < result.frameCount || result.feature18ArmedBeforeCapture ||
+         result.evidence.feature18Created || result.evidence.feature18Evaluated))
+        return std::nullopt;
+    if (result.ok && result.neural && backend != NeuralBackend::Amd &&
         (result.verifiedNeuralFrames < result.frameCount || !result.feature18ArmedBeforeCapture ||
          !result.evidence.Valid())) return std::nullopt;
     if (result.ok && !result.neural &&

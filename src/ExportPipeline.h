@@ -1,5 +1,6 @@
 #pragma once
 
+#include "NeuralRenderTypes.h"
 #include "UpscalingPolicy.h"
 
 #include <cmath>
@@ -48,6 +49,10 @@ struct ExportSelection {
     uint32_t multiplier{2};
     // Super Resolution's engine when the model does not run (UpscalingPolicy.h).
     SuperResolutionEngine engine{kRecommendedSuperResolutionEngine};
+    // Which backend the worker stage runs on. Carried through the plan into the
+    // request rather than decided at the point of use, so the dialog, the plan
+    // summary and the job all name the same one.
+    NeuralBackend backend{NeuralBackend::Nvidia};
 };
 
 enum class ExportRefusal {
@@ -91,6 +96,9 @@ struct ExportPlan {
     uint32_t multiplier{};
     // Frames per second of the finished file, for the dialog's summary line.
     double outputFps{};
+    // Which backend the worker stage runs on, copied from the selection so a
+    // caller holding only the plan can still say what will run it.
+    NeuralBackend backend{NeuralBackend::Nvidia};
 };
 
 // `maxMultiplier` is 1 + DLSSG.MultiFrameCountMax, or 0 when the runtime admits
@@ -113,6 +121,11 @@ inline ExportPlan PlanExport(const ExportSelection& selection, uint32_t sourceWi
     plan.outputWidth = sourceWidth;
     plan.outputHeight = sourceHeight;
     plan.outputFps = sourceFps;
+    // Carried unconditionally, including for the stages this backend cannot run.
+    // Which combinations it can is refused by the front ends that know what this
+    // machine offers (RenderCommandLine and StageExport), because the answer
+    // depends on the backend's admitted box rather than on the plan's shape.
+    plan.backend = selection.backend;
 
     if (selection.upscale) {
         const UpscalingSize target = UpscalingTarget(sourceWidth, sourceHeight, selection.targetHeight);

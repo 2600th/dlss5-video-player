@@ -12,6 +12,8 @@
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -177,6 +179,155 @@ std::vector<RuntimeLockCheck> VerifyRuntimeLock(const std::filesystem::path& run
         checks.push_back(std::move(check));
     }
     return checks;
+}
+
+// One SHA256SUMS, parsed. Lines are `<64 hex><two spaces><path relative to the
+// manifest's own directory>`, which is what sha256sum writes and what
+// tools/lmxxf-sync produces. Anything else is skipped rather than reported: a
+// header, a comment, a trailing newline are not entries, and refusing the whole
+// manifest for one would make the check fail on formatting instead of on drift.
+struct AmdManifestEntry {
+    std::wstring relativePath;
+    std::string sha256;
+};
+
+std::vector<AmdManifestEntry> ParseAmdManifest(std::string_view text)
+{
+    std::vector<AmdManifestEntry> entries;
+    size_t cursor = 0;
+    while (cursor < text.size()) {
+        const size_t end = text.find('\n', cursor);
+        std::string_view line = text.substr(cursor, end == std::string_view::npos
+                                                        ? std::string_view::npos : end - cursor);
+        cursor = end == std::string_view::npos ? text.size() : end + 1;
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        if (line.size() < 64 + 2 + 1) continue;
+        std::string digest(line.substr(0, 64));
+        for (char& c : digest) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (LowercaseHex64(digest) == false) continue;
+        if (line[64] != ' ') continue;
+        size_t start = line.find_first_not_of(' ', 64);
+        if (start == std::string_view::npos) continue;
+        const std::string_view path = line.substr(start);
+        // Forward slashes are what the manifests carry; the filesystem wants the
+        // platform separator, and this is a Windows-only program.
+        std::wstring wide;
+        wide.reserve(path.size());
+        for (const char c : path) wide.push_back(c == '/' ? L'\\' : static_cast<wchar_t>(
+            static_cast<unsigned char>(c)));
+        if (wide.empty()) continue;
+        entries.push_back({std::move(wide), std::move(digest)});
+    }
+    return entries;
+}
+
+// Every SHA256SUMS under `runtimeDirectory`, deepest first, so a drift report
+// names a module before the manifest that lists it. Unreadable directories and
+// manifests are skipped: VerifyAmdRuntimeLock reports the files it can see, and
+// a tree that cannot be walked at all comes back with the DLL row failing.
+std::vector<std::filesystem::path> FindAmdManifests(const std::filesystem::path& runtimeDirectory)
+{
+    namespace fs = std::filesystem;
+    std::vector<fs::path> manifests;
+    std::error_code error;
+    for (fs::recursive_directory_iterator it(runtimeDirectory, error), end; it != end;
+         it.increment(error)) {
+        if (error) break;
+        if (!it->is_regular_file(error) || error) continue;
+        if (it->path().filename() == L"SHA256SUMS") manifests.push_back(it->path());
+    }
+    std::sort(manifests.begin(), manifests.end());
+    return manifests;
+}
+
+std::vector<AmdRuntimeCheck> VerifyAmdRuntimeLock(const std::filesystem::path& runtimeDirectory,
+                                                  std::stop_token stop)
+{
+    namespace fs = std::filesystem;
+    std::vector<AmdRuntimeCheck> checks;
+    // The DLL first, so a runtime whose most important file is missing says so
+    // at the head of the refusal rather than the tail.
+    {
+        AmdRuntimeCheck check;
+        check.name = L"LmxxfNrRuntime.dll";
+        check.digestPublished = false;
+        const fs::path path = runtimeDirectory / L"LmxxfNrRuntime.dll";
+        std::error_code error;
+        check.present = fs::is_regular_file(path, error) && !error;
+        if (check.present) {
+            check.actualSize = fs::file_size(path, error);
+            if (error) check.actualSize = 0;
+            // Presence and a non-empty body are the whole claim, and both are
+            // recorded so a reader can see it is a weaker claim than the module
+            // rows rather than assume a digest was compared.
+            check.hashMatches = check.actualSize != 0;
+            check.present = check.actualSize != 0;
+        }
+        checks.push_back(std::move(check));
+    }
+    for (const fs::path& manifest : FindAmdManifests(runtimeDirectory)) {
+        if (stop.stop_requested()) break;
+        std::ifstream input(manifest, std::ios::binary);
+        if (!input) continue;
+        std::ostringstream buffer;
+        buffer << input.rdbuf();
+        const std::string text = buffer.str();
+        const fs::path manifestDirectory = manifest.parent_path();
+        std::error_code relativeError;
+        const fs::path manifestName = fs::relative(manifest, runtimeDirectory, relativeError);
+        for (const AmdManifestEntry& entry : ParseAmdManifest(text)) {
+            AmdRuntimeCheck check;
+            check.manifest = relativeError ? manifest.filename().wstring()
+                                           : manifestName.wstring();
+            const fs::path path = manifestDirectory / entry.relativePath;
+            std::error_code pathError;
+            fs::path shown = fs::relative(path, runtimeDirectory, pathError);
+            check.name = pathError ? path.filename().wstring() : shown.wstring();
+            check.present = fs::is_regular_file(path, pathError) && !pathError;
+            if (!check.present) {
+                checks.push_back(std::move(check));
+                continue;
+            }
+            check.actualSize = fs::file_size(path, pathError);
+            if (pathError) check.actualSize = 0;
+            if (const auto digest = Sha256FileCached(path, stop)) {
+                check.actualSha256 = *digest;
+                for (char& c : check.actualSha256)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                check.hashMatches = check.actualSha256 == entry.sha256;
+            }
+            checks.push_back(std::move(check));
+        }
+    }
+    return checks;
+}
+
+bool AmdRuntimeLockSatisfied(std::span<const AmdRuntimeCheck> checks)
+{
+    if (checks.empty()) return false;
+    for (const AmdRuntimeCheck& check : checks) {
+        if (!check.Ok()) return false;
+    }
+    return true;
+}
+
+std::wstring DescribeAmdRuntimeLockDrift(std::span<const AmdRuntimeCheck> checks)
+{
+    std::wstring description;
+    for (const AmdRuntimeCheck& check : checks) {
+        if (check.Ok()) continue;
+        if (!description.empty()) description += L"; ";
+        description += check.name;
+        description += L": ";
+        if (!check.present) {
+            description += check.manifest.empty()
+                ? L"missing or empty"
+                : L"missing, named by " + check.manifest;
+            continue;
+        }
+        description += L"hash mismatch, named by " + check.manifest;
+    }
+    return description;
 }
 
 bool RuntimeLockSatisfied(std::span<const RuntimeLockCheck> checks)

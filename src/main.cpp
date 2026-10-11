@@ -115,6 +115,9 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "PrecisionSleeper.h"
 #include "RangeSelection.h"
 #include "RuntimeLock.h"
+// Only for ResolveRuntimeDirectory: --capabilities has to describe the tree the
+// named backend will load, and the AMD one is not in the helper package.
+#include "AmdLmxxfRuntime.h"
 #include "RuntimeModulePolicy.h"
 #include "UpscalingPolicy.h"
 #include "NeuralMotionPolicy.h"
@@ -12651,11 +12654,18 @@ static int RunProbeCommand(const render_command::Command& command,RenderConsole&
         }
         list("sr_heights",rungs);
 
-        // The neural runtime, held to the same lock a render is held to.
-        const auto runtimeDirectory=helpers/L"neural-runtime";
+        // The neural runtime, held to the same lock a render is held to. Which
+        // tree that is depends on the backend the command named, so an AMD job's
+        // report describes the tree it will actually load rather than the one it
+        // never touches. The helper executable itself is always the package's.
+        const auto helperDirectory=helpers/L"neural-runtime";
+        const auto runtimeDirectory=command.selection.backend==NeuralBackend::Amd
+            ?amd_lmxxf::ResolveRuntimeDirectory({})
+            :helperDirectory;
         std::string runtime="verified";
-        if(!std::filesystem::is_regular_file(runtimeDirectory/L"NeuralWorker.exe",fileError))runtime="missing";
-        else if(const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,EmbeddedRuntimeLock(),{});!refusal.empty())runtime="refused: "+WideToUtf8(refusal);
+        if(!std::filesystem::is_regular_file(helperDirectory/L"NeuralWorker.exe",fileError))runtime="missing";
+        else if(command.selection.backend==NeuralBackend::Amd&&runtimeDirectory.empty())runtime="refused: the AMD runtime directory could not be resolved";
+        else if(const std::wstring refusal=StageExportRuntimeRefusal(runtimeDirectory,EmbeddedRuntimeLock(),{},command.selection.backend);!refusal.empty())runtime="refused: "+WideToUtf8(refusal);
         text("neural_runtime",runtime);
         const bool worker=runtime=="verified"&&!command.safeMode;
 
@@ -12820,6 +12830,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         say(StageExportEncodeSummary(plan,width,job.quality,job.upscalingHistory));
         say(L"writing "+output.wstring());
         LOG("--render plan: upscale="<<command.selection.upscale<<" engine="<<SuperResolutionEngineName(selection.engine)<<" neural="<<command.selection.neural
+            <<" backend="<<NeuralBackendName(plan.backend)
             <<" framegen="<<command.selection.frameGeneration<<" output="<<plan.outputWidth<<"x"<<plan.outputHeight
             <<" fps="<<plan.outputFps<<" range=["<<range.start100ns<<","<<range.end100ns<<") preset="
             <<(command.preset?std::string(neural_presets::kPresets[*command.preset].key):std::string("saved")));

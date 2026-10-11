@@ -616,31 +616,47 @@ int wmain(int argc, wchar_t** argv)
         return 0;
     };
     const std::filesystem::path moduleDirectory = ModuleDirectory();
-    if (std::wstring unlocked = UnlockedRuntimeModules(moduleDirectory); !unlocked.empty())
-        return fail(std::move(unlocked));
-    // A Super Resolution-only job runs with the add-on DISABLED, so the model
-    // cannot run however the job goes; everything else - the probe, a resident
-    // session, every neural job - enables it. Only a single-shot job line can
-    // ask for that: the resident launch line carries no job, and its jobs are
-    // held to requireNeural when they arrive.
-    const bool neuralAddon =
-        arguments->preflight || arguments->command != nullptr || arguments->request.requireNeural;
-    const ConfigUpdate config = ConfigureNeuralAddon(moduleDirectory / L"ReShade.ini", neuralAddon);
-    if (!config.ok || config.addonEnabled != neuralAddon) {
-        return fail(!config.error.empty() ? config.error
-            : neuralAddon ? L"The helper-local neural add-on configuration was not enabled."
-                          : L"The helper-local neural add-on configuration was not disabled.");
-    }
-    // ReShade reads its INI while its proxy is loaded at process startup. If
-    // this invocation repaired the helper-local contract, exit and let the
-    // hook-free parent launch one fresh helper. Full exit is essential: the
-    // proxy must release its log before the rendering process starts. The
-    // add-on flipping between a neural job and a Super Resolution-only one
-    // takes this same exit, once per flip.
-    if (config.changed) {
-        if (!arguments->configurationRestarted)
-            return neural_worker_detail::kConfigurationChangedExitCode;
-        return fail(L"The helper-local neural configuration changed again after restart.");
+    // The AMD backend loads no proxy and reads no ReShade.ini: LmxxfNrRuntime.dll
+    // is loaded by this process itself and everything it needs arrives in the
+    // request. So the add-on contract below - the stray-module check beside the
+    // proxy, the INI repair, and the exit-and-relaunch that exists only so the
+    // proxy can re-read it - is skipped rather than satisfied vacuously against a
+    // directory that holds neither file.
+    const bool amdBackend = arguments->request.backend == NeuralBackend::Amd;
+    // Resident mode is the live player's helper. It takes its jobs off a command
+    // channel rather than off this line, so a job's backend arrives somewhere this
+    // process has not been taught to read - refusing by name is what keeps a
+    // helper from quietly running the other backend and reporting a healthy job
+    // that produced the wrong picture.
+    if (amdBackend && arguments->command)
+        return fail(L"The AMD backend does not serve resident helper sessions; it runs one job per process.");
+    if (!amdBackend) {
+        if (std::wstring unlocked = UnlockedRuntimeModules(moduleDirectory); !unlocked.empty())
+            return fail(std::move(unlocked));
+        // A Super Resolution-only job runs with the add-on DISABLED, so the model
+        // cannot run however the job goes; everything else - the probe, a resident
+        // session, every neural job - enables it. Only a single-shot job line can
+        // ask for that: the resident launch line carries no job, and its jobs are
+        // held to requireNeural when they arrive.
+        const bool neuralAddon =
+            arguments->preflight || arguments->command != nullptr || arguments->request.requireNeural;
+        const ConfigUpdate config = ConfigureNeuralAddon(moduleDirectory / L"ReShade.ini", neuralAddon);
+        if (!config.ok || config.addonEnabled != neuralAddon) {
+            return fail(!config.error.empty() ? config.error
+                : neuralAddon ? L"The helper-local neural add-on configuration was not enabled."
+                              : L"The helper-local neural add-on configuration was not disabled.");
+        }
+        // ReShade reads its INI while its proxy is loaded at process startup. If
+        // this invocation repaired the helper-local contract, exit and let the
+        // hook-free parent launch one fresh helper. Full exit is essential: the
+        // proxy must release its log before the rendering process starts. The
+        // add-on flipping between a neural job and a Super Resolution-only one
+        // takes this same exit, once per flip.
+        if (config.changed) {
+            if (!arguments->configurationRestarted)
+                return neural_worker_detail::kConfigurationChangedExitCode;
+            return fail(L"The helper-local neural configuration changed again after restart.");
+        }
     }
     // Match the player bootstrap ordering: enter the proxy on the main thread
     // before Media Foundation or a decoder can load the system DXGI path.

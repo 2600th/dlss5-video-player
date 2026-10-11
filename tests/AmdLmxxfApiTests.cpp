@@ -65,13 +65,28 @@ LmxxfNrApi CompleteApi()
     return api;
 }
 
-void complete_v1_table_is_accepted_without_get_timings_test()
+void complete_table_is_accepted_without_the_abi3_appendix_test()
 {
     LmxxfNrApi api = CompleteApi();
+    // GetTimings and the four recording functions are the ABI 3 appendix. A
+    // table without them is still complete enough to produce a frame.
     api.GetTimings = nullptr;
+    api.BeginRecordingExecution = nullptr;
+    api.EndRecordingExecution = nullptr;
+    api.InvalidateRecording = nullptr;
+    api.CollectRecording = nullptr;
     CHECK_EQ(amd_lmxxf::ApiProblem::None, amd_lmxxf::ValidateApiTable(api));
 
+    // A legacy-sized table is not a substitute. Its tail was never written, so
+    // reading GetTimings out of it would be reading whatever follows in memory.
     api.struct_size = LMXXF_NR_API_V1_SIZE;
+    CHECK_EQ(amd_lmxxf::ApiProblem::StructSizeMismatch, amd_lmxxf::ValidateApiTable(api));
+
+    api.struct_size = LMXXF_NR_API_V2_SIZE;
+    CHECK_EQ(amd_lmxxf::ApiProblem::StructSizeMismatch, amd_lmxxf::ValidateApiTable(api));
+
+    api = CompleteApi();
+    api.struct_size = LMXXF_NR_API_V3_SIZE;
     CHECK_EQ(amd_lmxxf::ApiProblem::None, amd_lmxxf::ValidateApiTable(api));
 }
 
@@ -94,17 +109,27 @@ void malformed_table_is_rejected_before_use_test()
     CHECK_EQ(amd_lmxxf::ApiProblem::None, amd_lmxxf::ValidateApiTable(api));
 }
 
-void capabilities_are_validated_without_claiming_hip_is_ready_before_create_test()
+void capabilities_are_validated_against_their_declared_size_test()
 {
     LmxxfNrCapabilities capabilities{};
     capabilities.struct_size = sizeof(capabilities);
     capabilities.abi_version = LMXXF_NR_ABI_VERSION;
     capabilities.max_input_width = 1920;
     capabilities.max_input_height = 1080;
-    capabilities.hip_ready = 0;
+    // ABI 3 removed hip_ready; readiness comes from GetStatus after Create.
+    CHECK_EQ(uint32_t{32}, uint32_t{sizeof(LmxxfNrCapabilities)});
     CHECK_EQ(amd_lmxxf::ApiProblem::None, amd_lmxxf::ValidateCapabilities(capabilities));
 
     capabilities.max_input_width = 0;
+    CHECK_EQ(amd_lmxxf::ApiProblem::InvalidCapabilities,
+             amd_lmxxf::ValidateCapabilities(capabilities));
+
+    capabilities = {};
+    capabilities.struct_size = sizeof(capabilities);
+    capabilities.abi_version = LMXXF_NR_ABI_VERSION;
+    capabilities.max_input_width = 1920;
+    capabilities.max_input_height = 1080;
+    capabilities.struct_size = 36u; // the ABI 1 size, which had hip_ready
     CHECK_EQ(amd_lmxxf::ApiProblem::InvalidCapabilities,
              amd_lmxxf::ValidateCapabilities(capabilities));
 }
@@ -152,6 +177,15 @@ void frame_builder_sets_the_sizes_the_runtime_negotiates_test()
     CHECK_EQ(1.0f, frame.model_scale);
     CHECK_EQ(1.0f, frame.pre_exposure);
     CHECK_EQ(1.0f, frame.exposure_scale);
+    // ABI 3 grew the frame info from 80 to 160 bytes, and paper_white is
+    // required by the codec Record path rather than optional.
+    CHECK_EQ(uint32_t{160}, uint32_t{sizeof(LmxxfNrFrameInfo)});
+    CHECK_EQ(1.0f, frame.paper_white);
+    CHECK_EQ(uint32_t{0}, frame.reserved_after_exposure);
+    CHECK_EQ(uint32_t{0}, frame.temporal_flags);
+    CHECK(frame.exposure == nullptr);
+    CHECK(frame.motion == nullptr);
+    CHECK(frame.depth == nullptr);
 
     const LmxxfNrJob job = amd_lmxxf::MakeJob();
     CHECK_EQ(uint32_t{sizeof(LmxxfNrJob)}, job.struct_size);
@@ -172,6 +206,12 @@ struct FakeContext
     int retire = 0;
     int cancel = 0;
     int reset = 0;
+    // ABI 3 job plumbing. PrepareFrame is handed the caller's struct address;
+    // every call after it must be handed the handle the runtime wrote back.
+    // Recording both is what makes a regression to &job visible.
+    void* preparedStructAddress = nullptr;
+    void* lastJobArgument = nullptr;
+    int jobArgumentsSeen = 0;
     std::string error;
 };
 
@@ -181,29 +221,48 @@ LmxxfNrApi FakeApi(FakeContext& fake)
     api.struct_size = sizeof(api);
     api.abi_version = LMXXF_NR_ABI_VERSION;
     api.PrepareFrame = [](void* context, const LmxxfNrFrameInfo*, LmxxfNrJob* job) {
-        ++static_cast<FakeContext*>(context)->prepare;
-        job->handle = context;
-        job->private_output = context;
+        auto* state = static_cast<FakeContext*>(context);
+        ++state->prepare;
+        state->preparedStructAddress = job;
+        // The real runtime publishes its own job identity here, not the
+        // caller's address - which is exactly why the address cannot be reused.
+        job->handle = state;
+        job->private_output = state;
         return int32_t{LMXXF_NR_OK};
     };
-    api.RecordInputs = [](void* context, void*, void*) {
-        ++static_cast<FakeContext*>(context)->inputs;
+    api.RecordInputs = [](void* context, void* job, void*) {
+        auto* state = static_cast<FakeContext*>(context);
+        ++state->inputs;
+        state->lastJobArgument = job;
+        ++state->jobArgumentsSeen;
         return int32_t{LMXXF_NR_OK};
     };
-    api.EnqueueHip = [](void* context, void*, void*) {
-        ++static_cast<FakeContext*>(context)->enqueue;
+    api.EnqueueHip = [](void* context, void* job, void*) {
+        auto* state = static_cast<FakeContext*>(context);
+        ++state->enqueue;
+        state->lastJobArgument = job;
+        ++state->jobArgumentsSeen;
         return int32_t{LMXXF_NR_OK};
     };
-    api.RecordOutputs = [](void* context, void*, void*) {
-        ++static_cast<FakeContext*>(context)->outputs;
+    api.RecordOutputs = [](void* context, void* job, void*) {
+        auto* state = static_cast<FakeContext*>(context);
+        ++state->outputs;
+        state->lastJobArgument = job;
+        ++state->jobArgumentsSeen;
         return int32_t{LMXXF_NR_OK};
     };
-    api.Retire = [](void* context, void*) {
-        ++static_cast<FakeContext*>(context)->retire;
+    api.Retire = [](void* context, void* job) {
+        auto* state = static_cast<FakeContext*>(context);
+        ++state->retire;
+        state->lastJobArgument = job;
+        ++state->jobArgumentsSeen;
         return int32_t{LMXXF_NR_OK};
     };
-    api.CancelUnsubmitted = [](void* context, void*) {
-        ++static_cast<FakeContext*>(context)->cancel;
+    api.CancelUnsubmitted = [](void* context, void* job) {
+        auto* state = static_cast<FakeContext*>(context);
+        ++state->cancel;
+        state->lastJobArgument = job;
+        ++state->jobArgumentsSeen;
         return int32_t{LMXXF_NR_OK};
     };
     api.ResetHistory = [](void* context) {
@@ -270,6 +329,37 @@ void session_accepts_recording_outputs_before_enqueue_and_call_order_doc_test()
     CHECK_EQ(1, fake.enqueue);
 }
 
+void session_hands_the_runtime_the_job_handle_after_prepare_frame_test()
+{
+    FakeContext fake;
+    const LmxxfNrApi api = FakeApi(fake);
+    amd_lmxxf::Session session(api, &fake);
+    const LmxxfNrFrameInfo frame = amd_lmxxf::MakeFrameInfo(
+        &fake, 1920, 1080, 4u, &fake, 1u, 1u, 1u);
+
+    CHECK(session.PrepareFrame(frame));
+    const void* structAddress = fake.preparedStructAddress;
+    const void* handle = session.Job().handle;
+    CHECK(structAddress != nullptr);
+    CHECK(handle != nullptr);
+    // The runtime publishes its own job identity, not the caller's address.
+    // Handing the address back is what ABI 3 rejects at run time with
+    // "need job and command list" even though nothing is null.
+    CHECK(handle != structAddress);
+
+    CHECK(session.RecordInputs(&fake));
+    CHECK_EQ(handle, fake.lastJobArgument);
+    CHECK(session.ProducerSubmitted());
+    CHECK(session.EnqueueHip(&fake));
+    CHECK_EQ(handle, fake.lastJobArgument);
+    CHECK(session.RecordOutputs(&fake));
+    CHECK_EQ(handle, fake.lastJobArgument);
+    CHECK(session.Retire());
+    CHECK_EQ(handle, fake.lastJobArgument);
+    // RecordInputs, EnqueueHip, RecordOutputs and Retire all took the handle.
+    CHECK_EQ(4, fake.jobArgumentsSeen);
+}
+
 void session_cancel_is_terminal_and_reset_is_explicit_test()
 {
     FakeContext fake;
@@ -328,12 +418,12 @@ void Run(std::string_view only)
         const char* name;
         void (*run)();
     } cases[]{
-        {"complete_v1_table_is_accepted_without_get_timings_test",
-         complete_v1_table_is_accepted_without_get_timings_test},
+        {"complete_table_is_accepted_without_the_abi3_appendix_test",
+         complete_table_is_accepted_without_the_abi3_appendix_test},
         {"malformed_table_is_rejected_before_use_test",
          malformed_table_is_rejected_before_use_test},
-        {"capabilities_are_validated_without_claiming_hip_is_ready_before_create_test",
-         capabilities_are_validated_without_claiming_hip_is_ready_before_create_test},
+        {"capabilities_are_validated_against_their_declared_size_test",
+         capabilities_are_validated_against_their_declared_size_test},
         {"call_order_accepts_only_the_documented_phase_transitions_test",
          call_order_accepts_only_the_documented_phase_transitions_test},
         {"frame_builder_sets_the_sizes_the_runtime_negotiates_test",
@@ -342,6 +432,8 @@ void Run(std::string_view only)
          session_rejects_out_of_order_calls_before_reaching_the_runtime_test},
         {"session_accepts_recording_outputs_before_enqueue_and_call_order_doc_test",
          session_accepts_recording_outputs_before_enqueue_and_call_order_doc_test},
+        {"session_hands_the_runtime_the_job_handle_after_prepare_frame_test",
+         session_hands_the_runtime_the_job_handle_after_prepare_frame_test},
         {"session_cancel_is_terminal_and_reset_is_explicit_test",
          session_cancel_is_terminal_and_reset_is_explicit_test},
         {"amd_gpu_policy_only_admits_the_targets_the_runtime_has_modules_for_test",

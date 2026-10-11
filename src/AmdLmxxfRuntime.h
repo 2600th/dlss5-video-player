@@ -37,6 +37,17 @@ constexpr std::wstring_view RuntimeFailureName(RuntimeFailure failure) noexcept
     return L"unknown";
 }
 
+// Where LmxxfNrRuntime.dll and its module tree are expected to be. The same
+// search order the ffmpeg helpers use (MediaTools.h / FindToolIn) and for the
+// same reason: an explicit answer wins, then the layouts a checkout and a
+// packaged build actually have. Empty when none of them holds the module, which
+// the caller reports rather than papering over - a job that silently ran against
+// a different runtime tree would make every other check meaningless.
+//
+// The environment variable is named after the compile definition the AMD tests
+// build against, so one name means one thing across both.
+std::filesystem::path ResolveRuntimeDirectory(const std::filesystem::path& explicitDirectory = {});
+
 // Owns one loaded LmxxfNrRuntime module and at most one live context. The
 // runtime globally records its last error, so all calls on one module must be
 // serialized by the owning worker or evaluator.
