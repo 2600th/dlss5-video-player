@@ -50,7 +50,8 @@
 // nothing): the count is the one panel value this backend stacks the model
 // with, so a render at two passes is a different picture and a different key,
 // while 1 keys as every render before the control was wired keyed.
-inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uint32_t passes = 1)
+inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uint32_t passes = 1,
+                                             bool skinProtect = false)
 {
     std::string document = "backend=amd-lmxxf\n"
                            "temporal=off\n"
@@ -60,6 +61,12 @@ inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uin
         document += "accumulation=" + std::string(TemporalStabilityName(accumulation)) + "\n";
     if (passes != 1)
         document += "passes=" + std::to_string(passes) + "\n";
+    // Only with a count: the runtime blends the skin mask in only when later
+    // passes exist, so at one pass this switch renders exactly what an off
+    // switch renders, and a key term that claims otherwise would retire
+    // coverage for a picture this backend would render the same either way.
+    if (skinProtect && passes > 1)
+        document += "skin-protect=1\n";
     return document;
 }
 
@@ -112,9 +119,19 @@ inline TemporalStability SavedStability(NeuralBackend backend, std::string_view 
 // a value that reaches a pixel without being added here retires rendered work
 // every time a slider moves.
 inline std::string CanonicalNeuralSettingsForBackend(NeuralBackend backend,
-                                                     const NeuralSettings& settings)
+                                                     const NeuralSettings& settings,
+                                                     bool amdSkinProtect = false)
 {
-    if (backend == NeuralBackend::Amd)
-        return "passes=" + std::to_string(std::clamp(settings.passes, 1, 4));
+    if (backend == NeuralBackend::Amd) {
+        const uint32_t passes = std::clamp(settings.passes, 1, 4);
+        // The skin switch lives beside the count in the player's own state
+        // rather than in NeuralSettings - it is the runtime's, not the add-on's
+        // - so it arrives as its own argument, and it counts only above one pass,
+        // which is the same rule AmdNeuralSettingsDocument applies to it. In step
+        // or coverage from one arm is served to the other.
+        std::string term = "passes=" + std::to_string(passes);
+        if (amdSkinProtect && passes > 1) term += " skin-protect=1";
+        return term;
+    }
     return CanonicalNeuralSettings(settings);
 }

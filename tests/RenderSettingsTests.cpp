@@ -855,6 +855,22 @@ void the_retained_settings_term_reads_only_what_the_backend_reads()
     // different parts of it.
     CHECK(CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, single) !=
           CanonicalNeuralSettingsForBackend(NeuralBackend::Nvidia, single));
+    // The skin switch is the runtime's and lives beside the count in the same
+    // file, so it arrives as its own argument - and counts only above one pass,
+    // where the runtime actually blends it in.
+    NeuralSettings stacked4; stacked4.passes = 4;
+    CHECK_EQ(std::string("passes=4"),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, stacked4, false));
+    CHECK_EQ(std::string("passes=4 skin-protect=1"),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, stacked4, true));
+    CHECK_EQ(std::string("passes=1"),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, single, true));
+    // NVIDIA has no such switch, so its term never carries it - matched on the
+    // term itself, not on "skin", which its own panel field skinStructure has.
+    CHECK(CanonicalNeuralSettingsForBackend(NeuralBackend::Nvidia, stacked4, true).find("skin-protect") ==
+          std::string::npos);
+    CHECK(CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, stacked4, true).find("skin-protect=1") !=
+          std::string::npos);
 }
 
 void removing_one_owned_entry_preserves_other_entries_and_outside_files()

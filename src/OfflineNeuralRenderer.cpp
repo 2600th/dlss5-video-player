@@ -2887,7 +2887,9 @@ struct AmdLmxxfEvaluatorAdapter {
     // load of the DLL re-reads it. Cost when the count actually moved: one
     // module load, which the AMD job pays on its first frame anyway.
     uint32_t broughtUpPasses{1};
+    bool broughtUpSkinProtect{false};
     uint32_t jobPasses{1};
+    bool jobSkinProtect{false};
     bool reused=false;
     // Why the last bring-up failed, kept because a failed Initialize drops the
     // evaluator and LastFailure() would then have nothing left to ask.
@@ -2897,7 +2899,10 @@ struct AmdLmxxfEvaluatorAdapter {
     // Told before Initialize, because the reuse question is where the count
     // enters: an evaluator built under another count holds a network that
     // stacks that many passes.
-    void SetJobPasses(uint32_t passes){jobPasses=passes<1u?1u:(passes>4u?4u:passes);}
+    void SetMultiPassConfig(uint32_t passes,bool skinProtect){
+        jobPasses=passes<1u?1u:(passes>4u?4u:passes);
+        jobSkinProtect=skinProtect&&jobPasses>1u;
+    }
     bool Initialize(HWND,uint32_t w,uint32_t h,uint32_t ow,uint32_t oh,double fps,
                     const GuideControls& guides,PixelLayout,const SourceColorDescription&){
         if(!ow||!oh){ow=w;oh=h;}
@@ -2906,13 +2911,15 @@ struct AmdLmxxfEvaluatorAdapter {
         // accumulation rung and the pass count are the whole inheritance
         // question and a match on all four means there is nothing to rebuild.
         reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory&&
-               broughtUpStability==config.stability&&broughtUpPasses==jobPasses;
+               broughtUpStability==config.stability&&broughtUpPasses==jobPasses&&
+               broughtUpSkinProtect==jobSkinProtect;
         if(reused)return true;
         captured.clear();
         evaluator=std::make_unique<AmdLmxxfEvaluator>(config);
         width=w;height=h;broughtUpTemporal=config.temporalHistory;
         broughtUpStability=config.stability;
         broughtUpPasses=jobPasses;
+        broughtUpSkinProtect=jobSkinProtect;
         if(evaluator->Initialize(nullptr,w,h,ow,oh,fps,guides))return true;
         broughtUpFailure=evaluator->LastFailure();
         LOG("AMD neural runtime did not come up for "<<w<<"x"<<h<<": "<<evaluator->LastError());
@@ -3662,8 +3669,9 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // fails the job: the panel would otherwise show a count nothing renders.
     {
         std::string passesError;
-        if (!amd_lmxxf::WriteAmdPassesConfig(state.amdEvaluator.config.runtimeDirectory,
-                                             std::clamp(request.amdPasses, 1u, 4u), passesError)) {
+        if (!amd_lmxxf::WriteAmdMultiPassConfig(state.amdEvaluator.config.runtimeDirectory,
+                                                std::clamp(request.amdPasses, 1u, 4u),
+                                                request.amdSkinProtect, passesError)) {
             NeuralRenderResult refused;
             refused.jobId = request.jobId;
             refused.failure = NeuralRenderFailure::Preflight;
@@ -3712,7 +3720,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // when it is built); this only tells the adapter that a moved count is a
     // moved bring-up, so the next Initialize reloads the module and the runtime
     // reads the file the player just wrote.
-    state.amdEvaluator.SetJobPasses(request.amdPasses);
+    state.amdEvaluator.SetMultiPassConfig(request.amdPasses, request.amdSkinProtect);
     // What this backend cannot be asked for. Each is a benchmark switch that
     // exists to change what the NVIDIA path renders, and here it would change
     // nothing at all - a run that reported the flag's arm while rendering the
@@ -3748,6 +3756,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
             :"off, this backend has no guide estimator and this job brought no guide files")
         <<" accumulation="<<TemporalStabilityName(state.amdEvaluator.config.stability)
         <<" passes="<<request.amdPasses<<" (the runtime stacks the network itself; the count was handed to it before the network was built)"
+        <<" skin-protect="<<(request.amdSkinProtect?"on":"off")
         <<" feature18-receipt=not-applicable, this backend has no ReShade log");
 
     // Read before the per-job reset, so a bring-up the previous job left armed is

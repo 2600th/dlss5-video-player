@@ -56,8 +56,9 @@ constexpr std::optional<NeuralBackend> ParseNeuralBackend(std::string_view name)
 //     key, so any of them can change what comes back.
 //   * Amd - almost none of it. This backend loads no proxy and reads no INI;
 //     of the panel it reads exactly one value, the pass count, which the
-//     evaluator stacks the model with - and the rung travels outside this
-//     struct, so no value of THIS struct but that one reaches a pixel. The
+//     runtime stacks the model with - and the rung and the multi-pass skin
+//     switch travel outside this struct, so no value of THIS struct but the
+//     count reaches a pixel. The
 //     job's key carries the count in AmdNeuralSettingsDocument(), and the
 //     retention key carries it through CanonicalNeuralSettingsForBackend();
 //     ApplyNeuralSettings restarts an AMD session when the count moved, and a

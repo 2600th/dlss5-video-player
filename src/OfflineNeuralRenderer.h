@@ -165,6 +165,12 @@ struct NeuralRenderRequest {
     // always did: the cache key carries the count only off the default.
     // Clamped 1..4 by ValidRequest.
     uint32_t amdPasses{1};
+    // Whether the runtime's later passes keep skin-coloured pixels pinned to the
+    // first pass (DLSS5_MULTI_PASS_SKIN_PROTECT). Off by default, and it changes
+    // nothing at one pass - the runtime only blends it when the count is above
+    // one, so a request that asks for it alone renders what one pass renders and
+    // is keyed the same way. AMD only; NVIDIA's add-on has no such switch.
+    bool amdSkinProtect{false};
 };
 
 struct NeuralRenderProgress {

@@ -148,21 +148,35 @@ inline std::string AmdPassesConfigLine(uint32_t passes)
     return "DLSS5_MULTI_PASS=" + std::to_string(passes < 1 ? 1u : (passes > 4 ? 4u : passes));
 }
 
-// Whether `line` sets DLSS5_MULTI_PASS, matched on the KEY rather than on the
-// prefix: the reader counts any line that starts with DLSS5_ and holds '=', and
-// the runtime's own switches share that prefix - DLSS5_MULTI_PASS_SKIN_PROTECT
-// is a different key that a prefix match would swallow. Same key twice in one
-// file is the last line that wins, so this returns true for every occurrence and
-// the writer keeps the last one, which is where the reader would look.
-inline bool IsAmdPassesConfigLine(std::string_view line) noexcept
+// Whether `line` sets `key` exactly, under the reader's own rule: a line counts
+// when it starts with DLSS5_, holds '=' and is long enough, and the key is
+// everything before the first '='. Matching the key rather than the prefix is
+// what keeps the runtime's own switches apart - DLSS5_MULTI_PASS_SKIN_PROTECT
+// and DLSS5_MULTI_PASS_PREDICT share the prefix, and a prefix match swallowed
+// the first of them when this writer began as a single-key one (measured, and
+// the reason the tests below exist). Same key twice in one file is the last
+// line that wins, so this returns true for every occurrence and the writer
+// keeps the last one, which is where the reader looks.
+inline bool IsAmdConfigLine(std::string_view line, std::string_view key) noexcept
 {
     if (line.size() < 8 || line.substr(0, 6) != "DLSS5_") return false;
     const size_t eq = line.find('=');
-    return eq != std::string_view::npos && line.substr(0, eq) == "DLSS5_MULTI_PASS";
+    return eq != std::string_view::npos && line.substr(0, eq) == key;
 }
 
-inline bool WriteAmdPassesConfig(const std::filesystem::path& runtimeDirectory, uint32_t passes,
-                                 std::string& error)
+inline bool IsAmdPassesConfigLine(std::string_view line) noexcept
+{
+    return IsAmdConfigLine(line, "DLSS5_MULTI_PASS");
+}
+
+// What the player owns inside the runtime's configuration file: the pass count
+// and, on this runtime, whether later passes keep skin-coloured pixels pinned to
+// the first pass (DLSS5_MULTI_PASS_SKIN_PROTECT). Both are written on every AMD
+// job, the skin switch included when it is off - a key the panel has released has
+// to be able to switch off one a hand edit turned on, and a runtime that reads
+// its configuration once cannot be told again.
+inline bool WriteAmdMultiPassConfig(const std::filesystem::path& runtimeDirectory, uint32_t passes,
+                                    bool skinProtect, std::string& error)
 {
     namespace fs = std::filesystem;
     const fs::path directory = runtimeDirectory / L"DLSS5-AMD";
@@ -173,19 +187,27 @@ inline bool WriteAmdPassesConfig(const std::filesystem::path& runtimeDirectory, 
         return false;
     }
     const fs::path path = directory / L"custom-config.txt";
-    const std::string wanted = AmdPassesConfigLine(passes);
+    // Passes first, then the skin switch: the order they are written in is the
+    // order they appear in when neither was in the file.
+    std::string keys[2];
+    std::string values[2];
+    keys[0] = "DLSS5_MULTI_PASS";
+    values[0] = AmdPassesConfigLine(passes).substr(keys[0].size() + 1);
+    keys[1] = "DLSS5_MULTI_PASS_SKIN_PROTECT";
+    values[1] = skinProtect ? "1" : "0";
+    constexpr size_t kKeyCount = 2;
+    // Where each key's last line sits, or npos when the file has none yet.
+    size_t keepAt[kKeyCount] = {std::string::npos, std::string::npos};
     std::vector<std::string> lines;
-    bool replaced = false;
     {
         std::ifstream input(path, std::ios::binary);
         std::ostringstream buffer;
         if (input) buffer << input.rdbuf();
         const std::string text = buffer.str();
         // Two passes over the text: which lines are ours, and where the reader
-        // would read the key. Only the LAST occurrence is rewritten and the
-        // earlier ones are dropped, so the file the runtime parses agrees with
-        // the file it would have parsed before this call.
-        std::vector<size_t> ours;
+        // would read each key. Only the LAST occurrence of each key is rewritten
+        // and the earlier ones are dropped, so the file the runtime parses agrees
+        // with the file it would have parsed before this call.
         {
             size_t start = 0;
             while (start < text.size()) {
@@ -193,29 +215,31 @@ inline bool WriteAmdPassesConfig(const std::filesystem::path& runtimeDirectory, 
                 std::string_view line(text.data() + start,
                                       (end == std::string::npos ? text.size() : end) - start);
                 if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-                if (IsAmdPassesConfigLine(line)) ours.push_back(start);
+                for (size_t key = 0; key < kKeyCount; ++key)
+                    if (IsAmdConfigLine(line, keys[key])) keepAt[key] = start;
                 if (end == std::string::npos) break;
                 start = end + 1;
             }
         }
-        const size_t keep = ours.empty() ? std::string::npos : ours.back();
         size_t start = 0;
         while (start < text.size()) {
             const size_t end = text.find('\n', start);
             std::string line = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-            const bool isOurs = IsAmdPassesConfigLine(line);
-            if (!isOurs) {
+            size_t ours = kKeyCount;
+            for (size_t key = 0; key < kKeyCount; ++key)
+                if (IsAmdConfigLine(line, keys[key])) ours = key;
+            if (ours == kKeyCount) {
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 lines.push_back(std::move(line));
-            } else if (start == keep) {
-                lines.push_back(wanted);
-                replaced = true;
+            } else if (keepAt[ours] == start) {
+                lines.push_back(keys[ours] + "=" + values[ours]);
             }
             if (end == std::string::npos) break;
             start = end + 1;
         }
     }
-    if (!replaced) lines.push_back(wanted);
+    for (size_t key = 0; key < kKeyCount; ++key)
+        if (keepAt[key] == std::string::npos) lines.push_back(keys[key] + "=" + values[key]);
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) {
         error = "the runtime's configuration file could not be written (" + path.string() + ")";

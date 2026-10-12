@@ -107,6 +107,9 @@ struct StageExportJob {
     // whatever this says: a reduced model input and a Super Resolution output
     // are one carrier's two jobs, and it can only do one of them.
     uint32_t processingScale{kDefaultProcessingScale};
+    // The runtime's multi-pass skin switch (AMD only); see
+    // RenderSettings::amdSkinProtect in the player.
+    bool amdSkinProtect{false};
     // Super Resolution's history for an upscaling pass without the model; a pass
     // that runs the model keeps Temporal (CarrierUpscalingHistory).
     UpscalingHistory upscalingHistory{kRecommendedUpscalingHistory};

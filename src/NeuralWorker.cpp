@@ -1323,12 +1323,16 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
             arguments.emplace_back(L"--amd-runtime-dir");
             arguments.emplace_back(request.amdRuntimeDirectory.wstring());
         }
-        // The pass count (AmdLmxxfEvaluatorConfig::passes). Only off the
-        // default, so an unstacked AMD job's command line is byte-identical to
-        // before the experiment.
+        // The pass count and the skin switch, both only off their defaults, so
+        // an unstacked AMD job's command line is byte-identical to before either
+        // existed.
         if (request.amdPasses != 1) {
             arguments.emplace_back(L"--amd-passes");
             arguments.emplace_back(std::to_wstring(request.amdPasses));
+        }
+        if (request.amdSkinProtect) {
+            arguments.emplace_back(L"--amd-skin-protect");
+            arguments.emplace_back(L"1");
         }
     }
     // Absent means 100, the source size, which is every job before the rungs.
@@ -1470,7 +1474,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
                CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, NeuralBackendKey,
-               AmdRuntimeDirectoryKey, AmdPassesKey, KeyCount };
+               AmdRuntimeDirectoryKey, AmdPassesKey, AmdSkinProtectKey, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1499,7 +1503,10 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         L"--amd-runtime-dir",
         // The pass count, sent only off the default, so the command
         // line of every job before the experiment is byte-identical to before.
-        L"--amd-passes"};
+        L"--amd-passes",
+        // The skin switch: sent when on, absent when off, because the runtime's
+        // own default is off and the helper has nothing to say about it then.
+        L"--amd-skin-protect"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1636,6 +1643,11 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         uint64_t passes = 0;
         if (!ParseUnsigned(*values[AmdPassesKey], passes) || passes > UINT32_MAX) return std::nullopt;
         request.amdPasses = static_cast<uint32_t>(passes);
+    }
+    if (values[AmdSkinProtectKey]) {
+        uint64_t on = 0;
+        if (!ParseUnsigned(*values[AmdSkinProtectKey], on) || on > 1) return std::nullopt;
+        request.amdSkinProtect = on != 0;
     }
     if (values[ProcessingScale]) {
         uint64_t percent = 0;
