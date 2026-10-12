@@ -6638,7 +6638,14 @@ private:
         // The combo lists the rungs in the enum's own order, so the index IS the rung.
         select(IDC_NS_SCENE_CUTS,static_cast<int>(m_temporalSettings.sceneCuts));
         select(IDC_NS_STABILITY,static_cast<int>(m_temporalSettings.stability));
-        const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
+        const auto check=[&](int id,bool on){
+            if(HWND box=GetDlgItem(h,id)){
+                SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);
+                // An owner-drawn box stores the state but does not redraw for
+                // it: without this the tick stays whatever it was.
+                InvalidateRect(box,nullptr,TRUE);
+            }
+        };
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         check(IDC_NS_CHAINED,m_neuralSettings.chainedHistory);
         check(IDC_NS_SKIN_PROTECT,m_amdSkinProtect);
@@ -6796,7 +6803,10 @@ private:
         CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",40+top,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",right);
         CreateNeuralCheck(h,IDC_NS_SKIN_PROTECT,L"neural.settings.skin_protect",12+right,74+top,116,L"neural.tip.skin_protect");
         CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+right,74+top,224,L"neural.tip.chained");
-        CreateNeuralCheck(h,IDC_NS_MP_PREDICT,L"neural.settings.mp_predict",132+right+228,74+top,180,L"neural.tip.mp_predict");
+        // Its own row, below the other two: the stacking group's row is full
+        // (skin 12+right..132+right+116, chained ..+224, ends 804 of the 880
+        // the dialog is wide) and a third box on it was drawn off the window.
+        CreateNeuralCheck(h,IDC_NS_MP_PREDICT,L"neural.settings.mp_predict",12+right,96+top,300,L"neural.tip.mp_predict");
         CreateSettingsGroupHeading(h,L"neural.settings.group_guides",112+top,right,400);
         CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+right,138+top,116,L"neural.tip.guide_mv");
         CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+right,138+top,80,L"neural.tip.guide_depth");
@@ -7030,7 +7040,11 @@ private:
                 // The owner-drawn check boxes do not flip their own check: the
                 // click is only a click until this turns the state over, and
                 // the read below is what carries it into the settings.
-                if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,SendMessageW(box,BM_GETCHECK,0,0)==BST_CHECKED?BST_UNCHECKED:BST_CHECKED,0);
+                if(HWND box=GetDlgItem(h,id)){
+                    const bool on=SendMessageW(box,BM_GETCHECK,0,0)!=BST_CHECKED;
+                    SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);
+                    InvalidateRect(box,nullptr,TRUE);
+                }
                 ReadNeuralSettingControls(h);return 0;
             }
             break;
@@ -7049,7 +7063,14 @@ private:
     }
 
     void SyncEncoderSettingControls(HWND h){
-        const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
+        const auto check=[&](int id,bool on){
+            if(HWND box=GetDlgItem(h,id)){
+                SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);
+                // An owner-drawn box stores the state but does not redraw for
+                // it: without this the tick stays whatever it was.
+                InvalidateRect(box,nullptr,TRUE);
+            }
+        };
         check(IDC_ES_GPU_CONVERT,m_gpuColorConversion);
         check(IDC_ES_GPU_SOURCE,m_gpuSourceConversion);
         if(HWND combo=GetDlgItem(h,IDC_ES_NVENC_PRESET))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(int(m_nvencPreset)-1),0);
