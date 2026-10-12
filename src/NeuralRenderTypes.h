@@ -54,19 +54,24 @@ constexpr std::optional<NeuralBackend> ParseNeuralBackend(std::string_view name)
 //   * Nvidia - yes, all of it. The values are written into the ReShade.ini the
 //     helper loads (NeuralAddonOverridesFor) and they are a term of the render
 //     key, so any of them can change what comes back.
-//   * Amd - no, none of it. This backend loads no proxy and reads no INI; its
-//     evaluator's config is the runtime directory, the guide sources and the
-//     temporal switches, so no value of this struct reaches a pixel. The job's
-//     key is AmdNeuralSettingsDocument(), which takes no NeuralSettings
-//     argument at all (NeuralStabilitySettings.h).
+//   * Amd - almost none of it. This backend loads no proxy and reads no INI;
+//     of the panel it reads exactly one value, the pass count, which the
+//     evaluator stacks the model with - and the rung travels outside this
+//     struct, so no value of THIS struct but that one reaches a pixel. The
+//     job's key carries the count in AmdNeuralSettingsDocument(), and the
+//     retention key carries it through CanonicalNeuralSettingsForBackend();
+//     ApplyNeuralSettings restarts an AMD session when the count moved, and a
+//     caller that wires a second panel value through to this backend must flip
+//     all three in the same change, or the picture moves and neither the keys
+//     nor the session follow it.
 //
 // The interesting case is the one this leaves out rather than the one it
-// covers. `NeuralSettings` is the add-on's struct, not the whole dialog: the
-// same dialog also holds the temporal rung, and that one DOES reach an AMD
-// render, because it selects this player's own accumulation over the runtime's
-// output. So this function is not "nothing in the dialog matters on AMD", and a
-// caller that reads it that way leaves a moved rung unapplied -
-// ApplyNeuralSettings states the real condition.
+// covers. `NeuralSettings` is the add-on's struct: the same dialog also holds
+// the temporal rung, and that one DOES reach an AMD render, because it selects
+// this player's own accumulation over the runtime's output. So this function is
+// not "nothing in the dialog matters on AMD", and a caller that reads it that
+// way leaves a moved rung unapplied - ApplyNeuralSettings states the real
+// condition, which on this backend is the rung or the pass count having moved.
 //
 // A caller may ask this only about a picture a render would produce. It is not a
 // statement that the panel is inert for the user - the values are still saved

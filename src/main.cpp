@@ -2287,12 +2287,11 @@ struct NeuralJobInputs {
     GuideControls guides;
     TemporalSettings temporal;
     NeuralSettings settings;
-    // Experimental AMD stacking (NeuralRenderRequest::amdPasses). The player's
-    // own jobs - a live session, a paused preview - stay at 1 for now: the
-    // experiment is defined for the offline render only, and a live path that
-    // stacked would also have to answer what a stacked pass does to the
-    // accumulation history mid-session. The command-line render feeds this from
-    // its own request instead.
+    // How many times the model runs over each frame on the AMD backend
+    // (NeuralRenderRequest::amdPasses), read from the same panel value NVIDIA
+    // counts passes with. The player's own jobs carry it because a live session
+    // is restarted for a moved count (ApplyNeuralSettings) and would otherwise
+    // relaunch under the number it was started with.
     uint32_t amdPasses{1};
     HANDLE pauseEvent{};
     bool prepareOnly{};
@@ -6839,23 +6838,26 @@ private:
             // and on this backend that is a different question than on NVIDIA.
             // NVIDIA's render reads every value in this dialog
             // (BackendReadsNeuralSettings), so any change is a reason. AMD's
-            // reads the accumulation rung and nothing else: no ReShade.ini is
-            // loaded or read and the guides are the evaluator's two constants
-            // rather than `m_renderGuides`, while the rung is this player's own
-            // pass over the runtime's output and is a term of the job's key
-            // (NeuralStabilitySettings.h). Anything else is not free - a
-            // restart costs a cold start, and for its whole duration the session
-            // is down and the original plays, so the picture changes character
-            // and changes back; a driven session measured two such restarts at
-            // 7.1 s and 16.7 s, attach=1.9 s and 11.1 s of them, both begun by
-            // pressing Apply on a panel whose values this backend never read.
-            // The rung is the exception the other way: the session in flight is
-            // rendering under the previous one, so leaving it running is how a
-            // user who moves the switch sees nothing happen.
+            // reads the accumulation rung and the pass count, and nothing else:
+            // no ReShade.ini is loaded or read and the guides are the
+            // evaluator's two constants rather than `m_renderGuides`, while the
+            // rung is this player's own pass over the runtime's output and the
+            // pass count stacks the model over itself, both of them terms of
+            // the job's key (NeuralStabilitySettings.h). Anything else is not
+            // free - a restart costs a cold start, and for its whole duration
+            // the session is down and the original plays, so the picture
+            // changes character and changes back; a driven session measured two
+            // such restarts at 7.1 s and 16.7 s, attach=1.9 s and 11.1 s of
+            // them, both begun by pressing Apply on a panel whose values this
+            // backend never read. The rung and the count are the exceptions the
+            // other way: the session in flight is rendering under the previous
+            // ones, so leaving it running is how a user who moves either switch
+            // sees nothing happen.
             const bool restart=BackendReadsNeuralSettings(m_opt.neuralBackend)||
-                               m_temporalSettings.stability!=m_liveRenderSettings.temporal.stability;
+                               m_temporalSettings.stability!=m_liveRenderSettings.temporal.stability||
+                               m_neuralSettings.passes!=m_liveRenderSettings.neural.passes;
             if(!restart){
-                LOG("Neural settings applied at "<<Position()<<" s; this backend's render reads the accumulation rung and nothing else in the dialog, and the rung is unchanged, so the active session is left running.");
+                LOG("Neural settings applied at "<<Position()<<" s; this backend's render reads the accumulation rung and the pass count and nothing else in the dialog, and neither moved, so the active session is left running.");
                 return;
             }
             // The restart must not leave a queued seek behind: it would run
@@ -11151,7 +11153,7 @@ private:
             // reports from the request.
             job.backend=m_opt.neuralBackend;job.amdRuntimeDirectory=m_opt.amdRuntimeDirectory;
             const RenderSettings render=JobRenderSettings(kind);
-            job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.pauseEvent=m_neuralPauseEvent;
+            job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.amdPasses=std::clamp(render.neural.passes,1,4);job.pauseEvent=m_neuralPauseEvent;
             job.gpuColorConversion=m_gpuColorConversion;job.gpuSourceConversion=m_gpuSourceConversion;job.nvencPreset=m_nvencPreset;job.processingScale=m_processingScale;job.captureDither=m_captureDither;job.cacheQuality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
             job.reuseSourceKey=reuseSourceKey;job.expectedDurationSeconds=expectedDurationSeconds;job.range=range;job.prepareOnly=prepareOnly;
             // The background acquisition of this very source, when one is in

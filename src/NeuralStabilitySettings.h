@@ -5,6 +5,7 @@
 #include "NeuralSettings.h"
 #include "TemporalStabilityPolicy.h"
 
+#include <algorithm>
 #include <string>
 #include <string_view>
 
@@ -46,14 +47,9 @@
 // rungs blend differently and must never share an entry.
 //
 // `passes` follows the same rule and for the same reason (default 1 writes
-// nothing), with one caveat the experiment has to retire: it is EXPERIMENTAL
-// stacking (AmdLmxxfEvaluatorConfig::passes), reached only from `--render
-// --passes`, and it is a key term precisely because it changes what runs. If
-// the experiment earns the panel control, the two places that read this
-// function's sibling - CanonicalNeuralSettingsForBackend, which returns a
-// constant for this backend, and ApplyNeuralSettings's restart gate - have to
-// stop treating passes as unreachable in the same change, or the picture moves
-// and neither the retained coverage nor the live session follows it.
+// nothing): the count is the one panel value this backend stacks the model
+// with, so a render at two passes is a different picture and a different key,
+// while 1 keys as every render before the control was wired keyed.
 inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uint32_t passes = 1)
 {
     std::string document = "backend=amd-lmxxf\n"
@@ -103,20 +99,22 @@ inline TemporalStability SavedStability(NeuralBackend backend, std::string_view 
 // spell it on the backend where all of it is read.
 //
 // On NVIDIA this is the whole canonical string, because every value on the panel
-// reaches a pixel there (BackendReadsNeuralSettings). On AMD it is a constant,
-// because none of it does: the rung is the one dialog value that reaches an AMD
-// render, and it travels in the temporal term of the same key
-// (CanonicalTemporalSettings), not here. The render key has known this all along
-// - its settings term is AmdNeuralSettingsDocument above, which takes no
-// NeuralSettings argument at all. The retention key kept hashing the whole panel
-// anyway, so moving a combo box whose value cannot reach this backend's pixels
-// retired coverage on disk byte-identical to what a restart would have rendered
-// - the exact waste the settings document's comment already ruled out for the
-// render key, one key over. Retiring a key once, here, is the fix; a key term
-// that lies about the picture it names is the bug.
+// reaches a pixel there (BackendReadsNeuralSettings). On AMD exactly one value
+// does - the pass count, stacked by the evaluator over its own output - so this
+// is that one value and nothing else. The rung travels in the temporal term of
+// the same key (CanonicalTemporalSettings); the panel's other values are still
+// unreachable here, and hashing them would retire coverage a restart would have
+// rendered identically - the exact waste the settings document's comment already
+// ruled out for the render key, one key over.
+//
+// Keep this in lockstep with what RunAmdJob actually copies into the evaluator's
+// config. A value added here before it reaches a pixel is a key term that lies;
+// a value that reaches a pixel without being added here retires rendered work
+// every time a slider moves.
 inline std::string CanonicalNeuralSettingsForBackend(NeuralBackend backend,
                                                      const NeuralSettings& settings)
 {
-    return backend == NeuralBackend::Amd ? std::string("unreached")
-                                        : CanonicalNeuralSettings(settings);
+    if (backend == NeuralBackend::Amd)
+        return "passes=" + std::to_string(std::clamp(settings.passes, 1, 4));
+    return CanonicalNeuralSettings(settings);
 }

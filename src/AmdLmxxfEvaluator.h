@@ -154,14 +154,15 @@ struct AmdLmxxfEvaluatorConfig {
     // it by name (kAmdDefaultStability in AmdLmxxfPolicy.h).
     TemporalStability stability{TemporalStability::Off};
 
-    // Experimental: how many times the model runs over each frame, the passes
-    // 2..N each fed the previous pass's readback as their source (NeuralSettings
-    // "passes" on the add-on's panel). EXPERIMENT ONLY, reached from `--render
-    // --amd-passes` until a measurement says what stacking the model on its own
-    // output actually does - no UI, no live path, and the accumulation pass runs
-    // on the FIRST evaluation only, so the stacked passes measure the model
-    // against itself without the history blender entangled in the answer.
-    // 1 is the exact behaviour before this field existed.
+    // How many times the model runs over each frame, passes 2..N each fed the
+    // previous pass's readback as their source - the pass count on the panel
+    // ("Neural passes"), wired through on this backend by RunAmdJob. The
+    // accumulation pass runs on the FIRST evaluation only, so the stacked
+    // passes are plain spatial evaluations and the history blender never sees
+    // the model's restacking as motion; measured on the still clip, each extra
+    // pass moves the picture further from its source and makes it less steady
+    // (commit 02aea47's numbers), which is why the default is 1 and the control
+    // is the user's to move. 1 is the exact behaviour before this field existed.
     uint32_t passes{1};
 
     // Per-stage trace, for the smoke test and for a receipt. Empty disables it.

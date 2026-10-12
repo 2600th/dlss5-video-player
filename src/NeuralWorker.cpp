@@ -940,7 +940,7 @@ bool ValidRequest(const NeuralRenderRequest& request)
     if (request.upscalingHistory != kDefaultUpscalingHistory &&
         (request.requireNeural || !request.outputWidth ||
          (request.outputWidth == request.width && request.outputHeight == request.height))) return false;
-    // Experimental AMD stacking: the panel's own 1..4 ladder, malformed rather
+    // The pass count: the panel's own 1..4 ladder, malformed rather
     // than clamped - a typo'd value should stop the job, not quietly renumber
     // what the caller asked the model to run.
     if (request.amdPasses < 1 || request.amdPasses > 4) return false;
@@ -1323,7 +1323,7 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
             arguments.emplace_back(L"--amd-runtime-dir");
             arguments.emplace_back(request.amdRuntimeDirectory.wstring());
         }
-        // Experimental stacking (AmdLmxxfEvaluatorConfig::passes). Only off the
+        // The pass count (AmdLmxxfEvaluatorConfig::passes). Only off the
         // default, so an unstacked AMD job's command line is byte-identical to
         // before the experiment.
         if (request.amdPasses != 1) {
@@ -1497,7 +1497,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // An AMD line without it is one an older player built and lets the
         // helper resolve the pack itself, which is what it did before.
         L"--amd-runtime-dir",
-        // Experimental AMD stacking, sent only off the default, so the command
+        // The pass count, sent only off the default, so the command
         // line of every job before the experiment is byte-identical to before.
         L"--amd-passes"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};

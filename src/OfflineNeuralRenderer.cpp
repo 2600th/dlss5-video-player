@@ -3676,7 +3676,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // made where the request is made, so that a job which asked for Off gets Off
     // and a job which said nothing gets Low.
     state.amdEvaluator.config.stability=request.temporal.stability;
-    // Experimental stacking, clamped to the panel's own ladder; ValidRequest
+    // The pass count, clamped to the panel's own ladder; ValidRequest
     // has already refused a value outside it, so this clamp is belt over brace.
     state.amdEvaluator.config.passes=std::clamp(request.amdPasses,1u,4u);
     // What this backend cannot be asked for. Each is a benchmark switch that

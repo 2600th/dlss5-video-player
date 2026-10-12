@@ -158,12 +158,12 @@ struct NeuralRenderRequest {
     // NeuralDirectEncodeSmoke GPU tests that hold it to that). Auto for every job
     // the player starts; only the benchmark and those tests name a path.
     EncoderPath encoderPath{EncoderPath::Auto};
-    // Experimental, AMD only: how many times the model runs over each frame
-    // (AmdLmxxfEvaluatorConfig::passes). Reached only from `--render --passes`
-    // while the stacking is being measured; 1 is the exact behaviour before the
-    // field existed, and a 1 in a request names the same render it always did.
-    // Clamped 1..4 by ValidRequest, and the cache key carries it only off the
-    // default, so every render before the experiment keys as it keyed.
+    // How many times the model runs over each frame on the AMD backend
+    // (AmdLmxxfEvaluatorConfig::passes), from the same panel value NVIDIA
+    // counts passes with. 1 is the single evaluation every job before the
+    // control was wired ran, and a 1 in a request names the same render it
+    // always did: the cache key carries the count only off the default.
+    // Clamped 1..4 by ValidRequest.
     uint32_t amdPasses{1};
 };
 
