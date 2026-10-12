@@ -1,7 +1,9 @@
 #include "GuideControls.h"
 #include "ReShadeConfig.h"
 #include "NeuralCache.h"
+#include "NeuralRenderTypes.h"
 #include "NeuralSettings.h"
+#include "NeuralStabilitySettings.h"
 #include "TemporalSettings.h"
 #include "OpticalFlowNvof.h"
 #include "TestSupport.h"
@@ -821,6 +823,35 @@ void skin_structure_is_off_or_what_the_runtime_acts_on()
     }
 }
 
+// The retention key's neural term follows the backend (NeuralStabilitySettings.h):
+// NVIDIA's render reads the whole panel, so its term is the canonical string byte
+// for byte; AMD's reads none of it, so its term is a constant, and two panels
+// that differ only in values this backend cannot reach keep the same retained
+// coverage. The rung is the one dialog value that reaches an AMD render, and it
+// travels in the key's temporal term (CanonicalTemporalSettings), not here.
+void the_retained_settings_term_reads_only_what_the_backend_reads()
+{
+    NeuralSettings passes4;
+    passes4.passes = 4;
+    // NVIDIA: the term IS the canonical string, so an NVIDIA retention key is
+    // byte-identical to what it was before the term grew a backend argument.
+    CHECK_EQ(CanonicalNeuralSettingsForBackend(NeuralBackend::Nvidia, NeuralSettings{}),
+             CanonicalNeuralSettings(NeuralSettings{}));
+    CHECK_EQ(CanonicalNeuralSettingsForBackend(NeuralBackend::Nvidia, passes4),
+             CanonicalNeuralSettings(passes4));
+    // AMD: a constant. Pass count and every other panel value are unreachable on
+    // this backend, so moving them retires nothing.
+    CHECK(CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, passes4) !=
+          CanonicalNeuralSettingsForBackend(NeuralBackend::Nvidia, passes4));
+    CHECK_EQ(CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, passes4),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, NeuralSettings{}));
+    NeuralSettings tuned;
+    tuned.intensity = 0.5f;
+    tuned.chainedHistory = false;
+    CHECK_EQ(CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, tuned),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, NeuralSettings{}));
+}
+
 void removing_one_owned_entry_preserves_other_entries_and_outside_files()
 {
     TempDirectory temp;
@@ -1023,6 +1054,7 @@ int main()
     writing_the_ini_sweeps_only_temporaries_older_than_this_process();
     neural_settings_round_trip_and_format_renodx_overrides();
     skin_structure_is_off_or_what_the_runtime_acts_on();
+    the_retained_settings_term_reads_only_what_the_backend_reads();
     removing_one_owned_entry_preserves_other_entries_and_outside_files();
     default_cache_root_owns_new_writes_under_windows_appdata_virtualization();
     a_cache_root_that_cannot_become_a_directory_is_invalid_and_names_the_cause();

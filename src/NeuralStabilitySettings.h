@@ -2,6 +2,7 @@
 
 #include "AmdLmxxfPolicy.h"
 #include "NeuralRenderTypes.h"
+#include "NeuralSettings.h"
 #include "TemporalStabilityPolicy.h"
 
 #include <string>
@@ -83,4 +84,27 @@ inline TemporalStability StabilitySettingsDefault(NeuralBackend backend) noexcep
 inline TemporalStability SavedStability(NeuralBackend backend, std::string_view saved) noexcept
 {
     return ParseTemporalStability(saved).value_or(StabilitySettingsDefault(backend));
+}
+
+// The NeuralSettings term of a RETAINED live session's identity: what `backend`'s
+// render actually reads out of the add-on's panel, spelled as the caller would
+// spell it on the backend where all of it is read.
+//
+// On NVIDIA this is the whole canonical string, because every value on the panel
+// reaches a pixel there (BackendReadsNeuralSettings). On AMD it is a constant,
+// because none of it does: the rung is the one dialog value that reaches an AMD
+// render, and it travels in the temporal term of the same key
+// (CanonicalTemporalSettings), not here. The render key has known this all along
+// - its settings term is AmdNeuralSettingsDocument above, which takes no
+// NeuralSettings argument at all. The retention key kept hashing the whole panel
+// anyway, so moving a combo box whose value cannot reach this backend's pixels
+// retired coverage on disk byte-identical to what a restart would have rendered
+// - the exact waste the settings document's comment already ruled out for the
+// render key, one key over. Retiring a key once, here, is the fix; a key term
+// that lies about the picture it names is the bug.
+inline std::string CanonicalNeuralSettingsForBackend(NeuralBackend backend,
+                                                     const NeuralSettings& settings)
+{
+    return backend == NeuralBackend::Amd ? std::string("unreached")
+                                        : CanonicalNeuralSettings(settings);
 }

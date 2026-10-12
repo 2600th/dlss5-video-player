@@ -10193,10 +10193,15 @@ private:
         return WideToUtf8(identity)+"|"+std::to_string(m_decoder.Width())+"x"+std::to_string(m_decoder.Height());
     }
     // What makes retained coverage reusable: same source at the same geometry,
-    // same neural settings, same guides. Anything else and the frames on disk
-    // are not the frames the user would get now.
+    // the neural settings this backend's render reads, the same guides, the same
+    // temporal switches. Anything else and the frames on disk are not the frames
+    // the user would get now. The neural term is per backend
+    // (CanonicalNeuralSettingsForBackend) because the two renders read different
+    // parts of the panel: NVIDIA's reads all of it, AMD's reads none of it and
+    // takes the rung from the temporal term instead - hashing the panel there
+    // would retire coverage a restart would have rendered identically.
     std::string RetentionKeyFor(const RenderSettings& render)const{
-        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettings(render.neural)+"|"+CanonicalGuideControls(render.guides)+
+        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettingsForBackend(m_opt.neuralBackend,render.neural)+"|"+CanonicalGuideControls(render.guides)+
                "|"+CanonicalTemporalSettings(render.temporal);
     }
     std::string LiveRetentionKey()const{return RetentionKeyFor(CurrentRenderSettings());}
