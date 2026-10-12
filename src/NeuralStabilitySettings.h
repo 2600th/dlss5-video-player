@@ -44,7 +44,17 @@
 // exact key this backend published before the pass existed, so a job that asks
 // for it has to keep that key. Every other rung is spelled out, because two
 // rungs blend differently and must never share an entry.
-inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation)
+//
+// `passes` follows the same rule and for the same reason (default 1 writes
+// nothing), with one caveat the experiment has to retire: it is EXPERIMENTAL
+// stacking (AmdLmxxfEvaluatorConfig::passes), reached only from `--render
+// --passes`, and it is a key term precisely because it changes what runs. If
+// the experiment earns the panel control, the two places that read this
+// function's sibling - CanonicalNeuralSettingsForBackend, which returns a
+// constant for this backend, and ApplyNeuralSettings's restart gate - have to
+// stop treating passes as unreachable in the same change, or the picture moves
+// and neither the retained coverage nor the live session follows it.
+inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uint32_t passes = 1)
 {
     std::string document = "backend=amd-lmxxf\n"
                            "temporal=off\n"
@@ -52,6 +62,8 @@ inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation)
                            "depth=constant(1)\n";
     if (accumulation != TemporalStability::Off)
         document += "accumulation=" + std::string(TemporalStabilityName(accumulation)) + "\n";
+    if (passes != 1)
+        document += "passes=" + std::to_string(passes) + "\n";
     return document;
 }
 

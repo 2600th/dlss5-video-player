@@ -940,6 +940,10 @@ bool ValidRequest(const NeuralRenderRequest& request)
     if (request.upscalingHistory != kDefaultUpscalingHistory &&
         (request.requireNeural || !request.outputWidth ||
          (request.outputWidth == request.width && request.outputHeight == request.height))) return false;
+    // Experimental AMD stacking: the panel's own 1..4 ladder, malformed rather
+    // than clamped - a typo'd value should stop the job, not quietly renumber
+    // what the caller asked the model to run.
+    if (request.amdPasses < 1 || request.amdPasses > 4) return false;
     return true;
 }
 
@@ -1319,6 +1323,13 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
             arguments.emplace_back(L"--amd-runtime-dir");
             arguments.emplace_back(request.amdRuntimeDirectory.wstring());
         }
+        // Experimental stacking (AmdLmxxfEvaluatorConfig::passes). Only off the
+        // default, so an unstacked AMD job's command line is byte-identical to
+        // before the experiment.
+        if (request.amdPasses != 1) {
+            arguments.emplace_back(L"--amd-passes");
+            arguments.emplace_back(std::to_wstring(request.amdPasses));
+        }
     }
     // Absent means 100, the source size, which is every job before the rungs.
     if (request.processingScale != kDefaultProcessingScale) {
@@ -1459,7 +1470,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
                CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, NeuralBackendKey,
-               AmdRuntimeDirectoryKey, KeyCount };
+               AmdRuntimeDirectoryKey, AmdPassesKey, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1485,7 +1496,10 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // said it would rather than a second resolution that happens to agree.
         // An AMD line without it is one an older player built and lets the
         // helper resolve the pack itself, which is what it did before.
-        L"--amd-runtime-dir"};
+        L"--amd-runtime-dir",
+        // Experimental AMD stacking, sent only off the default, so the command
+        // line of every job before the experiment is byte-identical to before.
+        L"--amd-passes"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1618,6 +1632,11 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
     // the backend without it leaves the field empty, which RunAmdJob reads as
     // "resolve one", exactly what the helper did before the key existed.
     if (values[AmdRuntimeDirectoryKey]) request.amdRuntimeDirectory = *values[AmdRuntimeDirectoryKey];
+    if (values[AmdPassesKey]) {
+        uint64_t passes = 0;
+        if (!ParseUnsigned(*values[AmdPassesKey], passes) || passes > UINT32_MAX) return std::nullopt;
+        request.amdPasses = static_cast<uint32_t>(passes);
+    }
     if (values[ProcessingScale]) {
         uint64_t percent = 0;
         if (!ParseUnsigned(*values[ProcessingScale], percent) || percent > UINT32_MAX ||

@@ -1726,8 +1726,10 @@ bool AmdLmxxfEvaluator::SubmitFrame(const std::vector<uint8_t>& bgra, bool reset
     // The same plan the lease path takes, for the same reason: where this
     // frame's source goes is decided before the upload puts it there. The two
     // call orders differ in where the runtime is asked to render, not in what
-    // the accumulation around it is.
-    const bool accumulates = config_.stability != TemporalStability::Off;
+    // the accumulation around it is. A stacked pass suspends it: the pass runs
+    // on the first evaluation's result only, so "what stacking does" and "what
+    // blending does" stay two questions while this is being measured.
+    const bool accumulates = config_.stability != TemporalStability::Off && !inExtraPass_;
     FrameIdentity accumulationFrame{};
     temporal_stability::Plan accumulationPlan{};
     int sourceSlot = -1;
@@ -1839,6 +1841,32 @@ bool AmdLmxxfEvaluator::SubmitFrame(const std::vector<uint8_t>& bgra, bool reset
 
     // ---- read back -------------------------------------------------------
     if (!ReadBackProduced(out)) return false;
+
+    // The stacked passes (AmdLmxxfEvaluatorConfig::passes), experimental: each
+    // feeds the previous pass's readback back as its own source and runs the
+    // same single evaluation again, accumulation suspended. Re-entering
+    // SubmitFrame keeps the session's per-evaluation lifecycle honest -
+    // PrepareFrame, EnqueueHip, Retire, readback, evaluation counters - which
+    // is what "the model ran N times" means to everything that counts
+    // evaluations. The reset stays false and the frame number stays this
+    // frame's: nothing between the passes is a new frame or a scene cut.
+    // `out` is both input and output and that is safe in order: the upload
+    // copies the vector into the colour texture before the readback at the
+    // bottom of the re-entered call overwrites it. Gated on !leases_: the
+    // re-entered SubmitFrame would otherwise take the lease order, and the
+    // experiment is defined for the offline path only. Gated on
+    // !inExtraPass_ as well, and this one is not decoration: the re-entered
+    // call runs this same loop when it reaches its own readback, and its pass
+    // counter starts from 1 again - without the flag the stacking recurses
+    // until the process dies, which is exactly what the first run did, four
+    // probe lines deep into frame one. The flag says "this call IS a stacked
+    // pass", so its own readback is a finished frame rather than a new input.
+    for (uint32_t pass = 1; pass < config_.passes && !leases_ && !inExtraPass_; ++pass) {
+        inExtraPass_ = true;
+        const bool stacked = SubmitFrame(out, false, sourceFrameNumber, out);
+        inExtraPass_ = false;
+        if (!stacked) return false;
+    }
 
     LmxxfNrTimings timings;
     std::string timingError;

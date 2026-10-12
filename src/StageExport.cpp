@@ -137,6 +137,8 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         request.sourceDeband=job.sourceDeband;
         request.suppliedExposure=job.suppliedExposure;
         request.temporal=job.temporal;
+        // Experimental AMD stacking; clamped again by ValidRequest.
+        request.amdPasses=std::clamp(job.neuralSettings.passes,1,4);
         request.requireNeural=plan.requireNeural;
         request.backend=plan.backend;
         const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;

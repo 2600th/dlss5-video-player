@@ -2876,6 +2876,12 @@ struct AmdLmxxfEvaluatorAdapter {
     // with, and a job handed one would be reported as a healthy render at a rung
     // that never ran.
     TemporalStability broughtUpStability{TemporalStability::Off};
+    // The pass count rides the same inheritance question even though it touches
+    // no resource: the evaluator holds its config by value from construction, so
+    // a job that asked for a different count under a reused evaluator would run
+    // the previous job's count. Keying on it costs a rebuild only when the count
+    // actually moved between jobs.
+    uint32_t broughtUpPasses{1};
     bool reused=false;
     // Why the last bring-up failed, kept because a failed Initialize drops the
     // evaluator and LastFailure() would then have nothing left to ask.
@@ -2890,12 +2896,13 @@ struct AmdLmxxfEvaluatorAdapter {
         // accumulation rung are the whole inheritance question and a match on all
         // three means there is nothing to rebuild.
         reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory&&
-               broughtUpStability==config.stability;
+               broughtUpStability==config.stability&&broughtUpPasses==config.passes;
         if(reused)return true;
         captured.clear();
         evaluator=std::make_unique<AmdLmxxfEvaluator>(config);
         width=w;height=h;broughtUpTemporal=config.temporalHistory;
         broughtUpStability=config.stability;
+        broughtUpPasses=config.passes;
         if(evaluator->Initialize(nullptr,w,h,ow,oh,fps,guides))return true;
         broughtUpFailure=evaluator->LastFailure();
         LOG("AMD neural runtime did not come up for "<<w<<"x"<<h<<": "<<evaluator->LastError());
@@ -3669,6 +3676,9 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // made where the request is made, so that a job which asked for Off gets Off
     // and a job which said nothing gets Low.
     state.amdEvaluator.config.stability=request.temporal.stability;
+    // Experimental stacking, clamped to the panel's own ladder; ValidRequest
+    // has already refused a value outside it, so this clamp is belt over brace.
+    state.amdEvaluator.config.passes=std::clamp(request.amdPasses,1u,4u);
     // What this backend cannot be asked for. Each is a benchmark switch that
     // exists to change what the NVIDIA path renders, and here it would change
     // nothing at all - a run that reported the flag's arm while rendering the
@@ -3703,6 +3713,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
         <<" temporal="<<(fileGuides?"on, under the recording-lease lifecycle"
             :"off, this backend has no guide estimator and this job brought no guide files")
         <<" accumulation="<<TemporalStabilityName(state.amdEvaluator.config.stability)
+        <<" passes="<<state.amdEvaluator.config.passes
         <<" feature18-receipt=not-applicable, this backend has no ReShade log");
 
     // Read before the per-job reset, so a bring-up the previous job left armed is

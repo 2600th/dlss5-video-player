@@ -456,6 +456,23 @@ void amd_accumulation_rung_is_on_by_default_and_off_keeps_the_old_key_test()
         for (size_t other = 0; other < distinct; ++other) CHECK(document != seen[other]);
         seen[distinct++] = document;
     }
+
+    // The experimental pass count keys the same way and for the same reason:
+    // the default 1 writes nothing, so every render before the experiment keys
+    // as it keyed, and each non-default count is its own line because N passes
+    // is N runs of the model and must never serve another count's entry.
+    CHECK_EQ(before, AmdNeuralSettingsDocument(TemporalStability::Off, 1));
+    for (const uint32_t passes : {2u, 3u, 4u}) {
+        const std::string document = AmdNeuralSettingsDocument(TemporalStability::Off, passes);
+        const std::string line = "passes=" + std::to_string(passes) + "\n";
+        CHECK_EQ(before.size() + line.size(), document.size());
+        CHECK(document.compare(before.size(), line.size(), line) == 0);
+        // And the count composes with a rung rather than replacing it.
+        const std::string both =
+            AmdNeuralSettingsDocument(TemporalStability::Low, passes);
+        CHECK(both.find("accumulation=low\n") != std::string::npos);
+        CHECK(both.find(line) != std::string::npos);
+    }
 }
 
 // Which key a rung is remembered under, and what a machine takes when its key
