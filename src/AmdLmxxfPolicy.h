@@ -1,9 +1,15 @@
 #pragma once
 
 #include "TemporalStabilityPolicy.h"
+#include "Utf8Text.h"
 
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace amd_lmxxf {
 
@@ -115,6 +121,112 @@ constexpr LayoutState ClassifyLayout(const RuntimeLayout& layout) noexcept
 {
     if (layout.Absent()) return LayoutState::Absent;
     return layout.Complete() ? LayoutState::Complete : LayoutState::Incomplete;
+}
+
+// The panel's pass count, written where the runtime will read it: the
+// `DLSS5_MULTI_PASS` key of the runtime's own custom-config.txt, under
+// `DLSS5-AMD\` next to the DLL.
+//
+// Why a file and not the process environment. The runtime reads its
+// configuration exactly once per process, when the network is created
+// (LoadFlagsFileOnce is a std::call_once inside the module), and its DLL is a
+// static-CRT build with no option setter in its API table - so an environment
+// variable set by this process cannot reach it: this program is /MT too, and
+// two static CRTs have two private copies of the environment. Measured, not
+// assumed: with the count injected into this process's environment, renders at
+// one pass and at two came out byte-identical. The file is the channel that
+// does work, and rewriting the key is idempotent, so every AMD job states the
+// count again before the network is built.
+//
+// Everything else in the file is left alone - the reader's rules are
+// reproduced here rather than replaced (a line counts when it starts with
+// DLSS5_, holds '=', and is at least 8 characters; anything else, comments
+// included, passes through), because a file rewritten wholesale would take the
+// user's other switches with it.
+inline std::string AmdPassesConfigLine(uint32_t passes)
+{
+    return "DLSS5_MULTI_PASS=" + std::to_string(passes < 1 ? 1u : (passes > 4 ? 4u : passes));
+}
+
+// Whether `line` sets DLSS5_MULTI_PASS, matched on the KEY rather than on the
+// prefix: the reader counts any line that starts with DLSS5_ and holds '=', and
+// the runtime's own switches share that prefix - DLSS5_MULTI_PASS_SKIN_PROTECT
+// is a different key that a prefix match would swallow. Same key twice in one
+// file is the last line that wins, so this returns true for every occurrence and
+// the writer keeps the last one, which is where the reader would look.
+inline bool IsAmdPassesConfigLine(std::string_view line) noexcept
+{
+    if (line.size() < 8 || line.substr(0, 6) != "DLSS5_") return false;
+    const size_t eq = line.find('=');
+    return eq != std::string_view::npos && line.substr(0, eq) == "DLSS5_MULTI_PASS";
+}
+
+inline bool WriteAmdPassesConfig(const std::filesystem::path& runtimeDirectory, uint32_t passes,
+                                 std::string& error)
+{
+    namespace fs = std::filesystem;
+    const fs::path directory = runtimeDirectory / L"DLSS5-AMD";
+    std::error_code ec;
+    fs::create_directories(directory, ec);
+    if (ec) {
+        error = "the runtime's configuration folder could not be created (" + directory.string() + ")";
+        return false;
+    }
+    const fs::path path = directory / L"custom-config.txt";
+    const std::string wanted = AmdPassesConfigLine(passes);
+    std::vector<std::string> lines;
+    bool replaced = false;
+    {
+        std::ifstream input(path, std::ios::binary);
+        std::ostringstream buffer;
+        if (input) buffer << input.rdbuf();
+        const std::string text = buffer.str();
+        // Two passes over the text: which lines are ours, and where the reader
+        // would read the key. Only the LAST occurrence is rewritten and the
+        // earlier ones are dropped, so the file the runtime parses agrees with
+        // the file it would have parsed before this call.
+        std::vector<size_t> ours;
+        {
+            size_t start = 0;
+            while (start < text.size()) {
+                const size_t end = text.find('\n', start);
+                std::string_view line(text.data() + start,
+                                      (end == std::string::npos ? text.size() : end) - start);
+                if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+                if (IsAmdPassesConfigLine(line)) ours.push_back(start);
+                if (end == std::string::npos) break;
+                start = end + 1;
+            }
+        }
+        const size_t keep = ours.empty() ? std::string::npos : ours.back();
+        size_t start = 0;
+        while (start < text.size()) {
+            const size_t end = text.find('\n', start);
+            std::string line = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            const bool isOurs = IsAmdPassesConfigLine(line);
+            if (!isOurs) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                lines.push_back(std::move(line));
+            } else if (start == keep) {
+                lines.push_back(wanted);
+                replaced = true;
+            }
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+    }
+    if (!replaced) lines.push_back(wanted);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        error = "the runtime's configuration file could not be written (" + path.string() + ")";
+        return false;
+    }
+    for (const std::string& line : lines) output << line << "\n";
+    if (!output) {
+        error = "the runtime's configuration file was not written whole (" + path.string() + ")";
+        return false;
+    }
+    return true;
 }
 
 } // namespace amd_lmxxf

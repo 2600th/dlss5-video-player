@@ -5,6 +5,9 @@
 
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -509,6 +512,73 @@ void stability_rung_is_remembered_under_a_key_per_backend_test()
     CHECK_EQ(StabilitySettingsDefault(NeuralBackend::Amd), SavedStability(NeuralBackend::Amd, "2"));
 }
 
+// The pass count reaches the runtime through its own configuration file, so the
+// writer has to agree with the reader on two things and change nothing else: the
+// KEY (the runtime's own switches share the DLSS5_ prefix, so a prefix match
+// swallows DLSS5_MULTI_PASS_SKIN_PROTECT - measured, that is what the first
+// version of this writer did) and which occurrence of a repeated key wins (the
+// last one).
+void amd_pass_count_reaches_the_runtime_through_its_own_config_file_test()
+{
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / L"amd-passes-config-test";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    const fs::path file = root / L"DLSS5-AMD" / L"custom-config.txt";
+    const auto read = [&file] {
+        std::ifstream in(file, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        return buffer.str();
+    };
+
+    // The reader counts a line that starts with DLSS5_ and holds '='; only the
+    // exact key is ours to write.
+    CHECK(amd_lmxxf::IsAmdPassesConfigLine("DLSS5_MULTI_PASS=2"));
+    CHECK(!amd_lmxxf::IsAmdPassesConfigLine("DLSS5_MULTI_PASS_SKIN_PROTECT=1"));
+    CHECK(!amd_lmxxf::IsAmdPassesConfigLine("DLSS5_MULTI_PASS_PREDICT=1"));
+    CHECK(!amd_lmxxf::IsAmdPassesConfigLine("DLSS5_MULTI_PASS_SKIP_BLOCKS=31,32"));
+    CHECK(!amd_lmxxf::IsAmdPassesConfigLine("#DLSS5_MULTI_PASS=2"));
+    CHECK(!amd_lmxxf::IsAmdPassesConfigLine("DLSS5_STYLE=3"));
+    CHECK_EQ(std::string("DLSS5_MULTI_PASS=1"), amd_lmxxf::AmdPassesConfigLine(0));
+    CHECK_EQ(std::string("DLSS5_MULTI_PASS=4"), amd_lmxxf::AmdPassesConfigLine(9));
+
+    // A file that does not exist yet: the folder is made and the key written.
+    std::string error;
+    CHECK(amd_lmxxf::WriteAmdPassesConfig(root, 2, error));
+    CHECK(fs::is_regular_file(file, ec) && !ec);
+    CHECK(read() == "DLSS5_MULTI_PASS=2\n");
+
+    // A hand-written file: its comments, its other keys and a repeated key of
+    // ours survive, the last occurrence is the one rewritten, and no earlier one
+    // is left behind for the reader to disagree with.
+    {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out << "# hand written\n"
+               "DLSS5_MULTI_PASS_SKIN_PROTECT=1\n"
+               "DLSS5_STYLE=3\n"
+               "DLSS5_MULTI_PASS=2\n"
+               "\n"
+               "DLSS5_MULTI_PASS=3\n";
+    }
+    CHECK(amd_lmxxf::WriteAmdPassesConfig(root, 4, error));
+    const std::string rewritten = read();
+    CHECK(rewritten == "# hand written\n"
+                       "DLSS5_MULTI_PASS_SKIN_PROTECT=1\n"
+                       "DLSS5_STYLE=3\n"
+                       "\n"
+                       "DLSS5_MULTI_PASS=4\n");
+    CHECK(rewritten.find("DLSS5_MULTI_PASS=2") == std::string::npos);
+    CHECK(rewritten.find("DLSS5_MULTI_PASS=3") == std::string::npos);
+
+    // Idempotent: writing the same count again changes nothing, which is what
+    // lets every job state the count without churning the file.
+    CHECK(amd_lmxxf::WriteAmdPassesConfig(root, 4, error));
+    CHECK(read() == rewritten);
+
+    fs::remove_all(root, ec);
+}
+
 void Run(std::string_view only)
 {
     const struct {
@@ -541,6 +611,8 @@ void Run(std::string_view only)
          amd_accumulation_rung_is_on_by_default_and_off_keeps_the_old_key_test},
         {"stability_rung_is_remembered_under_a_key_per_backend_test",
          stability_rung_is_remembered_under_a_key_per_backend_test},
+        {"amd_pass_count_reaches_the_runtime_through_its_own_config_file_test",
+         amd_pass_count_reaches_the_runtime_through_its_own_config_file_test},
     };
     for (const auto& test : cases) {
         if (!only.empty() && std::string_view(test.name).find(only) == std::string_view::npos)

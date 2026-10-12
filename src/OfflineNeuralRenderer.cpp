@@ -1,5 +1,7 @@
 #include "OfflineNeuralRenderer.h"
+#include "AmdLmxxfPolicy.h"
 #include "PlatformPaths.h"
+#include "Utf8Text.h"
 
 #include "Log.h"
 #include "PixelLayout.h"
@@ -2876,33 +2878,41 @@ struct AmdLmxxfEvaluatorAdapter {
     // with, and a job handed one would be reported as a healthy render at a rung
     // that never ran.
     TemporalStability broughtUpStability{TemporalStability::Off};
-    // The pass count rides the same inheritance question even though it touches
-    // no resource: the evaluator holds its config by value from construction, so
-    // a job that asked for a different count under a reused evaluator would run
-    // the previous job's count. Keying on it costs a rebuild only when the count
-    // actually moved between jobs.
+    // The pass count this bring-up was made under, and the one the next job
+    // asks for. They are not in the evaluator's config because the count is the
+    // RUNTIME's: the network stacks itself when it is built, from the value in
+    // its own configuration file. A moved count therefore needs a rebuild, and
+    // the rebuild is what makes the file's new value real - the module reads
+    // its configuration once per process (LoadFlagsFileOnce), so only a fresh
+    // load of the DLL re-reads it. Cost when the count actually moved: one
+    // module load, which the AMD job pays on its first frame anyway.
     uint32_t broughtUpPasses{1};
+    uint32_t jobPasses{1};
     bool reused=false;
     // Why the last bring-up failed, kept because a failed Initialize drops the
     // evaluator and LastFailure() would then have nothing left to ask.
     NeuralRenderFailure broughtUpFailure{NeuralRenderFailure::None};
 
     bool Reused()const{return reused;}
+    // Told before Initialize, because the reuse question is where the count
+    // enters: an evaluator built under another count holds a network that
+    // stacks that many passes.
+    void SetJobPasses(uint32_t passes){jobPasses=passes<1u?1u:(passes>4u?4u:passes);}
     bool Initialize(HWND,uint32_t w,uint32_t h,uint32_t ow,uint32_t oh,double fps,
                     const GuideControls& guides,PixelLayout,const SourceColorDescription&){
         if(!ow||!oh){ow=w;oh=h;}
         // The guides are per-frame inputs on this path rather than bring-up
-        // state, and there is no upscale, so the size, the job model and the
-        // accumulation rung are the whole inheritance question and a match on all
-        // three means there is nothing to rebuild.
+        // state, and there is no upscale, so the size, the job model, the
+        // accumulation rung and the pass count are the whole inheritance
+        // question and a match on all four means there is nothing to rebuild.
         reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory&&
-               broughtUpStability==config.stability&&broughtUpPasses==config.passes;
+               broughtUpStability==config.stability&&broughtUpPasses==jobPasses;
         if(reused)return true;
         captured.clear();
         evaluator=std::make_unique<AmdLmxxfEvaluator>(config);
         width=w;height=h;broughtUpTemporal=config.temporalHistory;
         broughtUpStability=config.stability;
-        broughtUpPasses=config.passes;
+        broughtUpPasses=jobPasses;
         if(evaluator->Initialize(nullptr,w,h,ow,oh,fps,guides))return true;
         broughtUpFailure=evaluator->LastFailure();
         LOG("AMD neural runtime did not come up for "<<w<<"x"<<h<<": "<<evaluator->LastError());
@@ -3641,6 +3651,28 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // NeuralRenderJob.
     state.amdEvaluator.config.runtimeDirectory=
         amd_lmxxf::ResolveRuntimeDirectory(request.amdRuntimeDirectory);
+    // The pass count is the RUNTIME's, and the runtime reads it from its own
+    // configuration file once per process, when the network is built - which is
+    // below this point. Written here rather than in the player's job setup
+    // because this is the first line every AMD render passes on its way to a
+    // network: a live job, a paused preview and the single-shot helper behind
+    // `--render` all reach this function, and only the first two pass through
+    // the player's own job setup - a write there left the command-line render
+    // running under whatever the file last said. A file that cannot be written
+    // fails the job: the panel would otherwise show a count nothing renders.
+    {
+        std::string passesError;
+        if (!amd_lmxxf::WriteAmdPassesConfig(state.amdEvaluator.config.runtimeDirectory,
+                                             std::clamp(request.amdPasses, 1u, 4u), passesError)) {
+            NeuralRenderResult refused;
+            refused.jobId = request.jobId;
+            refused.failure = NeuralRenderFailure::Preflight;
+            refused.detail = utf8_text::ToWide(passesError) +
+                             L" - the neural pass count cannot be handed to the AMD runtime.";
+            LOG("Refusing the AMD job: " << passesError);
+            return refused;
+        }
+    }
     // Deliberately no log sink. This evaluator logs per call and per frame - the
     // guide line, every ABI status - and that log file is the one SessionEvidence
     // measures to decide whether a helper may serve another job. A backend whose
@@ -3676,9 +3708,11 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // made where the request is made, so that a job which asked for Off gets Off
     // and a job which said nothing gets Low.
     state.amdEvaluator.config.stability=request.temporal.stability;
-    // The pass count, clamped to the panel's own ladder; ValidRequest
-    // has already refused a value outside it, so this clamp is belt over brace.
-    state.amdEvaluator.config.passes=std::clamp(request.amdPasses,1u,4u);
+    // The count is the runtime's, not the evaluator's (the network stacks itself
+    // when it is built); this only tells the adapter that a moved count is a
+    // moved bring-up, so the next Initialize reloads the module and the runtime
+    // reads the file the player just wrote.
+    state.amdEvaluator.SetJobPasses(request.amdPasses);
     // What this backend cannot be asked for. Each is a benchmark switch that
     // exists to change what the NVIDIA path renders, and here it would change
     // nothing at all - a run that reported the flag's arm while rendering the
@@ -3713,7 +3747,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
         <<" temporal="<<(fileGuides?"on, under the recording-lease lifecycle"
             :"off, this backend has no guide estimator and this job brought no guide files")
         <<" accumulation="<<TemporalStabilityName(state.amdEvaluator.config.stability)
-        <<" passes="<<state.amdEvaluator.config.passes
+        <<" passes="<<request.amdPasses<<" (the runtime stacks the network itself; the count was handed to it before the network was built)"
         <<" feature18-receipt=not-applicable, this backend has no ReShade log");
 
     // Read before the per-job reset, so a bring-up the previous job left armed is

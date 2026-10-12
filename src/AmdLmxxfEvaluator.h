@@ -154,17 +154,6 @@ struct AmdLmxxfEvaluatorConfig {
     // it by name (kAmdDefaultStability in AmdLmxxfPolicy.h).
     TemporalStability stability{TemporalStability::Off};
 
-    // How many times the model runs over each frame, passes 2..N each fed the
-    // previous pass's readback as their source - the pass count on the panel
-    // ("Neural passes"), wired through on this backend by RunAmdJob. The
-    // accumulation pass runs on the FIRST evaluation only, so the stacked
-    // passes are plain spatial evaluations and the history blender never sees
-    // the model's restacking as motion; measured on the still clip, each extra
-    // pass moves the picture further from its source and makes it less steady
-    // (commit 02aea47's numbers), which is why the default is 1 and the control
-    // is the user's to move. 1 is the exact behaviour before this field existed.
-    uint32_t passes{1};
-
     // Per-stage trace, for the smoke test and for a receipt. Empty disables it.
     std::function<void(std::string_view)> log;
 };
@@ -394,12 +383,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> zeroMotion_;
     temporal_stability::History accumulationHistory_{};
     uint64_t accumulationFrames_{};
-
-    // True while SubmitFrame is running one of the stacked passes 2..N on its
-    // own output. It suspends the accumulation pass for the duration, so a
-    // stacked pass is a plain spatial evaluation and the history blender only
-    // ever sees the first one's result - see AmdLmxxfEvaluatorConfig::passes.
-    bool inExtraPass_{false};
 
     // The state the caller declared for color_ at the last RecordInputs and the
     // state the next transition must start from. The runtime reads the colour
