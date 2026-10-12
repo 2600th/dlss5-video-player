@@ -1,17 +1,21 @@
 #include "AmdLmxxfEvaluator.h"
 
 #include "AmdLmxxfPolicy.h"
+#include "AmdTemporalAccumulationShader.h"
 #include "GuideFiles.h"
+#include "TemporalStabilityShader.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <d3dcompiler.h>
 #include <system_error>
 #include <vector>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "d3dcompiler.lib")
 
 namespace {
 
@@ -44,6 +48,27 @@ constexpr D3D12_RESOURCE_STATES kGuideState = D3D12_RESOURCE_STATE_NON_PIXEL_SHA
 // releases cannot spin this frame loop forever.
 constexpr int kCollectAttempts = 64;
 
+// The temporal accumulation's descriptor layout, laid out by hand because the
+// heap is small and a wrong index here reads somebody else's texture without
+// saying so.
+//
+// Exactly one of these is rewritten between frames: the runtime publishes a new
+// private_output every frame, so decode's input is the descriptor that cannot
+// be built once. Everything else is either a texture that never changes or a
+// choice between two tables - the accumulation's t1/t3/t4 name the history slot
+// the pass is reading, so which table is bound is which slot it reads and no
+// descriptor is edited to change it.
+constexpr UINT kSrvDecode = 0;
+constexpr UINT kSrvEncodeBase = 1;          // + the history slot being encoded
+constexpr UINT kSrvAccumulateBase = 3;      // + the history slot being read * 5
+constexpr UINT kAccumulateTableSize = 5;    // t0..t4, the pass's whole binding
+constexpr UINT kSrvCount = 3 + 2 * kAccumulateTableSize;
+
+constexpr UINT kRtvStabilised = 0;
+constexpr UINT kRtvHistoryBase = 1;         // + the history slot being written
+constexpr UINT kRtvNeuralLinear = 3;
+constexpr UINT kRtvCount = 4;
+
 std::string Narrow(const std::wstring& text)
 {
     if (text.empty()) return {};
@@ -67,6 +92,48 @@ std::string Hex32(long value)
     char buffer[16]{};
     std::snprintf(buffer, sizeof(buffer), "%08lX", static_cast<unsigned long>(value));
     return buffer;
+}
+
+// One transition of one resource, whole-resource. The frame path has enough
+// barriers in a row that writing them out in full at each site buries the order
+// they have to be in; this is the same barrier the file already builds by hand,
+// with the three fields that change as arguments.
+void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
+                D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+{
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    list->ResourceBarrier(1, &barrier);
+}
+
+// A descriptor handle `index` entries along a heap, in the two flavours the
+// frame path needs: the CPU one for creating views, the GPU one for binding
+// them.
+D3D12_CPU_DESCRIPTOR_HANDLE OffsetHandle(D3D12_CPU_DESCRIPTOR_HANDLE base, UINT size, UINT index)
+{
+    base.ptr += static_cast<SIZE_T>(size) * index;
+    return base;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE OffsetHandle(D3D12_GPU_DESCRIPTOR_HANDLE base, UINT size, UINT index)
+{
+    base.ptr += static_cast<UINT64>(size) * index;
+    return base;
+}
+
+// A compiler blob as text, without the terminator GetBufferSize() counts. Used
+// for the messages D3DCompile and D3D12SerializeRootSignature hand back, which
+// are the only place a shader problem is ever explained.
+std::string BlobText(ID3DBlob* blob)
+{
+    if (blob == nullptr || blob->GetBufferPointer() == nullptr) return {};
+    std::string text(static_cast<const char*>(blob->GetBufferPointer()), blob->GetBufferSize());
+    while (!text.empty() && text.back() == '\0') text.pop_back();
+    return text;
 }
 
 } // namespace
@@ -133,8 +200,19 @@ bool AmdLmxxfEvaluator::Refuse(std::string detail)
 
 bool AmdLmxxfEvaluator::Ready() const noexcept
 {
-    return prepared_ && session_.has_value() && device_ != nullptr && queue_ != nullptr &&
-           color_ != nullptr && uploadMapped_ != nullptr && readback_ != nullptr;
+    if (!(prepared_ && session_.has_value() && device_ != nullptr && queue_ != nullptr &&
+          color_ != nullptr && uploadMapped_ != nullptr && readback_ != nullptr))
+        return false;
+    // A rung is not something this evaluator can attempt without its pass, and
+    // Ready() is what every frame path asks before it starts: a frame that got
+    // past this point and then found no pass would already have uploaded itself
+    // and be halfway through a command list.
+    if (config_.stability == TemporalStability::Off) return true;
+    return psoDecode_ != nullptr && psoAccumulate_ != nullptr && psoEncode_ != nullptr &&
+           convertRootSig_ != nullptr && accumulationRootSig_ != nullptr &&
+           sourceSlot_[0] != nullptr && sourceSlot_[1] != nullptr &&
+           historySlot_[0] != nullptr && historySlot_[1] != nullptr &&
+           neuralLinear_ != nullptr && stabilised_ != nullptr && zeroMotion_ != nullptr;
 }
 
 bool AmdLmxxfEvaluator::BringUpDevice(std::string_view why)
@@ -668,6 +746,26 @@ void AmdLmxxfEvaluator::TearDown()
     readback_.Reset();
     upload_.Reset();
     color_.Reset();
+    // The accumulation's objects go with the frame ones they are sized to, and
+    // the history is dropped with them: a device that comes back up at another
+    // geometry starts a new history rather than blending into a frame of the
+    // size it no longer is.
+    accumulationHistory_ = {};
+    zeroMotion_.Reset();
+    stabilised_.Reset();
+    neuralLinear_.Reset();
+    historySlot_[0].Reset();
+    historySlot_[1].Reset();
+    sourceSlot_[0].Reset();
+    sourceSlot_[1].Reset();
+    psoEncode_.Reset();
+    psoAccumulate_.Reset();
+    psoDecode_.Reset();
+    accumulationRootSig_.Reset();
+    convertRootSig_.Reset();
+    accumulationRtvHeap_.Reset();
+    accumulationSrvHeap_.Reset();
+    accumulationSrvDescriptorSize_ = 0;
     fence_.Reset();
     consumerList_.Reset();
     consumerAllocator_.Reset();
@@ -715,9 +813,13 @@ bool AmdLmxxfEvaluator::Initialize(HWND, uint32_t width, uint32_t height, uint32
     frameIndex_ = 0;
     evaluations_ = 0;
     neuralEvaluations_ = 0;
+    accumulationFrames_ = 0;
 
     if (!BringUpDevice("the evaluator owns them; a stage C worker would hand its own")) return false;
     if (!CreateFrameResources()) return false;
+    // Before the runtime, so a shader that will not compile is refused before a
+    // session is armed for a job that could never run at its rung.
+    if (!CreateTemporalResources()) return false;
     if (!BringUpRuntime()) return false;
     // After the runtime, so a guide failure reports with the session's context
     // already in the log. Only the lease path has a consumer list to build.
@@ -754,7 +856,7 @@ bool AmdLmxxfEvaluator::WaitForGpu()
     return true;
 }
 
-bool AmdLmxxfEvaluator::UploadColor(const std::vector<uint8_t>& bgra)
+bool AmdLmxxfEvaluator::UploadColor(const std::vector<uint8_t>& bgra, int sourceSlot)
 {
     // The pointer never moves; only the contents do. The upload buffer is
     // persistent and mapped, so a frame costs one memcpy per row and no
@@ -767,15 +869,8 @@ bool AmdLmxxfEvaluator::UploadColor(const std::vector<uint8_t>& bgra)
                     static_cast<size_t>(width_) * 4u);
     }
 
-    if (colorState_ != D3D12_RESOURCE_STATE_COPY_DEST) {
-        D3D12_RESOURCE_BARRIER barrier{};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = color_.Get();
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barrier.Transition.StateBefore = colorState_;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        list_->ResourceBarrier(1, &barrier);
-    }
+    if (colorState_ != D3D12_RESOURCE_STATE_COPY_DEST)
+        Transition(list_.Get(), color_.Get(), colorState_, D3D12_RESOURCE_STATE_COPY_DEST);
 
     D3D12_TEXTURE_COPY_LOCATION destination{};
     destination.pResource = color_.Get();
@@ -787,13 +882,25 @@ bool AmdLmxxfEvaluator::UploadColor(const std::vector<uint8_t>& bgra)
     source.PlacedFootprint = footprint_;
     list_->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
 
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = color_.Get();
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = kColorState;
-    list_->ResourceBarrier(1, &barrier);
+    // The accumulation's trust test compares this frame's source with the frame
+    // before it, so this frame has to be in the slot its own output will go into
+    // before the pass reads either. It is taken from the colour texture rather
+    // than uploaded a second time because they are the same bytes and this
+    // texture already holds them.
+    D3D12_RESOURCE_STATES stateAfterUpload = D3D12_RESOURCE_STATE_COPY_DEST;
+    if (sourceSlot == 0 || sourceSlot == 1) {
+        ID3D12Resource* slot = sourceSlot_[static_cast<size_t>(sourceSlot)].Get();
+        Transition(list_.Get(), color_.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(list_.Get(), slot, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                   D3D12_RESOURCE_STATE_COPY_DEST);
+        list_->CopyResource(slot, color_.Get());
+        Transition(list_.Get(), slot, D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        stateAfterUpload = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    }
+
+    Transition(list_.Get(), color_.Get(), stateAfterUpload, kColorState);
 
     colorState_ = kColorState;
     colorUploaded_ = true;
@@ -820,33 +927,475 @@ bool AmdLmxxfEvaluator::CopyProducedToReadback(ID3D12GraphicsCommandList* list)
                     "job.private_output format " + std::to_string(static_cast<int>(description.Format)) +
                         " is not a 32-bit BGRA layout this evaluator can read");
 
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = produced;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = kPrivateOutputState;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    list->ResourceBarrier(1, &barrier);
+    Transition(list, produced, kPrivateOutputState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    CopyTextureToReadback(list, produced, description.Format);
+    // Put it back exactly where the runtime left it, so the next frame's own
+    // barriers still describe the truth.
+    Transition(list, produced, D3D12_RESOURCE_STATE_COPY_SOURCE, kPrivateOutputState);
 
+    lastOutput_ = produced;
+    lastOutputWasPrivate_ = produced != static_cast<void*>(color_.Get());
+    return true;
+}
+
+void AmdLmxxfEvaluator::CopyTextureToReadback(ID3D12GraphicsCommandList* list, ID3D12Resource* from,
+                                             DXGI_FORMAT format)
+{
+    // The frame's own footprint, carrying the source's format: the two paths
+    // that reach this differ only in the texture they hand it, and the format
+    // has to come from that texture because a copy region does not convert.
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = footprint_;
-    footprint.Footprint.Format = description.Format;
+    footprint.Footprint.Format = format;
     D3D12_TEXTURE_COPY_LOCATION destination{};
     destination.pResource = readback_.Get();
     destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     destination.PlacedFootprint = footprint;
     D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = produced;
+    source.pResource = from;
     source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     source.SubresourceIndex = 0;
     list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+}
 
-    // Put it back exactly where the runtime left it, so the next frame's own
-    // barriers still describe the truth.
-    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-    list->ResourceBarrier(1, &barrier);
+bool AmdLmxxfEvaluator::CreateTemporalResources()
+{
+    if (config_.stability == TemporalStability::Off) return true;
 
-    lastOutput_ = produced;
-    lastOutputWasPrivate_ = produced != static_cast<void*>(color_.Get());
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    // Every texture here is the frame's own size, because the runtime is a 1:1
+    // denoiser (Initialize refuses anything else), so the only fields that vary
+    // between them are the format and the flags.
+    auto texture = [&](DXGI_FORMAT format, uint32_t w, uint32_t h, D3D12_RESOURCE_FLAGS flags,
+                       D3D12_RESOURCE_STATES initial, Microsoft::WRL::ComPtr<ID3D12Resource>& out,
+                       const wchar_t* name) -> bool {
+        D3D12_RESOURCE_DESC description{};
+        description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        description.Width = w;
+        description.Height = h;
+        description.DepthOrArraySize = 1;
+        description.MipLevels = 1;
+        description.Format = format;
+        description.SampleDesc.Count = 1;
+        description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        description.Flags = flags;
+        if (FAILED(device_->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &description,
+                                                    initial, nullptr, IID_PPV_ARGS(out.GetAddressOf()))))
+            return Refuse("CreateCommittedResource for " + Narrow(std::wstring(name)) + " failed");
+        out->SetName(name);
+        return true;
+    };
+
+    for (UINT slot = 0; slot < 2; ++slot) {
+        if (!texture(DXGI_FORMAT_B8G8R8A8_UNORM, width_, height_, D3D12_RESOURCE_FLAG_NONE,
+                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, sourceSlot_[slot],
+                     slot ? L"AMD_Temporal_Source_B" : L"AMD_Temporal_Source_A"))
+            return false;
+        if (!texture(DXGI_FORMAT_R16G16B16A16_FLOAT, width_, height_,
+                     D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, historySlot_[slot],
+                     slot ? L"AMD_Temporal_History_B" : L"AMD_Temporal_History_A"))
+            return false;
+    }
+    if (!texture(DXGI_FORMAT_R16G16B16A16_FLOAT, width_, height_,
+                 D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, neuralLinear_,
+                 L"AMD_Temporal_NeuralLinear"))
+        return false;
+    if (!texture(DXGI_FORMAT_B8G8R8A8_UNORM, width_, height_,
+                 D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, stabilised_,
+                 L"AMD_Temporal_Stabilised"))
+        return false;
+    if (!texture(DXGI_FORMAT_R16G16_FLOAT, 1, 1, D3D12_RESOURCE_FLAG_NONE,
+                 D3D12_RESOURCE_STATE_COPY_DEST, zeroMotion_, L"AMD_Temporal_ZeroMotion"))
+        return false;
+
+    // The zero motion field, through a throwaway staging buffer. The pass reads
+    // a vector from this texture and adds it to the sample position, so a zero
+    // vector is what makes the frame it accumulates from the same position as
+    // the frame it accumulates into.
+    {
+        const uint16_t zero[2] = {0, 0};
+        D3D12_HEAP_PROPERTIES uploadHeap{};
+        uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = sizeof(zero);
+        buffer.Height = 1;
+        buffer.DepthOrArraySize = 1;
+        buffer.MipLevels = 1;
+        buffer.Format = DXGI_FORMAT_UNKNOWN;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        Microsoft::WRL::ComPtr<ID3D12Resource> staging;
+        if (FAILED(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                    IID_PPV_ARGS(staging.GetAddressOf()))))
+            return Refuse("CreateCommittedResource for the zero-motion staging buffer failed");
+        void* mapped = nullptr;
+        const D3D12_RANGE noRead{0, 0};
+        if (FAILED(staging->Map(0, &noRead, &mapped)))
+            return Refuse("the zero-motion staging buffer would not map");
+        std::memcpy(mapped, zero, sizeof(zero));
+        staging->Unmap(0, nullptr);
+
+        // It has to go through a list, and this is the only one that exists
+        // before a frame does. Every frame path resets this pair at its own
+        // start, so leaving it closed here is the state they expect.
+        if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_.Get(), nullptr)))
+            return Refuse("the command list would not reset for the zero-motion upload");
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = zeroMotion_.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        destination.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = staging.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        source.PlacedFootprint.Offset = 0;
+        source.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R16G16_FLOAT;
+        source.PlacedFootprint.Footprint.Width = 1;
+        source.PlacedFootprint.Footprint.Height = 1;
+        source.PlacedFootprint.Footprint.Depth = 1;
+        source.PlacedFootprint.Footprint.RowPitch = sizeof(zero);
+        list_->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        Transition(list_.Get(), zeroMotion_.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (FAILED(list_->Close()))
+            return Refuse("the zero-motion list would not close");
+        ID3D12CommandList* lists[] = {list_.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        if (!WaitForGpu()) return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC srvHeap{};
+    srvHeap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srvHeap.NumDescriptors = kSrvCount;
+    srvHeap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device_->CreateDescriptorHeap(&srvHeap, IID_PPV_ARGS(accumulationSrvHeap_.GetAddressOf()))))
+        return Refuse("CreateDescriptorHeap for the accumulation's SRVs failed");
+    accumulationSrvDescriptorSize_ =
+        device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtvHeap{};
+    rtvHeap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtvHeap.NumDescriptors = kRtvCount;
+    if (FAILED(device_->CreateDescriptorHeap(&rtvHeap, IID_PPV_ARGS(accumulationRtvHeap_.GetAddressOf()))))
+        return Refuse("CreateDescriptorHeap for the accumulation's render targets failed");
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtvBase =
+        accumulationRtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    const UINT rtvSize = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    device_->CreateRenderTargetView(stabilised_.Get(), nullptr,
+                                    OffsetHandle(rtvBase, rtvSize, kRtvStabilised));
+    device_->CreateRenderTargetView(neuralLinear_.Get(), nullptr,
+                                    OffsetHandle(rtvBase, rtvSize, kRtvNeuralLinear));
+    for (UINT slot = 0; slot < 2; ++slot)
+        device_->CreateRenderTargetView(historySlot_[slot].Get(), nullptr,
+                                        OffsetHandle(rtvBase, rtvSize, kRtvHistoryBase + slot));
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE srvBase =
+        accumulationSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+    auto makeView = [&](ID3D12Resource* resource, DXGI_FORMAT format, UINT index) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.Format = format;
+        view.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(resource, &view,
+                                          OffsetHandle(srvBase, accumulationSrvDescriptorSize_, index));
+    };
+    for (UINT slot = 0; slot < 2; ++slot)
+        makeView(historySlot_[slot].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, kSrvEncodeBase + slot);
+    // One table per history slot the pass can read. Which table is bound is
+    // which slot it reads, so the whole choice costs a descriptor-table bind
+    // rather than a descriptor edit.
+    for (UINT read = 0; read < 2; ++read) {
+        const UINT base = kSrvAccumulateBase + read * kAccumulateTableSize;
+        makeView(neuralLinear_.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, base + 0);
+        makeView(historySlot_[read].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, base + 1);
+        makeView(zeroMotion_.Get(), DXGI_FORMAT_R16G16_FLOAT, base + 2);
+        // t3 is this frame's source and t4 the frame before it. The slot this
+        // frame's output goes into is the slot its source goes into, so when the
+        // pass reads slot `read` it is the other one that is current - and on a
+        // reset, where the two are the same slot, neither is read at all.
+        makeView(sourceSlot_[read ^ 1u].Get(), DXGI_FORMAT_B8G8R8A8_UNORM, base + 3);
+        makeView(sourceSlot_[read].Get(), DXGI_FORMAT_B8G8R8A8_UNORM, base + 4);
+    }
+    // Decode's table is rewritten every frame with the runtime's own texture.
+    // Until then it points at a real texture, because a bound table of null
+    // descriptors is what a debug layer calls a bug and a frame is what fixes.
+    makeView(sourceSlot_[0].Get(), DXGI_FORMAT_B8G8R8A8_UNORM, kSrvDecode);
+
+    if (!CreateTemporalPipeline()) return false;
+
+    Log("temporal accumulation " + std::string(TemporalStabilityName(config_.stability)) + " at " +
+        std::to_string(width_) + "x" + std::to_string(height_) +
+        ": two FP16 history slots, two source frames, one zero motion field");
+    return true;
+}
+
+bool AmdLmxxfEvaluator::CreateTemporalPipeline()
+{
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+
+    auto compile = [&](const char* text, size_t length, const char* entry,
+                       Microsoft::WRL::ComPtr<ID3DBlob>& blob) -> bool {
+        // The profile is the entry point's (AmdTemporalAccumulationShader.h):
+        // this loop compiles two vertex shaders and three pixel shaders, and a
+        // fixed target here is a mistake only a device can see.
+        const char* profile = ShaderProfileFor(entry);
+        Microsoft::WRL::ComPtr<ID3DBlob> error;
+        const HRESULT hr = D3DCompile(text, length, "amd-temporal", nullptr, nullptr, entry, profile,
+                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob.GetAddressOf(),
+                                      error.GetAddressOf());
+        if (FAILED(hr))
+            return Refuse(std::string("the temporal accumulation's ") + entry + " (" + profile +
+                          ") would not compile: " + (error ? BlobText(error.Get()) : Hex32(hr)));
+        return true;
+    };
+
+    Microsoft::WRL::ComPtr<ID3DBlob> convertVs, decodePs, encodePs, accumulateVs, accumulatePs;
+    if (!compile(kAmdTemporalConvertHlsl, sizeof(kAmdTemporalConvertHlsl) - 1, "VS", convertVs))
+        return false;
+    if (!compile(kAmdTemporalConvertHlsl, sizeof(kAmdTemporalConvertHlsl) - 1, "PSDecode", decodePs))
+        return false;
+    if (!compile(kAmdTemporalConvertHlsl, sizeof(kAmdTemporalConvertHlsl) - 1, "PSEncode", encodePs))
+        return false;
+    if (!compile(kTemporalStabilityHlsl, sizeof(kTemporalStabilityHlsl) - 1, "VS", accumulateVs))
+        return false;
+    if (!compile(kTemporalStabilityHlsl, sizeof(kTemporalStabilityHlsl) - 1, "PSTemporalStability",
+                 accumulatePs))
+        return false;
+
+    // The conversions take one texture and no constants, so their signature is a
+    // table of one and nothing else.
+    D3D12_DESCRIPTOR_RANGE convertRange{};
+    convertRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    convertRange.NumDescriptors = 1;
+    convertRange.BaseShaderRegister = 0;
+    D3D12_ROOT_PARAMETER convertParameter{};
+    convertParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    convertParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    convertParameter.DescriptorTable.NumDescriptorRanges = 1;
+    convertParameter.DescriptorTable.pDescriptorRanges = &convertRange;
+    {
+        D3D12_ROOT_SIGNATURE_DESC description{};
+        description.NumParameters = 1;
+        description.pParameters = &convertParameter;
+        description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
+        const HRESULT hr =
+            D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1,
+                                        signature.GetAddressOf(), error.GetAddressOf());
+        if (FAILED(hr))
+            return Refuse("the conversion root signature would not serialize: " +
+                          (error ? BlobText(error.Get()) : Hex32(hr)));
+        if (FAILED(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                                signature->GetBufferSize(),
+                                                IID_PPV_ARGS(convertRootSig_.GetAddressOf()))))
+            return Refuse("CreateRootSignature for the conversions failed");
+    }
+
+    // The accumulation takes the pass's own five textures and its eight
+    // constants - the same shape the NVIDIA capture path builds for it.
+    D3D12_DESCRIPTOR_RANGE accumulateRange{};
+    accumulateRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    accumulateRange.NumDescriptors = kAccumulateTableSize;
+    accumulateRange.BaseShaderRegister = 0;
+    D3D12_ROOT_PARAMETER accumulateParameters[2]{};
+    accumulateParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    accumulateParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    accumulateParameters[0].DescriptorTable.NumDescriptorRanges = 1;
+    accumulateParameters[0].DescriptorTable.pDescriptorRanges = &accumulateRange;
+    accumulateParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    accumulateParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    accumulateParameters[1].Constants.Num32BitValues = 8;
+    accumulateParameters[1].Constants.ShaderRegister = 0;
+    {
+        D3D12_ROOT_SIGNATURE_DESC description{};
+        description.NumParameters = 2;
+        description.pParameters = accumulateParameters;
+        description.NumStaticSamplers = 1;
+        description.pStaticSamplers = &sampler;
+        description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
+        const HRESULT hr =
+            D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1,
+                                        signature.GetAddressOf(), error.GetAddressOf());
+        if (FAILED(hr))
+            return Refuse("the accumulation root signature would not serialize: " +
+                          (error ? BlobText(error.Get()) : Hex32(hr)));
+        if (FAILED(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                                signature->GetBufferSize(),
+                                                IID_PPV_ARGS(accumulationRootSig_.GetAddressOf()))))
+            return Refuse("CreateRootSignature for the accumulation failed");
+    }
+
+    // One description, three states: the conversions differ in their pixel
+    // shader and target format, the accumulation in its own pair.
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.VS = {convertVs->GetBufferPointer(), convertVs->GetBufferSize()};
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.SampleDesc = {1, 0};
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+
+    pso.pRootSignature = convertRootSig_.Get();
+    pso.PS = {decodePs->GetBufferPointer(), decodePs->GetBufferSize()};
+    pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (FAILED(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(psoDecode_.GetAddressOf()))))
+        return Refuse("CreateGraphicsPipelineState for the decode pass failed");
+    pso.PS = {encodePs->GetBufferPointer(), encodePs->GetBufferSize()};
+    pso.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (FAILED(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(psoEncode_.GetAddressOf()))))
+        return Refuse("CreateGraphicsPipelineState for the encode pass failed");
+
+    pso.pRootSignature = accumulationRootSig_.Get();
+    pso.VS = {accumulateVs->GetBufferPointer(), accumulateVs->GetBufferSize()};
+    pso.PS = {accumulatePs->GetBufferPointer(), accumulatePs->GetBufferSize()};
+    pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (FAILED(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(psoAccumulate_.GetAddressOf()))))
+        return Refuse("CreateGraphicsPipelineState for the accumulation pass failed");
+    return true;
+}
+
+bool AmdLmxxfEvaluator::RecordTemporalAccumulation(ID3D12GraphicsCommandList* list,
+                                                   const temporal_stability::Plan& plan,
+                                                   const FrameIdentity& frame)
+{
+    const std::optional<temporal_stability::Blend> blend =
+        temporal_stability::BlendFor(config_.stability);
+    if (!blend)
+        return Fail(NeuralRenderFailure::Neural,
+                    "the temporal accumulation was recorded at a rung with no blend");
+
+    auto* produced = static_cast<ID3D12Resource*>(session_->Job().private_output);
+    if (produced == nullptr)
+        return Fail(NeuralRenderFailure::Neural,
+                    "the runtime published no job.private_output, so there is no frame to stabilise");
+    const D3D12_RESOURCE_DESC description = produced->GetDesc();
+    if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        description.Width != width_ || description.Height != height_)
+        return Fail(NeuralRenderFailure::Neural,
+                    "job.private_output is " + std::to_string(description.Width) + "x" +
+                        std::to_string(description.Height) + ", not the " + std::to_string(width_) +
+                        "x" + std::to_string(height_) + " frame that was submitted");
+    if (description.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        description.Format != DXGI_FORMAT_B8G8R8X8_UNORM)
+        return Fail(NeuralRenderFailure::Neural,
+                    "job.private_output format " +
+                        std::to_string(static_cast<int>(description.Format)) +
+                        " is not a 32-bit BGRA layout this evaluator can read");
+
+    // The one descriptor that cannot be built once: the runtime publishes a new
+    // texture for every frame, as EnsureFrameResources' counterpart in the
+    // renderer does not have to, because this backend's producer is not ours.
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.Format = description.Format;
+        view.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(
+            produced, &view,
+            OffsetHandle(accumulationSrvHeap_->GetCPUDescriptorHandleForHeapStart(),
+                         accumulationSrvDescriptorSize_, kSrvDecode));
+    }
+
+    ID3D12DescriptorHeap* heaps[] = {accumulationSrvHeap_.Get()};
+    list->SetDescriptorHeaps(1, heaps);
+
+    const UINT read = plan.read;
+    const UINT write = plan.write;
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtvBase =
+        accumulationRtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    const UINT rtvSize = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    const D3D12_GPU_DESCRIPTOR_HANDLE srvBase =
+        accumulationSrvHeap_->GetGPUDescriptorHandleForHeapStart();
+
+    // Weight is zero on a reset, where the pass returns the neural pixel before
+    // its first history fetch. Everything else in the block is the rung's own.
+    float constants[8] = {
+        0.0f, 0.0f,  // the motion field is one texel of zero, in texel units
+        plan.blend ? blend->historyWeight : 0.0f,
+        blend->trustLow,
+        blend->trustHigh,
+        width_ ? 1.0f / static_cast<float>(width_) : 0.0f,
+        height_ ? 1.0f / static_cast<float>(height_) : 0.0f,
+        0.0f};
+
+    auto draw = [&](ID3D12PipelineState* pso, D3D12_CPU_DESCRIPTOR_HANDLE target, UINT srvIndex,
+                    const float* constants) {
+        D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(width_),
+                                static_cast<float>(height_), 0.0f, 1.0f};
+        D3D12_RECT scissor{0, 0, static_cast<LONG>(width_), static_cast<LONG>(height_)};
+        list->RSSetViewports(1, &viewport);
+        list->RSSetScissorRects(1, &scissor);
+        list->OMSetRenderTargets(1, &target, FALSE, nullptr);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        list->SetPipelineState(pso);
+        list->SetGraphicsRootDescriptorTable(
+            0, OffsetHandle(srvBase, accumulationSrvDescriptorSize_, srvIndex));
+        if (constants != nullptr) list->SetGraphicsRoot32BitConstants(1, 8, constants, 0);
+        list->DrawInstanced(3, 1, 0, 0);
+    };
+
+    // ---- decode: the runtime's 8-bit sRGB frame into linear FP16 ----------
+    Transition(list, produced, kPrivateOutputState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    list->SetGraphicsRootSignature(convertRootSig_.Get());
+    Transition(list, neuralLinear_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    draw(psoDecode_.Get(), OffsetHandle(rtvBase, rtvSize, kRtvNeuralLinear), kSrvDecode, nullptr);
+    Transition(list, neuralLinear_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    // ---- accumulate: the pass itself, into this frame's history slot ------
+    list->SetGraphicsRootSignature(accumulationRootSig_.Get());
+    Transition(list, historySlot_[write].Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    draw(psoAccumulate_.Get(), OffsetHandle(rtvBase, rtvSize, kRtvHistoryBase + write),
+         kSrvAccumulateBase + read * kAccumulateTableSize, constants);
+    Transition(list, historySlot_[write].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    // ---- encode: back to the codes the readback and its readers carry -----
+    list->SetGraphicsRootSignature(convertRootSig_.Get());
+    Transition(list, stabilised_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    draw(psoEncode_.Get(), OffsetHandle(rtvBase, rtvSize, kRtvStabilised),
+         kSrvEncodeBase + write, nullptr);
+    Transition(list, stabilised_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_COPY_SOURCE);
+    CopyTextureToReadback(list, stabilised_.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
+    Transition(list, stabilised_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    // The runtime's own texture goes back exactly where it left it, so the next
+    // frame's barriers still describe the truth.
+    Transition(list, produced, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kPrivateOutputState);
+
+    accumulationHistory_ = temporal_stability::Commit(accumulationHistory_, plan, frame);
+    // What a reader of this frame gets is the stabilized texture, not the
+    // runtime's own, and saying so is the point of the two accessors.
+    lastOutput_ = stabilised_.Get();
+    lastOutputWasPrivate_ = false;
+    ++accumulationFrames_;
     return true;
 }
 
@@ -956,7 +1505,27 @@ bool AmdLmxxfEvaluator::SubmitFrameLease(const std::vector<uint8_t>& bgra, bool 
         FAILED(consumerList_->Reset(consumerAllocator_.Get(), nullptr)))
         return Fail(NeuralRenderFailure::Neural, "a command list would not reset");
 
-    if (!UploadColor(bgra))
+    // Where this frame sits in the accumulation's history, decided before the
+    // upload because the upload is what puts this frame's source into the slot
+    // the plan says the pass will read it from.
+    const bool accumulates = config_.stability != TemporalStability::Off;
+    FrameIdentity accumulationFrame{};
+    temporal_stability::Plan accumulationPlan{};
+    int sourceSlot = -1;
+    if (accumulates) {
+        // The evaluator is one job over one source for its whole life, so the
+        // two fields that would tell two streams apart carry the same value on
+        // every frame and the frame number is what decides: the successor
+        // advances the history, a repeat of the same frame blends against the
+        // same history again, and a gap is a reset. The caller's own reset
+        // overrides all three.
+        accumulationFrame.frameNumber = sourceFrameNumber;
+        accumulationPlan =
+            temporal_stability::PlanFrame(accumulationHistory_, accumulationFrame, resetRequested);
+        sourceSlot = static_cast<int>(accumulationPlan.write);
+    }
+
+    if (!UploadColor(bgra, sourceSlot))
         return Fail(NeuralRenderFailure::Neural, "the frame could not be uploaded");
 
     // The guides go in after the colour upload and before PrepareFrame, so one
@@ -1019,9 +1588,14 @@ bool AmdLmxxfEvaluator::SubmitFrameLease(const std::vector<uint8_t>& bgra, bool 
         Report("RecordOutputs", session.LastStatus());
         return abandon("RecordOutputs", session.LastStatus());
     }
-    if (!CopyProducedToReadback(consumerList_.Get()))
+    if (accumulates) {
+        if (!RecordTemporalAccumulation(consumerList_.Get(), accumulationPlan, accumulationFrame))
+            return abandon("the produced frame could not be stabilized",
+                           static_cast<int32_t>(LMXXF_NR_FAILED));
+    } else if (!CopyProducedToReadback(consumerList_.Get())) {
         return abandon("the produced frame could not be read",
                        static_cast<int32_t>(LMXXF_NR_FAILED));
+    }
     if (FAILED(consumerList_->Close()))
         return Fail(NeuralRenderFailure::Neural, "the consumer list would not close");
 
@@ -1148,7 +1722,23 @@ bool AmdLmxxfEvaluator::SubmitFrame(const std::vector<uint8_t>& bgra, bool reset
     // ---- producer: upload, PrepareFrame, RecordInputs --------------------
     if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_.Get(), nullptr)))
         return Fail(NeuralRenderFailure::Neural, "the producer command list would not reset");
-    if (!UploadColor(bgra))
+
+    // The same plan the lease path takes, for the same reason: where this
+    // frame's source goes is decided before the upload puts it there. The two
+    // call orders differ in where the runtime is asked to render, not in what
+    // the accumulation around it is.
+    const bool accumulates = config_.stability != TemporalStability::Off;
+    FrameIdentity accumulationFrame{};
+    temporal_stability::Plan accumulationPlan{};
+    int sourceSlot = -1;
+    if (accumulates) {
+        accumulationFrame.frameNumber = sourceFrameNumber;
+        accumulationPlan =
+            temporal_stability::PlanFrame(accumulationHistory_, accumulationFrame, resetRequested);
+        sourceSlot = static_cast<int>(accumulationPlan.write);
+    }
+
+    if (!UploadColor(bgra, sourceSlot))
         return Fail(NeuralRenderFailure::Neural, "the produced frame could not be uploaded");
 
     const uint64_t frameId = ++frameIndex_;
@@ -1220,7 +1810,13 @@ bool AmdLmxxfEvaluator::SubmitFrame(const std::vector<uint8_t>& bgra, bool reset
                         : NeuralRenderFailure::Neural,
                     "RecordOutputs: " + session.LastError());
     }
-    if (!CopyProducedToReadback(list_.Get())) {
+    if (accumulates) {
+        if (!RecordTemporalAccumulation(list_.Get(), accumulationPlan, accumulationFrame)) {
+            (void)session.Cancel();
+            (void)list_->Close();
+            return false;
+        }
+    } else if (!CopyProducedToReadback(list_.Get())) {
         (void)session.Cancel();
         (void)list_->Close();
         return false;
@@ -1315,6 +1911,12 @@ uint64_t AmdLmxxfEvaluator::NeuralEvaluations() const { return neuralEvaluations
 
 void AmdLmxxfEvaluator::ResetTemporal()
 {
+    // The host's own history goes with the runtime's. This is called between
+    // passes, for a seek, where the next frame is not the successor of the last
+    // one - and it is called without anything on the frame saying so, so a
+    // history left standing here would be blended into a shot it does not
+    // belong to.
+    accumulationHistory_ = {};
     if (!session_.has_value()) return;
     if (!session_->ResetHistory())
         lastError_ = "ResetHistory: " + session_->LastError();

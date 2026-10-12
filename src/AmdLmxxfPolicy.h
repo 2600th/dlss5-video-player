@@ -1,5 +1,7 @@
 #pragma once
 
+#include "TemporalStabilityPolicy.h"
+
 #include <cstdint>
 #include <string_view>
 
@@ -10,6 +12,24 @@ inline constexpr std::wstring_view kRuntimeDirectoryName = L"amd-neural-runtime"
 inline constexpr std::wstring_view kRuntimeDllName = L"LmxxfNrRuntime.dll";
 inline constexpr std::wstring_view kAssetsDirectoryName = L"native-game-tiled-assets";
 inline constexpr std::wstring_view kLockFileName = L"amd-runtime-lock.json";
+
+// The rung an AMD render takes when nothing asked for one.
+//
+// The runtime relights every frame on its own and this backend has no history
+// for it to fuse with - its own temporal model needs guides, and the estimator
+// that would produce them is the expensive half this backend does not have - so
+// what a viewer sees between frames is the model's own frame-to-frame jitter.
+// The host-side accumulation (TemporalStabilityPolicy.h) is what takes that out,
+// which makes Off here not a neutral setting but the arm that flickers: measured
+// on a still source, frame-to-frame Y PSNR is 49.1 dB at the model's own output
+// against the source's own 96.6 dB, and Low takes the added jitter down 28.5%
+// for 0.1 dB of distance from the source
+// (docs/AMD-TEMPORAL-ACCUMULATION-zh.md).
+//
+// Low rather than Medium or High because this is a default and not a choice: the
+// rungs trade steadiness for detail monotonically, Low is the one that moves the
+// picture least, and a viewer who wants more can ask for it.
+inline constexpr TemporalStability kAmdDefaultStability = TemporalStability::Low;
 
 enum class GpuFamily
 {

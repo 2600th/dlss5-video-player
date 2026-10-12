@@ -3,6 +3,7 @@
 #include "ExportPipeline.h"
 #include "NeuralPresets.h"
 #include "RenderCliContract.h"
+#include "TemporalStabilityPolicy.h"
 #include "UpscalingPolicy.h"
 
 #include <cstddef>
@@ -72,6 +73,12 @@ struct Command {
     // Super Resolution's history for sr without nr (UpscalingHistoryName);
     // empty uses the saved choice.
     std::optional<UpscalingHistory> history;
+    // The temporal accumulation's rung (TemporalStabilityPolicy.h). Absent uses
+    // the backend's own default, which is not one value: NVIDIA's switch is the
+    // add-on's opt-in ladder and defaults to Off, AMD's is this player's own
+    // accumulation and defaults to a rung. The parse leaves it empty and the
+    // plan resolves it, because only the plan knows which backend it has.
+    std::optional<TemporalStability> temporalStability;
     // Super Resolution's engine for sr without nr; empty uses the saved choice.
     // --history alone implies dlss, the engine it belongs to.
     std::optional<SuperResolutionEngine> engine;
@@ -196,7 +203,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
          seenHeight = false, seenMultiplier = false, seenOut = false, seenQuiet = false,
          seenScale = false, seenPasses = false, seenIntensity = false, seenTone = false,
          seenStructure = false, seenColor = false, seenEncode = false, seenHistory = false, seenEngine = false,
-         seenStyle = false, seenBackend = false;
+         seenStyle = false, seenBackend = false, seenStability = false;
     std::wstring_view presetName;
     // What the dialog opens with: the neural pass alone.
     command.selection = ExportSelection{};
@@ -329,6 +336,18 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             if (!once(seenHistory)) return bad(L"--history was given twice.");
             command.history = ParseUpscalingHistory(value == L"temporal" ? "temporal" : value == L"per-frame" ? "per-frame" : "");
             if (!command.history) return bad(L"--history takes temporal or per-frame.");
+        } else if (argument == L"--temporal-stability") {
+            if (!once(seenStability)) return bad(L"--temporal-stability was given twice.");
+            // Spelled out here rather than routed through ParseTemporalStability:
+            // this parser's values are wide and its narrow-string helper works on
+            // the wire form, while these are the same four words under a spelling
+            // the dialog, the log and the receipt already share. A value that
+            // reads the same in all four places is the point, not duplication.
+            if (EqualsIgnoringCase(value, L"off")) command.temporalStability = TemporalStability::Off;
+            else if (EqualsIgnoringCase(value, L"low")) command.temporalStability = TemporalStability::Low;
+            else if (EqualsIgnoringCase(value, L"medium")) command.temporalStability = TemporalStability::Medium;
+            else if (EqualsIgnoringCase(value, L"high")) command.temporalStability = TemporalStability::High;
+            else return bad(L"--temporal-stability takes off, low, medium or high.");
         } else if (argument == L"--multiplier") {
             if (!once(seenMultiplier)) return bad(L"--multiplier was given twice.");
             const auto multiplier = ParseCount(value);
@@ -462,6 +481,11 @@ inline std::wstring Usage()
         L"  --history H        DLSS Super Resolution's history for sr without nr: temporal\n"
         L"                     or per-frame; implies --sr-engine dlss. Default: the\n"
         L"                     player's saved choice.\n"
+        L"  --temporal-stability R  How much motion-compensated history the render keeps:\n"
+        L"                     off, low, medium or high. The pass holds a still pixel's\n"
+        L"                     tone against the model's frame-to-frame jitter, and the\n"
+        L"                     rungs trade detail for steadiness. Default: the backend's\n"
+        L"                     own - off on NVIDIA, low on AMD.\n"
         L"  --processing-scale N  The resolution the model runs at, as a percentage of\n"
         L"                     the source: 100, 75 or 50, restored to the source size by\n"
         L"                     Super Resolution. For nr without sr. Default: the player's\n"

@@ -41,6 +41,7 @@
 #include "AmdLmxxfRuntime.h"
 #include "AmdLmxxfSession.h"
 #include "OfflineNeuralRenderer.h"
+#include "TemporalStabilityPolicy.h"
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -131,6 +132,28 @@ struct AmdLmxxfEvaluatorConfig {
     std::filesystem::path motionGuideDirectory;
     std::filesystem::path depthGuideDirectory;
 
+    // How much of the motion-compensated history the frame keeps
+    // (TemporalStabilityPolicy.h). This is the player's own pass, not the
+    // runtime's: it runs after the runtime has published the frame and before the
+    // readback takes it, so nothing about it is a runtime feature and
+    // TemporalStability::Off is the exact code path this evaluator had before the
+    // pass existed. It is also NOT the same switch as `temporalHistory` above -
+    // that one asks the runtime to fuse its own model under the lease lifecycle
+    // and needs guides, while this one needs nothing from the runtime at all.
+    //
+    // No motion estimator is behind it: the pass decides trust from the two
+    // source frames themselves, and this backend hands it a zero motion field, so
+    // it accumulates where the source held still and returns the frame untouched
+    // everywhere else. That is the whole of "P1" in
+    // docs/AMD-TEMPORAL-ACCUMULATION-zh.md, and it is why the default here can be
+    // a rung at all on a backend with no flow at all.
+    //
+    // Off rather than a rung is the struct's own default so that an evaluator
+    // built without saying anything renders the picture it always did; the
+    // caller that wants the default accumulation the backend ships with asks for
+    // it by name (kAmdDefaultStability in AmdLmxxfPolicy.h).
+    TemporalStability stability{TemporalStability::Off};
+
     // Per-stage trace, for the smoke test and for a receipt. Empty disables it.
     std::function<void(std::string_view)> log;
 };
@@ -197,6 +220,11 @@ public:
     // silently lost its directory would otherwise produce a healthy-looking run
     // of the constant path.
     uint64_t GuideFrames() const noexcept { return guideFrames_; }
+    // How many frames the host-side temporal accumulation ran on. Zero when
+    // config_.stability is Off, and the number a run has to check to know the
+    // pass it asked for actually ran - the rung is in no result field, so a
+    // frame that skipped it otherwise looks like one that did not.
+    uint64_t AccumulationFrames() const noexcept { return accumulationFrames_; }
 
 private:
     // True when the session exists and every object the frame path needs does.
@@ -221,7 +249,12 @@ private:
     // submission sit; see the class comment in AmdLmxxfSession.h.
     bool SubmitFrameLease(const std::vector<uint8_t>& bgra, bool resetRequested,
                           uint64_t sourceFrameNumber, std::vector<uint8_t>& out);
-    bool UploadColor(const std::vector<uint8_t>& bgra);
+    // `sourceSlot` is which of the two source textures the temporal
+    // accumulation's trust test should find this frame in, or -1 when it is not
+    // running and the copy is skipped. It is the same slot the frame's output
+    // goes into, which is what makes the pair the test compares the pair of
+    // consecutive frames it means to compare.
+    bool UploadColor(const std::vector<uint8_t>& bgra, int sourceSlot);
     // The motion and depth textures, plus the upload buffer that fills them. The
     // pointers and the sizes are fixed for the life of the session - the runtime
     // rebuilds its chain around a pointer that moves - and only the contents
@@ -233,6 +266,36 @@ private:
     // directory is set. Fails the frame on a missing or malformed file.
     bool UploadGuides(ID3D12GraphicsCommandList* list, uint64_t sourceFrameNumber);
     bool CopyProducedToReadback(ID3D12GraphicsCommandList* list);
+    // ---- temporal accumulation (TemporalStabilityPolicy.h) ----------------
+    //
+    // Everything below exists only when config_.stability is not Off, and every
+    // one of it is required for a frame to run at a rung: the pass has no
+    // fall-back to the plain copy, because a rung that silently did not run
+    // would publish a picture the job did not ask for and a receipt that says it
+    // did.
+    //
+    // Three steps and a copy, in this order and for this reason:
+    //
+    //   decode     the runtime's 8-bit sRGB frame -> linear FP16, which is the
+    //              input contract kTemporalStabilityHlsl's t0 states
+    //   accumulate that pass itself, whose output is the history slot for this
+    //              frame in linear FP16
+    //   encode     the history slot -> 8-bit sRGB, which is what the readback
+    //              buffer and every consumer of it carries
+    bool CreateTemporalResources();
+    bool CreateTemporalPipeline();
+    // Records the three passes and the copy on `list`. `plan` is the frame's
+    // step from temporal_stability::PlanFrame and `frame` the identity it was
+    // taken for; both come from the caller because the upload has to put this
+    // frame's source where the plan says the pass will read it, which happens
+    // before either pass is recorded.
+    bool RecordTemporalAccumulation(ID3D12GraphicsCommandList* list,
+                                    const temporal_stability::Plan& plan,
+                                    const FrameIdentity& frame);
+    // The copy both the plain and the accumulated path end with: `from` into the
+    // readback buffer at the frame's own footprint, in `format`.
+    void CopyTextureToReadback(ID3D12GraphicsCommandList* list, ID3D12Resource* from,
+                               DXGI_FORMAT format);
     // Maps the readback buffer and copies the frame out of it. Shared by both
     // call orders, which differ only in which list the copy was recorded into.
     bool ReadBackProduced(std::vector<uint8_t>& out);
@@ -286,6 +349,41 @@ private:
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT depthFootprint_{};
     uint8_t* guideUploadMapped_{};
     uint8_t* uploadMapped_{};
+
+    // ---- the temporal accumulation's own objects (config_.stability) -------
+    //
+    // Two root signatures rather than one: the accumulation's table holds five
+    // textures and eight constants, the conversions' holds one texture and none,
+    // and a signature that has to describe both would be a signature neither of
+    // them is.
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> convertRootSig_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> accumulationRootSig_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> psoDecode_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> psoAccumulate_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> psoEncode_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> accumulationSrvHeap_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> accumulationRtvHeap_;
+    UINT accumulationSrvDescriptorSize_{};
+    // The source frames the trust test compares, one per history slot. The text
+    // is 8-bit sRGB, the same as the runtime's own frame and the same as what the
+    // pass's t3/t4 expect to linearise themselves.
+    Microsoft::WRL::ComPtr<ID3D12Resource> sourceSlot_[2];
+    // The stabilized output per slot, in FP16 because it is what a recursive
+    // filter is accumulated in: an 8-bit slot would quantise once per blend and
+    // the rungs would stop separating from each other.
+    Microsoft::WRL::ComPtr<ID3D12Resource> historySlot_[2];
+    // The runtime's frame in the linear light the pass's t0 contract asks for,
+    // and the result encoded back to the codes the readback carries.
+    Microsoft::WRL::ComPtr<ID3D12Resource> neuralLinear_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> stabilised_;
+    // One texel of zero motion. The pass needs a motion texture bound and reads
+    // it as a vector; a zero field is what makes it a filter over the source's
+    // own agreement rather than a motion-compensated one, which is the whole of
+    // what this backend can honestly supply without an estimator.
+    Microsoft::WRL::ComPtr<ID3D12Resource> zeroMotion_;
+    temporal_stability::History accumulationHistory_{};
+    uint64_t accumulationFrames_{};
+
     // The state the caller declared for color_ at the last RecordInputs and the
     // state the next transition must start from. The runtime reads the colour
     // resource in the declared state and does not transition it (it maps that

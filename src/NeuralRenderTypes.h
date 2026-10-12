@@ -44,7 +44,8 @@ constexpr std::optional<NeuralBackend> ParseNeuralBackend(std::string_view name)
     return std::nullopt;
 }
 
-// Whether this backend's render reads the Neural settings dialog at all.
+// Whether this backend's render reads `NeuralSettings` - the add-on's own panel
+// - at all.
 //
 // The question is not whether the panel is enabled but whether a value on it
 // can reach a pixel, and that is a property of the backend rather than of the
@@ -53,13 +54,19 @@ constexpr std::optional<NeuralBackend> ParseNeuralBackend(std::string_view name)
 //   * Nvidia - yes, all of it. The values are written into the ReShade.ini the
 //     helper loads (NeuralAddonOverridesFor) and they are a term of the render
 //     key, so any of them can change what comes back.
-//   * Amd - no, none of them. This backend loads no proxy and reads no INI; its
+//   * Amd - no, none of it. This backend loads no proxy and reads no INI; its
 //     evaluator's config is the runtime directory, the guide sources and the
-//     temporal switches, and the job's key is AmdNeuralSettingsDocument(), which
-//     takes no settings argument. Nothing in the dialog is an input to an AMD
-//     render, which is why a live session does not restart for one (see
-//     MainFrame::ApplyNeuralSettings: the restart costs a cold start, and for
-//     its whole duration the session is down and the original plays).
+//     temporal switches, so no value of this struct reaches a pixel. The job's
+//     key is AmdNeuralSettingsDocument(), which takes no NeuralSettings
+//     argument at all (NeuralStabilitySettings.h).
+//
+// The interesting case is the one this leaves out rather than the one it
+// covers. `NeuralSettings` is the add-on's struct, not the whole dialog: the
+// same dialog also holds the temporal rung, and that one DOES reach an AMD
+// render, because it selects this player's own accumulation over the runtime's
+// output. So this function is not "nothing in the dialog matters on AMD", and a
+// caller that reads it that way leaves a moved rung unapplied -
+// ApplyNeuralSettings states the real condition.
 //
 // A caller may ask this only about a picture a render would produce. It is not a
 // statement that the panel is inert for the user - the values are still saved

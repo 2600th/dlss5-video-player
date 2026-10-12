@@ -2870,6 +2870,12 @@ struct AmdLmxxfEvaluatorAdapter {
     // than bring-up state, and each frame either finds its file or fails.
     uint32_t width{},height{};
     bool broughtUpTemporal{};
+    // The accumulation rung is bring-up state for the same reason as the job
+    // model and one more: the pass's textures and its three pipelines are made
+    // in Initialize, so an evaluator brought up at Off has nothing to run a rung
+    // with, and a job handed one would be reported as a healthy render at a rung
+    // that never ran.
+    TemporalStability broughtUpStability{TemporalStability::Off};
     bool reused=false;
     // Why the last bring-up failed, kept because a failed Initialize drops the
     // evaluator and LastFailure() would then have nothing left to ask.
@@ -2880,13 +2886,16 @@ struct AmdLmxxfEvaluatorAdapter {
                     const GuideControls& guides,PixelLayout,const SourceColorDescription&){
         if(!ow||!oh){ow=w;oh=h;}
         // The guides are per-frame inputs on this path rather than bring-up
-        // state, and there is no upscale, so the size and the job model are the
-        // whole inheritance question and a match means there is nothing to rebuild.
-        reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory;
+        // state, and there is no upscale, so the size, the job model and the
+        // accumulation rung are the whole inheritance question and a match on all
+        // three means there is nothing to rebuild.
+        reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory&&
+               broughtUpStability==config.stability;
         if(reused)return true;
         captured.clear();
         evaluator=std::make_unique<AmdLmxxfEvaluator>(config);
         width=w;height=h;broughtUpTemporal=config.temporalHistory;
+        broughtUpStability=config.stability;
         if(evaluator->Initialize(nullptr,w,h,ow,oh,fps,guides))return true;
         broughtUpFailure=evaluator->LastFailure();
         LOG("AMD neural runtime did not come up for "<<w<<"x"<<h<<": "<<evaluator->LastError());
@@ -3652,6 +3661,14 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // Asking for the leases without them would fuse two constants into content
     // that moves, which is a result about a still scene no caller asked for.
     state.amdEvaluator.config.temporalHistory=fileGuides;
+    // The host-side accumulation, which is a different switch from the one just
+    // above and answers to a different caller: it needs no guides and no lease,
+    // it runs on both call orders, and its Off is the pass not running rather
+    // than the pass running weakly. The rung is the caller's, and the caller's
+    // own default is the one this backend ships with (AmdDefaultStability) -
+    // made where the request is made, so that a job which asked for Off gets Off
+    // and a job which said nothing gets Low.
+    state.amdEvaluator.config.stability=request.temporal.stability;
     // What this backend cannot be asked for. Each is a benchmark switch that
     // exists to change what the NVIDIA path renders, and here it would change
     // nothing at all - a run that reported the flag's arm while rendering the
@@ -3685,6 +3702,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
             ?std::string("constant"):state.amdEvaluator.config.depthGuideDirectory.string())
         <<" temporal="<<(fileGuides?"on, under the recording-lease lifecycle"
             :"off, this backend has no guide estimator and this job brought no guide files")
+        <<" accumulation="<<TemporalStabilityName(state.amdEvaluator.config.stability)
         <<" feature18-receipt=not-applicable, this backend has no ReShade log");
 
     // Read before the per-job reset, so a bring-up the previous job left armed is

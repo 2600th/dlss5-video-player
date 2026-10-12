@@ -381,6 +381,10 @@ private:
             {L"neural.settings.stability", L"Temporal stability"},
             {L"neural.stability.off", L"Off (default)"}, {L"neural.stability.low", L"Low"},
             {L"neural.stability.medium", L"Medium"}, {L"neural.stability.high", L"High"},
+            // The same rung on the AMD backend, where it is not the default: Off
+            // there is the model's own frame-to-frame jitter with nothing holding
+            // it, which is what a viewer sees as flicker.
+            {L"neural.stability.off.amd", L"Off"},
             {L"neural.settings.note", L"These change the neural render itself: a change re-renders, and conversions and exports write it. Image adjustments and Mix change only what this screen shows, instantly."},
             {L"neural.settings.preset", L"Look preset"},
             {L"neural.tip.preset", L"A named starting point for the Look controls. Every preset renders in the same time; moving a control afterwards makes it Custom, and picking the preset again brings its values back."},
@@ -434,6 +438,14 @@ private:
             {L"neural.tip.guide_depth", L"Sends this player's estimated depth proxy.\nMeasured: it only changes the image while Motion vectors is on - with motion off, depth makes no difference."},
             {L"neural.tip.scene_cuts", L"How readily a cut in the video starts the model's temporal history over.\nDefault found every one of 22 labelled cuts in real footage with no false alarm. More sensitive also catches cuts between similar-looking shots, at the price of an extra reset on flashes; Less sensitive resets less often and can miss a second cut that follows within 0.3 s. Off never resets on the picture - only seeks and dropped frames do.\nChanging it renders again."},
             {L"neural.tip.stability", L"Steadies shimmer the model adds from frame to frame: the previous rendered frame is moved along the video's own motion and blended in, only where the source itself did not change after that move - so moving edges, occlusions and cuts take the new frame as it is.\nLow, Medium and High keep 30, 50 and 70 % of that history. Changing it renders again.\nOff is the render as the model produced it."},
+            // The same pass on the AMD backend, where it runs without a motion
+            // estimate: that backend has none, so the one it is given is zero and
+            // the source test above is what does the work - a pixel is blended
+            // only where the two source frames agree, which is still surfaces and
+            // not the things that moved. Written as what happens rather than as
+            // what the pass can do with a flow, because on this backend there is
+            // no flow to speak of.
+            {L"neural.tip.stability.amd", L"Steadies what the model changes from frame to frame on surfaces that hold still, which is what shows up as flicker.\nThis backend has no motion estimate, so none is used: a pixel is blended only where this source frame and the one before it agree, so still areas are steadied and anything the source moved is taken as the model made it. Low, Medium and High keep 30, 50 and 70 % of that history, and Low is the default here. Changing it renders again.\nOff is the model's own output with nothing holding it, which is the one that flickers."},
             {L"neural.tip.apply", L"Applies these settings to what is on screen: an active session restarts at the playhead, a paused frame is rendered again.\nEvery distinct combination is rendered from scratch - about 10 s for one 1080p frame - and repeats come back from cache."},
             {L"neural.tip.passes", L"Runs the model over each frame more than once.\nThe add-on warns games away from this because every extra pass is another full neural evaluate against a frame budget; a conversion has no frame budget, so the cost lands on render time instead.\nMeasured on the 72-frame range clip: two passes took 9.81 s against 8.01 s and wrote 932,019 bytes against 780,048."},
             {L"neural.tip.chained", L"Gives every stacked pass its own temporal history, reset only on a scene cut.\nTurning it off makes passes 2 and up stateless - NVIDIA documents a per-frame reset as a flicker and aliasing risk, so this is an A/B switch for suspected ghosting rather than a setting to leave off.\nNo effect at one pass."},

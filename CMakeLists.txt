@@ -563,7 +563,8 @@ if(BUILD_TESTING)
 
     # Pure ABI/table contract; no player objects or GPU are needed.
     add_executable(AmdLmxxfApiTests tests/AmdLmxxfApiTests.cpp
-        src/AmdLmxxfApi.h src/AmdLmxxfPolicy.h src/AmdLmxxfSession.h)
+        src/AmdLmxxfApi.h src/AmdLmxxfPolicy.h src/AmdLmxxfSession.h
+        src/NeuralStabilitySettings.h)
     target_compile_features(AmdLmxxfApiTests PRIVATE cxx_std_20)
     target_compile_options(AmdLmxxfApiTests PRIVATE /W4 /WX /permissive- /EHsc /Zc:__cplusplus)
     target_include_directories(AmdLmxxfApiTests PRIVATE "${CMAKE_SOURCE_DIR}/src")

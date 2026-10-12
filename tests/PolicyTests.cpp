@@ -88,6 +88,7 @@
 #include "TemporalStabilityPolicy.h"
 #include "NeuralMotionPolicy.h"
 #include "TemporalStabilityShader.h"
+#include "AmdTemporalAccumulationShader.h"
 #include "DitherPolicy.h"
 #include "DebandPolicy.h"
 #include "SeekPolicy.h"
@@ -10564,19 +10565,41 @@ void temporal_stability_blends_only_across_a_continuous_history_test()
     CHECK(!history.hasBase);
 }
 
-// The pass's own program, compiled from the text the renderer compiles, with its
-// entry points and flags - the one check of it a machine without a GPU can make.
-void temporal_stability_shader_compiles_test()
+// Every entry point of the two programs the temporal pass is compiled from,
+// each with the profile ShaderProfileFor names for it.
+//
+// The check is not decoration. The AMD evaluator compiles five entry points out
+// of two strings in one loop, and a vertex shader handed ps_5_1 does not fail
+// quietly: it fails on the device that compiles it, with X4502 about a semantic
+// on the shader's own struct - naming neither the entry point nor the profile -
+// which is how "the temporal accumulation's VS would not compile" reached a
+// render log with nothing in it to act on.
+void temporal_shader_programs_compile_under_the_profiles_their_entries_name_test()
 {
-    const auto compiles=[](const char* entry,const char* target){
+    const auto compiles=[](const char* program,const char* text,size_t length,const char* entry){
         Microsoft::WRL::ComPtr<ID3DBlob> code,errors;
-        const HRESULT hr=D3DCompile(kTemporalStabilityHlsl,sizeof(kTemporalStabilityHlsl)-1,"stability",nullptr,nullptr,
-                                    entry,target,D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&errors);
-        if(FAILED(hr)&&errors)std::cerr<<static_cast<const char*>(errors->GetBufferPointer())<<'\n';
+        const char* profile=ShaderProfileFor(entry);
+        const HRESULT hr=D3DCompile(text,length,program,nullptr,nullptr,entry,profile,
+                                    D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&errors);
+        if(FAILED(hr)&&errors)std::cerr<<program<<" ("<<entry<<" / "<<profile<<"): "
+                                       <<static_cast<const char*>(errors->GetBufferPointer())<<'\n';
         return SUCCEEDED(hr)&&code&&code->GetBufferSize()>0;
     };
-    CHECK(compiles("VS","vs_5_1"));
-    CHECK(compiles("PSTemporalStability","ps_5_1"));
+    // The pass itself, which the NVIDIA capture path and this backend both run.
+    CHECK(compiles("stability",kTemporalStabilityHlsl,sizeof(kTemporalStabilityHlsl)-1,"VS"));
+    CHECK(compiles("stability",kTemporalStabilityHlsl,sizeof(kTemporalStabilityHlsl)-1,
+                   "PSTemporalStability"));
+    // AMD's own two conversions, which cross between the runtime's 8-bit sRGB
+    // output and the pass's linear FP16.
+    CHECK(compiles("amd-temporal",kAmdTemporalConvertHlsl,sizeof(kAmdTemporalConvertHlsl)-1,"VS"));
+    CHECK(compiles("amd-temporal",kAmdTemporalConvertHlsl,sizeof(kAmdTemporalConvertHlsl)-1,
+                   "PSDecode"));
+    CHECK(compiles("amd-temporal",kAmdTemporalConvertHlsl,sizeof(kAmdTemporalConvertHlsl)-1,
+                   "PSEncode"));
+    // The names the two headers actually declare. A renamed entry point that is
+    // not `VS` falls through to the pixel profile, and this is where that shows.
+    CHECK(std::string_view(ShaderProfileFor("VS"))=="vs_5_1");
+    CHECK(std::string_view(ShaderProfileFor("PSTemporalStability"))=="ps_5_1");
 }
 
 // The blue-noise map the present and the capture dither against. Each property is
@@ -16010,7 +16033,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_saved_image_carries_its_provenance_test),
     TEST_CASE(compare_panes_locate_the_point_under_the_pointer_test),
     TEST_CASE(temporal_stability_blends_only_across_a_continuous_history_test),
-    TEST_CASE(temporal_stability_shader_compiles_test),
+    TEST_CASE(temporal_shader_programs_compile_under_the_profiles_their_entries_name_test),
     TEST_CASE(blue_noise_dither_map_is_balanced_and_blue_test),
     TEST_CASE(blue_noise_dither_preserves_the_mean_a_rounded_store_loses_test),
     TEST_CASE(blue_noise_dither_reaches_the_present_and_capture_programs_test),

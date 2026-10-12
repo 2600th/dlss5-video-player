@@ -136,6 +136,7 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         request.quality=job.quality;
         request.sourceDeband=job.sourceDeband;
         request.suppliedExposure=job.suppliedExposure;
+        request.temporal=job.temporal;
         request.requireNeural=plan.requireNeural;
         request.backend=plan.backend;
         const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;

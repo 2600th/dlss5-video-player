@@ -5,6 +5,7 @@
 #include "NeuralRenderTypes.h"
 #include "NeuralSettings.h"
 #include "RuntimeLock.h"
+#include "TemporalSettings.h"
 #include "UpscalingPolicy.h"
 #include "VsrPolicy.h"
 
@@ -114,6 +115,11 @@ struct StageExportJob {
     // from Neural settings", but nothing wrote them: the export used whatever
     // the last live render had left in ReShade.ini.
     NeuralSettings neuralSettings{};
+    // The render's temporal choices, from --temporal-stability and the saved
+    // settings (TemporalSettings.h). Carried rather than resolved here because
+    // the default depends on which backend the plan runs on, and this struct is
+    // filled before the plan is read.
+    TemporalSettings temporal{};
     // The capture-quality switches of Encoder settings, so the export's neural pass
     // writes the same way the cache does.
     bool captureDither{true};

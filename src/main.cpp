@@ -122,6 +122,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 // architecture, so which module set a card would get is asked before the pack is
 // offered behind the D key (and again on the start screen, from the same call).
 #include "AmdLmxxfPolicy.h"
+#include "NeuralStabilitySettings.h"
 #include "RuntimeModulePolicy.h"
 #include "UpscalingPolicy.h"
 #include "NeuralMotionPolicy.h"
@@ -2248,29 +2249,21 @@ static std::wstring DescribeAmdRuntimeVerified(std::span<const AmdRuntimeCheck> 
     return text;
 }
 
-// The AMD job's settings document, which is what the staged neural-settings.ini
-// holds and what the cache key's settings term is a digest of.
-//
-// There is no INI here and nothing to rewrite per job: this backend's knobs
-// travel in the request, and the ones it has are the evaluator's - where its
-// guides come from and whether the temporal model runs. So this document says
-// exactly that, in the terms the worker will use, rather than transcribing the
-// ReShade panel the backend never reads. Those panel values are deliberately not
-// hashed in either: a key term that changes no pixel would retire a render every
-// time a slider moved, and the job's log line names them as asked-for instead.
-//
-// Today it is one constant, because the live player cannot ask for file guides
-// (GuideFiles.h: the estimator's own field, or nothing) and the AMD backend has
-// no estimator, so its guides are the constants and its temporal model is off.
-// The day a caller can ask for either, this document changes with the request
-// that carries it - which is why it is a document rather than a literal in the
-// key.
-static std::string AmdNeuralSettingsDocument()
+// The accumulation rung this machine has saved for `backend`, or that backend's
+// default when nothing was saved. Which key, and which default, are
+// NeuralStabilitySettings.h's business and are checked there; what belongs here
+// is only that the lookup fallback and the parse fallback are the same rung
+// spelled twice, once as text for the INI and once as a value.
+static TemporalStability ReadSavedStability(NeuralBackend backend,
+                                            const std::filesystem::path& settingsPath)
 {
-    return "backend=amd-lmxxf\n"
-           "temporal=off\n"
-           "motion=constant(0,0)\n"
-           "depth=constant(1)\n";
+    const std::wstring fallback =
+        Utf8ToWide(std::string(TemporalStabilityName(StabilitySettingsDefault(backend))));
+    wchar_t stability[32]{};
+    GetPrivateProfileStringW(L"Temporal", StabilitySettingsKey(backend), fallback.c_str(),
+                             stability, static_cast<DWORD>(std::size(stability)),
+                             settingsPath.c_str());
+    return SavedStability(backend, WideToUtf8(stability));
 }
 
 // Everything a neural job reads, captured on the UI thread when it starts:
@@ -2524,7 +2517,7 @@ private:
         // named mutex derived from the directory, so it costs the tree nothing.
         lease_.emplace(runtimeDirectory_);
         if(!lease_->Held()){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("AMD neural runtime is in use by another render; refusing to share it.");return false;}
-        settingsSnapshot_=AmdNeuralSettingsDocument();
+        settingsSnapshot_=AmdNeuralSettingsDocument(in_.temporal.stability);
         settingsDigest_=Sha256Bytes(*settingsSnapshot_);
         if(!settingsDigest_){completion_->result.detail=L"The neural settings digest could not be computed.";return false;}
         return true;
@@ -5117,9 +5110,9 @@ private:
             GetPrivateProfileStringW(L"Temporal",L"SceneCuts",L"default",cuts,static_cast<DWORD>(std::size(cuts)),SettingsPath().c_str());
             m_temporalSettings.sceneCuts=scene_cut::ParseSensitivity(WideToUtf8(cuts)).value_or(scene_cut::Sensitivity::Default);
             m_guides.SetSceneCutSensitivity(m_temporalSettings.sceneCuts);
-            wchar_t stability[32]{};
-            GetPrivateProfileStringW(L"Temporal",L"Stability",L"off",stability,static_cast<DWORD>(std::size(stability)),SettingsPath().c_str());
-            m_temporalSettings.stability=ParseTemporalStability(WideToUtf8(stability)).value_or(TemporalStability::Off);
+            // The rung, from this backend's own key. ReadSavedStability carries
+            // why there are two keys rather than one.
+            m_temporalSettings.stability=ReadSavedStability(m_opt.neuralBackend,SettingsPath());
         }
         m_gpuColorConversion=GetPrivateProfileIntW(L"Encoding",L"GpuColorConversion",0,SettingsPath().c_str())!=0;
         m_gpuSourceConversion=GetPrivateProfileIntW(L"Encoding",L"GpuSourceConversion",0,SettingsPath().c_str())!=0;
@@ -5253,7 +5246,7 @@ private:
         WritePrivateProfileStringW(L"NeuralGuides",L"MotionVectors",m_renderGuides.motionVectors?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"NeuralGuides",L"Depth",m_renderGuides.depth?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Temporal",L"SceneCuts",Utf8ToWide(std::string(scene_cut::SensitivityName(m_temporalSettings.sceneCuts))).c_str(),SettingsPath().c_str());
-        WritePrivateProfileStringW(L"Temporal",L"Stability",Utf8ToWide(std::string(TemporalStabilityName(m_temporalSettings.stability))).c_str(),SettingsPath().c_str());
+        WritePrivateProfileStringW(L"Temporal",StabilitySettingsKey(m_opt.neuralBackend),Utf8ToWide(std::string(TemporalStabilityName(m_temporalSettings.stability))).c_str(),SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuSourceConversion",m_gpuSourceConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"NvencPreset",std::to_wstring(m_nvencPreset).c_str(),SettingsPath().c_str());
@@ -6700,10 +6693,18 @@ private:
             // A ladder with Off first and the default, for the reason the policy
             // header gives: it trades detail in motion for steadiness, and a
             // default never moves down a ladder to buy something else.
-            const std::wstring stability[]={T(L"neural.stability.off"),T(L"neural.stability.low"),
-                                            T(L"neural.stability.medium"),T(L"neural.stability.high")};
+            // "Off" is the default on one backend and not the other, and the
+            // caption says which: NVIDIA's ladder is opt-in until a comparison
+            // says otherwise, while on AMD Off is the arm that flickers
+            // (AmdLmxxfPolicy.h). The rung names are the same four words the log
+            // and the receipt use, so a value reads the same in all three places.
+            const bool amdStability=m_opt.neuralBackend==NeuralBackend::Amd;
+            const std::wstring stability[]={
+                T(amdStability?L"neural.stability.off.amd":L"neural.stability.off"),
+                T(L"neural.stability.low"),T(L"neural.stability.medium"),T(L"neural.stability.high")};
             CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",238+top,
-                              {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability",right);
+                              {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},
+                              amdStability?L"neural.tip.stability.amd":L"neural.tip.stability",right);
         }
         // What Apply will do to the picture on screen right now (issue #15:
         // "the settings do not apply" was partly a picture nobody said was the
@@ -6827,19 +6828,27 @@ private:
     void ApplyNeuralSettings(){
         SaveVideoSettings();
         if(m_liveSession){
-            // On a backend whose render reads none of these values, restarting
-            // cannot change one frame of what comes back - the job's key is the
-            // settings document it was started with, and the AMD document takes
-            // no settings (BackendReadsNeuralSettings) - while the restart
-            // itself IS visible: it costs a cold start, and for its whole
-            // duration the session is down and the original plays, so the
-            // picture changes character and changes back. A driven session
-            // measured two such restarts at 7.1 s and 16.7 s, attach=1.9 s and
-            // 11.1 s of them, both of them begun by pressing Apply on a panel
-            // whose values this backend never reads. Saving the values is all
-            // there is to do here, and it is done above.
-            if(!BackendReadsNeuralSettings(m_opt.neuralBackend)){
-                LOG("Neural settings applied at "<<Position()<<" s; this backend's render reads none of them, so the active session is left running.");
+            // A restart is worth its cost exactly when it can change a frame,
+            // and on this backend that is a different question than on NVIDIA.
+            // NVIDIA's render reads every value in this dialog
+            // (BackendReadsNeuralSettings), so any change is a reason. AMD's
+            // reads the accumulation rung and nothing else: no ReShade.ini is
+            // loaded or read and the guides are the evaluator's two constants
+            // rather than `m_renderGuides`, while the rung is this player's own
+            // pass over the runtime's output and is a term of the job's key
+            // (NeuralStabilitySettings.h). Anything else is not free - a
+            // restart costs a cold start, and for its whole duration the session
+            // is down and the original plays, so the picture changes character
+            // and changes back; a driven session measured two such restarts at
+            // 7.1 s and 16.7 s, attach=1.9 s and 11.1 s of them, both begun by
+            // pressing Apply on a panel whose values this backend never read.
+            // The rung is the exception the other way: the session in flight is
+            // rendering under the previous one, so leaving it running is how a
+            // user who moves the switch sees nothing happen.
+            const bool restart=BackendReadsNeuralSettings(m_opt.neuralBackend)||
+                               m_temporalSettings.stability!=m_liveRenderSettings.temporal.stability;
+            if(!restart){
+                LOG("Neural settings applied at "<<Position()<<" s; this backend's render reads the accumulation rung and nothing else in the dialog, and the rung is unchanged, so the active session is left running.");
                 return;
             }
             // The restart must not leave a queued seek behind: it would run
@@ -13137,6 +13146,13 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         if(!command.quality.empty())ParseEncoderQuality(command.quality,job.quality);
         job.sourceDeband=GetPrivateProfileIntW(L"Encoding",L"SourceDeband",0,settings.c_str())!=0;
         job.suppliedExposure=GetPrivateProfileIntW(L"Encoding",L"SuppliedExposure",0,settings.c_str())!=0;
+        // The temporal rung: the command line's, or what this machine has saved
+        // for the backend the plan runs on. Resolved here rather than at the
+        // parse because the two backends do not share a default - Off on NVIDIA,
+        // a rung on AMD - so "not given" cannot resolve to one value any earlier
+        // than the plan is known.
+        job.temporal.stability=command.temporalStability.value_or(
+            ReadSavedStability(plan.backend,settings));
 
         say(StageExportPlanSummary(plan,width,height,fps));
         // What the render will look like and how it is encoded, whichever of

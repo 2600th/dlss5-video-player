@@ -1,10 +1,12 @@
 #include "AmdLmxxfApi.h"
 #include "AmdLmxxfPolicy.h"
 #include "AmdLmxxfSession.h"
+#include "NeuralStabilitySettings.h"
 
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -412,6 +414,84 @@ void amd_runtime_layout_requires_every_checked_component_test()
     CHECK_EQ(amd_lmxxf::LayoutState::Complete, amd_lmxxf::ClassifyLayout(layout));
 }
 
+// Whether the accumulation rung is on by default on AMD, and whether Off keeps
+// the key this backend published before the pass existed.
+//
+// Both halves are load-bearing and both are cheap to get wrong silently. If the
+// default were Off, this backend would ship the arm that flickers. If Off grew a
+// line in the document, every AMD entry already on disk - made by a build whose
+// picture is exactly what Off produces - would be retired and re-rendered for a
+// byte.
+void amd_accumulation_rung_is_on_by_default_and_off_keeps_the_old_key_test()
+{
+    // Off is not the neutral setting here: the runtime relights every frame on
+    // its own, so Off is the picture with the model's own frame-to-frame jitter
+    // left in place, and the pass is what takes it out. Low rather than a
+    // stronger rung because this is a default and not a choice - the rungs trade
+    // steadiness for detail monotonically, and Low moves the picture least
+    // (AmdLmxxfPolicy.h).
+    CHECK_EQ(TemporalStability::Low, amd_lmxxf::kAmdDefaultStability);
+
+    // The pre-pass document, spelled out. Any added or renamed line here is a
+    // change to every AMD key on disk at the defaults, so the check is against
+    // the literal text and not against `AmdNeuralSettingsDocument(Off)`.
+    const std::string before = "backend=amd-lmxxf\n"
+                               "temporal=off\n"
+                               "motion=constant(0,0)\n"
+                               "depth=constant(1)\n";
+    CHECK_EQ(before, AmdNeuralSettingsDocument(TemporalStability::Off));
+
+    // Every other rung adds exactly its own line, and no two rungs share a
+    // document: two rungs blend differently, so one key for both would serve a
+    // render made under the other.
+    std::string seen[3];
+    size_t distinct = 0;
+    for (const TemporalStability rung :
+         {TemporalStability::Low, TemporalStability::Medium, TemporalStability::High}) {
+        const std::string document = AmdNeuralSettingsDocument(rung);
+        const std::string line = "accumulation=" + std::string(TemporalStabilityName(rung)) + "\n";
+        CHECK_EQ(before.size() + line.size(), document.size());
+        CHECK(document.compare(0, before.size(), before) == 0);
+        CHECK(document.compare(before.size(), line.size(), line) == 0);
+        for (size_t other = 0; other < distinct; ++other) CHECK(document != seen[other]);
+        seen[distinct++] = document;
+    }
+}
+
+// Which key a rung is remembered under, and what a machine takes when its key
+// says nothing.
+//
+// The two backends' switches are different features - NVIDIA's is the add-on's
+// own ladder in its capture path, opt-in; AMD's is this player's accumulation
+// over the runtime's output, on by default - so one shared key would hand a
+// machine the other backend's answer, and on AMD that answer is the arm that
+// flickers.
+void stability_rung_is_remembered_under_a_key_per_backend_test()
+{
+    CHECK(std::wstring_view(StabilitySettingsKey(NeuralBackend::Nvidia)) == L"Stability");
+    CHECK(std::wstring_view(StabilitySettingsKey(NeuralBackend::Amd)) == L"AmdStability");
+
+    CHECK_EQ(TemporalStability::Off, StabilitySettingsDefault(NeuralBackend::Nvidia));
+    CHECK_EQ(amd_lmxxf::kAmdDefaultStability, StabilitySettingsDefault(NeuralBackend::Amd));
+
+    // A rung that was saved is honoured, whatever it is and on either backend.
+    // Off on AMD is the case that matters: it is reachable, so it has to be
+    // readable back rather than being replaced by the default.
+    CHECK_EQ(TemporalStability::High, SavedStability(NeuralBackend::Nvidia, "high"));
+    CHECK_EQ(TemporalStability::Medium, SavedStability(NeuralBackend::Amd, "medium"));
+    CHECK_EQ(TemporalStability::Off, SavedStability(NeuralBackend::Amd, "off"));
+
+    // Nothing saved, or something a hand edit or a future build left behind:
+    // this backend's own default and never the other's. The file is written in
+    // the lowercase spelling, so anything else is malformed rather than a rung.
+    CHECK_EQ(StabilitySettingsDefault(NeuralBackend::Nvidia),
+             SavedStability(NeuralBackend::Nvidia, ""));
+    CHECK_EQ(StabilitySettingsDefault(NeuralBackend::Amd), SavedStability(NeuralBackend::Amd, ""));
+    CHECK_EQ(StabilitySettingsDefault(NeuralBackend::Amd),
+             SavedStability(NeuralBackend::Amd, "Low"));
+    CHECK_EQ(StabilitySettingsDefault(NeuralBackend::Amd), SavedStability(NeuralBackend::Amd, "2"));
+}
+
 void Run(std::string_view only)
 {
     const struct {
@@ -440,6 +520,10 @@ void Run(std::string_view only)
          amd_gpu_policy_only_admits_the_targets_the_runtime_has_modules_for_test},
         {"amd_runtime_layout_requires_every_checked_component_test",
          amd_runtime_layout_requires_every_checked_component_test},
+        {"amd_accumulation_rung_is_on_by_default_and_off_keeps_the_old_key_test",
+         amd_accumulation_rung_is_on_by_default_and_off_keeps_the_old_key_test},
+        {"stability_rung_is_remembered_under_a_key_per_backend_test",
+         stability_rung_is_remembered_under_a_key_per_backend_test},
     };
     for (const auto& test : cases) {
         if (!only.empty() && std::string_view(test.name).find(only) == std::string_view::npos)
