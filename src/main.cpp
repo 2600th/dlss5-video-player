@@ -638,6 +638,9 @@ static void ApplyDarkControlTheme(HWND control)
 // with this property and drawn in the accent, as the toolbar draws a control
 // that is on: BS_DEFPUSHBUTTON cannot be combined with BS_OWNERDRAW.
 static constexpr const wchar_t* kDefaultButtonProperty=L"DLSSVideo.DefaultButton";
+// Owner-drawn check boxes carry this, so WM_DRAWITEM can tell them from push
+// buttons: both arrive as ODT_BUTTON, and only one of them wants a square.
+static constexpr const wchar_t* kCheckBoxProperty=L"DLSSVideo.CheckBox";
 static void MarkDefaultButton(HWND button){if(button)SetPropW(button,kDefaultButtonProperty,reinterpret_cast<HANDLE>(1));}
 // Window properties are not freed with the window, so a dialog takes its
 // children's off before they go (WM_DESTROY reaches the parent first).
@@ -758,6 +761,50 @@ static void DrawDarkPushButton(const DRAWITEMSTRUCT& item)
                                      ((item.itemState&ODS_NOACCEL)?DT_HIDEPREFIX:0u));
     if(oldFont)SelectObject(item.hDC,oldFont);
     if(visual.drawFocus)DrawRoundedFocusRing(item.hDC,item.rcItem,radius,visual.text,dpi);
+}
+
+// An owner-drawn check box: the square and its tick drawn here, the label in
+// the primary text colour rather than whatever the system's dark theme says -
+// the reason this is owner-drawn at all. The tick's fill is the accent blue,
+// the box the dialog's own surface, and a disabled switch carries both in the
+// quiet greys so a greyed option reads as one.
+static void DrawDarkCheckBox(const DRAWITEMSTRUCT& item)
+{
+    const bool enabled=(item.itemState&ODS_DISABLED)==0,pressed=(item.itemState&ODS_SELECTED)!=0;
+    const bool checked=SendMessageW(item.hwndItem,BM_GETCHECK,0,0)==BST_CHECKED;
+    const UINT dpi=ActiveWindowDpi(item.hwndItem);
+    const int box=MulDiv(14,static_cast<int>(dpi),USER_DEFAULT_SCREEN_DPI);
+    const HBRUSH background=DarkDialogBrush();FillRect(item.hDC,&item.rcItem,background);
+    const int top=item.rcItem.top+(item.rcItem.bottom-item.rcItem.top-box)/2;
+    const RECT square{item.rcItem.left,top,item.rcItem.left+box,top+box};
+    const COLORREF border=enabled?(checked?ui_palette::PrimaryBlue:(pressed?ui_palette::Hover:dark_mode::Rule))
+                                  :ui_palette::Inactive;
+    const COLORREF fill=checked?ui_palette::PrimaryBlue:ui_palette::ControlSurface;
+    HBRUSH brush=CreateSolidBrush(fill);HPEN pen=CreatePen(PS_SOLID,1,border);
+    const HGDIOBJ oldBrush=SelectObject(item.hDC,brush),oldPen=SelectObject(item.hDC,pen);
+    Rectangle(item.hDC,square.left,square.top,square.right,square.bottom);
+    SelectObject(item.hDC,oldBrush);SelectObject(item.hDC,oldPen);DeleteObject(brush);DeleteObject(pen);
+    if(checked){
+        // The tick, inset a fifth of the box and stroked white over the accent.
+        const int inset=box/5;
+        POINT tick[3]={{square.left+inset,square.top+box-inset*2},
+                       {square.left+box/2,square.bottom-inset},
+                       {square.right-inset/2,square.top+inset}};
+        HPEN tickPen=CreatePen(PS_SOLID,MulDiv(2,static_cast<int>(dpi),USER_DEFAULT_SCREEN_DPI),RGB(255,255,255));
+        const HGDIOBJ oldTickPen=SelectObject(item.hDC,tickPen);
+        Polyline(item.hDC,tick,3);
+        SelectObject(item.hDC,oldTickPen);DeleteObject(tickPen);
+    }
+    wchar_t text[128]{};GetWindowTextW(item.hwndItem,text,static_cast<int>(std::size(text)));
+    const HFONT font=reinterpret_cast<HFONT>(SendMessageW(item.hwndItem,WM_GETFONT,0,0));
+    const HGDIOBJ oldFont=font?SelectObject(item.hDC,font):nullptr;
+    SetBkMode(item.hDC,TRANSPARENT);
+    SetTextColor(item.hDC,enabled?dark_mode::Text:dark_mode::QuietText);
+    RECT label{item.rcItem.left+box+MulDiv(8,static_cast<int>(dpi),USER_DEFAULT_SCREEN_DPI),
+               item.rcItem.top,item.rcItem.right,item.rcItem.bottom};
+    DrawTextW(item.hDC,text,-1,&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|
+              ((item.itemState&ODS_NOACCEL)?DT_HIDEPREFIX:0u));
+    if(oldFont)SelectObject(item.hDC,oldFont);
 }
 
 // The two modal prompts' share of the dark chrome and the dpi handling: the
@@ -6664,7 +6711,11 @@ private:
     }
 
     HWND CreateNeuralCheck(HWND h,int id,const wchar_t* labelKey,int x,int y,int width,const wchar_t* tipKey=nullptr){
-        HWND box=DialogControl(h,L"BUTTON",T(labelKey).c_str(),WS_TABSTOP|BS_AUTOCHECKBOX,x,y,width,22,id);
+        // Owner-drawn (DrawDarkCheckBox): a themed check box paints its own
+        // label in the system theme's colour, which read grey against every
+        // other option's white.
+        HWND box=DialogControl(h,L"BUTTON",T(labelKey).c_str(),WS_TABSTOP|BS_OWNERDRAW,x,y,width,22,id);
+        if(box)SetPropW(box,kCheckBoxProperty,reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
         AddTip(h,box,tipKey);return box;
     }
 
@@ -6975,7 +7026,13 @@ private:
             // reaches the render. Adding a control without adding it to this
             // line is the one mistake this dialog invites, and it is silent.
             if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY)&&code==CBN_SELCHANGE)||
-               ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED||id==IDC_NS_SKIN_PROTECT||id==IDC_NS_MP_PREDICT)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
+               ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED||id==IDC_NS_SKIN_PROTECT||id==IDC_NS_MP_PREDICT)&&code==BN_CLICKED)){
+                // The owner-drawn check boxes do not flip their own check: the
+                // click is only a click until this turns the state over, and
+                // the read below is what carries it into the settings.
+                if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,SendMessageW(box,BM_GETCHECK,0,0)==BST_CHECKED?BST_UNCHECKED:BST_CHECKED,0);
+                ReadNeuralSettingControls(h);return 0;
+            }
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
