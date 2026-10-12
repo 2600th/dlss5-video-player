@@ -6598,6 +6598,10 @@ private:
         m_neuralSettings.chainedHistory=checked(IDC_NS_CHAINED);
         m_amdSkinProtect=checked(IDC_NS_SKIN_PROTECT);
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
+        // Same dependency the Enable path states: the switch renders nothing at
+        // one pass, so moving the pass combo has to move its greyed state too.
+        if(HWND protect=GetDlgItem(h,IDC_NS_SKIN_PROTECT))
+            EnableWindow(protect,m_opt.neuralBackend==NeuralBackend::Amd&&m_neuralSettings.passes>1);
         EnableDependentNeuralControls(h);
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
         TemporalSettings temporal=m_temporalSettings;
@@ -6941,7 +6945,7 @@ private:
             // reaches the render. Adding a control without adding it to this
             // line is the one mistake this dialog invites, and it is silent.
             if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY)&&code==CBN_SELCHANGE)||
-               ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
+               ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED||id==IDC_NS_SKIN_PROTECT)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
