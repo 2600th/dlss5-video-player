@@ -6442,6 +6442,8 @@ private:
             const auto* item=reinterpret_cast<const DRAWITEMSTRUCT*>(l);
             if(item&&item->CtlType==ODT_STATIC){DrawDialogHeading(*item);result=TRUE;return true;}
             if(!item||item->CtlType!=ODT_BUTTON)return false;
+            // Both kinds arrive as ODT_BUTTON; only one of them wants a square.
+            if(GetPropW(item->hwndItem,kCheckBoxProperty)){DrawDarkCheckBox(*item);result=TRUE;return true;}
             DrawDarkPushButton(*item);result=TRUE;return true;
         }
         case WM_NOTIFY:{
