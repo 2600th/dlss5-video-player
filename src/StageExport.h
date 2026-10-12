@@ -110,6 +110,9 @@ struct StageExportJob {
     // The runtime's multi-pass skin switch (AMD only); see
     // RenderSettings::amdSkinProtect in the player.
     bool amdSkinProtect{false};
+    // Whether a third pass is predicted rather than really run; see
+    // RenderSettings::amdMultiPassPredict in the player.
+    bool amdMultiPassPredict{true};
     // Super Resolution's history for an upscaling pass without the model; a pass
     // that runs the model keeps Temporal (CarrierUpscalingHistory).
     UpscalingHistory upscalingHistory{kRecommendedUpscalingHistory};

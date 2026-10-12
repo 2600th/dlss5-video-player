@@ -401,6 +401,7 @@ static constexpr int IDC_NS_GUIDE_DEPTH = 7312;
 static constexpr int IDC_NS_SCENE_CUTS = 7340;
 static constexpr int IDC_NS_STABILITY = 7341;
 static constexpr int IDC_NS_SKIN_PROTECT = 7351;
+static constexpr int IDC_NS_MP_PREDICT = 7352;
 // The preset strip, the line that says what the preset does, the line that
 // says what Apply will do, and the way across to Image adjustments.
 static constexpr int IDC_NS_PRESET = 7342;
@@ -618,7 +619,14 @@ static void ApplyDarkControlTheme(HWND control)
         const LONG_PTR type=GetWindowLongPtrW(control,GWL_STYLE)&BS_TYPEMASK;
         const bool check=type==BS_CHECKBOX||type==BS_AUTOCHECKBOX||type==BS_3STATE||type==BS_AUTO3STATE||
                          type==BS_RADIOBUTTON||type==BS_AUTORADIOBUTTON;
-        if(check)setTheme(control,L"DarkMode_Explorer",nullptr);
+        if(check){
+            // The dark checkbox theme paints its own label in whatever colour the
+            // system theme says, which on this dialog reads grey rather than the
+            // white every other option carries. Cleared, the box draws classically
+            // and takes its text from WM_CTLCOLORBTN - white here, disabled grey
+            // from the system - over the dialog's own dark brush.
+            setTheme(control,L"",nullptr);
+        }
         return;
     }
     if(kind==L"msctls_trackbar32"||kind==L"ScrollBar"||kind==L"tooltips_class32"||kind==L"ListBox")
@@ -2280,6 +2288,14 @@ static bool ReadSavedAmdSkinProtect(const std::filesystem::path& settingsPath)
     return GetPrivateProfileIntW(L"AmdMultiPass",L"SkinProtect",1,settingsPath.c_str())!=0;
 }
 
+// The third-pass prediction as this machine has saved it. The runtime's own
+// default is on and so is the panel's; a machine that never touched the switch
+// renders what it always rendered.
+static bool ReadSavedAmdMultiPassPredict(const std::filesystem::path& settingsPath)
+{
+    return GetPrivateProfileIntW(L"AmdMultiPass",L"PredictPass3",1,settingsPath.c_str())!=0;
+}
+
 // Everything a neural job reads, captured on the UI thread when it starts:
 // the job thread never touches PlayerApp. The two pointers are owned by the
 // player and outlive the job, which the UI thread joins before touching them.
@@ -2310,6 +2326,7 @@ struct NeuralJobInputs {
     // The runtime's multi-pass skin switch, same road as the count (see
     // RenderSettings::amdSkinProtect).
     bool amdSkinProtect{false};
+    bool amdMultiPassPredict{true};
     HANDLE pauseEvent{};
     bool prepareOnly{};
     // The background acquisition of this very source, when one is in flight.
@@ -2540,7 +2557,7 @@ private:
         // named mutex derived from the directory, so it costs the tree nothing.
         lease_.emplace(runtimeDirectory_);
         if(!lease_->Held()){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("AMD neural runtime is in use by another render; refusing to share it.");return false;}
-        settingsSnapshot_=AmdNeuralSettingsDocument(in_.temporal.stability,in_.amdPasses,in_.amdSkinProtect);
+        settingsSnapshot_=AmdNeuralSettingsDocument(in_.temporal.stability,in_.amdPasses,in_.amdSkinProtect,in_.amdMultiPassPredict);
         settingsDigest_=Sha256Bytes(*settingsSnapshot_);
         if(!settingsDigest_){completion_->result.detail=L"The neural settings digest could not be computed.";return false;}
         return true;
@@ -2730,7 +2747,7 @@ private:
         staging_=cache_.BeginRenderStaging(renderKey_);if(!staging_){completion_->result.detail=in_.cacheFailureText.Describe(cache_);return false;}
         {std::ofstream settingsFile(*staging_/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot_->data(),static_cast<std::streamsize>(settingsSnapshot_->size()));if(!settingsFile){cache_.MarkInvalid(*staging_);completion_->result.detail=L"The neural settings snapshot could not be staged.";return false;}}
         const auto& range=in_.range;
-        NeuralRenderRequest request{nullptr,sourcePath_,liveIndex?liveDirectory/L"neural.mkv":*staging_/L"neural.mkv",width_,height_,fps_,duration_};request.jobId=in_.generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps_);request.guides=in_.guides;request.temporal=in_.temporal;request.amdPasses=in_.amdPasses;request.amdSkinProtect=in_.amdSkinProtect;request.pauseEvent=in_.pauseEvent;request.segmentFrames=liveIndex?in_.segmentFrames:0u;request.firstSegmentFrames=liveIndex?in_.firstSegmentFrames:0u;request.gpuColorConversion=in_.gpuColorConversion;request.nvencPreset=in_.nvencPreset;request.gpuSourceConversion=in_.gpuSourceConversion;request.processingScale=in_.processingScale;request.captureDither=in_.captureDither;request.quality=in_.cacheQuality;request.sourceDeband=in_.sourceDeband;request.suppliedExposure=in_.suppliedExposure;
+        NeuralRenderRequest request{nullptr,sourcePath_,liveIndex?liveDirectory/L"neural.mkv":*staging_/L"neural.mkv",width_,height_,fps_,duration_};request.jobId=in_.generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps_);request.guides=in_.guides;request.temporal=in_.temporal;request.amdPasses=in_.amdPasses;request.amdSkinProtect=in_.amdSkinProtect;request.amdMultiPassPredict=in_.amdMultiPassPredict;request.pauseEvent=in_.pauseEvent;request.segmentFrames=liveIndex?in_.segmentFrames:0u;request.firstSegmentFrames=liveIndex?in_.firstSegmentFrames:0u;request.gpuColorConversion=in_.gpuColorConversion;request.nvencPreset=in_.nvencPreset;request.gpuSourceConversion=in_.gpuSourceConversion;request.processingScale=in_.processingScale;request.captureDither=in_.captureDither;request.quality=in_.cacheQuality;request.sourceDeband=in_.sourceDeband;request.suppliedExposure=in_.suppliedExposure;
         // Which backend runs the pass, and - on the AMD one - the tree it loads
         // its module from. The worker executable is not on this line for the
         // reason the export gives: one binary serves both backends and always
@@ -5137,6 +5154,7 @@ private:
             // why there are two keys rather than one.
             m_temporalSettings.stability=ReadSavedStability(m_opt.neuralBackend,SettingsPath());
         m_amdSkinProtect=ReadSavedAmdSkinProtect(SettingsPath());
+        m_amdMultiPassPredict=ReadSavedAmdMultiPassPredict(SettingsPath());
         }
         m_gpuColorConversion=GetPrivateProfileIntW(L"Encoding",L"GpuColorConversion",0,SettingsPath().c_str())!=0;
         m_gpuSourceConversion=GetPrivateProfileIntW(L"Encoding",L"GpuSourceConversion",0,SettingsPath().c_str())!=0;
@@ -5276,6 +5294,7 @@ private:
         // whichever backend this machine has, and one key a machine owns is one
         // place to look.
         WritePrivateProfileStringW(L"AmdMultiPass",L"SkinProtect",m_amdSkinProtect?L"1":L"0",SettingsPath().c_str());
+        WritePrivateProfileStringW(L"AmdMultiPass",L"PredictPass3",m_amdMultiPassPredict?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuSourceConversion",m_gpuSourceConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"NvencPreset",std::to_wstring(m_nvencPreset).c_str(),SettingsPath().c_str());
@@ -6576,6 +6595,7 @@ private:
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         check(IDC_NS_CHAINED,m_neuralSettings.chainedHistory);
         check(IDC_NS_SKIN_PROTECT,m_amdSkinProtect);
+        check(IDC_NS_MP_PREDICT,m_amdMultiPassPredict);
         // Chained history only governs passes 2+, so it is dead UI at one
         // pass rather than a setting that quietly does nothing.
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
@@ -6597,6 +6617,7 @@ private:
         m_neuralSettings.passes=std::clamp(sel(IDC_NS_PASSES,m_neuralSettings.passes-1)+1,1,4);
         m_neuralSettings.chainedHistory=checked(IDC_NS_CHAINED);
         m_amdSkinProtect=checked(IDC_NS_SKIN_PROTECT);
+        m_amdMultiPassPredict=checked(IDC_NS_MP_PREDICT);
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
         // Same dependency the Enable path states: the switch renders nothing at
         // one pass, so moving the pass combo has to move its greyed state too.
@@ -6625,6 +6646,10 @@ private:
         // an off switch renders.
         if(HWND protect=GetDlgItem(h,IDC_NS_SKIN_PROTECT))
             EnableWindow(protect,m_opt.neuralBackend==NeuralBackend::Amd&&m_neuralSettings.passes>1);
+        // The prediction is a three-pass question only; at other counts the
+        // runtime never asks.
+        if(HWND predict=GetDlgItem(h,IDC_NS_MP_PREDICT))
+            EnableWindow(predict,m_opt.neuralBackend==NeuralBackend::Amd&&m_neuralSettings.passes==3);
     }
 
     // The persisted guide switches also drive the live (non-cached) guide
@@ -6719,7 +6744,8 @@ private:
         CreateSettingsGroupHeading(h,L"neural.settings.group_cost",12+top,right,400);
         CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",40+top,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",right);
         CreateNeuralCheck(h,IDC_NS_SKIN_PROTECT,L"neural.settings.skin_protect",12+right,74+top,116,L"neural.tip.skin_protect");
-        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+right,74+top,284,L"neural.tip.chained");
+        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+right,74+top,224,L"neural.tip.chained");
+        CreateNeuralCheck(h,IDC_NS_MP_PREDICT,L"neural.settings.mp_predict",132+right+228,74+top,180,L"neural.tip.mp_predict");
         CreateSettingsGroupHeading(h,L"neural.settings.group_guides",112+top,right,400);
         CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+right,138+top,116,L"neural.tip.guide_mv");
         CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+right,138+top,80,L"neural.tip.guide_depth");
@@ -6831,9 +6857,12 @@ private:
         // NeuralSettings: it is the runtime's option, not the add-on's, and it
         // travels the same road as the pass count.
         bool amdSkinProtect{false};
+        // Whether a third pass is predicted rather than really run; only means
+        // anything at three passes, where it changes how the picture is made.
+        bool amdMultiPassPredict{true};
         friend bool operator==(const RenderSettings&,const RenderSettings&)=default;
     };
-    RenderSettings CurrentRenderSettings()const{return {m_neuralSettings,m_renderGuides,m_temporalSettings,m_amdSkinProtect};}
+    RenderSettings CurrentRenderSettings()const{return {m_neuralSettings,m_renderGuides,m_temporalSettings,m_amdSkinProtect,m_amdMultiPassPredict};}
 
     // The render the picture came from is not what the dialog now holds. Only the
     // export path noticed this before, so a settings change made during playback
@@ -6896,7 +6925,8 @@ private:
             const bool restart=BackendReadsNeuralSettings(m_opt.neuralBackend)||
                                m_temporalSettings.stability!=m_liveRenderSettings.temporal.stability||
                                m_neuralSettings.passes!=m_liveRenderSettings.neural.passes||
-                               m_amdSkinProtect!=m_liveRenderSettings.amdSkinProtect;
+                               m_amdSkinProtect!=m_liveRenderSettings.amdSkinProtect||
+                               m_amdMultiPassPredict!=m_liveRenderSettings.amdMultiPassPredict;
             if(!restart){
                 LOG("Neural settings applied at "<<Position()<<" s; this backend's render reads the accumulation rung and the pass count and nothing else in the dialog, and neither moved, so the active session is left running.");
                 return;
@@ -6928,7 +6958,7 @@ private:
         case WM_SIZE:ResizeSettingsChildren(h,kNeuralDesignW,kNeuralDesignH);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};m_amdSkinProtect=true;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
+            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};m_amdSkinProtect=true;m_amdMultiPassPredict=true;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
             if(id==IDC_NS_OPEN_ADJUST&&code==BN_CLICKED){ShowAdjustments();return 0;}
@@ -6945,7 +6975,7 @@ private:
             // reaches the render. Adding a control without adding it to this
             // line is the one mistake this dialog invites, and it is silent.
             if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY)&&code==CBN_SELCHANGE)||
-               ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED||id==IDC_NS_SKIN_PROTECT)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
+               ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED||id==IDC_NS_SKIN_PROTECT||id==IDC_NS_MP_PREDICT)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -10251,7 +10281,7 @@ private:
     // takes the rung from the temporal term instead - hashing the panel there
     // would retire coverage a restart would have rendered identically.
     std::string RetentionKeyFor(const RenderSettings& render)const{
-        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettingsForBackend(m_opt.neuralBackend,render.neural,render.amdSkinProtect)+"|"+CanonicalGuideControls(render.guides)+
+        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettingsForBackend(m_opt.neuralBackend,render.neural,render.amdSkinProtect,render.amdMultiPassPredict)+"|"+CanonicalGuideControls(render.guides)+
                "|"+CanonicalTemporalSettings(render.temporal);
     }
     std::string LiveRetentionKey()const{return RetentionKeyFor(CurrentRenderSettings());}
@@ -11194,7 +11224,7 @@ private:
             // reports from the request.
             job.backend=m_opt.neuralBackend;job.amdRuntimeDirectory=m_opt.amdRuntimeDirectory;
             const RenderSettings render=JobRenderSettings(kind);
-            job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.amdPasses=std::clamp(render.neural.passes,1,4);job.amdSkinProtect=render.amdSkinProtect;job.pauseEvent=m_neuralPauseEvent;
+            job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.amdPasses=std::clamp(render.neural.passes,1,4);job.amdSkinProtect=render.amdSkinProtect;job.amdMultiPassPredict=render.amdMultiPassPredict;job.pauseEvent=m_neuralPauseEvent;
             job.gpuColorConversion=m_gpuColorConversion;job.gpuSourceConversion=m_gpuSourceConversion;job.nvencPreset=m_nvencPreset;job.processingScale=m_processingScale;job.captureDither=m_captureDither;job.cacheQuality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
             job.reuseSourceKey=reuseSourceKey;job.expectedDurationSeconds=expectedDurationSeconds;job.range=range;job.prepareOnly=prepareOnly;
             // The background acquisition of this very source, when one is in
@@ -12831,6 +12861,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // The runtime's multi-pass skin switch; see RenderSettings::amdSkinProtect
     // and ReadSavedAmdSkinProtect for why the saved default is on.
     bool m_amdSkinProtect{true};
+    // The runtime's third-pass prediction; the runtime's default is on and so is
+    // the panel's.
+    bool m_amdMultiPassPredict{true};
     // The preset the Look settings were last taken from, so Custom can say
     // which one it departed from. kPresetCount when none is known yet.
     size_t m_lastNeuralPreset=neural_presets::kPresetCount;
@@ -13215,6 +13248,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         // for it, because it only means anything above one pass and the panel
         // already greys itself there.
         job.amdSkinProtect=ReadSavedAmdSkinProtect(settings);
+        job.amdMultiPassPredict=ReadSavedAmdMultiPassPredict(settings);
 
         say(StageExportPlanSummary(plan,width,height,fps));
         // What the render will look like and how it is encoded, whichever of

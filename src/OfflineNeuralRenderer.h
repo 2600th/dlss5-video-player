@@ -171,6 +171,11 @@ struct NeuralRenderRequest {
     // one, so a request that asks for it alone renders what one pass renders and
     // is keyed the same way. AMD only; NVIDIA's add-on has no such switch.
     bool amdSkinProtect{false};
+    // Whether a third pass is predicted from the first two rather than really
+    // run (DLSS5_MULTI_PASS_PREDICT). On by default - the runtime's own default
+    // - and it means something only at three passes: at one or two the question
+    // never comes up, so the field is keyed the same way there whatever it says.
+    bool amdMultiPassPredict{true};
 };
 
 struct NeuralRenderProgress {

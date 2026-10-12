@@ -141,6 +141,7 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         // stacks the model with; the count is clamped again by ValidRequest.
         request.amdPasses=std::clamp(job.neuralSettings.passes,1,4);
         request.amdSkinProtect=job.amdSkinProtect;
+        request.amdMultiPassPredict=job.amdMultiPassPredict;
         request.requireNeural=plan.requireNeural;
         request.backend=plan.backend;
         const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;

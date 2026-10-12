@@ -545,9 +545,9 @@ void amd_pass_count_reaches_the_runtime_through_its_own_config_file_test()
 
     // A file that does not exist yet: the folder is made and the key written.
     std::string error;
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 2, false, error));
+    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 2, false, true, error));
     CHECK(fs::is_regular_file(file, ec) && !ec);
-    CHECK(read() == "DLSS5_MULTI_PASS=2\nDLSS5_MULTI_PASS_SKIN_PROTECT=0\n");
+    CHECK(read() == "DLSS5_MULTI_PASS=2\nDLSS5_MULTI_PASS_SKIN_PROTECT=0\nDLSS5_MULTI_PASS_PREDICT=1\n");
 
     // A hand-written file: its comments, its other keys and a repeated key of
     // ours survive, the last occurrence is the one rewritten, and no earlier one
@@ -561,7 +561,7 @@ void amd_pass_count_reaches_the_runtime_through_its_own_config_file_test()
                "\n"
                "DLSS5_MULTI_PASS=3\n";
     }
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 4, false, error));
+    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 4, false, true, error));
     const std::string rewritten = read();
     // The hand-written skin switch is the panel's to set too: the panel's value
     // is what this job renders, and a value a hand edit left behind is not the
@@ -570,39 +570,52 @@ void amd_pass_count_reaches_the_runtime_through_its_own_config_file_test()
                        "DLSS5_MULTI_PASS_SKIN_PROTECT=0\n"
                        "DLSS5_STYLE=3\n"
                        "\n"
-                       "DLSS5_MULTI_PASS=4\n");
+                       "DLSS5_MULTI_PASS=4\n"
+                       "DLSS5_MULTI_PASS_PREDICT=1\n");
     CHECK(rewritten.find("DLSS5_MULTI_PASS=2") == std::string::npos);
     CHECK(rewritten.find("DLSS5_MULTI_PASS=3") == std::string::npos);
 
     // Idempotent: writing the same count again changes nothing, which is what
     // lets every job state the count without churning the file.
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 4, false, error));
+    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 4, false, true, error));
     CHECK(read() == rewritten);
 
     // The skin switch is written whether or not it is on - a panel that has
     // released the switch has to be able to switch off one a hand edit turned
     // on, and the runtime reads its configuration only once per process. Its own
     // key survives as the panel's value, not as the value that was there.
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 3, true, error));
+    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 3, true, true, error));
     CHECK(read() == "# hand written\n"
                    "DLSS5_MULTI_PASS_SKIN_PROTECT=1\n"
                    "DLSS5_STYLE=3\n"
                    "\n"
-                   "DLSS5_MULTI_PASS=3\n");
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 3, true, error));
+                   "DLSS5_MULTI_PASS=3\n"
+                   "DLSS5_MULTI_PASS_PREDICT=1\n");
+    // The prediction turns off a file that had it on - the same authority rule
+    // the skin switch follows.
+    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 3, true, false, error));
     CHECK(read() == "# hand written\n"
                    "DLSS5_MULTI_PASS_SKIN_PROTECT=1\n"
                    "DLSS5_STYLE=3\n"
                    "\n"
-                   "DLSS5_MULTI_PASS=3\n");
+                   "DLSS5_MULTI_PASS=3\n"
+                   "DLSS5_MULTI_PASS_PREDICT=0\n");
+    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 3, true, true, error));
+    CHECK(read() == "# hand written\n"
+                   "DLSS5_MULTI_PASS_SKIN_PROTECT=1\n"
+                   "DLSS5_STYLE=3\n"
+                   "\n"
+                   "DLSS5_MULTI_PASS=3\n"
+                   "DLSS5_MULTI_PASS_PREDICT=1\n");
     // And the two keys are independent: the count moves without the switch, and
     // the switch turns off a file that had it on.
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 4, false, error));
+    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 4, false, true, error));
     CHECK(read() == "# hand written\n"
                    "DLSS5_MULTI_PASS_SKIN_PROTECT=0\n"
                    "DLSS5_STYLE=3\n"
                    "\n"
-                   "DLSS5_MULTI_PASS=4\n");
+                   "DLSS5_MULTI_PASS=4\n"
+                   "DLSS5_MULTI_PASS_PREDICT=1\n");
     CHECK(!amd_lmxxf::IsAmdConfigLine("DLSS5_MULTI_PASS_SKIN_PROTECT=1", "DLSS5_MULTI_PASS"));
     CHECK(amd_lmxxf::IsAmdConfigLine("DLSS5_MULTI_PASS_SKIN_PROTECT=1", "DLSS5_MULTI_PASS_SKIN_PROTECT"));
 

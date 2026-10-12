@@ -1334,6 +1334,8 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
             arguments.emplace_back(L"--amd-skin-protect");
             arguments.emplace_back(L"1");
         }
+        arguments.emplace_back(L"--amd-mp-predict");
+        arguments.emplace_back(request.amdMultiPassPredict ? L"1" : L"0");
     }
     // Absent means 100, the source size, which is every job before the rungs.
     if (request.processingScale != kDefaultProcessingScale) {
@@ -1474,7 +1476,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
                CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, NeuralBackendKey,
-               AmdRuntimeDirectoryKey, AmdPassesKey, AmdSkinProtectKey, KeyCount };
+               AmdRuntimeDirectoryKey, AmdPassesKey, AmdSkinProtectKey, AmdPredictKey, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1506,7 +1508,13 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         L"--amd-passes",
         // The skin switch: sent when on, absent when off, because the runtime's
         // own default is off and the helper has nothing to say about it then.
-        L"--amd-skin-protect"};
+        L"--amd-skin-protect",
+        // The third-pass prediction. Sent ALWAYS, on or off: the panel is the
+        // authority and the runtime's own default (on) equals the panel's
+        // default, but a hand-edited file that turned it off must not outlive
+        // the panel saying on - this helper never re-reads the file, and the
+        // player rewrites it, so the command line is the tiebreaker.
+        L"--amd-mp-predict"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1648,6 +1656,11 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         uint64_t on = 0;
         if (!ParseUnsigned(*values[AmdSkinProtectKey], on) || on > 1) return std::nullopt;
         request.amdSkinProtect = on != 0;
+    }
+    if (values[AmdPredictKey]) {
+        uint64_t on = 0;
+        if (!ParseUnsigned(*values[AmdPredictKey], on) || on > 1) return std::nullopt;
+        request.amdMultiPassPredict = on != 0;
     }
     if (values[ProcessingScale]) {
         uint64_t percent = 0;
