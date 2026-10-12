@@ -763,6 +763,19 @@ static void DrawDarkPushButton(const DRAWITEMSTRUCT& item)
     if(visual.drawFocus)DrawRoundedFocusRing(item.hDC,item.rcItem,radius,visual.text,dpi);
 }
 
+// An owner-drawn check box carries its state in USERDATA, because BM_SETCHECK
+// is documented as ignored for push buttons and an owner-drawn button is one:
+// its type bits say 0x0B, not BS_CHECKBOX. Setting through the message would
+// store nothing, and every tick would read as unchecked - which is exactly what
+// the first owner-drawn cut did, silently.
+static void SetCheckBoxState(HWND box,bool on){
+    if(!box)return;
+    SetWindowLongPtrW(box,GWLP_USERDATA,on?1:0);
+    InvalidateRect(box,nullptr,TRUE);
+}
+
+static bool CheckBoxState(HWND box){return box&&GetWindowLongPtrW(box,GWLP_USERDATA)!=0;}
+
 // An owner-drawn check box: the square and its tick drawn here, the label in
 // the primary text colour rather than whatever the system's dark theme says -
 // the reason this is owner-drawn at all. The tick's fill is the accent blue,
@@ -771,7 +784,7 @@ static void DrawDarkPushButton(const DRAWITEMSTRUCT& item)
 static void DrawDarkCheckBox(const DRAWITEMSTRUCT& item)
 {
     const bool enabled=(item.itemState&ODS_DISABLED)==0,pressed=(item.itemState&ODS_SELECTED)!=0;
-    const bool checked=SendMessageW(item.hwndItem,BM_GETCHECK,0,0)==BST_CHECKED;
+    const bool checked=GetWindowLongPtrW(item.hwndItem,GWLP_USERDATA)!=0;
     const UINT dpi=ActiveWindowDpi(item.hwndItem);
     const int box=MulDiv(14,static_cast<int>(dpi),USER_DEFAULT_SCREEN_DPI);
     const HBRUSH background=DarkDialogBrush();FillRect(item.hDC,&item.rcItem,background);
@@ -6640,14 +6653,7 @@ private:
         // The combo lists the rungs in the enum's own order, so the index IS the rung.
         select(IDC_NS_SCENE_CUTS,static_cast<int>(m_temporalSettings.sceneCuts));
         select(IDC_NS_STABILITY,static_cast<int>(m_temporalSettings.stability));
-        const auto check=[&](int id,bool on){
-            if(HWND box=GetDlgItem(h,id)){
-                SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);
-                // An owner-drawn box stores the state but does not redraw for
-                // it: without this the tick stays whatever it was.
-                InvalidateRect(box,nullptr,TRUE);
-            }
-        };
+        const auto check=[&](int id,bool on){SetCheckBoxState(GetDlgItem(h,id),on);};
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         check(IDC_NS_CHAINED,m_neuralSettings.chainedHistory);
         check(IDC_NS_SKIN_PROTECT,m_amdSkinProtect);
@@ -6662,7 +6668,7 @@ private:
     void ReadNeuralSettingControls(HWND h){
         auto pos=[&](int id)->int{HWND t=GetDlgItem(h,id);return t?int(SendMessageW(t,TBM_GETPOS,0,0)):0;};
         auto sel=[&](int id,int fallback)->int{HWND c=GetDlgItem(h,id);const int index=c?int(SendMessageW(c,CB_GETCURSEL,0,0)):CB_ERR;return index==CB_ERR?fallback:index;};
-        auto checked=[&](int id)->bool{HWND b=GetDlgItem(h,id);return b&&SendMessageW(b,BM_GETCHECK,0,0)==BST_CHECKED;};
+        auto checked=[&](int id)->bool{return CheckBoxState(GetDlgItem(h,id));};
         m_neuralSettings.intensity=float(pos(IDC_NS_INTENSITY))/100.0f;
         m_neuralSettings.localStructure=float(pos(IDC_NS_STRUCTURE))/100.0f;
         m_neuralSettings.localTone=float(pos(IDC_NS_TONE))/100.0f;
@@ -7042,11 +7048,7 @@ private:
                 // The owner-drawn check boxes do not flip their own check: the
                 // click is only a click until this turns the state over, and
                 // the read below is what carries it into the settings.
-                if(HWND box=GetDlgItem(h,id)){
-                    const bool on=SendMessageW(box,BM_GETCHECK,0,0)!=BST_CHECKED;
-                    SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);
-                    InvalidateRect(box,nullptr,TRUE);
-                }
+                if(HWND box=GetDlgItem(h,id))SetCheckBoxState(box,!CheckBoxState(box));
                 ReadNeuralSettingControls(h);return 0;
             }
             break;
@@ -7065,14 +7067,7 @@ private:
     }
 
     void SyncEncoderSettingControls(HWND h){
-        const auto check=[&](int id,bool on){
-            if(HWND box=GetDlgItem(h,id)){
-                SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);
-                // An owner-drawn box stores the state but does not redraw for
-                // it: without this the tick stays whatever it was.
-                InvalidateRect(box,nullptr,TRUE);
-            }
-        };
+        const auto check=[&](int id,bool on){SetCheckBoxState(GetDlgItem(h,id),on);};
         check(IDC_ES_GPU_CONVERT,m_gpuColorConversion);
         check(IDC_ES_GPU_SOURCE,m_gpuSourceConversion);
         if(HWND combo=GetDlgItem(h,IDC_ES_NVENC_PRESET))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(int(m_nvencPreset)-1),0);
@@ -7087,7 +7082,7 @@ private:
 
     void ReadEncoderSettingControls(HWND h){
         auto sel=[&](int id,int fallback)->int{HWND c=GetDlgItem(h,id);const int index=c?int(SendMessageW(c,CB_GETCURSEL,0,0)):CB_ERR;return index==CB_ERR?fallback:index;};
-        auto checked=[&](int id)->bool{HWND b=GetDlgItem(h,id);return b&&SendMessageW(b,BM_GETCHECK,0,0)==BST_CHECKED;};
+        auto checked=[&](int id)->bool{return CheckBoxState(GetDlgItem(h,id));};
         // Only the next conversion reads these, so there is nothing to re-render for them.
         m_gpuColorConversion=checked(IDC_ES_GPU_CONVERT);
         m_gpuSourceConversion=checked(IDC_ES_GPU_SOURCE);
@@ -7250,7 +7245,7 @@ private:
     }
 
     void SyncExportStageControls(HWND h){
-        const auto check=[&](int id,bool on){if(HWND b=GetDlgItem(h,id))SendMessageW(b,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
+        const auto check=[&](int id,bool on){SetCheckBoxState(GetDlgItem(h,id),on);};
         const auto select=[&](int id,int index){if(HWND c=GetDlgItem(h,id))SendMessageW(c,CB_SETCURSEL,static_cast<WPARAM>(index),0);};
         check(IDC_EX_UPSCALE,m_exportSelection.upscale);
         check(IDC_EX_NEURAL,m_exportSelection.neural);
@@ -7278,7 +7273,7 @@ private:
     }
 
     void ReadExportStageControls(HWND h){
-        const auto checked=[&](int id){HWND b=GetDlgItem(h,id);return b&&SendMessageW(b,BM_GETCHECK,0,0)==BST_CHECKED;};
+        const auto checked=[&](int id){return CheckBoxState(GetDlgItem(h,id));};
         const auto sel=[&](int id,int fallback){HWND c=GetDlgItem(h,id);const int i=c?int(SendMessageW(c,CB_GETCURSEL,0,0)):CB_ERR;return i==CB_ERR?fallback:i;};
         m_exportSelection.upscale=checked(IDC_EX_UPSCALE);
         m_exportSelection.neural=checked(IDC_EX_NEURAL);
