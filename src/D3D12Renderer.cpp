@@ -196,10 +196,14 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
         if(!gpuSynchronized)return false;
         LOG("DLSS unavailable; using D3D12 scaler fallback.");
         m_renderW=sourceW; m_renderH=sourceH;
-        // No NGX here, so the SR switch's upscale is this player's own filter
-        // when the rung grows the source. Built at Initialize because the
-        // geometry it sizes by is fixed for the renderer's life; the switch
-        // only decides whether a frame uses it.
+        // No NGX here, so the SR switch's upscale is this player's own filter.
+        // That is a fact about the machine whatever rung this renderer is built
+        // at, so it is recorded before the targets are: a renderer opened at the
+        // source size (the local-file default) builds no targets, but it still
+        // has to answer the switch instead of greying it out as "No DLSS".
+        m_upscaleOwnEngine=true;
+        // Built at Initialize because the geometry it sizes by is fixed for the
+        // renderer's life; the switch only decides whether a frame uses it.
         if(!CreateUpscalePresentResources())return false;
         if(m_upscaleOffered)
             LOG("Playback upscale: this player's own stretch-and-sharpen will serve the SR switch at "
@@ -3181,7 +3185,10 @@ vsr_policy::PlaybackInput D3D12Renderer::PlaybackVsrInput()const{
 bool D3D12Renderer::PlaybackVsrApplies(const present_scale::Target&target)const{
     vsr_policy::PlaybackState state{};
     state.enabled=m_comparison.playbackVsr;
-    state.superResolution=m_lastDLSSUsed&&DLSSEnabled();
+    // The playback SR indicator answers the switch, not the driver: when this
+    // machine has no NGX the upscale is this player's own present pass, and the
+    // status line has to say so.
+    state.superResolution=(m_lastDLSSUsed&&DLSSEnabled())||UpscalePresentActive();
     // The one plain picture: with a reference resident, any comparison, a Mix other
     // than 1 or a mask is drawn from both members, and VSR of one would drop the other.
     const vsr_policy::PlaybackInput input=PlaybackVsrInput();

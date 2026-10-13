@@ -628,7 +628,14 @@ public:
     }
     // What the toolbar and the menu ask instead of DLSSAvailable: whether this
     // machine can upscale playback at all, by either route.
-    bool UpscalingPresentAvailable() const { return m_dlss.Available() || m_upscaleOffered; }
+    //
+    // A fact about the MACHINE, not about the rung this renderer happens to be
+    // built at. A renderer opened at the source size - the local-file default -
+    // builds no targets, because CreateUpscalePresentResources has nothing to
+    // stretch; it still has to answer the SR switch, or the toolbar greys out
+    // with the very "No DLSS" pill this route exists to retire. UpscalePresentActive
+    // is the narrower question: whether THIS frame is drawn through the filter.
+    bool UpscalingPresentAvailable() const { return m_dlss.Available() || m_upscaleOwnEngine; }
     void SetUpscaleSharpness(float sharpness) { m_upscaleSharpness = sharpness; }
     float UpscaleSharpness() const { return m_upscaleSharpness; }
     uint32_t DLSSInputW() const { return m_renderW; }
@@ -1186,6 +1193,10 @@ private:
     // what the panel holds, so a rung that does not grow leaves this null and
     // the present chain scales as it always did.
     bool m_upscaleOffered = false;
+    // This machine has no NGX, so the player's own stretch-and-sharpen is the
+    // playback upscaler. Recorded at Initialize before the targets are built,
+    // so a renderer whose rung does not grow still answers the SR switch.
+    bool m_upscaleOwnEngine = false;
     float m_upscaleSharpness = 0.6f;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_upscaleStretch;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_upscaleSharp;

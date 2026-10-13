@@ -7688,7 +7688,10 @@ private:
             if(candidate->renderer->Initialize(candidate->window,m_decoder.Width(),m_decoder.Height(),
                 size.width,size.height,gw,gh,NVSDK_NGX_PerfQuality_Value_MaxQuality,true)&&
                 RendererTookSourceLayout(candidate->renderer.get())&&
-                candidate->renderer->DLSSAvailable()){
+                // NGX where the machine has it, this player's own filter
+                // everywhere else: the candidate is ready when either engine can
+                // answer the switch, which is what UpscalingPresentAvailable asks.
+                candidate->renderer->UpscalingPresentAvailable()){
                 candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
                 GuideFrame guide;
                 candidate->guides.SetControls(m_guides.Controls());
@@ -7704,7 +7707,12 @@ private:
                     candidate->renderer->SetNextSourcePq(last.pq);
                     ready=candidate->renderer->RenderFrame(last.bgra.data(),last.bgra.size(),
                         guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),guide.gridW,guide.gridH,
-                        true,guide.motionVectors,float(1000.0/std::max(1.0,m_decoder.FrameRate())))&&candidate->renderer->LastFrameUsedDLSS();
+                        true,guide.motionVectors,float(1000.0/std::max(1.0,m_decoder.FrameRate())))&&
+                        // Either engine answers the switch: NGX where it exists, this
+                        // player's own upscale everywhere else. The candidate is ready
+                        // when the frame it just rendered actually went through one of
+                        // them, not only when NVIDIA's evaluate did.
+                        (candidate->renderer->LastFrameUsedDLSS()||candidate->renderer->UpscalePresentActive());
                 }
             }
         }
