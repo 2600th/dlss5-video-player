@@ -2362,7 +2362,12 @@ static bool ReadSavedAmdMultiPassPredict(const std::filesystem::path& settingsPa
 // the switch should render what it always rendered.
 static bool ReadSavedAmdMultiPassSkip(const std::filesystem::path& settingsPath)
 {
-    return GetPrivateProfileIntW(L"AmdMultiPass",L"LaterPassSkip",0,settingsPath.c_str())!=0;
+    // ON unless saved off. The runtime's own default is no skip, but the
+    // measured three-pass combination this backend starts at needs it: without
+    // the skip, three passes carry 135 % of the source's frame-to-frame change
+    // on moving content, and the frame budget the live session has does not fit
+    // three full passes anyway.
+    return GetPrivateProfileIntW(L"AmdMultiPass",L"LaterPassSkip",1,settingsPath.c_str())!=0;
 }
 
 // Everything a neural job reads, captured on the UI thread when it starts:
@@ -5237,7 +5242,12 @@ private:
         m_cacheQuality=ReadCacheQuality(SettingsPath());
         m_sourceDeband=GetPrivateProfileIntW(L"Encoding",L"SourceDeband",0,SettingsPath().c_str())!=0;
         m_suppliedExposure=GetPrivateProfileIntW(L"Encoding",L"SuppliedExposure",0,SettingsPath().c_str())!=0;
-        m_neuralSettings={};LoadNeuralSettings(SettingsPath(),m_neuralSettings);
+        m_neuralSettings={};
+        // The backend's own default before the file is read, so a machine that
+        // never touched the count starts at that backend's measured combination
+        // rather than at one pass everywhere.
+        m_neuralSettings.passes=PassesSettingsDefault(m_opt.neuralBackend);
+        LoadNeuralSettings(SettingsPath(),m_neuralSettings);
         const int mode=static_cast<int>(GetPrivateProfileIntW(L"Comparison",L"Mode",0,SettingsPath().c_str()));
         m_comparison={};
         // The Mix replaced the strength dial and Blend; compare_settings::Migrate reads
@@ -7050,7 +7060,7 @@ private:
         case WM_SIZE:ResizeSettingsChildren(h,kNeuralDesignW,kNeuralDesignH);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};m_amdSkinProtect=true;m_amdMultiPassPredict=true;m_amdMultiPassSkip=false;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
+            if(id==IDC_NS_RESET){m_neuralSettings={};m_neuralSettings.passes=PassesSettingsDefault(m_opt.neuralBackend);m_renderGuides={};m_temporalSettings={};m_amdSkinProtect=true;m_amdMultiPassPredict=true;m_amdMultiPassSkip=true;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
             if(id==IDC_NS_OPEN_ADJUST&&code==BN_CLICKED){ShowAdjustments();return 0;}
@@ -12962,10 +12972,10 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // The runtime's third-pass prediction; the runtime's default is on and so is
     // the panel's.
     bool m_amdMultiPassPredict{true};
-    // Whether later passes skip the heavy block group. Off by default: it keeps
-    // the look every render before this switch existed, and the ghosting it
-    // costs is what the panel's pass count is the user's call about.
-    bool m_amdMultiPassSkip{false};
+    // Whether later passes skip the heavy block group. On by default, because
+    // this backend's pass count defaults to three and the skip is what keeps
+    // three passes inside the frame budget and at a single pass's ghosting.
+    bool m_amdMultiPassSkip{true};
     // The preset the Look settings were last taken from, so Custom can say
     // which one it departed from. kPresetCount when none is known yet.
     size_t m_lastNeuralPreset=neural_presets::kPresetCount;
@@ -13309,6 +13319,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
             return refuse(L"the neural runtime is not installed beside the player, and the sr and nr stages run in it.");
 
         NeuralSettings neuralSettings{};
+        neuralSettings.passes=PassesSettingsDefault(plan.backend);
         if(command.preset)neuralSettings=neural_presets::kPresets[*command.preset].settings;
         else LoadNeuralSettings(settings,neuralSettings);
         // Each knob given on the command line wins over the preset or the

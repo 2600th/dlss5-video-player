@@ -50,6 +50,16 @@
 // nothing): the count is the one panel value this backend stacks the model
 // with, so a render at two passes is a different picture and a different key,
 // while 1 keys as every render before the control was wired keyed.
+// The pass count a backend renders when nothing was saved. NVIDIA's add-on
+// defaults to one pass and so does this player on it; the AMD backend defaults
+// to the measured combination - three passes, prediction on, later-pass skip on
+// - because stacking is where that backend's look lives and the skip is what
+// keeps the ghosting at a single pass's level while fitting the frame budget.
+inline constexpr uint32_t PassesSettingsDefault(NeuralBackend backend) noexcept
+{
+    return backend == NeuralBackend::Amd ? 3u : 1u;
+}
+
 inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uint32_t passes = 1,
                                              bool skinProtect = false, bool multiPassPredict = true,
                                              bool laterPassSkip = false)
