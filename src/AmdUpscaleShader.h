@@ -70,7 +70,11 @@ float4 PSAmdUpscale(V i):SV_Target{
         rows[r]=c0*wx.x+c1*wx.y+c2*wx.z+c3*wx.w;
     }
     float3 c=rows[0]*wy.x+rows[1]*wy.y+rows[2]*wy.z+rows[3]*wy.w;
-    return float4(saturate(c),1);
+    // No saturate here: the target decides. An 8-bit UNORM target clamps the
+    // write to [0,1] by its own definition, which is what the export path
+    // wants; the FP16 target the playback path writes keeps the bicubic's
+    // overshoot, which is what a linear-light present chain expects.
+    return float4(c,1);
 }
 
 // Contrast Adaptive Sharpening on the stretched frame, the official filter:
@@ -101,10 +105,23 @@ float4 PSAmdCas(V i):SV_Target{
     // Smooth minimum distance to the signal limit over the smooth max, then
     // the shaping: rqrt of that ratio is the adaptive part, and the official
     // peak of 8 is Contrast at its default of zero.
-    float3 amp=saturate(min(mn,2.0-mx)/mx);
+    //
+    // The statistics are read off the LDR part of the signal: this filter runs
+    // twice, once into an 8-bit UNORM target on the export path and once into
+    // FP16 on the playback path, and FP16 carries highlights the official [0,1]
+    // arithmetic cannot survive - min(mn,2-mx) goes negative and rsqrt of it
+    // does not exist. Clamping the STATISTICS leaves the shaping conservative
+    // over highlights (they keep their value, they simply do not sharpen),
+    // while the filtered output below still blends the unclamped taps, so the
+    // highlight itself reaches the target untouched.
+    float3 mnc=saturate(mn),mxc=saturate(mx);
+    float3 amp=saturate(min(mnc,2.0-mxc)/max(mxc,1e-5));
     amp=rsqrt(amp);
     float3 w=-1.0/(amp*8.0)*Sharpness;
-    float3 outC=saturate(((b+d)+(f+h))*w+e)/(1.0+4.0*w);
+    // The blend runs on the unclamped taps for the same reason: the FP16
+    // playback target keeps what the filter produces, the UNORM export target
+    // clamps it on write.
+    float3 outC=(((b+d)+(f+h))*w+e)/(1.0+4.0*w);
     return float4(outC,1);
 }
 )";

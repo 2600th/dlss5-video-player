@@ -608,6 +608,29 @@ public:
     // guide estimator, upload and two full-resolution passes have no consumer.
     bool GuidesRequired() const { return DLSSEnabled() || m_debugView != DebugView::Final; }
     bool LastFrameUsedDLSS() const { return m_lastDLSSUsed; }
+    // ---- this player's own upscale for playback (AmdUpscaleShader.h) -------
+    //
+    // The SR switch means "render bigger than the source". On NVIDIA that is
+    // NGX's evaluate; everywhere else it used to mean nothing at all. The
+    // stretch-and-sharpen the export path runs is the same filter and the same
+    // shader text, and it runs here over the linear FP16 neural frame the
+    // present chain already samples - so the answer to "no NGX" is not "no
+    // upscale" but this, at the output rung.
+    //
+    // Active when the switch is on, the runtime has no NGX, and the rung grows
+    // the source. All three have to hold: the switch because it is the user's
+    // own choice, the NGX absence because its evaluate is the better filter
+    // when it exists, and the growth because a rung at or below the source is
+    // not an upscale and the present chain's own scaling is enough.
+    bool UpscalePresentActive() const
+    {
+        return m_dlssEnabled && !m_dlss.Available() && m_upscaleOffered && m_upscaleStretch != nullptr;
+    }
+    // What the toolbar and the menu ask instead of DLSSAvailable: whether this
+    // machine can upscale playback at all, by either route.
+    bool UpscalingPresentAvailable() const { return m_dlss.Available() || m_upscaleOffered; }
+    void SetUpscaleSharpness(float sharpness) { m_upscaleSharpness = sharpness; }
+    float UpscaleSharpness() const { return m_upscaleSharpness; }
     uint32_t DLSSInputW() const { return m_renderW; }
     uint32_t DLSSInputH() const { return m_renderH; }
     uint32_t OutputW() const { return m_outputW; }
@@ -808,7 +831,13 @@ private:
     static constexpr uint32_t NvofInputSRV = PqSourceSRV + 1;
     // The RTX VSR frame (t6): a null view until the first one is allocated.
     static constexpr uint32_t VsrSRV = NvofInputSRV + 4;
-    static constexpr uint32_t SRVCount = VsrSRV + 1;
+    // The upscaled playback frame (t7): this player's own stretch-and-sharpen
+    // over the neural frame, written when the SR switch is on, the machine has
+    // no NGX, and the output rung grows the source. Present samples it in place
+    // of the source-size texture, which is why the whole zoom/pan/compositor
+    // chain above it does not have to know a second geometry exists.
+    static constexpr uint32_t UpscaleSRV = VsrSRV + 1;
+    static constexpr uint32_t SRVCount = UpscaleSRV + 1;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
     // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two
@@ -839,6 +868,15 @@ private:
     // The HDR source texture, on the first PQ frame.
     bool CreatePqSourceResources();
     bool InitializeDLSS(bool& gpuSynchronized);
+    // The playback upscale's targets, pipeline and descriptors, built when the
+    // switch is on and this machine has no NGX. The shader text is the export
+    // path's own (AmdUpscaleShader.h) - the same filter, compiled for the FP16
+    // targets the present chain samples instead of the export's UNORM ones.
+    bool CreateUpscalePresentResources();
+    // The stretch and the sharpen over the neural frame, recorded before the
+    // present draw that will sample them. The neural frame arrives in FP16
+    // linear light, which is also the domain the filter works best in.
+    void RecordUpscalePresent(ID3D12GraphicsCommandList* cmd);
     bool CreateUploadForTexture(const D3D12_RESOURCE_DESC& desc,
                                 Microsoft::WRL::ComPtr<ID3D12Resource>& upload,
                                 uint8_t*& mapped,
@@ -1143,6 +1181,19 @@ private:
     bool m_depthInWrite = true;
     bool m_outputInUAV = true;
     bool m_dlssEnabled = true;
+    // The playback upscale's own state (see UpscalePresentActive). Built only
+    // when the machine has no NGX and the rung grows the source; the switch is
+    // what the panel holds, so a rung that does not grow leaves this null and
+    // the present chain scales as it always did.
+    bool m_upscaleOffered = false;
+    float m_upscaleSharpness = 0.6f;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_upscaleStretch;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_upscaleSharp;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_upscaleRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoUpscaleStretch;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoUpscaleSharp;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_upscaleSrvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_upscaleRtvHeap;
     bool m_requestedTearing = false;
     bool m_followWindow = false;
     static inline std::atomic<uint64_t> s_instances{0};

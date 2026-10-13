@@ -1,4 +1,5 @@
 #include "D3D12Renderer.h"
+#include "AmdUpscaleShader.h"
 #include "NvencDirect.h"
 #include "D3D12FenceWait.h"
 #include "DebandPolicy.h"
@@ -195,6 +196,14 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
         if(!gpuSynchronized)return false;
         LOG("DLSS unavailable; using D3D12 scaler fallback.");
         m_renderW=sourceW; m_renderH=sourceH;
+        // No NGX here, so the SR switch's upscale is this player's own filter
+        // when the rung grows the source. Built at Initialize because the
+        // geometry it sizes by is fixed for the renderer's life; the switch
+        // only decides whether a frame uses it.
+        if(!CreateUpscalePresentResources())return false;
+        if(m_upscaleOffered)
+            LOG("Playback upscale: this player's own stretch-and-sharpen will serve the SR switch at "
+                <<m_outputW<<"x"<<m_outputH<<" (no NGX on this machine).");
     }
     // Only the player's renderer presents a comparison, and only it asks NGX about RTX
     // VSR; the offline carrier never has a view to show it in.
@@ -1678,6 +1687,11 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     }
 
     m_lastDLSSUsed=used;
+    // This player's own upscale, when the switch is on and there is no NGX to
+    // do it: the present draw below samples the sharpened frame instead of the
+    // source-size one, and nothing above this line learns a second geometry
+    // exists.
+    if(UpscalePresentActive())RecordUpscalePresent(cmd);
     // The backbuffer pass and Present are not optional even for a window nobody sees:
     // the RenoDX add-on performs its feature-18 evaluation per present. An export that
     // skipped presents past the feature recreate rendered 900/900 "verified" frames with
@@ -1699,7 +1713,12 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
             case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_hdrOutput?m_psoMotionDebugHdr.Get():m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
             case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_hdrOutput?m_psoDepthDebugHdr.Get():m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
             case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(presentPso);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
-            default:cmd->SetPipelineState(presentPso);if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}break;
+            default:
+                cmd->SetPipelineState(presentPso);
+                if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));
+                else if(UpscalePresentActive())cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(UpscaleSRV));
+                else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}
+                break;
         }
         if(debugPixelResource)Barrier(cmd,debugPixelResource,debugBefore,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         cmd->DrawInstanced(3,1,0,0);
@@ -1725,6 +1744,231 @@ bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const Fr
 ID3D12PipelineState* D3D12Renderer::BackbufferProgram(bool scaled,bool hdrTarget)const{
     if(hdrTarget)return m_psoPresentHdr.Get();
     return scaled?m_psoPresentScaled.Get():m_psoPresent.Get();
+}
+
+bool D3D12Renderer::CreateUpscalePresentResources()
+{
+    // Built when this machine has no NGX and the rung grows the source; the
+    // switch itself only decides whether they are used, so a rung change or a
+    // toggle never has to rebuild anything.
+    if (m_dlss.Available() || m_outputW <= m_renderW || m_outputH <= m_renderH) {
+        // Nothing to stretch, or a stale pair from a larger rung: either way
+        // the present chain scales as it always did. A re-entry at a smaller
+        // rung has to release the pair it built for the larger one.
+        m_psoUpscaleSharp.Reset();m_psoUpscaleStretch.Reset();m_upscaleRootSig.Reset();
+        m_upscaleRtvHeap.Reset();m_upscaleSrvHeap.Reset();m_upscaleSharp.Reset();m_upscaleStretch.Reset();
+        m_upscaleOffered = false;
+        return true;
+    }
+
+    auto compile = [&](const char* entry, ComPtr<ID3DBlob>& blob) -> bool {
+        ComPtr<ID3DBlob> error;
+        const char* profile = UpscaleShaderProfileFor(entry);
+        const HRESULT hr = D3DCompile(kAmdUpscaleHlsl, sizeof(kAmdUpscaleHlsl) - 1,
+                                      "amd-upscale-present", nullptr, nullptr, entry, profile,
+                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob.GetAddressOf(),
+                                      error.GetAddressOf());
+        if (FAILED(hr)) {
+            if (error) LOG((char*)error->GetBufferPointer());
+            return false;
+        }
+        return true;
+    };
+    ComPtr<ID3DBlob> vs, stretchPs, sharpPs;
+    if (!compile("VS", vs)) return false;
+    if (!compile("PSAmdUpscale", stretchPs)) return false;
+    if (!compile("PSAmdCas", sharpPs)) return false;
+
+    // The static sampler is POINT because both passes sample at exact texel
+    // centres: the Catmull-Rom weights are the whole filter and the CAS taps
+    // sit on the stretched frame's own pixels. A linear sampler would apply
+    // the stretch a second time.
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+
+    D3D12_DESCRIPTOR_RANGE range{};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 1;
+    range.BaseShaderRegister = 0;
+    D3D12_ROOT_PARAMETER parameter{};
+    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    parameter.DescriptorTable.NumDescriptorRanges = 1;
+    parameter.DescriptorTable.pDescriptorRanges = &range;
+    D3D12_ROOT_PARAMETER parameters[2] = {parameter, parameter};
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[1].Constants.Num32BitValues = 8;
+    parameters[1].Constants.ShaderRegister = 0;
+    {
+        D3D12_ROOT_SIGNATURE_DESC description{};
+        description.NumParameters = 2;
+        description.pParameters = parameters;
+        description.NumStaticSamplers = 1;
+        description.pStaticSamplers = &sampler;
+        description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        ComPtr<ID3DBlob> signature, error;
+        if (FAILED(D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1,
+                                               signature.GetAddressOf(), error.GetAddressOf())))
+            return false;
+        if (FAILED(m_device->CreateRootSignature(0, signature->GetBufferPointer(),
+                                                 signature->GetBufferSize(),
+                                                 IID_PPV_ARGS(m_upscaleRootSig.GetAddressOf()))))
+            return false;
+    }
+
+    // FP16 targets at the output rung: the present chain samples this frame in
+    // linear light and encodes once at the backbuffer, so the filter runs in
+    // the same domain and nothing between here and there converts.
+    D3D12_RESOURCE_DESC target{};
+    target.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    target.Width = m_outputW;
+    target.Height = m_outputH;
+    target.DepthOrArraySize = 1;
+    target.MipLevels = 1;
+    target.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    target.SampleDesc.Count = 1;
+    target.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    if (FAILED(m_device->CreateCommittedResource(
+            &defaultHeap, D3D12_HEAP_FLAG_NONE, &target,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+            IID_PPV_ARGS(m_upscaleStretch.GetAddressOf()))))
+        return false;
+    if (FAILED(m_device->CreateCommittedResource(
+            &defaultHeap, D3D12_HEAP_FLAG_NONE, &target,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+            IID_PPV_ARGS(m_upscaleSharp.GetAddressOf()))))
+        return false;
+    D3D12_DESCRIPTOR_HEAP_DESC srvHeap{};
+    srvHeap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srvHeap.NumDescriptors = 1;  // the stretched frame, read by the sharpen pass
+    srvHeap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(m_device->CreateDescriptorHeap(&srvHeap, IID_PPV_ARGS(m_upscaleSrvHeap.GetAddressOf()))))
+        return false;
+    D3D12_DESCRIPTOR_HEAP_DESC rtvHeap{};
+    rtvHeap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtvHeap.NumDescriptors = 2;  // one per target
+    if (FAILED(m_device->CreateDescriptorHeap(&rtvHeap, IID_PPV_ARGS(m_upscaleRtvHeap.GetAddressOf()))))
+        return false;
+    const UINT rtvInc = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    m_device->CreateRenderTargetView(m_upscaleStretch.Get(), nullptr,
+                                     m_upscaleRtvHeap->GetCPUDescriptorHandleForHeapStart());
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE second = m_upscaleRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        second.ptr += rtvInc;
+        m_device->CreateRenderTargetView(m_upscaleSharp.Get(), nullptr, second);
+    }
+    // The sharpened frame is what present samples, so its view lives in the
+    // present chain's own heap at the slot the backbuffer pass binds.
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    view.Texture2D.MipLevels = 1;
+    m_device->CreateShaderResourceView(m_upscaleSharp.Get(), &view, SRVCPU(UpscaleSRV));
+    // The stretched frame's view is in the filter's own heap, and the frame it
+    // reads is a new texture every present - the neural frame's own handle is
+    // bound per draw in RecordUpscalePresent.
+    m_device->CreateShaderResourceView(m_upscaleStretch.Get(), &view,
+                                       m_upscaleSrvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pso.SampleDesc = {1, 0};
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pso.pRootSignature = m_upscaleRootSig.Get();
+    pso.PS = {stretchPs->GetBufferPointer(), stretchPs->GetBufferSize()};
+    if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(m_psoUpscaleStretch.GetAddressOf()))))
+        return false;
+    pso.PS = {sharpPs->GetBufferPointer(), sharpPs->GetBufferSize()};
+    if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(m_psoUpscaleSharp.GetAddressOf()))))
+        return false;
+    m_upscaleOffered = true;
+    return true;
+}
+
+void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)
+{
+    // The neural frame arrives in FP16 linear light at the source size - the
+    // same texture the plain present pass samples - and leaves in FP16 at the
+    // output rung, in the slot the backbuffer pass binds instead of that
+    // texture's. The zoom, the pan, the comparison panes and the compositor
+    // all run above this and never learn a second geometry exists.
+    // The neural frame sits in GuideReadState whenever the conversion pass has
+    // let go of it, which is the state the present pass would have found it in;
+    // m_colorInRT is the renderer's own record of exactly that fact.
+    if (!m_colorInRT) Barrier(cmd, m_dlssColor.Get(), GuideReadState,
+                              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    // The stretch reads the frame at the render size - what the conversion
+    // pass wrote - and writes the capture at the output rung. On this path the
+    // two are the same as the source, but the contract is the texture's, not
+    // the source's.
+    const float constants[8] = {static_cast<float>(m_renderW), static_cast<float>(m_renderH),
+                                static_cast<float>(m_outputW), static_cast<float>(m_outputH),
+                                m_upscaleSharpness, 0.0f, 0.0f, 0.0f};
+    const UINT rtvInc = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    const D3D12_GPU_DESCRIPTOR_HANDLE ownSrv =
+        m_upscaleSrvHeap->GetGPUDescriptorHandleForHeapStart();
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtvBase = m_upscaleRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    ID3D12DescriptorHeap* heaps[] = {m_upscaleSrvHeap.Get()};
+    cmd->SetDescriptorHeaps(1, heaps);
+    cmd->SetGraphicsRootSignature(m_upscaleRootSig.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(m_outputW),
+                            static_cast<float>(m_outputH), 0.0f, 1.0f};
+    D3D12_RECT scissor{0, 0, static_cast<LONG>(m_outputW), static_cast<LONG>(m_outputH)};
+    cmd->RSSetViewports(1, &viewport);
+    cmd->RSSetScissorRects(1, &scissor);
+    auto draw = [&](ID3D12PipelineState* pso, D3D12_CPU_DESCRIPTOR_HANDLE target,
+                    D3D12_GPU_DESCRIPTOR_HANDLE srv) {
+        cmd->OMSetRenderTargets(1, &target, FALSE, nullptr);
+        cmd->SetPipelineState(pso);
+        cmd->SetGraphicsRootDescriptorTable(0, srv);
+        cmd->SetGraphicsRoot32BitConstants(1, 8, constants, 0);
+        cmd->DrawInstanced(3, 1, 0, 0);
+    };
+    // ---- stretch: the neural frame to the output rung ----------------------
+    Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE neural = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+        neural.ptr += static_cast<UINT64>(m_srvInc) * 4u;
+        draw(m_psoUpscaleStretch.Get(), rtvBase, neural);
+    }
+    Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    // ---- sharpen: CAS over the stretched frame's own neighbourhood ---------
+    Barrier(cmd, m_upscaleSharp.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE second = rtvBase;
+        second.ptr += rtvInc;
+        draw(m_psoUpscaleSharp.Get(), second, ownSrv);
+    }
+    Barrier(cmd, m_upscaleSharp.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if (!m_colorInRT) Barrier(cmd, m_dlssColor.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                              GuideReadState);
+    // The backbuffer pass binds tables out of the present chain's own heap.
+    ID3D12DescriptorHeap* presentHeaps[] = {m_srvHeap.Get()};
+    cmd->SetDescriptorHeaps(1, presentHeaps);
 }
 
 present_scale::Target D3D12Renderer::CurrentPresentTarget()const{

@@ -2336,6 +2336,11 @@ static TemporalStability ReadSavedStability(NeuralBackend backend,
     return SavedStability(backend, WideToUtf8(stability));
 }
 
+// The playback upscale's sharpening when nothing is saved. The export path's
+// default is the same number and the same filter (AmdUpscaleShader.h), so a
+// machine that tuned one has tuned both.
+static constexpr float kDefaultUpscaleSharpness=0.6f;
+
 // The runtime's multi-pass skin switch as this machine has saved it.
 //
 // ON by default, against the runtime's own default of off, and the reason is a
@@ -5229,6 +5234,8 @@ private:
             // why there are two keys rather than one.
             m_temporalSettings.stability=ReadSavedStability(m_opt.neuralBackend,SettingsPath());
         m_amdSkinProtect=ReadSavedAmdSkinProtect(SettingsPath());
+        m_upscaleSharpness=std::clamp(GetPrivateProfileIntW(L"Comparison",L"AmdUpscaleSharpness",
+            static_cast<int>(kDefaultUpscaleSharpness*100.0f+0.5f),SettingsPath().c_str())/100.0f,0.0f,1.0f);
         m_amdMultiPassPredict=ReadSavedAmdMultiPassPredict(SettingsPath());
         m_amdMultiPassSkip=ReadSavedAmdMultiPassSkip(SettingsPath());
         }
@@ -5376,6 +5383,10 @@ private:
         // place to look.
         WritePrivateProfileStringW(L"AmdMultiPass",L"SkinProtect",m_amdSkinProtect?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"AmdMultiPass",L"PredictPass3",m_amdMultiPassPredict?L"1":L"0",SettingsPath().c_str());
+        // The playback upscale's sharpening, hundredths so an integer INI keeps
+        // the resolution the filter is tuned at.
+        wchar_t sharpness[16];std::swprintf(sharpness,16,L"%d",static_cast<int>(m_upscaleSharpness*100.0f+0.5f));
+        WritePrivateProfileStringW(L"Comparison",L"AmdUpscaleSharpness",sharpness,SettingsPath().c_str());
         WritePrivateProfileStringW(L"AmdMultiPass",L"LaterPassSkip",m_amdMultiPassSkip?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuSourceConversion",m_gpuSourceConversion?L"1":L"0",SettingsPath().c_str());
@@ -7552,7 +7563,14 @@ private:
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
-    bool UpscalingActive()const{return m_renderer&&m_renderer->DLSSEnabled();}
+    // Two engines answer this switch: NGX's evaluate where the machine has it,
+    // and this player's own stretch-and-sharpen everywhere else. The toolbar,
+    // the status line and the rung picker all read the switch through here, so
+    // the answer has to be "is the picture bigger than the source" rather than
+    // "is NVIDIA in the machine".
+    bool UpscalingActive()const{
+        return m_renderer&&(m_renderer->DLSSEnabled()||m_renderer->UpscalePresentActive());
+    }
     // The rung a render should aim at. Auto reads the monitor this window is on
     // rather than the source, because the source decides only whether the rung
     // is reachable (UpscalingTarget's `grows`) while the panel decides whether
@@ -7597,7 +7615,7 @@ private:
         return m_upscaleAuto?AutoUpscaleTargetHeight(MonitorModeCached().height):m_upscaleTargetHeight;
     }
     bool UpscalingAvailable()const{
-        return m_loaded&&m_renderer&&m_renderer->DLSSAvailable()&&
+        return m_loaded&&m_renderer&&m_renderer->UpscalingPresentAvailable()&&
             HaveLastPlaybackFrame()&&
             (UpscalingActive()||UpscalingTarget(m_decoder.Width(),m_decoder.Height(),EffectiveUpscaleHeight()).grows);
     }
@@ -7610,7 +7628,7 @@ private:
     const wchar_t* UpscalingUnavailableReason()const{
         if(!m_loaded)return L"No video";
         if(!m_renderer)return L"Starting up";
-        if(!m_renderer->DLSSAvailable())return L"No DLSS";
+        if(!m_renderer->UpscalingPresentAvailable())return L"No DLSS";
         if(!HaveLastPlaybackFrame())return L"No frame yet";
         // The remaining clause is a target that would not grow, which is two
         // opposite facts: a source that already fills the output, or a panel
@@ -7666,6 +7684,7 @@ private:
             candidate->renderer=MakeD3D12Renderer();
             const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
             ConfigureRendererSource(candidate->renderer.get());
+            candidate->renderer->SetUpscaleSharpness(m_upscaleSharpness);
             if(candidate->renderer->Initialize(candidate->window,m_decoder.Width(),m_decoder.Height(),
                 size.width,size.height,gw,gh,NVSDK_NGX_PerfQuality_Value_MaxQuality,true)&&
                 RendererTookSourceLayout(candidate->renderer.get())&&
@@ -12725,6 +12744,10 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // claiming history against a frame that is not its predecessor.
     bool m_guidesSkipped=false,m_layoutMismatchLogged=false;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
     bool m_upscalingRequested=false;
+    // The playback upscale's CAS strength, hundredths in the INI. Kept beside the
+    // rung because it is the same control's second axis: the export path's
+    // sharpness default is the same number (AmdUpscaleShader.h).
+    float m_upscaleSharpness{0.6f};
     // RTX VSR as the playback upscaler ([Playback] RtxVsr). Rides on every
     // EffectiveComparison() the player pushes; the renderer decides each present
     // whether the picture is one it applies to (VsrPolicy.h PlaybackUpscales).
