@@ -7,6 +7,7 @@
 #include <nvsdk_ngx_helpers.h>
 #include <nvsdk_ngx_helpers_dlssg.h>
 #include "NgxSession.h"
+#include "FrameGenBackend.h"
 
 // What the runtime answered when asked for DLSS Frame Generation on this
 // machine. Every field is measured: nothing here is inferred from the GPU
@@ -66,9 +67,9 @@ struct DLSSGCapability {
 // the tagged DLSSG.MVecs are not it, so nothing may claim that a better motion
 // estimate buys a better generated frame until a runtime is measured that
 // reads them.
-class DLSSGBackend {
+class DLSSGBackend final : public IFrameGenBackend {
 public:
-    ~DLSSGBackend();
+    ~DLSSGBackend() override;
 
     // Creates the FrameGeneration feature at the given backbuffer geometry to
     // answer whether the runtime admits it. The create records work on `cmd`
@@ -79,6 +80,10 @@ public:
     // here, as Probe did, freed the feature before the GPU ran its create.
     DLSSGCapability Probe(ID3D12Device* device, ID3D12GraphicsCommandList* cmd,
                           uint32_t width, uint32_t height, DXGI_FORMAT backbufferFormat);
+    const char* Kind() const override { return "nvidia-ngx"; }
+    bool SessionEstablished() const override { return m_sessionLeaseAcquired && m_params != nullptr; }
+    uint32_t LastErrorCode() const override { return static_cast<uint32_t>(m_lastResult); }
+    std::wstring LastDetail() const override;
     // Releases the feature Probe created and answers with the release's own
     // result, Success when there is none. Only after the command list Probe
     // recorded into has retired; for one that never did, Abandon forgets it.
@@ -88,7 +93,7 @@ public:
     // Unlike Probe the feature is kept, so the create work this records on `cmd`
     // has to be submitted and retired before the first Evaluate.
     bool Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* cmd,
-                    uint32_t width, uint32_t height, DXGI_FORMAT backbufferFormat);
+                    uint32_t width, uint32_t height, DXGI_FORMAT backbufferFormat) override;
 
     // Generates intermediate frame `multiFrameIndex` (1-based, <= multiFrameCount)
     // between the PREVIOUS evaluated backbuffer and `backbuffer`.
@@ -113,14 +118,14 @@ public:
                   uint32_t multiFrameCount,
                   uint32_t multiFrameIndex,
                   bool reset,
-                  uint64_t backbufferFrameId = 0);
-    uint64_t EvaluationCount() const { return m_evaluations; }
-    bool FeatureCreated() const { return m_handle != nullptr; }
+                  uint64_t backbufferFrameId = 0) override;
+    uint64_t EvaluationCount() const override { return m_evaluations; }
+    bool FeatureCreated() const override { return m_handle != nullptr; }
     // DLSSG.MultiFrameCountMax as the runtime reported it to Initialize: the
     // most frames it will generate between one source pair, so the largest
     // multiplier is one more. 0 until Initialize has run, which is the same
     // "no answer" every other measured field here uses.
-    uint32_t MultiFrameCountMax() const { return m_multiFrameCountMax; }
+    uint32_t MultiFrameCountMax() const override { return m_multiFrameCountMax; }
 
     // Units the motion-vector texture handed to Evaluate is written in. DLSS-G
     // takes no pixel-space option: DLSSG.MvecScale{X,Y} exist to normalize the
@@ -141,22 +146,18 @@ public:
     enum class MotionVectorUnits { BackbufferPixels, NormalizedScreen };
     void SetMotionVectorUnits(MotionVectorUnits units) { m_mvecUnits = units; }
 
-    void Shutdown();
+    void Shutdown() override;
     // For a GPU that never retired the work this feature was recorded into:
     // forgets the feature, its parameters and the NGX session lease WITHOUT
     // releasing any of them, because releasing them under work that may still
     // be executing is the one thing worse than leaking them. Logged.
-    void Abandon();
+    void Abandon() override;
 
     // Whether the runtime admitted the feature: set by a Probe whose create
     // succeeded (and cleared again if its release is refused), and by an
     // Initialize that is holding a live feature. False until one of them succeeds and false again after
     // Shutdown, so no caller may read admission out of a call that did not run.
-    bool Available() const { return m_available; }
-    // True once NGX itself came up on the probe device and handed over a
-    // parameter block, so a caller can tell a runtime refusal - which is a
-    // verdict - from NGX never initializing, which is not one.
-    bool SessionEstablished() const { return m_sessionLeaseAcquired && m_params != nullptr; }
+    bool Available() const override { return m_available; }
     NVSDK_NGX_Result LastResult() const { return m_lastResult; }
 
 private:

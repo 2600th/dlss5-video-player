@@ -322,6 +322,8 @@ add_library(player_app OBJECT
     src/UiLayout.cpp src/UiLayout.h
     src/UiResources.cpp src/UiResources.h
     src/DLSSGBackend.cpp src/DLSSGBackend.h
+    src/FrameGenBackend.cpp src/FrameGenBackend.h
+    src/AmdFrameGenBackend.cpp src/AmdFrameGenBackend.h
     src/FrameGenerationPass.cpp src/FrameGenerationPass.h
     src/VsrUpscalePass.cpp src/VsrUpscalePass.h
     # Export with DLSS stages: the dialog and --render run these passes.

@@ -423,14 +423,6 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     // through the worker pass, whose carrier already covers just that range.
     if (command.hasRange && !selection.upscale && !selection.neural)
         return bad(L"--range needs the sr or nr stage: frame generation alone converts the whole file.");
-    // The AMD runtime generates no frames at all, and its upscale is not the
-    // model's carrier but the capture's own stretch-and-sharpen
-    // (AmdUpscaleShader.h), which runs after the model inside the same job - so
-    // the sr stage is welcome, and only frame generation is refused. Said here,
-    // where a script can see why, rather than inside the worker after it has
-    // decoded a frame.
-    if (selection.backend == NeuralBackend::Amd && selection.frameGeneration)
-        return bad(L"--neural-backend amd generates no frames; drop the fg stage.");
     parsed.mode = Mode::Render;
     return parsed;
 }

@@ -3,15 +3,18 @@
 #include "SceneCut.h"
 
 #include "DLSSGBackend.h"
+#include "FrameGenBackend.h"
 #include "HexText.h"
 #include "Log.h"
 #include "MediaPipeline.h"
 #include "NeuralPreflight.h"
+#include "Utf8Text.h"
 #include "VideoDecoder.h"
 
 #include <windows.h>
 
 #include <d3d12.h>
+#include <memory>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
@@ -55,7 +58,19 @@ void Append(std::wstring& detail, std::wstring sentence)
     detail += std::move(sentence);
 }
 
-std::wstring HexResult(NVSDK_NGX_Result result) { return HexResultTextWide(uint32_t(result)); }
+std::wstring HexResult(uint32_t result) { return HexResultTextWide(result); }
+
+// What to CALL the backend that produced the frames. The pass used to say
+// "DLSS-G" in every sentence because NGX was the only implementation; with the
+// vendor-neutral optical-flow backend that name is a lie on any other card, and
+// a log that credits the wrong runtime sends the next reader to the wrong log.
+std::wstring BackendName(const IFrameGenBackend& backend)
+{
+    const std::string kind = backend.Kind() ? backend.Kind() : "";
+    if (kind == "nvidia-ngx") return L"DLSS-G";
+    if (kind == "amd-optical-flow") return L"the optical-flow backend";
+    return L"the frame-generation backend";
+}
 
 const wchar_t* EncodeErrorText(EncodeError error)
 {
@@ -551,6 +566,22 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     std::wstring deviceDetail;
     if (!BringUpGpu(gpu, deviceDetail)) return fail(FrameGenerationError::Device, std::move(deviceDetail));
 
+    // Pick the frame-generation backend for the adapter the conversion runs on.
+    // NVIDIA keeps NGX DLSS-G (measured on an RTX 5090); every other adapter - the
+    // AMD GPUs this build targets - gets the vendor-neutral optical-flow backend
+    // that needs no NGX and no nvngx_dlssg.dll.
+    bool preferNvidia = false;
+    {
+        ComPtr<IDXGIFactory6> vendorFactory;
+        if (SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&vendorFactory)))) {
+            if (ComPtr<IDXGIAdapter1> vendorAdapter = SelectAdapter(vendorFactory.Get())) {
+                DXGI_ADAPTER_DESC1 vdesc{};
+                if (SUCCEEDED(vendorAdapter->GetDesc1(&vdesc))) preferNvidia = (vdesc.VendorId == 0x10DE);
+            }
+        }
+    }
+    auto backend = CreateFrameGenBackend(preferNvidia);
+
     // The interpolated output is the only resource the runtime writes, so it is
     // the only one that needs a UAV, and a format that cannot carry one cannot
     // carry a generated frame either. Refused here with the reason rather than
@@ -565,38 +596,34 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
                     L"generated frame is written through.");
     }
 
-    DLSSGBackend backend;
-    if (!backend.Initialize(gpu.device.Get(), gpu.cmd.Get(), width, height, kBackbufferFormat)) {
+    if (!backend->Initialize(gpu.device.Get(), gpu.cmd.Get(), width, height, kBackbufferFormat)) {
         // SessionEstablished separates the two failures the caller has to tell
-        // apart: NGX never came up on this device at all, which is a device
-        // verdict, from NGX coming up and the runtime refusing the feature,
-        // which is a verdict about the runtime.
-        const bool session = backend.SessionEstablished();
+        // apart: the backend's runtime never came up on this device at all, which
+        // is a device verdict, from it coming up and refusing the feature, which
+        // is a verdict about the runtime.
+        const bool session = backend->SessionEstablished();
         return fail(session ? FrameGenerationError::Runtime : FrameGenerationError::Device,
-                    (session ? L"The runtime refused CreateFeature(FrameGeneration): "
-                             : L"NGX could not be initialized on this device: ") +
-                        HexResult(backend.LastResult()) +
-                        (session ? L". nvngx_dlssg.dll must be resolvable beside the executable." : L"."));
+                    backend->LastDetail());
     }
     // Every submission below goes through here, so a GPU that never retires one
     // takes the feature into the leak with everything else instead of having it
     // released under work it may still be executing.
     const auto flush = [&] {
         if (gpu.Flush()) return true;
-        if (gpu.stuck) backend.Abandon();
+        if (gpu.stuck) backend->Abandon();
         return false;
     };
 
     // The runtime's own ceiling, never a constant: MultiFrameCountMax is how
     // many frames it will generate between one source pair, so the largest
     // multiplier is one more than that.
-    const uint32_t admitted = 1u + backend.MultiFrameCountMax();
+    const uint32_t admitted = 1u + backend->MultiFrameCountMax();
     uint32_t multiplier = request.multiplier;
     if (multiplier > admitted) {
         Append(result.detail, L"The requested " + std::to_wstring(request.multiplier) +
                                   L"x was clamped to " + std::to_wstring(admitted) +
                                   L"x: this runtime reports DLSSG.MultiFrameCountMax=" +
-                                  std::to_wstring(backend.MultiFrameCountMax()) + L".");
+                                  std::to_wstring(backend->MultiFrameCountMax()) + L".");
         multiplier = admitted;
     }
     const uint32_t generatedPerSource = multiplier - 1;
@@ -780,17 +807,18 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         // (tests/DlssgEvaluateSmoke.cpp, productionShape against
         // countOneResetShape). It is also the honest declaration - a reset
         // generates nothing, so there is no pair for it to subdivide.
-        return backend.Evaluate(gpu.cmd.Get(), backbuffer.Get(), motion.Get(), depth.Get(), interpolated.Get(),
+        return backend->Evaluate(gpu.cmd.Get(), backbuffer.Get(), motion.Get(), depth.Get(), interpolated.Get(),
                                 /*multiFrameCount=*/1, /*multiFrameIndex=*/1, /*reset=*/true,
                                 backbufferFrameId) &&
                flush();
     };
     if (!establishHistory()) {
-        result.evaluations = backend.EvaluationCount();
+        result.evaluations = backend->EvaluationCount();
         return fail(FrameGenerationError::Runtime,
-                    L"The first DLSS-G evaluate failed: " + HexResult(backend.LastResult()));
+                    L"The first " + BackendName(*backend) + L" evaluate failed: " +
+                        HexResult(backend->LastErrorCode()));
     }
-    result.evaluations = backend.EvaluationCount();
+    result.evaluations = backend->EvaluationCount();
     report(true);
 
     for (;;) {
@@ -863,11 +891,12 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         if (holdDuplicate) ++result.duplicateHolds;
         if (!pairIsContinuous) {
             if (!establishHistory()) {
-                result.evaluations = backend.EvaluationCount();
+                result.evaluations = backend->EvaluationCount();
                 return fail(FrameGenerationError::Runtime,
-                            std::wstring(sceneCut ? L"The DLSS-G evaluate after a scene cut failed: "
-                                                  : L"The DLSS-G evaluate after a decoder discontinuity failed: ") +
-                                HexResult(backend.LastResult()));
+                            L"The " + BackendName(*backend) +
+                                (sceneCut ? L" evaluate after a scene cut failed: "
+                                          : L" evaluate after a decoder discontinuity failed: ") +
+                                HexResult(backend->LastErrorCode()));
             }
             for (uint32_t held = 0; held < generatedPerSource; ++held) {
                 if (const EncodeError error = writeFrame(previous); error != EncodeError::None) {
@@ -876,15 +905,15 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
             }
         } else {
             for (uint32_t index = 1; index <= generatedPerSource; ++index) {
-                if (!backend.Evaluate(gpu.cmd.Get(), backbuffer.Get(), motion.Get(), depth.Get(),
+                if (!backend->Evaluate(gpu.cmd.Get(), backbuffer.Get(), motion.Get(), depth.Get(),
                                       interpolated.Get(), generatedPerSource, index, /*reset=*/false,
                                       backbufferFrameId)) {
-                    result.evaluations = backend.EvaluationCount();
+                    result.evaluations = backend->EvaluationCount();
                     return fail(FrameGenerationError::Runtime,
-                                L"DLSS-G evaluate " + std::to_wstring(index) + L" of " +
+                                BackendName(*backend) + L" evaluate " + std::to_wstring(index) + L" of " +
                                     std::to_wstring(generatedPerSource) + L" failed after " +
                                     std::to_wstring(progress.sourceFramesRead) + L" source frames: " +
-                                    HexResult(backend.LastResult()));
+                                    HexResult(backend->LastErrorCode()));
                 }
                 Barrier(gpu.cmd.Get(), interpolated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                         D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -893,12 +922,12 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
             if (!flush()) {
-                result.evaluations = backend.EvaluationCount();
+                result.evaluations = backend->EvaluationCount();
                 return fail(FrameGenerationError::Device,
                             L"The GPU did not retire the generated frames for source frame " +
                                 std::to_wstring(progress.sourceFramesRead) + L".");
             }
-            result.evaluations = backend.EvaluationCount();
+            result.evaluations = backend->EvaluationCount();
 
             for (uint32_t index = 0; index < generatedPerSource; ++index) {
                 if (holdDuplicate) {
@@ -977,10 +1006,11 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         result.ok = true;
         result.error = FrameGenerationError::None;
         report(true);
-        LOG("Frame generation wrote " << std::dec << result.framesWritten << " frames ("
-            << result.generatedFrames << " generated by DLSS-G, " << result.evaluations << " evaluates) from "
-            << progress.sourceFramesRead << " source frames at " << width << "x" << height << " "
-            << result.sourceFps << " -> " << result.outputFps << " fps, video only for the caller to mux");
+LOG("Frame generation wrote " << std::dec << result.framesWritten << " frames ("
+        << result.generatedFrames << " generated by " << utf8_text::FromWide(BackendName(*backend)) << ", "
+        << result.evaluations << " evaluates) from " << progress.sourceFramesRead << " source frames at "
+        << width << "x" << height << " " << result.sourceFps << " -> " << result.outputFps
+        << " fps, video only for the caller to mux");
         return result;
     }
 
@@ -1056,11 +1086,11 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     result.error = FrameGenerationError::None;
     report(true);
     LOG("Frame generation wrote " << std::dec << result.framesWritten << " frames ("
-        << result.generatedFrames << " generated by DLSS-G, " << result.evaluations << " evaluates) from "
-        << progress.sourceFramesRead << " source frames at " << width << "x" << height << " "
-        << result.sourceFps << " -> " << result.outputFps << " fps, carrying "
-        << result.outputAudioStreams << " audio and " << result.outputSubtitleStreams
-        << " subtitle streams from the source");
+        << result.generatedFrames << " generated by " << utf8_text::FromWide(BackendName(*backend)) << ", "
+        << result.evaluations << " evaluates) from " << progress.sourceFramesRead << " source frames at "
+        << width << "x" << height << " " << result.sourceFps << " -> " << result.outputFps
+        << " fps, carrying " << result.outputAudioStreams << " audio and "
+        << result.outputSubtitleStreams << " subtitle streams from the source");
     return result;
 }
 
@@ -1078,6 +1108,21 @@ FrameGenerationCapability QueryFrameGenerationCapability() noexcept
             return capability;
         }
 
+        // NVIDIA adapters keep NGX DLSS-G; every other adapter gets the vendor-
+        // neutral optical-flow backend, which needs no NGX and is available
+        // wherever a D3D12 compute-capable device exists.
+        bool preferNvidia = false;
+        {
+            ComPtr<IDXGIFactory6> vendorFactory;
+            if (SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&vendorFactory)))) {
+                if (ComPtr<IDXGIAdapter1> vendorAdapter = SelectAdapter(vendorFactory.Get())) {
+                    DXGI_ADAPTER_DESC1 vdesc{};
+                    if (SUCCEEDED(vendorAdapter->GetDesc1(&vdesc))) preferNvidia = (vdesc.VendorId == 0x10DE);
+                }
+            }
+        }
+
+        if (preferNvidia) {
         DLSSGBackend backend;
         const DLSSGCapability probed = backend.Probe(gpu.device.Get(), gpu.cmd.Get(), kCapabilityProbeWidth,
                                                      kCapabilityProbeHeight, kBackbufferFormat);
@@ -1106,6 +1151,16 @@ FrameGenerationCapability QueryFrameGenerationCapability() noexcept
                    (probed.available ? L"the feature was admitted but the GPU did not retire its create: "
                                      : L"CreateFeature(FrameGeneration) did not admit the feature: ") +
                        HexResultTextWide(uint32_t(probed.createResult)));
+        }
+        } else {
+            // Vendor-neutral optical-flow backend: no NGX, no nvngx_dlssg.dll. It
+            // is available on any D3D12 device that can run a compute shader; the
+            // conversion's own format-support check (TYPED_UNORDERED_ACCESS_VIEW
+            // on B8G8R8A8_UNORM) is the only gate, applied in Run. Multiplier is
+            // capped at 2x until the matcher is measured on real footage.
+            capability.available = true;
+            capability.multiFrameCountMax = 1;
+            capability.detail = L"AMD/neutral optical-flow frame generation (no NGX required).";
         }
     } catch (...) {
         capability.available = false;

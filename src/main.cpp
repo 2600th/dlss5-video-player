@@ -4570,7 +4570,7 @@ private:
         if(!completion->result.ok){
             // The pass removes its output and its staging file on every failure
             // path, so "nothing was written" is a fact rather than a comfort.
-            // The runtime's own sentence - "DLSS-G evaluate 1 of 1 failed after
+            // The backend's own sentence - "<backend> evaluate 1 of 1 failed after
             // 412 source frames: 0x..." - is in the log above, where an API
             // trace belongs.
             MessageBoxW(m_hwnd,T(L"framegen.failed").c_str(),title.c_str(),MB_OK|MB_ICONERROR);

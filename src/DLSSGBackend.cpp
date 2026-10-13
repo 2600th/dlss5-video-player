@@ -577,3 +577,13 @@ void DLSSGBackend::Shutdown()
     m_evaluations = 0;
     m_available = false;
 }
+
+std::wstring DLSSGBackend::LastDetail() const
+{
+    if (m_lastResult == NVSDK_NGX_Result_Success) return {};
+    const bool session = m_sessionLeaseAcquired && m_params != nullptr;
+    return (session ? L"The runtime refused CreateFeature(FrameGeneration): "
+                    : L"NGX could not be initialized on this device: ") +
+           HexResultTextWide(static_cast<uint32_t>(m_lastResult)) +
+           (session ? L". nvngx_dlssg.dll must be resolvable beside the executable." : L".");
+}
