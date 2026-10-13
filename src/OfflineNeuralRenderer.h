@@ -176,6 +176,12 @@ struct NeuralRenderRequest {
     // - and it means something only at three passes: at one or two the question
     // never comes up, so the field is keyed the same way there whatever it says.
     bool amdMultiPassPredict{true};
+    // Whether later passes skip the ViT + C512-uplink block group
+    // (DLSS5_MULTI_PASS_SKIP_BLOCKS). Measured to take three-pass ghosting from
+    // 135 % of the source's frame-to-frame gradient back to 106 %, at the cost
+    // of a lighter, lower-contrast look in the later passes. Means something
+    // only above one pass, so the key and the reuse decision say nothing there.
+    bool amdMultiPassSkip{false};
 };
 
 struct NeuralRenderProgress {

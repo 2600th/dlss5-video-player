@@ -113,6 +113,9 @@ struct StageExportJob {
     // Whether a third pass is predicted rather than really run; see
     // RenderSettings::amdMultiPassPredict in the player.
     bool amdMultiPassPredict{true};
+    // Whether later passes skip the heavy block group; see
+    // RenderSettings::amdMultiPassSkip in the player.
+    bool amdMultiPassSkip{false};
     // Super Resolution's history for an upscaling pass without the model; a pass
     // that runs the model keeps Temporal (CarrierUpscalingHistory).
     UpscalingHistory upscalingHistory{kRecommendedUpscalingHistory};

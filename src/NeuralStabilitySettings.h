@@ -51,7 +51,8 @@
 // with, so a render at two passes is a different picture and a different key,
 // while 1 keys as every render before the control was wired keyed.
 inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uint32_t passes = 1,
-                                             bool skinProtect = false, bool multiPassPredict = true)
+                                             bool skinProtect = false, bool multiPassPredict = true,
+                                             bool laterPassSkip = false)
 {
     std::string document = "backend=amd-lmxxf\n"
                            "temporal=off\n"
@@ -73,6 +74,11 @@ inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uin
     // and the picture this backend keyed before the switch existed.
     if (passes == 3 && !multiPassPredict)
         document += "mp-predict=0\n";
+    // Same rule as the prediction: a later-pass question, so the key says nothing
+    // at one pass, and the ON spelling is the term because off is the built-in
+    // default this backend keyed before the switch existed.
+    if (passes > 1 && laterPassSkip)
+        document += "mp-skip=1\n";
     return document;
 }
 
@@ -127,7 +133,8 @@ inline TemporalStability SavedStability(NeuralBackend backend, std::string_view 
 inline std::string CanonicalNeuralSettingsForBackend(NeuralBackend backend,
                                                      const NeuralSettings& settings,
                                                      bool amdSkinProtect = false,
-                                                     bool amdMultiPassPredict = true)
+                                                     bool amdMultiPassPredict = true,
+                                                     bool amdMultiPassSkip = false)
 {
     if (backend == NeuralBackend::Amd) {
         const uint32_t passes = std::clamp(settings.passes, 1, 4);
@@ -139,6 +146,7 @@ inline std::string CanonicalNeuralSettingsForBackend(NeuralBackend backend,
         std::string term = "passes=" + std::to_string(passes);
         if (amdSkinProtect && passes > 1) term += " skin-protect=1";
         if (passes == 3 && !amdMultiPassPredict) term += " mp-predict=0";
+        if (passes > 1 && amdMultiPassSkip) term += " mp-skip=1";
         return term;
     }
     return CanonicalNeuralSettings(settings);

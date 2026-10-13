@@ -1336,6 +1336,8 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         }
         arguments.emplace_back(L"--amd-mp-predict");
         arguments.emplace_back(request.amdMultiPassPredict ? L"1" : L"0");
+        arguments.emplace_back(L"--amd-mp-skip");
+        arguments.emplace_back(request.amdMultiPassSkip ? L"1" : L"0");
     }
     // Absent means 100, the source size, which is every job before the rungs.
     if (request.processingScale != kDefaultProcessingScale) {
@@ -1476,7 +1478,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
                CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, NeuralBackendKey,
-               AmdRuntimeDirectoryKey, AmdPassesKey, AmdSkinProtectKey, AmdPredictKey, KeyCount };
+               AmdRuntimeDirectoryKey, AmdPassesKey, AmdSkinProtectKey, AmdPredictKey, AmdLaterPassSkipKey, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1514,7 +1516,12 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // default, but a hand-edited file that turned it off must not outlive
         // the panel saying on - this helper never re-reads the file, and the
         // player rewrites it, so the command line is the tiebreaker.
-        L"--amd-mp-predict"};
+        L"--amd-mp-predict",
+        // The later-pass skip, sent always: the panel is the authority, and the
+        // runtime's built-in default (no skip) has to be reachable from the
+        // command line so a hand-edited list cannot outlive the panel saying
+        // off - the empty value the writer would put is not a number.
+        L"--amd-mp-skip"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1661,6 +1668,11 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         uint64_t on = 0;
         if (!ParseUnsigned(*values[AmdPredictKey], on) || on > 1) return std::nullopt;
         request.amdMultiPassPredict = on != 0;
+    }
+    if (values[AmdLaterPassSkipKey]) {
+        uint64_t on = 0;
+        if (!ParseUnsigned(*values[AmdLaterPassSkipKey], on) || on > 1) return std::nullopt;
+        request.amdMultiPassSkip = on != 0;
     }
     if (values[ProcessingScale]) {
         uint64_t percent = 0;

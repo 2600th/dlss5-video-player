@@ -402,6 +402,7 @@ static constexpr int IDC_NS_SCENE_CUTS = 7340;
 static constexpr int IDC_NS_STABILITY = 7341;
 static constexpr int IDC_NS_SKIN_PROTECT = 7351;
 static constexpr int IDC_NS_MP_PREDICT = 7352;
+static constexpr int IDC_NS_MP_SKIP = 7353;
 // The preset strip, the line that says what the preset does, the line that
 // says what Apply will do, and the way across to Image adjustments.
 static constexpr int IDC_NS_PRESET = 7342;
@@ -2356,6 +2357,14 @@ static bool ReadSavedAmdMultiPassPredict(const std::filesystem::path& settingsPa
     return GetPrivateProfileIntW(L"AmdMultiPass",L"PredictPass3",1,settingsPath.c_str())!=0;
 }
 
+// The later-pass block skip as this machine has saved it. Off unless saved on:
+// the runtime's own default runs every block, and a machine that never touched
+// the switch should render what it always rendered.
+static bool ReadSavedAmdMultiPassSkip(const std::filesystem::path& settingsPath)
+{
+    return GetPrivateProfileIntW(L"AmdMultiPass",L"LaterPassSkip",0,settingsPath.c_str())!=0;
+}
+
 // Everything a neural job reads, captured on the UI thread when it starts:
 // the job thread never touches PlayerApp. The two pointers are owned by the
 // player and outlive the job, which the UI thread joins before touching them.
@@ -2387,6 +2396,7 @@ struct NeuralJobInputs {
     // RenderSettings::amdSkinProtect).
     bool amdSkinProtect{false};
     bool amdMultiPassPredict{true};
+    bool amdMultiPassSkip{false};
     HANDLE pauseEvent{};
     bool prepareOnly{};
     // The background acquisition of this very source, when one is in flight.
@@ -2617,7 +2627,7 @@ private:
         // named mutex derived from the directory, so it costs the tree nothing.
         lease_.emplace(runtimeDirectory_);
         if(!lease_->Held()){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("AMD neural runtime is in use by another render; refusing to share it.");return false;}
-        settingsSnapshot_=AmdNeuralSettingsDocument(in_.temporal.stability,in_.amdPasses,in_.amdSkinProtect,in_.amdMultiPassPredict);
+        settingsSnapshot_=AmdNeuralSettingsDocument(in_.temporal.stability,in_.amdPasses,in_.amdSkinProtect,in_.amdMultiPassPredict,in_.amdMultiPassSkip);
         settingsDigest_=Sha256Bytes(*settingsSnapshot_);
         if(!settingsDigest_){completion_->result.detail=L"The neural settings digest could not be computed.";return false;}
         return true;
@@ -2807,7 +2817,7 @@ private:
         staging_=cache_.BeginRenderStaging(renderKey_);if(!staging_){completion_->result.detail=in_.cacheFailureText.Describe(cache_);return false;}
         {std::ofstream settingsFile(*staging_/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot_->data(),static_cast<std::streamsize>(settingsSnapshot_->size()));if(!settingsFile){cache_.MarkInvalid(*staging_);completion_->result.detail=L"The neural settings snapshot could not be staged.";return false;}}
         const auto& range=in_.range;
-        NeuralRenderRequest request{nullptr,sourcePath_,liveIndex?liveDirectory/L"neural.mkv":*staging_/L"neural.mkv",width_,height_,fps_,duration_};request.jobId=in_.generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps_);request.guides=in_.guides;request.temporal=in_.temporal;request.amdPasses=in_.amdPasses;request.amdSkinProtect=in_.amdSkinProtect;request.amdMultiPassPredict=in_.amdMultiPassPredict;request.pauseEvent=in_.pauseEvent;request.segmentFrames=liveIndex?in_.segmentFrames:0u;request.firstSegmentFrames=liveIndex?in_.firstSegmentFrames:0u;request.gpuColorConversion=in_.gpuColorConversion;request.nvencPreset=in_.nvencPreset;request.gpuSourceConversion=in_.gpuSourceConversion;request.processingScale=in_.processingScale;request.captureDither=in_.captureDither;request.quality=in_.cacheQuality;request.sourceDeband=in_.sourceDeband;request.suppliedExposure=in_.suppliedExposure;
+        NeuralRenderRequest request{nullptr,sourcePath_,liveIndex?liveDirectory/L"neural.mkv":*staging_/L"neural.mkv",width_,height_,fps_,duration_};request.jobId=in_.generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps_);request.guides=in_.guides;request.temporal=in_.temporal;request.amdPasses=in_.amdPasses;request.amdSkinProtect=in_.amdSkinProtect;request.amdMultiPassPredict=in_.amdMultiPassPredict;request.amdMultiPassSkip=in_.amdMultiPassSkip;request.pauseEvent=in_.pauseEvent;request.segmentFrames=liveIndex?in_.segmentFrames:0u;request.firstSegmentFrames=liveIndex?in_.firstSegmentFrames:0u;request.gpuColorConversion=in_.gpuColorConversion;request.nvencPreset=in_.nvencPreset;request.gpuSourceConversion=in_.gpuSourceConversion;request.processingScale=in_.processingScale;request.captureDither=in_.captureDither;request.quality=in_.cacheQuality;request.sourceDeband=in_.sourceDeband;request.suppliedExposure=in_.suppliedExposure;
         // Which backend runs the pass, and - on the AMD one - the tree it loads
         // its module from. The worker executable is not on this line for the
         // reason the export gives: one binary serves both backends and always
@@ -5215,6 +5225,7 @@ private:
             m_temporalSettings.stability=ReadSavedStability(m_opt.neuralBackend,SettingsPath());
         m_amdSkinProtect=ReadSavedAmdSkinProtect(SettingsPath());
         m_amdMultiPassPredict=ReadSavedAmdMultiPassPredict(SettingsPath());
+        m_amdMultiPassSkip=ReadSavedAmdMultiPassSkip(SettingsPath());
         }
         m_gpuColorConversion=GetPrivateProfileIntW(L"Encoding",L"GpuColorConversion",0,SettingsPath().c_str())!=0;
         m_gpuSourceConversion=GetPrivateProfileIntW(L"Encoding",L"GpuSourceConversion",0,SettingsPath().c_str())!=0;
@@ -5355,6 +5366,7 @@ private:
         // place to look.
         WritePrivateProfileStringW(L"AmdMultiPass",L"SkinProtect",m_amdSkinProtect?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"AmdMultiPass",L"PredictPass3",m_amdMultiPassPredict?L"1":L"0",SettingsPath().c_str());
+        WritePrivateProfileStringW(L"AmdMultiPass",L"LaterPassSkip",m_amdMultiPassSkip?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuSourceConversion",m_gpuSourceConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"NvencPreset",std::to_wstring(m_nvencPreset).c_str(),SettingsPath().c_str());
@@ -6658,6 +6670,7 @@ private:
         check(IDC_NS_CHAINED,m_neuralSettings.chainedHistory);
         check(IDC_NS_SKIN_PROTECT,m_amdSkinProtect);
         check(IDC_NS_MP_PREDICT,m_amdMultiPassPredict);
+        select(IDC_NS_MP_SKIP,m_amdMultiPassSkip?1:0);
         // Chained history only governs passes 2+, so it is dead UI at one
         // pass rather than a setting that quietly does nothing.
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
@@ -6680,6 +6693,7 @@ private:
         m_neuralSettings.chainedHistory=checked(IDC_NS_CHAINED);
         m_amdSkinProtect=checked(IDC_NS_SKIN_PROTECT);
         m_amdMultiPassPredict=checked(IDC_NS_MP_PREDICT);
+        m_amdMultiPassSkip=sel(IDC_NS_MP_SKIP,m_amdMultiPassSkip?1:0)!=0;
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
         // Same dependency the Enable path states: the switch renders nothing at
         // one pass, so moving the pass combo has to move its greyed state too.
@@ -6712,6 +6726,10 @@ private:
         // runtime never asks.
         if(HWND predict=GetDlgItem(h,IDC_NS_MP_PREDICT))
             EnableWindow(predict,m_opt.neuralBackend==NeuralBackend::Amd&&m_neuralSettings.passes==3);
+        // The skip is a later-pass question: above one pass only, and only on
+        // the backend whose runtime has the list.
+        if(HWND skip=GetDlgItem(h,IDC_NS_MP_SKIP))
+            EnableWindow(skip,m_opt.neuralBackend==NeuralBackend::Amd&&m_neuralSettings.passes>1);
     }
 
     // The persisted guide switches also drive the live (non-cached) guide
@@ -6814,7 +6832,8 @@ private:
         // Its own row, below the other two: the stacking group's row is full
         // (skin 12+right..132+right+116, chained ..+224, ends 804 of the 880
         // the dialog is wide) and a third box on it was drawn off the window.
-        CreateNeuralCheck(h,IDC_NS_MP_PREDICT,L"neural.settings.mp_predict",12+right,96+top,300,L"neural.tip.mp_predict");
+        CreateNeuralCheck(h,IDC_NS_MP_PREDICT,L"neural.settings.mp_predict",12+right,96+top,200,L"neural.tip.mp_predict");
+        CreateNeuralCombo(h,IDC_NS_MP_SKIP,L"neural.settings.mp_skip",96+top,{L"Off",L"Skip ViT + C512"},L"neural.tip.mp_skip",212+right,180);
         CreateSettingsGroupHeading(h,L"neural.settings.group_guides",112+top,right,400);
         CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+right,138+top,116,L"neural.tip.guide_mv");
         CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+right,138+top,80,L"neural.tip.guide_depth");
@@ -6929,9 +6948,12 @@ private:
         // Whether a third pass is predicted rather than really run; only means
         // anything at three passes, where it changes how the picture is made.
         bool amdMultiPassPredict{true};
+        // Whether later passes skip the heavy block group; only means anything
+        // above one pass.
+        bool amdMultiPassSkip{false};
         friend bool operator==(const RenderSettings&,const RenderSettings&)=default;
     };
-    RenderSettings CurrentRenderSettings()const{return {m_neuralSettings,m_renderGuides,m_temporalSettings,m_amdSkinProtect,m_amdMultiPassPredict};}
+    RenderSettings CurrentRenderSettings()const{return {m_neuralSettings,m_renderGuides,m_temporalSettings,m_amdSkinProtect,m_amdMultiPassPredict,m_amdMultiPassSkip};}
 
     // The render the picture came from is not what the dialog now holds. Only the
     // export path noticed this before, so a settings change made during playback
@@ -6995,7 +7017,8 @@ private:
                                m_temporalSettings.stability!=m_liveRenderSettings.temporal.stability||
                                m_neuralSettings.passes!=m_liveRenderSettings.neural.passes||
                                m_amdSkinProtect!=m_liveRenderSettings.amdSkinProtect||
-                               m_amdMultiPassPredict!=m_liveRenderSettings.amdMultiPassPredict;
+                               m_amdMultiPassPredict!=m_liveRenderSettings.amdMultiPassPredict||
+                               m_amdMultiPassSkip!=m_liveRenderSettings.amdMultiPassSkip;
             if(!restart){
                 LOG("Neural settings applied at "<<Position()<<" s; this backend's render reads the accumulation rung and the pass count and nothing else in the dialog, and neither moved, so the active session is left running.");
                 return;
@@ -7027,7 +7050,7 @@ private:
         case WM_SIZE:ResizeSettingsChildren(h,kNeuralDesignW,kNeuralDesignH);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};m_amdSkinProtect=true;m_amdMultiPassPredict=true;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
+            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};m_amdSkinProtect=true;m_amdMultiPassPredict=true;m_amdMultiPassSkip=false;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
             if(id==IDC_NS_OPEN_ADJUST&&code==BN_CLICKED){ShowAdjustments();return 0;}
@@ -7043,7 +7066,7 @@ private:
             // it back, and the setting the user thinks they picked never
             // reaches the render. Adding a control without adding it to this
             // line is the one mistake this dialog invites, and it is silent.
-            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY)&&code==CBN_SELCHANGE)||
+            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY||id==IDC_NS_MP_SKIP)&&code==CBN_SELCHANGE)||
                ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED||id==IDC_NS_SKIN_PROTECT||id==IDC_NS_MP_PREDICT)&&code==BN_CLICKED)){
                 // The owner-drawn check boxes do not flip their own check: the
                 // click is only a click until this turns the state over, and
@@ -10356,7 +10379,7 @@ private:
     // takes the rung from the temporal term instead - hashing the panel there
     // would retire coverage a restart would have rendered identically.
     std::string RetentionKeyFor(const RenderSettings& render)const{
-        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettingsForBackend(m_opt.neuralBackend,render.neural,render.amdSkinProtect,render.amdMultiPassPredict)+"|"+CanonicalGuideControls(render.guides)+
+        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettingsForBackend(m_opt.neuralBackend,render.neural,render.amdSkinProtect,render.amdMultiPassPredict,render.amdMultiPassSkip)+"|"+CanonicalGuideControls(render.guides)+
                "|"+CanonicalTemporalSettings(render.temporal);
     }
     std::string LiveRetentionKey()const{return RetentionKeyFor(CurrentRenderSettings());}
@@ -11299,7 +11322,7 @@ private:
             // reports from the request.
             job.backend=m_opt.neuralBackend;job.amdRuntimeDirectory=m_opt.amdRuntimeDirectory;
             const RenderSettings render=JobRenderSettings(kind);
-            job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.amdPasses=std::clamp(render.neural.passes,1,4);job.amdSkinProtect=render.amdSkinProtect;job.amdMultiPassPredict=render.amdMultiPassPredict;job.pauseEvent=m_neuralPauseEvent;
+            job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.amdPasses=std::clamp(render.neural.passes,1,4);job.amdSkinProtect=render.amdSkinProtect;job.amdMultiPassPredict=render.amdMultiPassPredict;job.amdMultiPassSkip=render.amdMultiPassSkip;job.pauseEvent=m_neuralPauseEvent;
             job.gpuColorConversion=m_gpuColorConversion;job.gpuSourceConversion=m_gpuSourceConversion;job.nvencPreset=m_nvencPreset;job.processingScale=m_processingScale;job.captureDither=m_captureDither;job.cacheQuality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
             job.reuseSourceKey=reuseSourceKey;job.expectedDurationSeconds=expectedDurationSeconds;job.range=range;job.prepareOnly=prepareOnly;
             // The background acquisition of this very source, when one is in
@@ -12939,6 +12962,10 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // The runtime's third-pass prediction; the runtime's default is on and so is
     // the panel's.
     bool m_amdMultiPassPredict{true};
+    // Whether later passes skip the heavy block group. Off by default: it keeps
+    // the look every render before this switch existed, and the ghosting it
+    // costs is what the panel's pass count is the user's call about.
+    bool m_amdMultiPassSkip{false};
     // The preset the Look settings were last taken from, so Custom can say
     // which one it departed from. kPresetCount when none is known yet.
     size_t m_lastNeuralPreset=neural_presets::kPresetCount;
@@ -13324,6 +13351,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         // already greys itself there.
         job.amdSkinProtect=ReadSavedAmdSkinProtect(settings);
         job.amdMultiPassPredict=ReadSavedAmdMultiPassPredict(settings);
+        job.amdMultiPassSkip=ReadSavedAmdMultiPassSkip(settings);
 
         say(StageExportPlanSummary(plan,width,height,fps));
         // What the render will look like and how it is encoded, whichever of

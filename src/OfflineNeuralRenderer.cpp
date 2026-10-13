@@ -2889,9 +2889,11 @@ struct AmdLmxxfEvaluatorAdapter {
     uint32_t broughtUpPasses{1};
     bool broughtUpSkinProtect{false};
     bool broughtUpPredict{true};
+    bool broughtUpSkip{false};
     uint32_t jobPasses{1};
     bool jobSkinProtect{false};
     bool jobPredict{true};
+    bool jobSkip{false};
     bool reused=false;
     // Why the last bring-up failed, kept because a failed Initialize drops the
     // evaluator and LastFailure() would then have nothing left to ask.
@@ -2909,6 +2911,8 @@ struct AmdLmxxfEvaluatorAdapter {
     // changes nothing the runtime would do, so it is normalised out of the
     // bring-up question here rather than forced through the caller.
     void SetMultiPassPredict(bool predict){jobPredict=predict&&jobPasses==3u;}
+    // The skip is a later-pass question, so it counts only above one pass.
+    void SetMultiPassSkip(bool skip){jobSkip=skip&&jobPasses>1u;}
     bool Initialize(HWND,uint32_t w,uint32_t h,uint32_t ow,uint32_t oh,double fps,
                     const GuideControls& guides,PixelLayout,const SourceColorDescription&){
         if(!ow||!oh){ow=w;oh=h;}
@@ -2918,7 +2922,8 @@ struct AmdLmxxfEvaluatorAdapter {
         // question and a match on all four means there is nothing to rebuild.
         reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory&&
                broughtUpStability==config.stability&&broughtUpPasses==jobPasses&&
-               broughtUpSkinProtect==jobSkinProtect&&broughtUpPredict==jobPredict;
+               broughtUpSkinProtect==jobSkinProtect&&broughtUpPredict==jobPredict&&
+               broughtUpSkip==jobSkip;
         if(reused)return true;
         captured.clear();
         evaluator=std::make_unique<AmdLmxxfEvaluator>(config);
@@ -2927,6 +2932,7 @@ struct AmdLmxxfEvaluatorAdapter {
         broughtUpPasses=jobPasses;
         broughtUpSkinProtect=jobSkinProtect;
         broughtUpPredict=jobPredict;
+        broughtUpSkip=jobSkip;
         if(evaluator->Initialize(nullptr,w,h,ow,oh,fps,guides))return true;
         broughtUpFailure=evaluator->LastFailure();
         LOG("AMD neural runtime did not come up for "<<w<<"x"<<h<<": "<<evaluator->LastError());
@@ -3679,7 +3685,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
         if (!amd_lmxxf::WriteAmdMultiPassConfig(state.amdEvaluator.config.runtimeDirectory,
                                                 std::clamp(request.amdPasses, 1u, 4u),
                                                 request.amdSkinProtect, request.amdMultiPassPredict,
-                                                passesError)) {
+                                                request.amdMultiPassSkip, passesError)) {
             NeuralRenderResult refused;
             refused.jobId = request.jobId;
             refused.failure = NeuralRenderFailure::Preflight;
@@ -3733,6 +3739,9 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // than a full run), which is a moved bring-up for the same reason the count
     // and the skin switch are: the runtime reads its configuration once.
     state.amdEvaluator.SetMultiPassPredict(request.amdMultiPassPredict);
+    // The skip list changes what the later passes compute, so it is a moved
+    // bring-up for the same reason the others are.
+    state.amdEvaluator.SetMultiPassSkip(request.amdMultiPassSkip);
     // What this backend cannot be asked for. Each is a benchmark switch that
     // exists to change what the NVIDIA path renders, and here it would change
     // nothing at all - a run that reported the flag's arm while rendering the
@@ -3770,6 +3779,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
         <<" passes="<<request.amdPasses<<" (the runtime stacks the network itself; the count was handed to it before the network was built)"
         <<" skin-protect="<<(request.amdSkinProtect?"on":"off")
         <<" mp-predict="<<(request.amdMultiPassPredict?"on":"off")
+        <<" mp-skip="<<(request.amdMultiPassSkip?"on":"off")
         <<" feature18-receipt=not-applicable, this backend has no ReShade log");
 
     // Read before the per-job reset, so a bring-up the previous job left armed is

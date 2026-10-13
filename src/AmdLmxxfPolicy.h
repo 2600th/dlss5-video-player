@@ -176,7 +176,8 @@ inline bool IsAmdPassesConfigLine(std::string_view line) noexcept
 // to be able to switch off one a hand edit turned on, and a runtime that reads
 // its configuration once cannot be told again.
 inline bool WriteAmdMultiPassConfig(const std::filesystem::path& runtimeDirectory, uint32_t passes,
-                                    bool skinProtect, bool multiPassPredict, std::string& error)
+                                    bool skinProtect, bool multiPassPredict, bool laterPassSkip,
+                                    std::string& error)
 {
     namespace fs = std::filesystem;
     const fs::path directory = runtimeDirectory / L"DLSS5-AMD";
@@ -189,17 +190,25 @@ inline bool WriteAmdMultiPassConfig(const std::filesystem::path& runtimeDirector
     const fs::path path = directory / L"custom-config.txt";
     // Passes first, then the skin switch: the order they are written in is the
     // order they appear in when neither was in the file.
-    std::string keys[3];
-    std::string values[3];
+    std::string keys[4];
+    std::string values[4];
     keys[0] = "DLSS5_MULTI_PASS";
     values[0] = AmdPassesConfigLine(passes).substr(keys[0].size() + 1);
     keys[1] = "DLSS5_MULTI_PASS_SKIN_PROTECT";
     values[1] = skinProtect ? "1" : "0";
     keys[2] = "DLSS5_MULTI_PASS_PREDICT";
     values[2] = multiPassPredict ? "1" : "0";
-    constexpr size_t kKeyCount = 3;
+    // Off is an EMPTY value, not "0": the runtime treats an empty list as its
+    // built-in default (run every block), which is the only spelling that also
+    // switches off a list a hand edit left behind. The list itself is the ViT
+    // and C512-uplink group the porting project measured - it costs the later
+    // passes most of their reshaping, which is where the stacking's ghosting
+    // comes from.
+    keys[3] = "DLSS5_MULTI_PASS_SKIP_BLOCKS";
+    values[3] = laterPassSkip ? "31,32,33,34,35,36,37,38,40,41,42,43,44,45,46,47" : "";
+    constexpr size_t kKeyCount = 4;
     // Where each key's last line sits, or npos when the file has none yet.
-    size_t keepAt[kKeyCount] = {std::string::npos, std::string::npos, std::string::npos};
+    size_t keepAt[kKeyCount] = {std::string::npos, std::string::npos, std::string::npos, std::string::npos};
     std::vector<std::string> lines;
     {
         std::ifstream input(path, std::ios::binary);

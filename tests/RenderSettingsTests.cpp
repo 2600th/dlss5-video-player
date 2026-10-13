@@ -865,6 +865,14 @@ void the_retained_settings_term_reads_only_what_the_backend_reads()
              CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, stacked4, true));
     CHECK_EQ(std::string("passes=1"),
              CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, single, true));
+    // The later-pass skip: the ON spelling above one pass, absent at one, and
+    // absent on NVIDIA whatever the switch says.
+    CHECK_EQ(std::string("passes=4 mp-skip=1"),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, stacked4, false, true, true));
+    CHECK_EQ(std::string("passes=1"),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, single, false, true, true));
+    CHECK(CanonicalNeuralSettingsForBackend(NeuralBackend::Nvidia, stacked4, false, true, true).find("mp-skip") ==
+          std::string::npos);
     // NVIDIA has no such switch, so its term never carries it - matched on the
     // term itself, not on "skin", which its own panel field skinStructure has.
     CHECK(CanonicalNeuralSettingsForBackend(NeuralBackend::Nvidia, stacked4, true).find("skin-protect") ==
