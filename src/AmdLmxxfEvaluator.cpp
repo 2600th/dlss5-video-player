@@ -2,12 +2,12 @@
 
 #include "AmdLmxxfPolicy.h"
 #include "AmdTemporalAccumulationShader.h"
+#include "AmdUpscaleShader.h"
 #include "GuideFiles.h"
 #include "TemporalStabilityShader.h"
 
 #include <algorithm>
 #include <chrono>
-#include <cstdio>
 #include <cstring>
 #include <d3dcompiler.h>
 #include <system_error>
@@ -766,6 +766,16 @@ void AmdLmxxfEvaluator::TearDown()
     accumulationRtvHeap_.Reset();
     accumulationSrvHeap_.Reset();
     accumulationSrvDescriptorSize_ = 0;
+    upscaleWidth_ = 0;
+    upscaleHeight_ = 0;
+    upscaleTarget_.Reset();
+    sharpenedTarget_.Reset();
+    psoUpscale_.Reset();
+    psoCas_.Reset();
+    upscaleRootSig_.Reset();
+    upscaleSrvHeap_.Reset();
+    upscaleSrvDescriptorSize_ = 0;
+    outputReadback_.Reset();
     fence_.Reset();
     consumerList_.Reset();
     consumerAllocator_.Reset();
@@ -793,15 +803,22 @@ bool AmdLmxxfEvaluator::Initialize(HWND, uint32_t width, uint32_t height, uint32
 
     if (width == 0 || height == 0) return Refuse("Initialize was handed a zero-sized frame");
     // The runtime is a 1:1 denoiser: job.private_output is the colour geometry.
-    // An upscaling capture would need a different seam, so the request is
-    // refused here rather than producing a frame of the wrong size.
-    if (outputWidth != width || outputHeight != height)
-        return Refuse("the AMD runtime renders at the source size, so a capture of " +
-                      std::to_string(outputWidth) + "x" + std::to_string(outputHeight) +
-                      " from a " + std::to_string(width) + "x" + std::to_string(height) +
-                      " source is not something this evaluator can produce");
+    // A capture at another size is therefore not the runtime's to produce - it
+    // is the upscale capture below, this evaluator's own stretch-and-sharpen
+    // over the runtime's output. A capture SMALLER than the frame is still
+    // refused here rather than executed as a downsize: no caller asks for one,
+    // and a pass that quietly shrank the picture would be a render nobody
+    // ordered.
+    if (outputWidth < width || outputHeight < height)
+        return Refuse("a capture of " + std::to_string(outputWidth) + "x" +
+                      std::to_string(outputHeight) + " from a " + std::to_string(width) + "x" +
+                      std::to_string(height) +
+                      " source is smaller than the source, which is not an upscale");
+    const uint32_t wantedUpscaleW = (outputWidth != width || outputHeight != height) ? outputWidth : 0;
+    const uint32_t wantedUpscaleH = wantedUpscaleW ? outputHeight : 0;
 
-    const bool sameGeometry = prepared_ && width_ == width && height_ == height;
+    const bool sameGeometry = prepared_ && width_ == width && height_ == height &&
+                              upscaleWidth_ == wantedUpscaleW && upscaleHeight_ == wantedUpscaleH;
     if (sameGeometry) {
         Log("Initialize re-entered at the same geometry; the session is reused");
         return true;
@@ -810,6 +827,8 @@ bool AmdLmxxfEvaluator::Initialize(HWND, uint32_t width, uint32_t height, uint32
     TearDown();
     width_ = width;
     height_ = height;
+    upscaleWidth_ = wantedUpscaleW;
+    upscaleHeight_ = wantedUpscaleH;
     frameIndex_ = 0;
     evaluations_ = 0;
     neuralEvaluations_ = 0;
@@ -820,6 +839,7 @@ bool AmdLmxxfEvaluator::Initialize(HWND, uint32_t width, uint32_t height, uint32
     // Before the runtime, so a shader that will not compile is refused before a
     // session is armed for a job that could never run at its rung.
     if (!CreateTemporalResources()) return false;
+    if (!CreateUpscaleResources()) return false;
     if (!BringUpRuntime()) return false;
     // After the runtime, so a guide failure reports with the session's context
     // already in the log. Only the lease path has a consumer list to build.
@@ -944,10 +964,14 @@ void AmdLmxxfEvaluator::CopyTextureToReadback(ID3D12GraphicsCommandList* list, I
     // The frame's own footprint, carrying the source's format: the two paths
     // that reach this differ only in the texture they hand it, and the format
     // has to come from that texture because a copy region does not convert.
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = footprint_;
+    // An upscaling capture reads its own buffer at the capture's footprint -
+    // the sharpened target is the capture's size, and a copy region demands
+    // that the two sides agree.
+    const bool upscaling = Upscaling();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = upscaling ? outputFootprint_ : footprint_;
     footprint.Footprint.Format = format;
     D3D12_TEXTURE_COPY_LOCATION destination{};
-    destination.pResource = readback_.Get();
+    destination.pResource = upscaling ? outputReadback_.Get() : readback_.Get();
     destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     destination.PlacedFootprint = footprint;
     D3D12_TEXTURE_COPY_LOCATION source{};
@@ -955,6 +979,253 @@ void AmdLmxxfEvaluator::CopyTextureToReadback(ID3D12GraphicsCommandList* list, I
     source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     source.SubresourceIndex = 0;
     list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+}
+
+bool AmdLmxxfEvaluator::CreateUpscaleResources()
+{
+    if (!Upscaling()) return true;
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    // One description, two targets: both are capture-sized BGRA, both written
+    // by a draw and read by the next pass or the copy.
+    D3D12_RESOURCE_DESC target{};
+    target.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    target.Width = upscaleWidth_;
+    target.Height = upscaleHeight_;
+    target.DepthOrArraySize = 1;
+    target.MipLevels = 1;
+    target.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    target.SampleDesc.Count = 1;
+    target.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if (FAILED(device_->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &target,
+                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                nullptr, IID_PPV_ARGS(upscaleTarget_.GetAddressOf()))))
+        return Refuse("CreateCommittedResource for the stretched target failed");
+    if (FAILED(device_->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &target,
+                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                nullptr, IID_PPV_ARGS(sharpenedTarget_.GetAddressOf()))))
+        return Refuse("CreateCommittedResource for the sharpened target failed");
+
+    D3D12_DESCRIPTOR_HEAP_DESC srvHeap{};
+    srvHeap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srvHeap.NumDescriptors = 2;  // the frame's texture, then the stretched one
+    srvHeap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device_->CreateDescriptorHeap(&srvHeap, IID_PPV_ARGS(upscaleSrvHeap_.GetAddressOf()))))
+        return Refuse("CreateDescriptorHeap for the upscale capture failed");
+    upscaleSrvDescriptorSize_ =
+        device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtvHeap{};
+    rtvHeap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtvHeap.NumDescriptors = 2;  // one per target
+    if (FAILED(device_->CreateDescriptorHeap(&rtvHeap, IID_PPV_ARGS(upscaleRtvHeap_.GetAddressOf()))))
+        return Refuse("CreateDescriptorHeap(RTV) for the upscale capture failed");
+    const UINT rtvSize = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    device_->CreateRenderTargetView(upscaleTarget_.Get(), nullptr,
+                                    upscaleRtvHeap_->GetCPUDescriptorHandleForHeapStart());
+    device_->CreateRenderTargetView(
+        sharpenedTarget_.Get(), nullptr,
+        OffsetHandle(upscaleRtvHeap_->GetCPUDescriptorHandleForHeapStart(), rtvSize, 1));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    view.Texture2D.MipLevels = 1;
+    device_->CreateShaderResourceView(
+        upscaleTarget_.Get(), &view,
+        OffsetHandle(upscaleSrvHeap_->GetCPUDescriptorHandleForHeapStart(),
+                     upscaleSrvDescriptorSize_, 1));
+
+    // The static sampler is POINT because both passes sample at exact texel
+    // centres: the Catmull-Rom weights are the whole filter, and the CAS taps
+    // sit on the target's own pixels. A linear sampler would apply the stretch
+    // a second time.
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+
+    D3D12_DESCRIPTOR_RANGE range{};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 1;
+    range.BaseShaderRegister = 0;
+    D3D12_ROOT_PARAMETER parameter{};
+    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    parameter.DescriptorTable.NumDescriptorRanges = 1;
+    parameter.DescriptorTable.pDescriptorRanges = &range;
+    D3D12_ROOT_PARAMETER parameters[2] = {parameter, parameter};
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[1].Constants.Num32BitValues = 8;
+    parameters[1].Constants.ShaderRegister = 0;
+    {
+        D3D12_ROOT_SIGNATURE_DESC description{};
+        description.NumParameters = 2;
+        description.pParameters = parameters;
+        description.NumStaticSamplers = 1;
+        description.pStaticSamplers = &sampler;
+        description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
+        const HRESULT hr = D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1,
+                                                       signature.GetAddressOf(),
+                                                       error.GetAddressOf());
+        if (FAILED(hr))
+            return Refuse("the upscale capture's root signature would not serialize: " +
+                          (error ? BlobText(error.Get()) : Hex32(hr)));
+        if (FAILED(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                                signature->GetBufferSize(),
+                                                IID_PPV_ARGS(upscaleRootSig_.GetAddressOf()))))
+            return Refuse("CreateRootSignature for the upscale capture failed");
+    }
+
+    auto compile = [&](const char* entry, Microsoft::WRL::ComPtr<ID3DBlob>& blob) -> bool {
+        const char* profile = UpscaleShaderProfileFor(entry);
+        Microsoft::WRL::ComPtr<ID3DBlob> shaderError;
+        const HRESULT hr = D3DCompile(kAmdUpscaleHlsl, sizeof(kAmdUpscaleHlsl) - 1, "amd-upscale",
+                                      nullptr, nullptr, entry, profile,
+                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob.GetAddressOf(),
+                                      shaderError.GetAddressOf());
+        if (FAILED(hr))
+            return Refuse(std::string("the upscale capture's ") + entry + " (" + profile +
+                          ") would not compile: " +
+                          (shaderError ? BlobText(shaderError.Get()) : Hex32(hr)));
+        return true;
+    };
+    Microsoft::WRL::ComPtr<ID3DBlob> vs, upscalePs, casPs;
+    if (!compile("VS", vs)) return false;
+    if (!compile("PSAmdUpscale", upscalePs)) return false;
+    if (!compile("PSAmdCas", casPs)) return false;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+    pso.SampleDesc = {1, 0};
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pso.pRootSignature = upscaleRootSig_.Get();
+    pso.PS = {upscalePs->GetBufferPointer(), upscalePs->GetBufferSize()};
+    if (FAILED(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(psoUpscale_.GetAddressOf()))))
+        return Refuse("CreateGraphicsPipelineState for the upscale pass failed");
+    pso.PS = {casPs->GetBufferPointer(), casPs->GetBufferSize()};
+    if (FAILED(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(psoCas_.GetAddressOf()))))
+        return Refuse("CreateGraphicsPipelineState for the CAS pass failed");
+
+    // The capture's own readback: the frame one is sized to the source, and a
+    // capture at another size is a different footprint with a different pitch.
+    device_->GetCopyableFootprints(&target, 0, 1, 0, &outputFootprint_, nullptr, nullptr, nullptr);
+    D3D12_RESOURCE_DESC bufferDescription{};
+    bufferDescription.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufferDescription.Width = outputFootprint_.Footprint.RowPitch *
+                              static_cast<UINT64>(upscaleHeight_);
+    bufferDescription.Height = 1;
+    bufferDescription.DepthOrArraySize = 1;
+    bufferDescription.MipLevels = 1;
+    bufferDescription.SampleDesc = {1, 0};
+    bufferDescription.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    D3D12_HEAP_PROPERTIES readbackHeap{};
+    readbackHeap.Type = D3D12_HEAP_TYPE_READBACK;
+    if (FAILED(device_->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE,
+                                                &bufferDescription,
+                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                IID_PPV_ARGS(outputReadback_.GetAddressOf()))))
+        return Refuse("CreateCommittedResource for the capture's readback failed");
+    return true;
+}
+
+bool AmdLmxxfEvaluator::RecordUpscale(ID3D12GraphicsCommandList* list, ID3D12Resource* from)
+{
+    if (from == nullptr)
+        return Fail(NeuralRenderFailure::Neural,
+                    "the upscale capture was recorded with no frame to stretch");
+    const D3D12_RESOURCE_DESC description = from->GetDesc();
+    if (description.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        description.Format != DXGI_FORMAT_B8G8R8X8_UNORM)
+        return Fail(NeuralRenderFailure::Neural,
+                    "the upscale capture's input format " +
+                        std::to_string(static_cast<int>(description.Format)) +
+                        " is not a 32-bit BGRA layout this evaluator can read");
+
+    // The one descriptor that cannot be built once, for the same reason the
+    // accumulation's is not: this backend's producer publishes a new texture
+    // for every frame.
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.Format = description.Format;
+        view.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(
+            from, &view,
+            OffsetHandle(upscaleSrvHeap_->GetCPUDescriptorHandleForHeapStart(),
+                         upscaleSrvDescriptorSize_, 0));
+    }
+
+    ID3D12DescriptorHeap* heaps[] = {upscaleSrvHeap_.Get()};
+    list->SetDescriptorHeaps(1, heaps);
+    list->SetGraphicsRootSignature(upscaleRootSig_.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    const D3D12_GPU_DESCRIPTOR_HANDLE srvBase =
+        upscaleSrvHeap_->GetGPUDescriptorHandleForHeapStart();
+    const float constants[8] = {
+        static_cast<float>(description.Width), static_cast<float>(description.Height),
+        static_cast<float>(upscaleWidth_), static_cast<float>(upscaleHeight_),
+        std::clamp(config_.upscaleSharpness, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f};
+    auto draw = [&](ID3D12PipelineState* pso, D3D12_CPU_DESCRIPTOR_HANDLE target,
+                    UINT srvIndex) {
+        D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(upscaleWidth_),
+                                static_cast<float>(upscaleHeight_), 0.0f, 1.0f};
+        D3D12_RECT scissor{0, 0, static_cast<LONG>(upscaleWidth_),
+                           static_cast<LONG>(upscaleHeight_)};
+        list->RSSetViewports(1, &viewport);
+        list->RSSetScissorRects(1, &scissor);
+        list->OMSetRenderTargets(1, &target, FALSE, nullptr);
+        list->SetPipelineState(pso);
+        list->SetGraphicsRootDescriptorTable(
+            0, OffsetHandle(srvBase, upscaleSrvDescriptorSize_, srvIndex));
+        list->SetGraphicsRoot32BitConstants(1, 8, constants, 0);
+        list->DrawInstanced(3, 1, 0, 0);
+    };
+
+    // ---- stretch: the frame into the capture's geometry -------------------
+    Transition(list, upscaleTarget_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    draw(psoUpscale_.Get(), upscaleRtvHeap_->GetCPUDescriptorHandleForHeapStart(), 0);
+    Transition(list, upscaleTarget_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    // ---- sharpen: CAS over the stretched frame's own neighbourhood ---------
+    const UINT rtvSize = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    Transition(list, sharpenedTarget_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    draw(psoCas_.Get(),
+         OffsetHandle(upscaleRtvHeap_->GetCPUDescriptorHandleForHeapStart(), rtvSize, 1), 1);
+    Transition(list, sharpenedTarget_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+               D3D12_RESOURCE_STATE_COPY_SOURCE);
+    CopyTextureToReadback(list, sharpenedTarget_.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
+    Transition(list, sharpenedTarget_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    // What a reader of this frame gets is the sharpened capture, not the
+    // runtime's own 1:1 output - the same claim the accumulation's encode makes.
+    lastOutput_ = sharpenedTarget_.Get();
+    lastOutputWasPrivate_ = false;
+    return true;
 }
 
 bool AmdLmxxfEvaluator::CreateTemporalResources()
@@ -1381,19 +1652,28 @@ bool AmdLmxxfEvaluator::RecordTemporalAccumulation(ID3D12GraphicsCommandList* li
     draw(psoEncode_.Get(), OffsetHandle(rtvBase, rtvSize, kRtvStabilised),
          kSrvEncodeBase + write, nullptr);
     Transition(list, stabilised_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
-               D3D12_RESOURCE_STATE_COPY_SOURCE);
-    CopyTextureToReadback(list, stabilised_.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
-    Transition(list, stabilised_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    // An upscaling capture stretches the stabilised frame instead of copying
+    // it; the plain capture copies. Both leave the frame where it was.
+    if (Upscaling()) {
+        if (!RecordUpscale(list, stabilised_.Get())) return false;
+    } else {
+        Transition(list, stabilised_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+        CopyTextureToReadback(list, stabilised_.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
+        Transition(list, stabilised_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
 
     // The runtime's own texture goes back exactly where it left it, so the next
     // frame's barriers still describe the truth.
     Transition(list, produced, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kPrivateOutputState);
 
     accumulationHistory_ = temporal_stability::Commit(accumulationHistory_, plan, frame);
-    // What a reader of this frame gets is the stabilized texture, not the
-    // runtime's own, and saying so is the point of the two accessors.
-    lastOutput_ = stabilised_.Get();
+    // What a reader of this frame gets is the stabilized texture - or, on an
+    // upscaling capture, the sharpened capture the record left there - and
+    // saying so is the point of the two accessors.
+    if (!Upscaling()) lastOutput_ = stabilised_.Get();
     lastOutputWasPrivate_ = false;
     ++accumulationFrames_;
     return true;
@@ -1401,20 +1681,29 @@ bool AmdLmxxfEvaluator::RecordTemporalAccumulation(ID3D12GraphicsCommandList* li
 
 bool AmdLmxxfEvaluator::ReadBackProduced(std::vector<uint8_t>& out)
 {
+    // An upscaling capture reads the capture's own buffer at the capture's
+    // footprint; the plain path reads the frame one at the frame's.
+    const bool upscaling = Upscaling();
+    ID3D12Resource* buffer = upscaling ? outputReadback_.Get() : readback_.Get();
+    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint =
+        upscaling ? outputFootprint_ : footprint_;
+    const uint32_t rows = upscaling ? upscaleHeight_ : height_;
+    const uint32_t columns = upscaling ? upscaleWidth_ : width_;
+
     void* mapped = nullptr;
-    const D3D12_RANGE readRange{0, static_cast<SIZE_T>(footprint_.Footprint.Height) *
-                                        footprint_.Footprint.RowPitch};
-    if (FAILED(readback_->Map(0, &readRange, &mapped)))
+    const D3D12_RANGE readRange{0, static_cast<SIZE_T>(footprint.Footprint.Height) *
+                                        footprint.Footprint.RowPitch};
+    if (FAILED(buffer->Map(0, &readRange, &mapped)))
         return Fail(NeuralRenderFailure::Neural, "the readback buffer would not map");
-    out.assign(static_cast<size_t>(width_) * height_ * 4u, 0);
-    for (uint32_t row = 0; row < height_; ++row) {
-        std::memcpy(out.data() + static_cast<size_t>(row) * width_ * 4u,
-                    static_cast<const uint8_t*>(mapped) + footprint_.Offset +
-                        static_cast<size_t>(row) * footprint_.Footprint.RowPitch,
-                    static_cast<size_t>(width_) * 4u);
+    out.assign(static_cast<size_t>(columns) * rows * 4u, 0);
+    for (uint32_t row = 0; row < rows; ++row) {
+        std::memcpy(out.data() + static_cast<size_t>(row) * columns * 4u,
+                    static_cast<const uint8_t*>(mapped) + footprint.Offset +
+                        static_cast<size_t>(row) * footprint.Footprint.RowPitch,
+                    static_cast<size_t>(columns) * 4u);
     }
     const D3D12_RANGE noWrite{0, 0};
-    readback_->Unmap(0, &noWrite);
+    buffer->Unmap(0, &noWrite);
     return true;
 }
 
@@ -1818,10 +2107,33 @@ bool AmdLmxxfEvaluator::SubmitFrame(const std::vector<uint8_t>& bgra, bool reset
             (void)list_->Close();
             return false;
         }
-    } else if (!CopyProducedToReadback(list_.Get())) {
-        (void)session.Cancel();
-        (void)list_->Close();
-        return false;
+    } else {
+        auto* produced = static_cast<ID3D12Resource*>(session_->Job().private_output);
+        if (produced == nullptr) {
+            (void)session.Cancel();
+            (void)list_->Close();
+            return Fail(NeuralRenderFailure::Neural,
+                        "the runtime published no job.private_output, so there is no frame to read");
+        }
+        // The stretch reads the frame as a shader resource; the plain capture
+        // copies it instead. Both put it back where the runtime left it.
+        if (Upscaling()) {
+            Transition(list_.Get(), produced, kPrivateOutputState,
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            const bool recorded =
+                RecordUpscale(list_.Get(), produced);
+            Transition(list_.Get(), produced, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                       kPrivateOutputState);
+            if (!recorded) {
+                (void)session.Cancel();
+                (void)list_->Close();
+                return false;
+            }
+        } else if (!CopyProducedToReadback(list_.Get())) {
+            (void)session.Cancel();
+            (void)list_->Close();
+            return false;
+        }
     }
     if (FAILED(list_->Close()))
         return Fail(NeuralRenderFailure::Neural, "the consumer list would not close");
@@ -1880,10 +2192,16 @@ bool AmdLmxxfEvaluator::Submit(const OfflineDecodedFrame& frame, const FrameIden
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 
     if (capture) {
-        if (produced.size() != inputBytes)
+        // An upscaling capture reads back at the capture's size; the frame
+        // check is for the plain path, where the readback IS the frame.
+        const size_t readbackBytes = Upscaling()
+                                         ? static_cast<size_t>(upscaleWidth_) * upscaleHeight_ * 4u
+                                         : inputBytes;
+        if (produced.size() != readbackBytes)
             return Fail(NeuralRenderFailure::Neural,
                         "the readback is " + std::to_string(produced.size()) +
-                            " bytes, not the " + std::to_string(inputBytes) + " of the frame");
+                            " bytes, not the " + std::to_string(readbackBytes) +
+                            " the capture reads back");
         out.bgra = std::move(produced);
     }
     out.id = id;

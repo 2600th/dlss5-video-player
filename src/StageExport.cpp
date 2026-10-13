@@ -143,6 +143,7 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         request.amdSkinProtect=job.amdSkinProtect;
         request.amdMultiPassPredict=job.amdMultiPassPredict;
         request.amdMultiPassSkip=job.amdMultiPassSkip;
+        request.upscaleSharpness=job.upscaleSharpness;
         request.requireNeural=plan.requireNeural;
         request.backend=plan.backend;
         const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;

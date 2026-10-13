@@ -182,6 +182,10 @@ struct NeuralRenderRequest {
     // of a lighter, lower-contrast look in the later passes. Means something
     // only above one pass, so the key and the reuse decision say nothing there.
     bool amdMultiPassSkip{false};
+    // The CAS strength on an upscaled capture, 0..1 (AmdUpscaleShader.h). It
+    // means nothing at source size, where no stretch runs, and is forwarded
+    // only because the capture is made in the helper.
+    float upscaleSharpness{0.6f};
 };
 
 struct NeuralRenderProgress {

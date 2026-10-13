@@ -13350,6 +13350,8 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         if(!command.quality.empty())ParseEncoderQuality(command.quality,job.quality);
         job.sourceDeband=GetPrivateProfileIntW(L"Encoding",L"SourceDeband",0,settings.c_str())!=0;
         job.suppliedExposure=GetPrivateProfileIntW(L"Encoding",L"SuppliedExposure",0,settings.c_str())!=0;
+        // The upscaled capture's CAS strength, when the caller named one.
+        if(command.upscaleSharpness)job.upscaleSharpness=*command.upscaleSharpness;
         // The temporal rung: the command line's, or what this machine has saved
         // for the backend the plan runs on. Resolved here rather than at the
         // parse because the two backends do not share a default - Off on NVIDIA,

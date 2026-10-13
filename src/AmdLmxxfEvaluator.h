@@ -50,6 +50,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <utility>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -154,6 +155,20 @@ struct AmdLmxxfEvaluatorConfig {
     // it by name (kAmdDefaultStability in AmdLmxxfPolicy.h).
     TemporalStability stability{TemporalStability::Off};
 
+    // The capture size, when the export asked to upscale (UpscalingTarget's
+    // rungs; equal to the frame size when it did not). The runtime is a
+    // fixed-box denoiser and renders 1:1, so the capture is this evaluator's
+    // own pass over the runtime's output - a Catmull-Rom stretch and a CAS
+    // sharpen (AmdUpscaleShader.h) - rather than something the runtime is
+    // asked for. A capture SMALLER than the frame is still refused: that is
+    // not an upscale and the pass does not downsize.
+    uint32_t outputWidth{};
+    uint32_t outputHeight{};
+    // The CAS strength on the stretched frame, 0..1. 0 is the stretch alone;
+    // 1 is the official filter at full weight. It rides the draw as a constant
+    // rather than a bring-up fact, so it is not in the reuse question below.
+    float upscaleSharpness{0.6f};
+
     // Per-stage trace, for the smoke test and for a receipt. Empty disables it.
     std::function<void(std::string_view)> log;
 };
@@ -226,6 +241,17 @@ public:
     // frame that skipped it otherwise looks like one that did not.
     uint64_t AccumulationFrames() const noexcept { return accumulationFrames_; }
 
+    // The size the readback actually carries: the capture size when the job
+    // upscales, the frame size when it does not. The OfflineNeuralRenderer's
+    // settle check asks this of every evaluator that has it, so the AMD answer
+    // is always the size it was asked for - the pass imposes no ratio bound the
+    // way DLSS's input-to-output window does.
+    std::pair<uint32_t, uint32_t> OutputSize() const noexcept
+    {
+        return Upscaling() ? std::pair{upscaleWidth_, upscaleHeight_}
+                           : std::pair{width_, height_};
+    }
+
 private:
     // True when the session exists and every object the frame path needs does.
     bool Ready() const noexcept;
@@ -296,6 +322,13 @@ private:
     // readback buffer at the frame's own footprint, in `format`.
     void CopyTextureToReadback(ID3D12GraphicsCommandList* list, ID3D12Resource* from,
                                DXGI_FORMAT format);
+    // The stretch-and-sharpen the capture runs instead of that copy, when the
+    // job upscales. `from` must arrive in PIXEL_SHADER_RESOURCE and is put back
+    // in it; the readback is recorded from the sharpened target at the capture
+    // footprint.
+    bool RecordUpscale(ID3D12GraphicsCommandList* list, ID3D12Resource* from);
+    bool Upscaling() const noexcept { return upscaleWidth_ != 0 && upscaleHeight_ != 0; }
+    bool CreateUpscaleResources();
     // Maps the readback buffer and copies the frame out of it. Shared by both
     // call orders, which differ only in which list the copy was recorded into.
     bool ReadBackProduced(std::vector<uint8_t>& out);
@@ -383,6 +416,27 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> zeroMotion_;
     temporal_stability::History accumulationHistory_{};
     uint64_t accumulationFrames_{};
+
+    // ---- the upscale capture's own objects (config_.outputWidth/Height) ----
+    //
+    // Two targets because the two passes cannot share one: the CAS pass reads
+    // the stretch's own 3x3 neighbourhood, and reading and writing the same
+    // texture in one draw is a hazard no state can license. The per-frame SRV
+    // is here rather than in the accumulation's heap, because the accumulation
+    // builds its heap only when a rung is set and the stretch has to work with
+    // the rung off.
+    uint32_t upscaleWidth_{};
+    uint32_t upscaleHeight_{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> upscaleTarget_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> sharpenedTarget_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> upscaleRootSig_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> psoUpscale_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> psoCas_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> upscaleSrvHeap_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> upscaleRtvHeap_;
+    UINT upscaleSrvDescriptorSize_{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT outputFootprint_{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> outputReadback_;
 
     // The state the caller declared for color_ at the last RecordInputs and the
     // state the next transition must start from. The runtime reads the colour

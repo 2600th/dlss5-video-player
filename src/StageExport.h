@@ -116,6 +116,9 @@ struct StageExportJob {
     // Whether later passes skip the heavy block group; see
     // RenderSettings::amdMultiPassSkip in the player.
     bool amdMultiPassSkip{false};
+    // The CAS strength on an upscaled capture (AmdUpscaleShader.h). Only the
+    // command line names it today; the dialog's export leaves the default.
+    float upscaleSharpness{0.6f};
     // Super Resolution's history for an upscaling pass without the model; a pass
     // that runs the model keeps Temporal (CarrierUpscalingHistory).
     UpscalingHistory upscalingHistory{kRecommendedUpscalingHistory};

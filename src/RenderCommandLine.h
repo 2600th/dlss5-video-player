@@ -62,6 +62,9 @@ struct Command {
     // local tone and local structure 0..2 and colour strength 0..1. Empty
     // leaves the value the preset or the saved settings give.
     std::optional<int> passes;
+    // The CAS strength on an upscaled capture (AmdUpscaleShader.h). Empty uses
+    // the evaluator's default.
+    std::optional<float> upscaleSharpness;
     std::optional<float> intensity, localTone, localStructure, colorStrength;
     // Neural settings' Style: 0 Default, 1 Natural, 2 Cinematic (NRStyle). With
     // it a script can render with one style and render the result again with
@@ -202,6 +205,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     bool seenRender = false, seenRange = false, seenPreset = false, seenStages = false,
          seenHeight = false, seenMultiplier = false, seenOut = false, seenQuiet = false,
          seenScale = false, seenPasses = false, seenIntensity = false, seenTone = false,
+         seenSharpness = false,
          seenStructure = false, seenColor = false, seenEncode = false, seenHistory = false, seenEngine = false,
          seenStyle = false, seenBackend = false, seenStability = false;
     std::wstring_view presetName;
@@ -295,6 +299,9 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             const auto passes = ParseCount(value);
             if (!passes || *passes < 1 || *passes > 4) return bad(L"--passes takes 1, 2, 3 or 4.");
             command.passes = int(*passes);
+        } else if (argument == L"--upscale-sharpness") {
+            if (auto error = look(seenSharpness, command.upscaleSharpness, 1.0f))
+                return bad(std::move(*error));
         } else if (argument == L"--intensity") {
             if (auto error = look(seenIntensity, command.intensity, 2.0f)) return bad(std::move(*error));
         } else if (argument == L"--local-tone") {
@@ -416,11 +423,14 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     // through the worker pass, whose carrier already covers just that range.
     if (command.hasRange && !selection.upscale && !selection.neural)
         return bad(L"--range needs the sr or nr stage: frame generation alone converts the whole file.");
-    // The AMD runtime admits a fixed box and returns the frame at the size it was
-    // given, and it generates no frames at all. Said here, where a script can see
-    // why, rather than inside the worker after it has decoded a frame.
-    if (selection.backend == NeuralBackend::Amd && (selection.upscale || selection.frameGeneration))
-        return bad(L"--neural-backend amd runs the nr stage alone: it does not upscale and generates no frames.");
+    // The AMD runtime generates no frames at all, and its upscale is not the
+    // model's carrier but the capture's own stretch-and-sharpen
+    // (AmdUpscaleShader.h), which runs after the model inside the same job - so
+    // the sr stage is welcome, and only frame generation is refused. Said here,
+    // where a script can see why, rather than inside the worker after it has
+    // decoded a frame.
+    if (selection.backend == NeuralBackend::Amd && selection.frameGeneration)
+        return bad(L"--neural-backend amd generates no frames; drop the fg stage.");
     parsed.mode = Mode::Render;
     return parsed;
 }
@@ -466,6 +476,8 @@ inline std::wstring Usage()
         L"  --passes N         Neural passes for nr, 1 to 4, stacked by the add-on; each\n"
         L"                     costs one more model evaluation per frame. Default: the\n"
         L"                     preset's or the saved setting.\n"
+        L"  --upscale-sharpness X  The sharpening on an upscaled sr capture, 0 to 1; 0 is\n"
+        L"                     the stretch alone. Default: 0.6.\n"
         L"  --style S          Neural style for nr: default, natural (the strongest\n"
         L"                     change) or cinematic. Applies over --preset.\n"
         L"  --intensity X      nr intensity, 0 to 1; up to 2 is accepted and renders as 1,\n"

@@ -99,6 +99,46 @@ bool ParseUnsigned(std::wstring_view text, uint64_t& value)
     return true;
 }
 
+// The one float the command line carries, written and read back through the
+// same fixed-point shape: three decimals, no exponent, no locale. A value that
+// does not round-trip through this form is refused rather than re-rounded,
+// because the parent wrote it from its own float and a silent drift here would
+// be a different picture than the one the caller asked for.
+bool ParseFloat(std::wstring_view text, float& value)
+{
+    uint64_t whole = 0, fraction = 0;
+    uint64_t scale = 1;
+    bool afterPoint = false;
+    if (text.empty()) return false;
+    for (const wchar_t character : text) {
+        if (character == L'.') {
+            if (afterPoint) return false;
+            afterPoint = true;
+            continue;
+        }
+        if (character < L'0' || character > L'9') return false;
+        const uint64_t digit = static_cast<uint64_t>(character - L'0');
+        if (!afterPoint) {
+            whole = whole * 10u + digit;
+        } else {
+            if (scale >= 1000u) return false;
+            fraction = fraction * 10u + digit;
+            scale *= 10u;
+        }
+    }
+    value = static_cast<float>(whole) + static_cast<float>(fraction) / static_cast<float>(scale);
+    return true;
+}
+
+std::wstring WideFromFloat(float value)
+{
+    // Three decimals is the parser's own resolution; anything past it is below
+    // the eighth of a code the filter moves.
+    wchar_t text[16]{};
+    std::swprintf(text, 16, L"%.3f", static_cast<double>(value));
+    return std::wstring(text);
+}
+
 bool ParseDouble(std::wstring_view text, double& value)
 {
     if (text.empty() || text.size() >= 128) return false;
@@ -1338,6 +1378,8 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(request.amdMultiPassPredict ? L"1" : L"0");
         arguments.emplace_back(L"--amd-mp-skip");
         arguments.emplace_back(request.amdMultiPassSkip ? L"1" : L"0");
+        arguments.emplace_back(L"--upscale-sharpness");
+        arguments.emplace_back(WideFromFloat(request.upscaleSharpness));
     }
     // Absent means 100, the source size, which is every job before the rungs.
     if (request.processingScale != kDefaultProcessingScale) {
@@ -1478,7 +1520,8 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
                CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, NeuralBackendKey,
-               AmdRuntimeDirectoryKey, AmdPassesKey, AmdSkinProtectKey, AmdPredictKey, AmdLaterPassSkipKey, KeyCount };
+               AmdRuntimeDirectoryKey, AmdPassesKey, AmdSkinProtectKey, AmdPredictKey, AmdLaterPassSkipKey,
+    UpscaleSharpnessKey, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1521,7 +1564,9 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // runtime's built-in default (no skip) has to be reachable from the
         // command line so a hand-edited list cannot outlive the panel saying
         // off - the empty value the writer would put is not a number.
-        L"--amd-mp-skip"};
+        L"--amd-mp-skip",
+        // The capture's CAS strength, forwarded whenever the caller named it.
+        L"--upscale-sharpness"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1673,6 +1718,13 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         uint64_t on = 0;
         if (!ParseUnsigned(*values[AmdLaterPassSkipKey], on) || on > 1) return std::nullopt;
         request.amdMultiPassSkip = on != 0;
+    }
+    if (values[UpscaleSharpnessKey]) {
+        float sharpness = 0.0f;
+        if (!ParseFloat(*values[UpscaleSharpnessKey], sharpness) ||
+            !std::isfinite(sharpness) || sharpness < 0.0f || sharpness > 1.0f)
+            return std::nullopt;
+        request.upscaleSharpness = sharpness;
     }
     if (values[ProcessingScale]) {
         uint64_t percent = 0;

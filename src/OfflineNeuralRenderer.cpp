@@ -2890,6 +2890,8 @@ struct AmdLmxxfEvaluatorAdapter {
     bool broughtUpSkinProtect{false};
     bool broughtUpPredict{true};
     bool broughtUpSkip{false};
+    uint32_t broughtUpOutputW{},broughtUpOutputH{};
+    uint32_t jobOutputW{},jobOutputH{};
     uint32_t jobPasses{1};
     bool jobSkinProtect{false};
     bool jobPredict{true};
@@ -2916,14 +2918,16 @@ struct AmdLmxxfEvaluatorAdapter {
     bool Initialize(HWND,uint32_t w,uint32_t h,uint32_t ow,uint32_t oh,double fps,
                     const GuideControls& guides,PixelLayout,const SourceColorDescription&){
         if(!ow||!oh){ow=w;oh=h;}
+        jobOutputW=ow;jobOutputH=oh;
         // The guides are per-frame inputs on this path rather than bring-up
-        // state, and there is no upscale, so the size, the job model, the
-        // accumulation rung and the pass count are the whole inheritance
-        // question and a match on all four means there is nothing to rebuild.
+        // state, so the size, the capture size, the job model, the accumulation
+        // rung and the pass count are the whole inheritance question and a
+        // match on all of them means there is nothing to rebuild.
         reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory&&
                broughtUpStability==config.stability&&broughtUpPasses==jobPasses&&
                broughtUpSkinProtect==jobSkinProtect&&broughtUpPredict==jobPredict&&
-               broughtUpSkip==jobSkip;
+               broughtUpSkip==jobSkip&&broughtUpOutputW==jobOutputW&&
+               broughtUpOutputH==jobOutputH;
         if(reused)return true;
         captured.clear();
         evaluator=std::make_unique<AmdLmxxfEvaluator>(config);
@@ -2933,6 +2937,8 @@ struct AmdLmxxfEvaluatorAdapter {
         broughtUpSkinProtect=jobSkinProtect;
         broughtUpPredict=jobPredict;
         broughtUpSkip=jobSkip;
+        broughtUpOutputW=jobOutputW;
+        broughtUpOutputH=jobOutputH;
         if(evaluator->Initialize(nullptr,w,h,ow,oh,fps,guides))return true;
         broughtUpFailure=evaluator->LastFailure();
         LOG("AMD neural runtime did not come up for "<<w<<"x"<<h<<": "<<evaluator->LastError());
@@ -3647,19 +3653,18 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
                                                    const NeuralSegmentSink& segments,
                                                    NeuralColdStartCallback coldStart)
 {
-    // The two things this backend cannot do, refused before a device comes up
-    // rather than after. The runtime admits a fixed box and returns the frame at
-    // the size it was given, so an upscale is not something it can be asked for,
-    // and a processing-scale reduction would be silently ignored - which is the
-    // one failure mode this codebase refuses to have.
+    // The one thing this backend cannot do is render below 100% processing
+    // scale: a reduced model input would be silently ignored, which is the one
+    // failure mode this codebase refuses to have. An upscale is the opposite
+    // case - the runtime still renders 1:1, and the capture is the evaluator's
+    // own stretch-and-sharpen pass (AmdUpscaleShader.h), so the output size
+    // travels into the config below and the capture machinery refuses anything
+    // that is not a grow.
     if(request.processingScale!=100)
         return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
             .detail=L"The AMD backend runs the model at the source size; a processing scale below 100 is not implemented for it."};
     const uint32_t outputWidth=request.outputWidth?request.outputWidth:request.width;
     const uint32_t outputHeight=request.outputHeight?request.outputHeight:request.height;
-    if(outputWidth!=request.width||outputHeight!=request.height)
-        return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
-            .detail=L"The AMD backend does not upscale; an output larger than the source is not implemented for it."};
 
     // The job goes to RunJob unchanged. It used to go as a copy with
     // requireNeural cleared, which switched NVIDIA's receipt verdicts off - and
@@ -3671,6 +3676,13 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // NeuralRenderJob.
     state.amdEvaluator.config.runtimeDirectory=
         amd_lmxxf::ResolveRuntimeDirectory(request.amdRuntimeDirectory);
+    // The capture size and the CAS strength the export asked for. The runtime
+    // still renders 1:1; the evaluator stretches its output and reads the
+    // capture back, so the encoder and the metrics see exactly the size the
+    // caller named.
+    state.amdEvaluator.config.outputWidth=outputWidth;
+    state.amdEvaluator.config.outputHeight=outputHeight;
+    state.amdEvaluator.config.upscaleSharpness=request.upscaleSharpness;
     // The pass count is the RUNTIME's, and the runtime reads it from its own
     // configuration file once per process, when the network is built - which is
     // below this point. Written here rather than in the player's job setup
