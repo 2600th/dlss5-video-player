@@ -9,41 +9,72 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-// Optical flow as coarse block matching. One thread per BLOCKxBlock tile; it
-// slides a +/-SEARCH window over the current frame and keeps the displacement
-// whose block best matches the previous frame's block (SAD over a 2x2
-// subsample). The output is one R16G16_FLOAT vector per block, in pixels:
+// Optical flow as coarse block matching. One 8x8 THREAD GROUP per BLOCKxBLOCK
+// tile: the group splits the +/-SEARCH window across its 64 threads, each
+// measures a strided subset of the candidate displacements, and a groupshared
+// reduction picks the winner. A thread per tile (what this started as) left the
+// machine 98% idle - one thread cannot cover a texture fetch's latency, and
+// this shader is nothing but texture fetches.
+//
+// The output is one R16G16_FLOAT vector per block, in pixels:
 // curr(origin + mv) ~= prev(origin), i.e. curr(p) = prev(p - mv).
 constexpr char kFlowHlsl[] = R"hlsl(
 cbuffer Params : register(b0) { uint gW; uint gH; uint gBlock; uint gSearch; };
 Texture2D<float4> Prev : register(t0);
 Texture2D<float4> Curr : register(t1);
 RWTexture2D<float2> Flow : register(u0);
-[numthreads(1, 1, 1)]
-void main(uint3 gid : SV_DispatchThreadID) {
+
+// The reduction's scratch, one slot per thread in the group.
+groupshared float sSad[64];
+groupshared int   sDx[64];
+groupshared int   sDy[64];
+
+[numthreads(8, 8, 1)]
+void main(uint3 groupId : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     int bw = (int)gW, bh = (int)gH;
-    int originX = (int)gid.x * (int)gBlock;
-    int originY = (int)gid.y * (int)gBlock;
+    int originX = (int)groupId.x * (int)gBlock;
+    int originY = (int)groupId.y * (int)gBlock;
     if (originX >= bw || originY >= bh) return;
+
     int search = (int)gSearch;
+    int span = 2 * search + 1;
+    int total = span * span;
+    int tid = (int)lid.y * 8 + (int)lid.x;
+
     float bestSAD = 1e30f; int bestdx = 0, bestdy = 0;
-    for (int dy = -search; dy <= search; ++dy) {
-        for (int dx = -search; dx <= search; ++dx) {
-            float sad = 0.0f;
-            for (int sy = 0; sy < (int)gBlock; sy += 2) {
-                for (int sx = 0; sx < (int)gBlock; sx += 2) {
-                    int px = originX + sx, py = originY + sy;
-                    int qx = px + dx, qy = py + dy;
-                    if (qx < 0 || qy < 0 || qx >= bw || qy >= bh) { sad += 1e9f; continue; }
-                    float3 a = Prev[int2(px, py)].rgb;
-                    float3 b = Curr[int2(qx, qy)].rgb;
-                    sad += abs(a.r - b.r) + abs(a.g - b.g) + abs(a.b - b.b);
-                }
+    for (int i = tid; i < total; i += 64) {
+        int dy = i / span - search;
+        int dx = i % span - search;
+        float sad = 0.0f;
+        // Every term is a non-negative difference, so a partial sum that
+        // already exceeds this thread's best cannot win: the candidate is
+        // abandoned the moment it is hopeless.
+        for (int sy = 0; sy < (int)gBlock; sy += 2) {
+            for (int sx = 0; sx < (int)gBlock; sx += 2) {
+                int px = originX + sx, py = originY + sy;
+                int qx = px + dx, qy = py + dy;
+                if (qx < 0 || qy < 0 || qx >= bw || qy >= bh) { sad += 1e9f; break; }
+                float3 a = Prev[int2(px, py)].rgb;
+                float3 b = Curr[int2(qx, qy)].rgb;
+                sad += abs(a.r - b.r) + abs(a.g - b.g) + abs(a.b - b.b);
+                if (sad >= bestSAD) break;
             }
-            if (sad < bestSAD) { bestSAD = sad; bestdx = dx; bestdy = dy; }
+            if (sad >= bestSAD) break;
         }
+        if (sad < bestSAD) { bestSAD = sad; bestdx = dx; bestdy = dy; }
     }
-    Flow[int2((int)gid.x, (int)gid.y)] = float2((float)bestdx, (float)bestdy);
+
+    sSad[tid] = bestSAD; sDx[tid] = bestdx; sDy[tid] = bestdy;
+    GroupMemoryBarrierWithGroupSync();
+    for (int stride = 32; stride > 0; stride >>= 1) {
+        if (tid < stride && sSad[tid + stride] < sSad[tid]) {
+            sSad[tid] = sSad[tid + stride];
+            sDx[tid] = sDx[tid + stride];
+            sDy[tid] = sDy[tid + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (tid == 0) Flow[int2((int)groupId.x, (int)groupId.y)] = float2((float)sDx[0], (float)sDy[0]);
 }
 )hlsl";
 
