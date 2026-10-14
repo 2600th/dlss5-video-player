@@ -1,5 +1,8 @@
 #include "AmdFrameGenBackend.h"
 
+#include "FrameGenBlendShader.h"
+#include "FrameGenFlowShader.h"
+
 #include <d3dcompiler.h>
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -9,114 +12,11 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-// Optical flow as coarse block matching. One 8x8 THREAD GROUP per BLOCKxBLOCK
-// tile: the group splits the +/-SEARCH window across its 64 threads, each
-// measures a strided subset of the candidate displacements, and a groupshared
-// reduction picks the winner. A thread per tile (what this started as) left the
-// machine 98% idle - one thread cannot cover a texture fetch's latency, and
-// this shader is nothing but texture fetches.
-//
-// The output is one R16G16_FLOAT vector per block, in pixels:
-// curr(origin + mv) ~= prev(origin), i.e. curr(p) = prev(p - mv).
-constexpr char kFlowHlsl[] = R"hlsl(
-cbuffer Params : register(b0) { uint gW; uint gH; uint gBlock; uint gSearch; };
-Texture2D<float4> Prev : register(t0);
-Texture2D<float4> Curr : register(t1);
-RWTexture2D<float2> Flow : register(u0);
-
-// The reduction's scratch, one slot per thread in the group.
-groupshared float sSad[64];
-groupshared int   sDx[64];
-groupshared int   sDy[64];
-
-[numthreads(8, 8, 1)]
-void main(uint3 groupId : SV_GroupID, uint3 lid : SV_GroupThreadID) {
-    int bw = (int)gW, bh = (int)gH;
-    int originX = (int)groupId.x * (int)gBlock;
-    int originY = (int)groupId.y * (int)gBlock;
-    if (originX >= bw || originY >= bh) return;
-
-    int search = (int)gSearch;
-    int span = 2 * search + 1;
-    int total = span * span;
-    int tid = (int)lid.y * 8 + (int)lid.x;
-
-    float bestSAD = 1e30f; int bestdx = 0, bestdy = 0;
-    for (int i = tid; i < total; i += 64) {
-        int dy = i / span - search;
-        int dx = i % span - search;
-        float sad = 0.0f;
-        // Every term is a non-negative difference, so a partial sum that
-        // already exceeds this thread's best cannot win: the candidate is
-        // abandoned the moment it is hopeless.
-        for (int sy = 0; sy < (int)gBlock; sy += 2) {
-            for (int sx = 0; sx < (int)gBlock; sx += 2) {
-                int px = originX + sx, py = originY + sy;
-                int qx = px + dx, qy = py + dy;
-                if (qx < 0 || qy < 0 || qx >= bw || qy >= bh) { sad += 1e9f; break; }
-                float3 a = Prev[int2(px, py)].rgb;
-                float3 b = Curr[int2(qx, qy)].rgb;
-                sad += abs(a.r - b.r) + abs(a.g - b.g) + abs(a.b - b.b);
-                if (sad >= bestSAD) break;
-            }
-            if (sad >= bestSAD) break;
-        }
-        if (sad < bestSAD) { bestSAD = sad; bestdx = dx; bestdy = dy; }
-    }
-
-    sSad[tid] = bestSAD; sDx[tid] = bestdx; sDy[tid] = bestdy;
-    GroupMemoryBarrierWithGroupSync();
-    for (int stride = 32; stride > 0; stride >>= 1) {
-        if (tid < stride && sSad[tid + stride] < sSad[tid]) {
-            sSad[tid] = sSad[tid + stride];
-            sDx[tid] = sDx[tid + stride];
-            sDy[tid] = sDy[tid + stride];
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (tid == 0) Flow[int2((int)groupId.x, (int)groupId.y)] = float2((float)sDx[0], (float)sDy[0]);
-}
-)hlsl";
-
-// Warp + blend. The previous frame's content advances by mv per frame, so at
-// time t the point now at p was at p - t*mv in the previous frame and at
-// p + (1-t)*mv in the current one. We sample both and average. Occlusions (a
-// coordinate landing outside the frame) are clamped by the bilinear helper, so
-// they fade toward the nearer frame rather than sampling garbage.
-constexpr char kBlendHlsl[] = R"hlsl(
-cbuffer Params : register(b0) { uint gW; uint gH; uint gBlock; uint gTBits; };
-Texture2D<float4> Prev : register(t0);
-Texture2D<float4> Curr : register(t1);
-Texture2D<float2> Flow : register(t2);
-RWTexture2D<float4> Out : register(u0);
-float4 sampleClamped(Texture2D<float4> tex, int x, int y, int w, int h) {
-    x = clamp(x, 0, w - 1); y = clamp(y, 0, h - 1);
-    return tex[int2(x, y)];
-}
-float4 bilinear(Texture2D<float4> tex, float2 p, int w, int h) {
-    float2 f = p - 0.5f;
-    float2 fl = floor(f);
-    float2 t = f - fl;
-    int x0 = (int)fl.x, y0 = (int)fl.y;
-    int x1 = x0 + 1, y1 = y0 + 1;
-    float4 s00 = sampleClamped(tex, x0, y0, w, h);
-    float4 s10 = sampleClamped(tex, x1, y0, w, h);
-    float4 s01 = sampleClamped(tex, x0, y1, w, h);
-    float4 s11 = sampleClamped(tex, x1, y1, w, h);
-    return lerp(lerp(s00, s10, t.x), lerp(s01, s11, t.x), t.y);
-}
-[numthreads(8, 8, 1)]
-void main(uint3 gid : SV_DispatchThreadID) {
-    int x = (int)gid.x, y = (int)gid.y;
-    if (x >= (int)gW || y >= (int)gH) return;
-    int bx = x / (int)gBlock, by = y / (int)gBlock;
-    float2 mv = Flow[int2(bx, by)];
-    float t = asfloat(gTBits);
-    float3 pW = bilinear(Prev, float2((float)x, (float)y) - t * mv, (int)gW, (int)gH).rgb;
-    float3 cW = bilinear(Curr, float2((float)x, (float)y) + (1.0f - t) * mv, (int)gW, (int)gH).rgb;
-    Out[int2(x, y)] = float4(0.5f * (pW + cW), 1.0f);
-}
-)hlsl";
+// The matcher and the blend are both shared with the playback renderer now: one
+// implementation each, two consumers. This build's blend is the per-tile one,
+// because the matcher writes one displacement per tile.
+constexpr const char* const kFlowHlsl = frame_gen_flow::kHlsl;
+constexpr const char* const kBlendHlsl = frame_gen_blend::kHlsl;
 
 // ASCII (the only thing shader compilers and D3DCompile diagnostics ever emit)
 // to a wide diagnostic string without dragging <locale> or a code-page guess in.
@@ -330,7 +230,8 @@ bool AmdFrameGenBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandL
 bool AmdFrameGenBackend::Evaluate(ID3D12GraphicsCommandList* cmd, ID3D12Resource* backbuffer,
                                   ID3D12Resource* /*motion*/, ID3D12Resource* /*depth*/,
                                   ID3D12Resource* outputInterpolated, uint32_t multiFrameCount,
-                                  uint32_t multiFrameIndex, bool reset, uint64_t /*backbufferFrameId*/)
+                                  uint32_t multiFrameIndex, bool reset, uint64_t /*backbufferFrameId*/,
+                                  float /*frameTimeMs*/)
 {
     if (!m_initialized) {
         Fail(0x8000'0020u, L"Optical-flow backend used before Initialize.");

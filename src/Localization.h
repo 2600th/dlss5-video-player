@@ -67,6 +67,7 @@ private:
             {L"compare.tag.difference", L"DIFFERENCE"}, {L"compare.tag.mix", L"MIX"}, {L"compare.tag.luma", L"LUMA"}, {L"compare.tag.color", L"COLOR"},
             {L"menu.final", L"Final image\t1"}, {L"menu.input", L"DLSS input\t2"}, {L"menu.mv", L"Motion vectors\t3"},
             {L"menu.depth", L"Depth\t4"}, {L"menu.fullscreen", L"Fullscreen\tF11"},
+            {L"menu.generated", L"Generated frame\t5"},
             {L"menu.dlss", L"DLSS"}, {L"menu.neural_rendering", L"Neural Rendering\tD"},
         {L"menu.dlss_upscaling", L"DLSS Upscaling"},
         {L"menu.rtx_vsr_upscaling", L"RTX VSR Upscaling (recommended)"},

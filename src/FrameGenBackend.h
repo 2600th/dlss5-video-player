@@ -38,7 +38,11 @@ public:
     // a backend that derives its own motion may ignore them. `reset` breaks
     // temporal continuity (first frame, scene cut): the backend should store
     // `backbuffer` as its history and produce no real in-between. `backbufferFrameId`
-    // is a per-source-frame counter some runtimes want.
+    // is a per-source-frame counter some runtimes want. `frameTimeMs` is the real
+    // interval between the two source frames; 0 lets the backend assume a
+    // synthetic 60 fps source. FidelityFX scales its motion estimate by this, so
+    // a wrong value slides the intermediate frame to the wrong place - the
+    // playback chain measures it off the decode timestamps.
     virtual bool Evaluate(ID3D12GraphicsCommandList* cmd,
                           ID3D12Resource* backbuffer,
                           ID3D12Resource* motion,
@@ -47,7 +51,8 @@ public:
                           uint32_t multiFrameCount,
                           uint32_t multiFrameIndex,
                           bool reset,
-                          uint64_t backbufferFrameId = 0) = 0;
+                          uint64_t backbufferFrameId = 0,
+                          float frameTimeMs = 0.0f) = 0;
 
     virtual uint64_t EvaluationCount() const = 0;
     // The runtime's own ceiling on generated frames per source pair; the largest

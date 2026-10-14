@@ -39,10 +39,11 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
     AppendMenuW(menu, MF_STRING, IDM_VIEW_INPUT, L"DLSS input\t2");
     AppendMenuW(menu, MF_STRING, IDM_VIEW_MV, L"Motion vectors\t3");
     AppendMenuW(menu, MF_STRING, IDM_VIEW_DEPTH, L"Depth\t4");
-    if (selectedCommand < IDM_VIEW_FINAL || selectedCommand > IDM_VIEW_DEPTH) {
+    AppendMenuW(menu, MF_STRING, IDM_VIEW_FRAME_GENERATED, L"Generated frame\t5");
+    if (selectedCommand < IDM_VIEW_FINAL || selectedCommand > IDM_VIEW_FRAME_GENERATED) {
         selectedCommand = IDM_VIEW_FINAL;
     }
-    CheckMenuRadioItem(menu, IDM_VIEW_FINAL, IDM_VIEW_DEPTH, selectedCommand, MF_BYCOMMAND);
+    CheckMenuRadioItem(menu, IDM_VIEW_FINAL, IDM_VIEW_FRAME_GENERATED, selectedCommand, MF_BYCOMMAND);
     return menu;
 }
 
@@ -164,6 +165,7 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(compare), compareName.c_str());
     add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input");
     add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth");
+    add(video, IDM_VIEW_FRAME_GENERATED, L"menu.generated");
     // The DLSS menu, grouped one feature per block.
     //
     // Microsoft's own menu guidance is the measure here: separators between

@@ -65,6 +65,10 @@ inline constexpr UINT IDM_VIEW_FINAL = 302;
 inline constexpr UINT IDM_VIEW_INPUT = 303;
 inline constexpr UINT IDM_VIEW_MV = 304;
 inline constexpr UINT IDM_VIEW_DEPTH = 305;
+// The playback frame generator's interpolated frame, last in the same radio
+// group. 306 continues that group directly, so the View submenu stays one
+// contiguous run and the radio check below can span it without a special case.
+inline constexpr UINT IDM_VIEW_FRAME_GENERATED = 306;
 inline constexpr UINT IDM_DLSS_UPSCALING = 308;
 inline constexpr UINT IDM_FRAME_GENERATION = 309;
 inline constexpr UINT IDM_PREVIEW_FRAME = 310;

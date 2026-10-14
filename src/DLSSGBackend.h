@@ -118,7 +118,7 @@ public:
                   uint32_t multiFrameCount,
                   uint32_t multiFrameIndex,
                   bool reset,
-                  uint64_t backbufferFrameId = 0) override;
+                  uint64_t backbufferFrameId = 0, float frameTimeMs = 0.0f) override;
     uint64_t EvaluationCount() const override { return m_evaluations; }
     bool FeatureCreated() const override { return m_handle != nullptr; }
     // DLSSG.MultiFrameCountMax as the runtime reported it to Initialize: the

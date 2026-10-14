@@ -1,5 +1,6 @@
 #include "MediaPipeline.h"
 #include "ExportPipeline.h"
+#include "ChildStderrTail.h"
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 #include "KillOnCloseJob.h"
@@ -204,11 +205,21 @@ struct ChildProcess {
     HANDLE process{};
     HANDLE job{};
     HANDLE stdinWrite{};
+    // The child's stderr, drained on a thread of its own and kept as a tail.
+    // The encoder children were spawned with hStdError=nullptr, so a child that
+    // died mid-pipe ("the encoder stopped accepting frames") left no reason
+    // behind - measured on the offline frame-generation pass, where the encode
+    // ffmpeg exits after a handful of frames with nothing said about why. The
+    // drain thread exists because a chatty child whose stderr nobody reads
+    // blocks on the write and stops consuming stdin, which is a worse failure
+    // than the one this explains (ChildStderrTail.h says the same).
+    ChildStderrTail stderrTail;
 
     ~ChildProcess() { Stop(); }
 
     void Stop()
     {
+        stderrTail.Stop();
         if (stdinWrite) { CloseHandle(stdinWrite); stdinWrite = nullptr; }
         if (process) {
             if (WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
@@ -220,6 +231,23 @@ struct ChildProcess {
         }
         if (job) { CloseHandle(job); job = nullptr; }
     }
+
+    // The child's exit code, or nullopt while it still runs. Asked before the
+    // handles are closed: Stop() closes the process handle, and the code is
+    // the first half of why a pipe write failed.
+    std::optional<DWORD> ExitCodeIfDead() const
+    {
+        if (!process) return std::nullopt;
+        if (WaitForSingleObject(process, 0) != WAIT_OBJECT_0) return std::nullopt;
+        DWORD code = 0;
+        if (!GetExitCodeProcess(process, &code)) return std::nullopt;
+        return code;
+    }
+
+    // What the child last wrote to stderr, after a short wait for the tail of
+    // it to arrive. A dead child has closed its end, so the drain ends
+    // promptly; the wait only bounds a grandchild that inherited the handle.
+    std::string CollectStderr(DWORD waitMs = 250) { return stderrTail.Collect(waitMs); }
 
     bool Start(const std::filesystem::path& executable,
                const std::vector<std::wstring>& arguments, bool pipeInput)
@@ -245,11 +273,17 @@ struct ChildProcess {
         STARTUPINFOEXW startup{};
         startup.StartupInfo.cb = sizeof(startup);
         std::vector<uint8_t> attributes;
+        // The stderr pipe's inheritable write end, when one could be made.
+        // nullptr keeps the old behaviour (no stderr at all) rather than
+        // failing the spawn over a diagnostic.
+        HANDLE errorWrite = nullptr;
         if (pipeInput) {
+            SECURITY_ATTRIBUTES errorSecurity{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+            errorWrite = stderrTail.Open(errorSecurity);
             startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
             startup.StartupInfo.hStdInput = stdinRead;
             startup.StartupInfo.hStdOutput = nullptr;
-            startup.StartupInfo.hStdError = nullptr;
+            startup.StartupInfo.hStdError = errorWrite;
             SIZE_T attributeBytes = 0;
             InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
             if (attributeBytes == 0) {
@@ -257,13 +291,17 @@ struct ChildProcess {
             }
             attributes.resize(attributeBytes);
             startup.lpAttributeList = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
-            HANDLE inherited = stdinRead;
+            // Both handles the child is meant to have: its stdin and its
+            // stderr. The explicit list is what makes exactly these inheritable
+            // and nothing else.
+            HANDLE inherited[2] = {stdinRead, errorWrite};
+            const SIZE_T inheritCount = errorWrite ? 2 : 1;
             if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0,
                                                    &attributeBytes)) {
                 CloseHandle(stdinRead); Stop(); return false;
             }
             if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0,
-                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inherited, sizeof(inherited),
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(HANDLE) * inheritCount,
                     nullptr, nullptr)) {
                 DeleteProcThreadAttributeList(startup.lpAttributeList);
                 CloseHandle(stdinRead); Stop(); return false;
@@ -279,6 +317,10 @@ struct ChildProcess {
         if (startup.lpAttributeList) DeleteProcThreadAttributeList(startup.lpAttributeList);
         if (stdinRead) CloseHandle(stdinRead);
         if (!created) { Stop(); return false; }
+        // Drops this process's copy of the stderr write end and starts the
+        // drain, whatever the outcome: a child that never started has nothing
+        // to drain, which Start() settles on its own.
+        stderrTail.Start(created != FALSE);
         process = info.hProcess;
         if (!AssignProcessToJobObject(job, process)) {
             TerminateProcess(process, 1); CloseHandle(info.hThread); Stop(); return false;
@@ -1171,12 +1213,44 @@ struct RawVideoEncoder::Impl {
     size_t frameBytes{};
     ChildProcess process;
     bool active{};
+    // Why the child last went away: its exit code and the tail of its stderr,
+    // collected at the failure rather than after Cancel() closes the handles.
+    // "The encoder stopped accepting frames" on its own sent the last
+    // investigation in circles - the child had exited long before the write
+    // that noticed, and nothing it said survived the spawn.
+    std::string lastChildDetail;
+
+    // Why the child went away, in one line: its exit code when it has one,
+    // then the tail of its stderr. Called while the child's handles are still
+    // open - Cancel() closes the process handle, and the code is the first
+    // half of the answer. A child that is somehow still running says so
+    // instead of guessing a code.
+    std::string DescribeFailure(std::optional<DWORD> knownExitCode = std::nullopt)
+    {
+        std::string detail;
+        const std::optional<DWORD> code = knownExitCode ? knownExitCode : process.ExitCodeIfDead();
+        if (code) {
+            detail = "the encoder child exited with code " + std::to_string(*code);
+        } else if (process.process) {
+            detail = "the encoder child is still running";
+        }
+        // Not "stderr": the UCRT defines stderr as a macro (a FILE*), so a local
+        // of that name is macro-expanded and fails to compile.
+        const std::string childStderr = process.CollectStderr(250);
+        if (!childStderr.empty()) {
+            if (!detail.empty()) detail += "; ";
+            detail += "its stderr ended with: " + ChildStderrTail::ForLog(childStderr, "");
+        }
+        return detail;
+    }
 };
 
 RawVideoEncoder::RawVideoEncoder(std::filesystem::path helperDirectory)
     : impl_(std::make_unique<Impl>(std::move(helperDirectory))) {}
 
 RawVideoEncoder::~RawVideoEncoder() { Cancel(); }
+
+const std::string& RawVideoEncoder::LastChildDetail() const { return impl_->lastChildDetail; }
 
 EncodeError RawVideoEncoder::Start(const EncoderSpec& spec,
                                    const std::filesystem::path& output)
@@ -1186,8 +1260,14 @@ EncodeError RawVideoEncoder::Start(const EncoderSpec& spec,
     if (bytes == 0 || output.empty()) return EncodeError::InvalidSpecification;
     const auto ffmpeg = FindHelper(impl_->helperDirectory, L"ffmpeg.exe");
     if (ffmpeg.empty()) return EncodeError::HelperMissing;
-    if (!impl_->process.Start(ffmpeg, BuildEncoderArguments(spec, output), true))
+    if (!impl_->process.Start(ffmpeg, BuildEncoderArguments(spec, output), true)) {
+        // The child never ran, or ran and left before the first frame: NVENC
+        // on a machine with no CUDA is exactly that, and it is the reason a
+        // write can fail on frame one. Collected here because Start's Cancel
+        // has already closed the handles.
+        impl_->lastChildDetail = impl_->DescribeFailure();
         return EncodeError::StartFailed;
+    }
     impl_->spec = spec;
     impl_->output = output;
     impl_->frameBytes = bytes;
@@ -1218,6 +1298,12 @@ EncodeError RawVideoEncoder::WriteFrame(std::span<const uint8_t> bgra, std::stop
         DWORD written = 0;
         if (!WriteFile(impl_->process.stdinWrite, bgra.data() + offset, wanted, &written, nullptr) ||
             written == 0) {
+            // A pipe write fails when the reader is gone, which means the child
+            // exited - and it exited on its own schedule, usually long before
+            // this write. Its exit code and the tail of its stderr are the
+            // whole story of why, and they are only readable while the handles
+            // are still open, so they are collected before Cancel().
+            impl_->lastChildDetail = impl_->DescribeFailure();
             Cancel();
             return stop.stop_requested() ? EncodeError::Cancelled : EncodeError::WriteFailed;
         }
@@ -1238,6 +1324,10 @@ EncodeError RawVideoEncoder::Finish(std::stop_token stop)
     const DWORD exitCode = impl_->process.Wait(stop, cancelled);
     impl_->active = false;
     if (cancelled) return EncodeError::Cancelled;
+    // A nonzero exit with the file in place is the child's own account of a
+    // failed mux; it goes out with the error, because "did not finish" and
+    // "finished short" need different fixes.
+    if (exitCode != 0) impl_->lastChildDetail = impl_->DescribeFailure(exitCode);
     std::error_code error;
     if (exitCode != 0 || !std::filesystem::is_regular_file(impl_->output, error) || error)
         return EncodeError::FinishFailed;

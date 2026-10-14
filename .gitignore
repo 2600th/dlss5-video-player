@@ -1,6 +1,9 @@
 # Build output
 /build*/
 /out/
+# A staged runnable copy of the player (exe + ffmpeg + neural-runtime/), assembled
+# by hand for testing on this machine - never a source deliverable.
+/run-fg/
 /CMakeFiles/
 /CMakeCache.txt
 /cmake_install.cmake

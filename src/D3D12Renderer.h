@@ -11,6 +11,8 @@
 #include <vector>
 #include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
+#include "FrameGenBackend.h"
+#include "FsrFrameGenBackend.h"
 #include "PixelLayout.h"
 #include "MediaSource.h"
 #include "FrameIdentity.h"
@@ -293,7 +295,7 @@ inline bool ComparisonNeedsCompositor(const ComparisonSettings& comparison)
 class D3D12Renderer {
 public:
     D3D12Renderer()=default;
-    enum class DebugView { Final, Input, MotionVectors, Depth };
+    enum class DebugView { Final, Input, MotionVectors, Depth, FrameGenerated };
 
     struct ColorSettings {
         float brightness = 0.0f;   // exposure-like brightness, in stops (-2..+2)
@@ -644,6 +646,10 @@ public:
     uint32_t OutputH() const { return m_outputH; }
     void SetDebugView(DebugView v) { m_debugView = v; m_presentStale = true; }
     DebugView GetDebugView() const { return m_debugView; }
+    // Playback frame generation (cadence doubling). Meaningful only when the
+    // FidelityFX island came up; the call is harmless when it did not.
+    void SetPlaybackFrameGeneration(bool on) { m_playbackFrameGen = on; }
+    bool PlaybackFrameGeneration() const { return m_playbackFrameGen; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
     bool DLSSFeatureCreated() const { return m_dlss.FeatureCreated(); }
     uint64_t DLSSEvaluations() const { return m_dlss.EvaluationCount(); }
@@ -844,7 +850,12 @@ private:
     // of the source-size texture, which is why the whole zoom/pan/compositor
     // chain above it does not have to know a second geometry exists.
     static constexpr uint32_t UpscaleSRV = VsrSRV + 1;
-    static constexpr uint32_t SRVCount = UpscaleSRV + 1;
+    // The interpolated frame the playback blend writes (t8): a null view until
+    // the first frame generation runs. The present pass samples it in place of
+    // the source when DebugView::FrameGenerated is selected, so the intermediate
+    // can be looked at without a second window or an export.
+    static constexpr uint32_t GeneratedFrameSRV = UpscaleSRV + 1;
+    static constexpr uint32_t SRVCount = GeneratedFrameSRV + 1;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
     // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two
@@ -884,6 +895,49 @@ private:
     // present draw that will sample them. The neural frame arrives in FP16
     // linear light, which is also the domain the filter works best in.
     void RecordUpscalePresent(ID3D12GraphicsCommandList* cmd);
+    // ---- Playback frame generation ----------------------------------------
+    // The offline converter's blend, run on the play path: the previous frame's
+    // copy, the interpolated result, and the compute pipeline that produces them.
+    // The flow field is NOT computed here - it is m_motion, the per-pixel
+    // CurrentToPrevious field the guide stage already produced this frame, which
+    // is the reason this can run inside a frame budget at all.
+    bool CreateFrameGenResources();
+    // Blend the previous frame into the current one at `t` (0..1 along the
+    // pair) into m_fgOutput, then make this frame the history for the next pair.
+    // `reset` breaks continuity (first frame, scene cut): the frame is stored as
+    // history and no intermediate is produced.
+    void RecordPlaybackFrameGen(ID3D12GraphicsCommandList* cmd, float t, bool reset);
+    // Drops the island bridge: the shared textures, the shared fence and their
+    // handles. The backend (if any) is shut down by its own destructor. Called
+    // when the island fails to come up and again at teardown.
+    void ReleaseFrameGenBridge();
+    // The FidelityFX island, driven from the play path. The convert pass lands
+    // this frame in the shared BGRA8 input on the frame's own list; the frame
+    // list is then closed and executed, the shared fence is signalled, and the
+    // island generates on its own device while the render thread waits for its
+    // completion. Returns false when the bridge broke (the caller falls back to
+    // the matcher and never asks again).
+    bool RunFrameGenIsland(bool reset);
+    // Creates the island's device and the runtime context on it, once, at the
+    // end of Initialize - never while the renderer's device is still being
+    // built (see the note in CreateFrameGenResources). False when the runtime
+    // is unavailable or refused; the caller falls back to the matcher.
+    bool EngageFrameGenIsland();
+    // The convert pass alone: FP16 linear -> BGRA8 sRGB into m_fgFfxInput. Split
+    // out of RecordPlaybackFrameGen so the island path can end the frame list
+    // right after it.
+    void RecordFrameGenConvert(ID3D12GraphicsCommandList* cmd);
+    // One present draw into the current backbuffer. `generated` selects the
+    // island's (or the matcher's) interpolated frame; otherwise the normal
+    // chain output is drawn, exactly as the non-generation present does.
+    bool RecordFrameGenPresentDraw(ID3D12GraphicsCommandList* cmd, uint32_t slot, bool generated);
+    // Bounded wait for a shared-fence value, for the case where the island
+    // failed before its own completion wait could vouch for the frame list.
+    bool WaitFgFenceValue(uint64_t value);
+    // What fraction along the pair the debug view shows, so the intermediate can
+    // be walked by hand without a UI slider.
+    void SetFrameGenPreviewT(float t) { m_fgPreviewT = t; }
+    float FrameGenPreviewT() const { return m_fgPreviewT; }
     bool CreateUploadForTexture(const D3D12_RESOURCE_DESC& desc,
                                 Microsoft::WRL::ComPtr<ID3D12Resource>& upload,
                                 uint8_t*& mapped,
@@ -1012,6 +1066,14 @@ private:
     // stall or a second reset of the allocator the rest of the frame is still using.
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_uploadAllocators[FrameCount];
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_uploadCmds[FrameCount];
+    // The SECOND present of a frame-generation pair. Cadence doubling presents
+    // the generated midpoint and then the source frame, and each Present takes
+    // its own backbuffer - so the second draw cannot share the list the first
+    // one is still queued behind. A pair per slot, reset at frame start like
+    // the others: the frame fence is signalled only after both presents'
+    // lists have executed, so the next frame's slot wait covers them.
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_presentAllocators[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_presentCmds[FrameCount];
     OpticalFlowNvof m_nvof;
     bool m_nvofActive = false;
     // Engine-input pixels -> DLSS input pixels for the flow resolve pass, from
@@ -1205,6 +1267,96 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoUpscaleSharp;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_upscaleSrvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_upscaleRtvHeap;
+    // Playback frame generation. m_fgHistory is the previous frame's copy, and
+    // m_fgOutput the interpolated result (so the one carrying
+    // ALLOW_UNORDERED_ACCESS). m_fgFlow is the matcher's per-tile displacement
+    // field, at ceil(render/8) resolution - the renderer runs the SAME matcher
+    // the offline converter does (FrameGenFlowShader.h) rather than consuming
+    // m_motion, because that field is a 128x72 compact grid stretched to full
+    // resolution: fine enough for the neural renderer's temporal accumulation,
+    // far too coarse to warp a frame with. Warping against it left the two
+    // frames visibly misregistered, which is the ghosting this replaced.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgHistory;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgOutput;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgFlow;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_fgRootSig;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_fgFlowRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoFrameGen;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoFrameGenFlow;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgDescriptorHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgFlowDescriptorHeap;
+    uint32_t m_fgDescriptorIncrement = 0;
+    uint32_t m_fgFlowDescriptorIncrement = 0;
+    // m_fgOutput's and m_fgFlow's states as the last record left them, so the
+    // next one transitions from where they really are. Same trap as the
+    // converter's flow texture: a transition whose before- and after-state are
+    // equal is rejected by the runtime and cmd->Close() answers E_INVALIDARG.
+    D3D12_RESOURCE_STATES m_fgOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES m_fgFlowState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    // The matcher's search radius, in pixels. Its cost is quadratic, so this is
+    // the speed dial as much as the motion-coverage one; see FrameGenFlowShader.h.
+    uint32_t m_fgSearch = 16;
+    float m_fgPreviewT = 0.5f;
+    // The FidelityFX runtime as the PRIMARY generator: it infers motion and
+    // disocclusion from the colour buffers themselves, where the matcher above
+    // ghosts on occlusions and tears wherever its per-tile field jumps. Built
+    // once in CreateFrameGenResources; a null or failed backend falls back to
+    // the matcher pipeline, which stays as the no-SDK path.
+    //
+    // In playback it runs in ISOLATED-ISLAND mode - its own D3D12 device, its
+    // own queue, synchronous submissions - because on the renderer's shared
+    // device the runtime removes that device within ~45 ms of its context being
+    // created (measured 2026-10-14 on the RX 9070 XT, every run since d814141).
+    // The typed pointer is what gives this renderer the island entry points;
+    // the offline conversion still drives the same class through
+    // IFrameGenBackend on a device it owns.
+    std::unique_ptr<FsrFrameGenBackend> m_fgFfx;
+    // The island bridge: the two frames and the fence the renderer and the
+    // island hand each other. The textures are the renderer's (shared heap
+    // flag), the fence is the renderer's too; the island opens all three. The
+    // fence carries one direction - the renderer signals it after the convert
+    // pass has written the input, the island's queue waits on it - and the
+    // island's own completion wait covers the other.
+    Microsoft::WRL::ComPtr<ID3D12Fence> m_fgFfxFence;
+    HANDLE m_fgFfxInputHandle = nullptr;
+    HANDLE m_fgFfxOutputHandle = nullptr;
+    HANDLE m_fgFfxFenceHandle = nullptr;
+    uint64_t m_fgFfxFenceValue = 0;
+    // True when the island came up. Distinct from m_fgFfx != null: a failed
+    // island leaves the backend object behind (for its LastDetail) but never
+    // usable again.
+    bool m_fgFfxIsland = false;
+    // Set when the island's first generated frame has been logged, so the
+    // report is once rather than per frame.
+    bool m_fgIslandReported = false;
+    // Set when the cadence double-present has been logged, once.
+    bool m_fgCadenceReported = false;
+    // FidelityFX runs in the reference's validated colour domain - BGRA8 sRGB -
+    // not the chain's FP16 linear light. m_fgFfxInput is the converted frame
+    // (this chain -> the runtime), m_fgFfxOutput the generated frame back, via
+    // the small convert pipeline below. The matcher fallback keeps using the
+    // FP16 pair, so the two paths hold separate resources.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgFfxInput;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgFfxOutput;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_fgConvertRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoFgConvert;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgConvertHeap;
+    uint32_t m_fgConvertDescriptorIncrement = 0;
+    D3D12_RESOURCE_STATES m_fgFfxInputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES m_fgFfxOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    // FidelityFX wants a per-frame counter that only ever advances by one, and
+    // a real inter-frame interval it scales its motion estimate by.
+    uint64_t m_fgFrameId = 0;
+    bool m_fgFfxFailed = false;
+    // The interval the current frame arrived with (RenderFrame's argument),
+    // remembered so the generation record can pass it to FidelityFX.
+    float m_fgFrameTimeMs = 0.0f;
+    // Playback frame generation as a feature rather than a debug view: each
+    // source frame is presented twice - the generated midpoint between it and
+    // its predecessor, then the frame itself - which is the cadence MPCVR-FSR-
+    // FrameGen presents with. Off by default; the offline conversion remains
+    // the shipped path for a converted file.
+    bool m_playbackFrameGen = false;
     bool m_requestedTearing = false;
     bool m_followWindow = false;
     static inline std::atomic<uint64_t> s_instances{0};

@@ -2375,6 +2375,32 @@ static bool ReadSavedAmdMultiPassSkip(const std::filesystem::path& settingsPath)
     return GetPrivateProfileIntW(L"AmdMultiPass",L"LaterPassSkip",1,settingsPath.c_str())!=0;
 }
 
+// Playback frame generation as this machine has saved it. Off unless saved on:
+// the shipped product path for a doubled cadence is the offline conversion
+// (progress, a file, then play), because presentation pacing is entangled with
+// the playback clock, audio sync and seeking. This switch is the experiment
+// that runs the same generation live, on the FidelityFX island, presenting the
+// generated midpoint and then each source frame.
+static bool ReadSavedPlaybackFrameGeneration(const std::filesystem::path& settingsPath)
+{
+    return GetPrivateProfileIntW(L"FrameGeneration",L"Playback",0,settingsPath.c_str())!=0;
+}
+
+// Hands a freshly initialized renderer the frame-generation settings this
+// machine has saved. Every renderer creation site calls it, so a rebuild (the
+// hardware-decoder fallback among them) cannot silently lose the setting.
+static void ConfigurePlaybackFrameGeneration(D3D12Renderer* renderer,
+                                             const std::filesystem::path& settingsPath)
+{
+    if (renderer) {
+        const bool on = ReadSavedPlaybackFrameGeneration(settingsPath);
+        renderer->SetPlaybackFrameGeneration(on);
+        LOG("Playback frame generation setting: " << (on ? "on" : "off")
+            << " ([FrameGeneration] Playback in " << utf8_text::FromWide(settingsPath.wstring())
+            << ").");
+    }
+}
+
 // Everything a neural job reads, captured on the UI thread when it starts:
 // the job thread never touches PlayerApp. The two pointers are owned by the
 // player and outlive the job, which the UI thread joins before touching them.
@@ -7535,6 +7561,7 @@ private:
         ConfigureRendererSource();
         if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),ow,oh,guideW,guideH,m_activeQuality)||!RendererTookSourceLayout()){std::wstring e=T(L"error.renderer"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);m_renderer.reset();m_decoder.Close();ShowWindow(m_viewport,SW_HIDE);return false;}
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());
+        ConfigurePlaybackFrameGeneration(m_renderer.get(),SettingsPath());
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
         m_haveNext=m_decoder.ReadNext(m_next);if(!m_decoder.IsStillImage())Audio().Start(source,m_currentSec);Audio().SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_cachedSourceFile=localPayload;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
@@ -7693,6 +7720,7 @@ private:
                 // answer the switch, which is what UpscalingPresentAvailable asks.
                 candidate->renderer->UpscalingPresentAvailable()){
                 candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
+                ConfigurePlaybackFrameGeneration(candidate->renderer.get(),SettingsPath());
                 GuideFrame guide;
                 candidate->guides.SetControls(m_guides.Controls());
                 candidate->guides.SetSceneCutSensitivity(m_guides.SceneCutSensitivity());
@@ -7857,7 +7885,18 @@ private:
                 <<" histogramOverlap="<<g.sceneCutHistogramOverlap<<" pts="<<f.timestamp100ns<<" history="<<m_historyGeneration);
         float ms=float(1000.0/std::max(1.0,m_decoder.FrameRate()));
         if(m_lastRenderedTs>=0 && f.timestamp100ns>m_lastRenderedTs){double d=double(f.timestamp100ns-m_lastRenderedTs)*1e-4;if(d>0.1&&d<500.0)ms=float(d);}
-        bool r=m_dlssReset||!g.hasHistory;
+        // The temporal reset the renderer applies to its upscaler and to playback
+        // frame generation. `reason` (above) already names FirstFrame / Seek / Drop
+        // from the explicit reset flags. The guide path additionally raises a reset
+        // on a pixel-detected scene cut via g.hasHistory; the non-guide path cannot
+        // see cuts because g is a fresh empty GuideFrame whose hasHistory is always
+        // false. The old `m_dlssReset || !g.hasHistory` therefore froze frame
+        // generation in a per-frame reset whenever guides were off - FidelityFX never
+        // kept a previous frame to interpolate from, so the cadence double-present was
+        // never taken. Base the reset on `reason`, and keep the scene-cut reset only
+        // where a guide actually computed one.
+        bool r = reason != HistoryReset::None;
+        if (guidesNeeded) r = r || !g.hasHistory;
         if(m_cachedPlayback){if(const auto* pair=m_synchronizedPlayback.CurrentPair())UploadComparisonReference(pair->original);}
         // Read before RememberPlaybackFrame, which may take `f`'s storage.
         const int64_t renderedTs=f.timestamp100ns;
@@ -7920,8 +7959,10 @@ private:
             [&](HWND window){
                 m_renderer=MakeD3D12Renderer();
                 ConfigureRendererSource();
-                return m_renderer->Initialize(window,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,m_activeQuality)&&
+                const bool rebuilt=m_renderer->Initialize(window,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,m_activeQuality)&&
                     RendererTookSourceLayout();
+                if(rebuilt)ConfigurePlaybackFrameGeneration(m_renderer.get(),SettingsPath());
+                return rebuilt;
             });
         m_renderWnd=rebuild.window;
         if(rebuild.outcome!=renderer_recovery::Outcome::Rebuilt){
@@ -11438,6 +11479,7 @@ private:
         ConfigureRendererSource();
         if(!m_renderer||!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,DefaultNeuralCarrierQuality())||!RendererTookSourceLayout()){Unload();return false;}
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());m_activeQuality=DefaultNeuralCarrierQuality();
+        ConfigurePlaybackFrameGeneration(m_renderer.get(),SettingsPath());
         const ComparisonView desiredView=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;
         // Decoder start-up (and any hardware-decode fallback) is asynchronous:
         // wait for the first pair within the same bound the seek path uses.
@@ -11705,6 +11747,7 @@ private:
             return{};
         }
         candidate->renderer->SetDLSS(false);candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
+        ConfigurePlaybackFrameGeneration(candidate->renderer.get(),SettingsPath());
         if(m_renderer)candidate->renderer->SetDebugView(m_renderer->GetDebugView());
         candidate->configuration.inputWidth=candidate->renderer->DLSSInputW();candidate->configuration.inputHeight=candidate->renderer->DLSSInputH();
         return candidate;
@@ -12123,7 +12166,7 @@ private:
     }
     void ShowDebugMenu(const RECT& anchor){
         UINT selected=IDM_VIEW_FINAL;
-        if(m_renderer){switch(m_renderer->GetDebugView()){case D3D12Renderer::DebugView::Input:selected=IDM_VIEW_INPUT;break;case D3D12Renderer::DebugView::MotionVectors:selected=IDM_VIEW_MV;break;case D3D12Renderer::DebugView::Depth:selected=IDM_VIEW_DEPTH;break;case D3D12Renderer::DebugView::Final:break;}}
+        if(m_renderer){switch(m_renderer->GetDebugView()){case D3D12Renderer::DebugView::Input:selected=IDM_VIEW_INPUT;break;case D3D12Renderer::DebugView::MotionVectors:selected=IDM_VIEW_MV;break;case D3D12Renderer::DebugView::Depth:selected=IDM_VIEW_DEPTH;break;case D3D12Renderer::DebugView::FrameGenerated:selected=IDM_VIEW_FRAME_GENERATED;break;case D3D12Renderer::DebugView::Final:break;}}
         HMENU menu=app_menu::CreateDebugViewMenu(selected);if(!menu)return;
         POINT point{anchor.left,anchor.top};ClientToScreen(m_hwnd,&point);
         const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,point.x,point.y,0,m_hwnd,nullptr);
@@ -12468,7 +12511,7 @@ private:
                 }
             }
             if(w==VK_F10)RevealFullscreenControls();
-            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(const auto command=app_menu::CommandForPlayerKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_OEM_PERIOD){StepCachedFrame();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){SetAspect(m_onePixel?false:!m_fill,false);return 0;}if(w=='D'){ToggleNeuralRendering();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}break;
+            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(const auto command=app_menu::CommandForPlayerKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_OEM_PERIOD){StepCachedFrame();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){SetAspect(m_onePixel?false:!m_fill,false);return 0;}if(w=='D'){ToggleNeuralRendering();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w=='5'){SetDebug(D3D12Renderer::DebugView::FrameGenerated);return 0;}break;
         }
         return DefWindowProcW(h,m,w,l);
     }
@@ -12512,7 +12555,7 @@ private:
         case IDM_FRAMEGEN_HOLD_DUPLICATES:SetHoldDuplicateFrames(!m_frameGenHoldDuplicates);break;
         case IDM_AUDIO_PASSTHROUGH:SetAudioPassthrough(!m_audioPassthrough);break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
-        case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:SetAspect(false,false);break;case IDM_ASPECT_FILL:SetAspect(true,false);break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
+        case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIEW_FRAME_GENERATED:SetDebug(D3D12Renderer::DebugView::FrameGenerated);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:SetAspect(false,false);break;case IDM_ASPECT_FILL:SetAspect(true,false);break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
         case IDM_MARK_IN:SetMarker(true,Position100ns());break;case IDM_MARK_OUT:SetMarker(false,Position100ns());break;case IDM_CLEAR_MARKS:ClearMarkers();break;case IDM_GOTO_TIMECODE:ShowTimecodeDialog();break;
         case IDM_PAUSE_NEURAL_RENDER:if(NeuralJobActive())SetNeuralJobPaused(!NeuralJobPaused());break;
         case IDM_PREVIEW_FRAME:PreviewCurrentFrame();break;case IDM_PREVIEW_CLIP:PreviewClip();break;case IDM_RENDER_RANGE:RenderMarkedRange();break;case IDM_RENDER_WHOLE:RenderWholeSource();break;

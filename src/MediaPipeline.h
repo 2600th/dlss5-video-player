@@ -354,6 +354,12 @@ public:
     EncodeError Finish(std::stop_token stop = {});
     void Cancel();
 
+    // Why the encoder child last went away - its exit code and the tail of its
+    // stderr - collected at the failure that observed it. Empty when nothing
+    // has failed. A broken pipe on its own says the child died and nothing
+    // about why; this is the why, for the error the caller shows.
+    const std::string& LastChildDetail() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

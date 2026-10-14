@@ -298,6 +298,11 @@ add_library(player_media OBJECT
 add_library(player_render OBJECT
     src/D3D12Renderer.cpp src/D3D12Renderer.h
     src/DLSSBackend.cpp src/DLSSBackend.h
+    # The FidelityFX frame-generation backend lives here, not in player_app,
+    # because the renderer instantiates it directly for the playback path -
+    # and NeuralWorker, which links this library but not player_app, would
+    # otherwise carry an unresolved reference to it.
+    src/FsrFrameGenBackend.cpp src/FsrFrameGenBackend.h src/FsrFrameGenAbi.h
     src/VsrEngine.cpp src/VsrEngine.h src/VsrPolicy.h
     src/TemporalGuides.cpp src/TemporalGuides.h
     src/OpticalFlowNvof.cpp src/OpticalFlowNvof.h
@@ -322,7 +327,7 @@ add_library(player_app OBJECT
     src/UiLayout.cpp src/UiLayout.h
     src/UiResources.cpp src/UiResources.h
     src/DLSSGBackend.cpp src/DLSSGBackend.h
-    src/FrameGenBackend.cpp src/FrameGenBackend.h
+    src/FrameGenBackend.cpp src/FrameGenBackend.h src/FrameGenBlendShader.h src/FrameGenColorConvertShader.h src/FrameGenFlowShader.h
     src/AmdFrameGenBackend.cpp src/AmdFrameGenBackend.h
     src/FrameGenerationPass.cpp src/FrameGenerationPass.h
     src/VsrUpscalePass.cpp src/VsrUpscalePass.h

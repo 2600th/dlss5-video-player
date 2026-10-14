@@ -466,7 +466,8 @@ bool DLSSGBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
                             uint32_t multiFrameCount,
                             uint32_t multiFrameIndex,
                             bool reset,
-                            uint64_t backbufferFrameId)
+                            uint64_t backbufferFrameId,
+                            float /*frameTimeMs*/)
 {
     if (!Available() || !m_handle || !cmd || !backbuffer || !motion || !depth || !outputInterpolated) return false;
     // The index is 1-based and bounded by the count, and the count by what the

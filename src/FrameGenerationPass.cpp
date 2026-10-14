@@ -4,6 +4,7 @@
 
 #include "DLSSGBackend.h"
 #include "FrameGenBackend.h"
+#include "FsrFrameGenBackend.h"
 #include "HexText.h"
 #include "Log.h"
 #include "MediaPipeline.h"
@@ -68,6 +69,7 @@ std::wstring BackendName(const IFrameGenBackend& backend)
 {
     const std::string kind = backend.Kind() ? backend.Kind() : "";
     if (kind == "nvidia-ngx") return L"DLSS-G";
+    if (kind == "amd-fidelityfx") return L"AMD FidelityFX";
     if (kind == "amd-optical-flow") return L"the optical-flow backend";
     return L"the frame-generation backend";
 }
@@ -447,6 +449,9 @@ public:
 
     EncodeError Finish(std::stop_token stop) { return encoder_.Finish(stop); }
     bool UsedSoftware() const { return usedSoftware_; }
+    // The encoder child's own account of its last failure, for the caller's
+    // error text: an exit code and the tail of ffmpeg's stderr.
+    const std::string& LastChildDetail() const { return encoder_.LastChildDetail(); }
 
 private:
     RawVideoEncoder encoder_;
@@ -689,10 +694,13 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     }
     FallbackEncoder encoder(helperDirectory_);
     if (const EncodeError error = encoder.Start(spec, stagingGuard.path); error != EncodeError::None) {
+        std::wstring detail = std::wstring(L"The frame-generation encoder could not be started: ") +
+                              EncodeErrorText(error) + L".";
+        const std::string& childDetail = encoder.LastChildDetail();
+        if (!childDetail.empty()) detail += L" " + utf8_text::ToWide(childDetail);
         return fail(error == EncodeError::Cancelled ? FrameGenerationError::Cancelled
                                                     : FrameGenerationError::Encoder,
-                    std::wstring(L"The frame-generation encoder could not be started: ") +
-                        EncodeErrorText(error) + L".");
+                    std::move(detail));
     }
 
     using Clock = std::chrono::steady_clock;
@@ -729,10 +737,18 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     // why this stays empty on the geometry this pass was measured at.
     std::vector<uint8_t> repacked;
     const auto encodeFailure = [&](EncodeError error) {
+        std::wstring detail = std::wstring(L"The encoder stopped after ") +
+                              std::to_wstring(result.framesWritten) + L" frames: " +
+                              EncodeErrorText(error) + L".";
+        // What the encoder child itself said before it went: exit code plus
+        // the tail of ffmpeg's stderr. A broken pipe only says the reader is
+        // gone; NVENC refusing the box, a mux error and a crashed child are
+        // three different repairs and the pipe cannot tell them apart.
+        const std::string& childDetail = encoder.LastChildDetail();
+        if (!childDetail.empty()) detail += L" " + utf8_text::ToWide(childDetail);
         return fail(error == EncodeError::Cancelled ? FrameGenerationError::Cancelled
                                                     : FrameGenerationError::Encoder,
-                    std::wstring(L"The encoder stopped after ") + std::to_wstring(result.framesWritten) +
-                        L" frames: " + EncodeErrorText(error) + L".");
+                    std::move(detail));
     };
 
     // The first source frame, which also carries the feature-create work NGX
@@ -981,9 +997,13 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     }
 
     if (const EncodeError error = encoder.Finish(stop); error != EncodeError::None) {
+        std::wstring detail = std::wstring(L"The converted file was not finished: ") +
+                              EncodeErrorText(error) + L".";
+        const std::string& childDetail = encoder.LastChildDetail();
+        if (!childDetail.empty()) detail += L" " + utf8_text::ToWide(childDetail);
         return fail(error == EncodeError::Cancelled ? FrameGenerationError::Cancelled
                                                     : FrameGenerationError::Encoder,
-                    std::wstring(L"The converted file was not finished: ") + EncodeErrorText(error) + L".");
+                    std::move(detail));
     }
     if (encoder.UsedSoftware()) {
         Append(result.detail, L"NVENC refused this encode, so it was completed with the software H.264 encoder.");
@@ -1153,14 +1173,23 @@ FrameGenerationCapability QueryFrameGenerationCapability() noexcept
                        HexResultTextWide(uint32_t(probed.createResult)));
         }
         } else {
-            // Vendor-neutral optical-flow backend: no NGX, no nvngx_dlssg.dll. It
-            // is available on any D3D12 device that can run a compute shader; the
-            // conversion's own format-support check (TYPED_UNORDERED_ACCESS_VIEW
-            // on B8G8R8A8_UNORM) is the only gate, applied in Run. Multiplier is
-            // capped at 2x until the matcher is measured on real footage.
+            // Not NVIDIA. FidelityFX is preferred when its runtime is on disk,
+            // because it is AMD's own generator for this GPU class; the
+            // self-contained matcher covers everything else. Both need no NGX
+            // and no nvngx_dlssg.dll, and both are capped at 2x until measured
+            // otherwise. The conversion's own format-support check
+            // (TYPED_UNORDERED_ACCESS_VIEW on B8G8R8A8_UNORM) is the only
+            // remaining gate, applied in Run.
             capability.available = true;
             capability.multiFrameCountMax = 1;
-            capability.detail = L"AMD/neutral optical-flow frame generation (no NGX required).";
+            if (FsrFrameGenBackend::RuntimePresent()) {
+                capability.detail = L"AMD FidelityFX frame generation "
+                                    L"(amd_fidelityfx_framegeneration_dx12.dll).";
+            } else {
+                capability.detail = L"AMD/neutral optical-flow frame generation (no NGX "
+                                    L"required). FidelityFX runtime not found in: " +
+                                    FsrFrameGenBackend::RuntimeSearchDescription() + L".";
+            }
         }
     } catch (...) {
         capability.available = false;

@@ -1,5 +1,9 @@
 #include "D3D12Renderer.h"
 #include "AmdUpscaleShader.h"
+#include "FrameGenBlendShader.h"
+#include "FrameGenColorConvertShader.h"
+#include "FrameGenFlowShader.h"
+#include "FsrFrameGenBackend.h"
 #include "NvencDirect.h"
 #include "D3D12FenceWait.h"
 #include "DebandPolicy.h"
@@ -127,6 +131,11 @@ void D3D12RendererDeleter::operator()(D3D12Renderer* renderer)const noexcept{
 
 D3D12Renderer::~D3D12Renderer() {
     if(m_testHooks)m_testHooks->ownedResource.reset();
+    // The frame-generation island first: its device is its own, so nothing here
+    // waits on the renderer's queue for it, and its shutdown must happen while
+    // the shared handles it opened are still open. After this the bridge is
+    // gone and the backend object (if the island failed) is inert.
+    ReleaseFrameGenBridge();
     // The flow engine holds registered views of textures this object owns, so it has to
     // be torn down while the device and queue are still alive and only once the GPU has
     // stopped touching those surfaces. Member destruction order cannot express that:
@@ -171,6 +180,14 @@ D3D12Renderer::~D3D12Renderer() {
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
 }
 
+// TEMPORARY DIAGNOSTIC (device-removal bisect): logs the device-removed reason at
+// each Initialize step boundary so the failing step is visible in DLSSVideoPlayer.log.
+static void LogGpuHealth(const char* stage, ID3D12Device* device) {
+    const HRESULT reason = device ? device->GetDeviceRemovedReason() : S_OK;
+    LOG("[gpu-health] " << (stage ? stage : "?") << " removedReason=" << HexText(reason)
+                        << (reason == 0x887A0005 ? "  <<<< DEVICE REMOVED" : ""));
+}
+
 bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint32_t outputW,uint32_t outputH,uint32_t gridW,uint32_t gridH,NVSDK_NGX_PerfQuality_Value quality,bool preserveSource,bool captureOutput) {
     m_preserveSource=preserveSource;
     m_captureOutput=captureOutput;
@@ -191,8 +208,10 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
     if(m_requestedSourceLayout==PixelLayout::Nv12&&m_sourceLayout==PixelLayout::Bgra)
         LOG("NV12 source needs even dimensions; taking BGRA at "<<m_sourceW<<"x"<<m_sourceH<<".");
     if(!CreateDeviceAndSwapchain(hwnd) || !CreateHeapsAndBackbuffers() || !CreatePipelines()) return false;
+    LogGpuHealth("after CreateDeviceAndSwapchain+Heaps+Pipelines", m_device.Get());
     bool gpuSynchronized=false;
     if(!InitializeDLSS(gpuSynchronized)) {
+        LogGpuHealth("after InitializeDLSS", m_device.Get());
         if(!gpuSynchronized)return false;
         LOG("DLSS unavailable; using D3D12 scaler fallback.");
         m_renderW=sourceW; m_renderH=sourceH;
@@ -205,14 +224,27 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
         // Built at Initialize because the geometry it sizes by is fixed for the
         // renderer's life; the switch only decides whether a frame uses it.
         if(!CreateUpscalePresentResources())return false;
+        LogGpuHealth("after CreateUpscalePresentResources", m_device.Get());
         if(m_upscaleOffered)
             LOG("Playback upscale: this player's own stretch-and-sharpen will serve the SR switch at "
                 <<m_outputW<<"x"<<m_outputH<<" (no NGX on this machine).");
     }
+    // Playback frame generation. Its flow source is the motion guide the frame
+    // already produces, so it is built once here like the upscale above and
+    // costs nothing until a frame asks for it. A failure is not fatal: the
+    // debug view then shows nothing rather than the player refusing to start.
+    if(!CreateFrameGenResources())
+        LOG("Playback frame generation: the blend pipeline could not be built; the debug view will show nothing.");
+    LogGpuHealth("after CreateFrameGenResources", m_device.Get());
     // Only the player's renderer presents a comparison, and only it asks NGX about RTX
     // VSR; the offline carrier never has a view to show it in.
     if(m_followWindow)m_vsr.Probe(m_device.Get());
+    LogGpuHealth("after VSR probe", m_device.Get());
     if(!CreateVideoResources()) return false;
+    LogGpuHealth("after CreateVideoResources", m_device.Get());
+    // The FidelityFX island, now that construction is done. A failure here is
+    // not fatal: the matcher keeps the debug view and the conversion working.
+    EngageFrameGenIsland();
     LOG("V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.");
     return true;
 }
@@ -229,7 +261,12 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     // has no "is it on" query before a device exists - would tell us a host wants it.
     // So it is on when a test says so and never otherwise: a production renderer has
     // no hooks, and the breadcrumb write per command list op stays in its frames.
-    if(m_testHooks&&m_testHooks->dred){
+    // DLSS5_DRED=1 in the environment is the third way in, and it is the one that
+    // works for the shipped exe - which is exactly the case where a device removal
+    // needs diagnosing (the FidelityFX island work, 2026-10). The settings are
+    // process-wide, so the island's device - created later, in
+    // CreateFrameGenResources - is covered by the same switch.
+    if((m_testHooks&&m_testHooks->dred)||GetEnvironmentVariableW(L"DLSS5_DRED",nullptr,0)){
         ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
         if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))){dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);}
     }
@@ -251,12 +288,17 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     for(uint32_t i=0;i<FrameCount;++i) {
         if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&m_allocators[i])),"CreateCommandAllocator"))return false;
         if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&m_uploadAllocators[i])),"CreateCommandAllocator (upload)"))return false;
+        // The second present of a frame-generation pair, on its own allocator:
+        // the first present's list is still queued when this one is recorded.
+        if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&m_presentAllocators[i])),"CreateCommandAllocator (present)"))return false;
     }
     for(uint32_t i=0;i<FrameCount;++i) {
         if(!HR(m_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,m_allocators[i].Get(),nullptr,IID_PPV_ARGS(&m_cmds[i])),"CreateCommandList"))return false;
         m_cmds[i]->Close();
         if(!HR(m_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,m_uploadAllocators[i].Get(),nullptr,IID_PPV_ARGS(&m_uploadCmds[i])),"CreateCommandList (upload)"))return false;
         m_uploadCmds[i]->Close();
+        if(!HR(m_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,m_presentAllocators[i].Get(),nullptr,IID_PPV_ARGS(&m_presentCmds[i])),"CreateCommandList (present)"))return false;
+        m_presentCmds[i]->Close();
     }
     BOOL tearing=FALSE;if(m_requestedTearing&&SUCCEEDED(m_factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,&tearing,sizeof(tearing))))m_allowTearing=tearing==TRUE;
     DXGI_SWAP_CHAIN_DESC1 sd{};sd.Width=m_outputW;sd.Height=m_outputH;sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;sd.SampleDesc={1,0};sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -1100,6 +1142,7 @@ bool D3D12Renderer::CreateUploadForTexture(const D3D12_RESOURCE_DESC&desc,ComPtr
 }
 
 bool D3D12Renderer::CreateVideoResources(){
+    LogGpuHealth("entering CreateVideoResources", m_device.Get());
     auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
     // m_sourceLayout was resolved in Initialize, before the pipelines that depend
     // on it.
@@ -1428,6 +1471,10 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const FrameIdent
 
 bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,bool motionGuides,float frameTimeMs,const FrameIdentity*identity){
     if(m_gpuUnusable)return false;
+    // Remembered for the frame-generation record later in this same call: the
+    // FidelityFX runtime scales its motion estimate by the real interval, and
+    // the value only exists as this argument.
+    m_fgFrameTimeMs=frameTimeMs;
     FollowWindowSize();
     if(m_gpuUnusable)return false;
     const bool nv12Source=m_sourceLayout==PixelLayout::Nv12;
@@ -1463,6 +1510,11 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     }
     if(!DeviceHR(m_allocators[slot]->Reset(),"Reset frame allocator")) return false;
     if(!DeviceHR(m_uploadAllocators[slot]->Reset(),"Reset frame upload allocator")) return false;
+    // The second present's list is NOT reset here. It is reset inside the
+    // frame-generation cadence path, right before it is recorded: resetting it
+    // at frame start leaves it in the recording state on frames that do not
+    // take that path, and the next frame's allocator Reset then fails with
+    // E_FAIL - a list still recording against an allocator blocks its reset.
     auto* cmd=m_cmds[slot].Get();
     auto* pre=m_uploadCmds[slot].Get();
     if(!DeviceHR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset frame command list")) return false;
@@ -1696,6 +1748,103 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     // source-size one, and nothing above this line learns a second geometry
     // exists.
     if(UpscalePresentActive())RecordUpscalePresent(cmd);
+    // Playback frame generation through the FidelityFX island. The convert
+    // pass lands this frame in the shared BGRA8 input on the frame's own list;
+    // the list is then closed and executed, the shared fence is signalled past
+    // it, and the island generates on ITS device while this thread waits for
+    // the generation to retire. Nothing the runtime records touches the
+    // renderer's list, and a fault inside the runtime removes the island's
+    // device and nothing else - the failure is reported here, the backend is
+    // dropped, and the matcher takes over from the next frame.
+    //
+    // The island runs for the debug view (which shows the generated frame
+    // alone) and for playback frame generation (which presents the generated
+    // midpoint and then the source frame - the cadence MPCVR-FSR-FrameGen
+    // presents with). A reset frame produces no presentable intermediate: the
+    // runtime has just discarded its history, so only the source is shown.
+    // The island's reset: true on its very first evaluate (no history exists
+    // yet) and on every genuine discontinuity the pipeline declares. NOT
+    // identity->historyGeneration == 0 - that counter stays 0 for a whole
+    // stream that never resets, which made the first cut of this pass hand the
+    // runtime reset=true on every single frame, so it never accumulated
+    // history and no generated frame was ever presented.
+    const bool firstIslandFrame = (m_fgFrameId == 0);
+    const bool resetFg = firstIslandFrame || temporalReset;
+    const bool fgWanted=m_playbackFrameGen||m_debugView==DebugView::FrameGenerated;
+    const bool islandWanted=m_fgFfxIsland&&!m_fgFfxFailed&&m_psoFgConvert&&m_fgFfxInput&&m_fgFfxOutput;
+    if(islandWanted&&fgWanted){
+        RecordFrameGenConvert(cmd);
+        if(!DeviceHR(cmd->Close(),"Close frame list before frame generation")) return false;
+        {ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);}
+        const uint64_t waitValue=++m_fgFfxFenceValue;
+        if(!DeviceHR(m_queue->Signal(m_fgFfxFence.Get(),waitValue),"Signal shared frame-generation fence")) return false;
+        const bool generated=m_fgFfx->EvaluateIsolated(m_fgFfxInput.Get(),m_fgFfxOutput.Get(),
+                                                        waitValue,resetFg,++m_fgFrameId,m_fgFrameTimeMs);
+        if(generated&&!m_fgIslandReported){
+            // Once, so a field log can tell "the island never ran" from "the
+            // island ran and the picture is wrong".
+            m_fgIslandReported=true;
+            LOG("Playback frame generation: the island produced its first frame ("
+                <<m_renderW<<"x"<<m_renderH<<", interval "<<m_fgFrameTimeMs<<" ms).");
+        }
+        if(!generated){
+            m_fgFfxFailed=true;
+            LOG("Playback frame generation: the FidelityFX island failed ("
+                <<utf8_text::FromWide(m_fgFfx->LastDetail())
+                <<"); falling back to the matcher from the next frame.");
+            // The island may have failed before its own completion wait, so
+            // nothing has yet vouched for the frame list's retirement - and the
+            // allocator is about to be reset under it. The shared fence value
+            // the island was handed is exactly that boundary.
+            if(!WaitFgFenceValue(waitValue)) return false;
+        }
+        // The island's wait (or the fence wait above) has retired the frame
+        // list, so its allocator can be reset for the present submission(s).
+        if(!DeviceHR(m_allocators[slot]->Reset(),"Reset frame allocator after frame generation")) return false;
+        if(!DeviceHR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset frame list after frame generation")) return false;
+        ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
+        const bool showGenerated=generated&&!resetFg;
+        if(m_playbackFrameGen&&showGenerated&&!m_fgCadenceReported){
+            // Once: the health line counts rendered source frames, not swapchain
+            // presents, so this is the only place the doubled cadence is visible
+            // in a field log.
+            m_fgCadenceReported=true;
+            LOG("Playback frame generation: cadence active - each source frame is presented "
+                "as the generated midpoint and then the frame itself.");
+        }
+        if(m_playbackFrameGen&&showGenerated){
+            // Cadence: the generated midpoint first, the source frame second.
+            // Two lists and two Presents, because each Present takes its own
+            // backbuffer and the first list is still queued when the second is
+            // recorded - the second pair's allocator was reset at frame start,
+            // covered by the frame fence the previous frame signalled after
+            // both of its presents.
+            if(!RecordFrameGenPresentDraw(cmd,slot,true)) return false;
+            if(!DeviceHR(cmd->Close(),"Close generated-frame present list")) return false;
+            {ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);}
+            if(!PresentSwapchain("Present generated frame")) return false;
+            auto* present=m_presentCmds[slot].Get();
+            if(!DeviceHR(present->Reset(m_presentAllocators[slot].Get(),nullptr),"Reset source present list")) return false;
+            ID3D12DescriptorHeap*ph[]={m_srvHeap.Get()};present->SetDescriptorHeaps(1,ph);
+            if(!RecordFrameGenPresentDraw(present,slot,false)) return false;
+            if(!DeviceHR(present->Close(),"Close source present list")) return false;
+            {ID3D12CommandList*ls[]={present};m_queue->ExecuteCommandLists(1,ls);}
+            return PresentSwapchain("Present source frame");
+        }
+        // Debug view, or a reset frame under playback generation: one present
+        // of the generated frame when there is one, of the source otherwise.
+        if(!RecordFrameGenPresentDraw(cmd,slot,showGenerated)) return false;
+        if(!DeviceHR(cmd->Close(),"Close frame command list")) return false;
+        {ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);}
+        return PresentSwapchain("Present");
+    }
+    // Playback frame generation, recorded between the upscale and the present
+    // draw. Only the debug view asks for it in this build: it writes the same
+    // intermediate the offline converter would and hands the present pass a
+    // texture to sample, which is how the interpolated frame can be looked at
+    // before anything decides to present several of them.
+    if(m_debugView==DebugView::FrameGenerated)
+        RecordPlaybackFrameGen(cmd,m_fgPreviewT,resetFg);
     // The backbuffer pass and Present are not optional even for a window nobody sees:
     // the RenoDX add-on performs its feature-18 evaluation per present. An export that
     // skipped presents past the feature recreate rendered 900/900 "verified" frames with
@@ -1717,6 +1866,31 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
             case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_hdrOutput?m_psoMotionDebugHdr.Get():m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
             case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_hdrOutput?m_psoDepthDebugHdr.Get():m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
             case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(presentPso);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
+            case DebugView::FrameGenerated:
+                // The interpolated frame RecordPlaybackFrameGen left shader-readable.
+                // Its own state is already NON_PIXEL_SHADER_RESOURCE, so this pass
+                // only has to add pixel visibility - unlike the guides above, which
+                // their own passes leave as render targets. The barrier below must
+                // target the SAME resource the table above samples: pointing it at
+                // the matcher's m_fgOutput while sampling the FidelityFX output left
+                // that one pixel-sampled in a NON_PIXEL-only state, and the AMD
+                // driver answered with a device removal (0x887A0001) on the first
+                // generated frame.
+                // A failed island leaves its output texture behind holding the
+                // last good frame - or nothing - so the matcher's own output is
+                // the honest thing to show once m_fgFfxFailed is set.
+                if(m_fgFfx && m_fgFfxOutput && !m_fgFfxFailed){
+                    debugPixelResource=m_fgFfxOutput.Get();
+                    debugBefore=m_fgFfxOutputState;
+                    cmd->SetPipelineState(presentPso);
+                    cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(GeneratedFrameSRV));
+                }else if(m_fgOutput){
+                    debugPixelResource=m_fgOutput.Get();
+                    debugBefore=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                    cmd->SetPipelineState(presentPso);
+                    cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(GeneratedFrameSRV));
+                }else{cmd->SetPipelineState(presentPso);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}
+                break;
             default:
                 cmd->SetPipelineState(presentPso);
                 if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));
@@ -1906,6 +2080,695 @@ bool D3D12Renderer::CreateUpscalePresentResources()
         return false;
     m_upscaleOffered = true;
     return true;
+}
+
+bool D3D12Renderer::CreateFrameGenResources()
+{
+    // The playback half of the frame generation the offline converter does.
+    // PRIMARY path: AMD FidelityFX, the vendor's own generator - it infers
+    // motion and disocclusion from the colour buffers, where the matcher
+    // fallback ghosts on occlusions and tears wherever its per-tile field
+    // jumps. It runs in the reference's validated colour domain (BGRA8 sRGB,
+    // via the convert pipeline below) because the chain's native FP16 linear
+    // input - even with the SCRGB transfer declared - still produced ghosted
+    // generated frames after everything else was made correct. FALLBACK: the
+    // same two compute passes the offline converter runs (block matcher, then
+    // blend), which work on any D3D12 device but are visibly worse. A failure
+    // here is not fatal either way: the debug view shows nothing rather than
+    // the player refusing to start.
+    // It runs in ISOLATED-ISLAND mode: its own D3D12 device on this adapter,
+    // its own queue, one synchronous submission per frame. On the renderer's
+    // shared device the same runtime removed that device within ~45 ms of its
+    // context being created, every run since d814141, before a single
+    // evaluate - see the long note in FsrFrameGenBackend.h. FALLBACK: the
+    // same two compute passes the offline converter runs (block matcher, then
+    // blend), which work on any D3D12 device but are visibly worse. A failure
+    // here is not fatal either way: the debug view shows nothing rather than
+    // the player refusing to start.
+
+    // The island bridge, built BEFORE the backend that opens it: the two shared
+    // frame textures and the shared fence, all created here on the renderer's
+    // device. The island reads m_fgFfxInput, writes m_fgFfxOutput, and waits on
+    // the fence value this renderer signals once the convert pass has run. The
+    // textures stay ordinary renderer resources - a shared heap flag changes
+    // nothing about how they are used on the creating device.
+    ReleaseFrameGenBridge();
+    m_fgFfx = std::make_unique<FsrFrameGenBackend>();
+
+    D3D12_HEAP_PROPERTIES sharedHeap{};
+    sharedHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC sharedTex{};
+    sharedTex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    sharedTex.Width = m_renderW;
+    sharedTex.Height = m_renderH;
+    sharedTex.DepthOrArraySize = 1;
+    sharedTex.MipLevels = 1;
+    sharedTex.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sharedTex.SampleDesc = {1, 0};
+    sharedTex.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    sharedTex.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const bool bridgeTextures =
+        SUCCEEDED(m_device->CreateCommittedResource(
+            &sharedHeap, D3D12_HEAP_FLAG_SHARED, &sharedTex,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+            IID_PPV_ARGS(m_fgFfxInput.GetAddressOf()))) &&
+        SUCCEEDED(m_device->CreateSharedHandle(m_fgFfxInput.Get(), nullptr, GENERIC_ALL,
+                                               nullptr, &m_fgFfxInputHandle)) &&
+        SUCCEEDED(m_device->CreateCommittedResource(
+            &sharedHeap, D3D12_HEAP_FLAG_SHARED, &sharedTex,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+            IID_PPV_ARGS(m_fgFfxOutput.GetAddressOf()))) &&
+        SUCCEEDED(m_device->CreateSharedHandle(m_fgFfxOutput.Get(), nullptr, GENERIC_ALL,
+                                               nullptr, &m_fgFfxOutputHandle)) &&
+        SUCCEEDED(m_device->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
+                                        IID_PPV_ARGS(m_fgFfxFence.GetAddressOf()))) &&
+        SUCCEEDED(m_device->CreateSharedHandle(m_fgFfxFence.Get(), nullptr, GENERIC_ALL,
+                                               nullptr, &m_fgFfxFenceHandle));
+    if (bridgeTextures) {
+        m_fgFfxInput->SetName(L"FrameGen_FfxInput_BGRA8_Shared");
+        m_fgFfxOutput->SetName(L"FrameGen_FfxOutput_BGRA8_Shared");
+        // The ISLAND is deliberately NOT created here. Creating the runtime's
+        // context while the renderer's device is still under construction
+        // correlates with a device removal ~40 ms later - the same async-fault
+        // signature the shared-device integration showed, now landing on the
+        // renderer's device through the shared GPU node (measured 2026-10-15:
+        // island engaged at Initialize time -> CreateVideoResources fails with
+        // DEVICE_REMOVED 39 ms later; the same backend on its own device in a
+        // minimal process runs six frames without a removal). MPCVR-FSR-FrameGen
+        // never creates its island during renderer construction either. The
+        // engagement is deferred to EngageFrameGenIsland, at the end of
+        // Initialize, when construction is complete and the GPU is idle.
+        LOG("Playback frame generation: the shared bridge is ready; the FidelityFX island "
+            "engages when the renderer finishes initializing.");
+    } else {
+        LOG("Playback frame generation: the shared bridge textures could not be created; "
+            "falling back to the matcher.");
+        m_fgFfxIsland=false;m_fgFfx.reset();
+        ReleaseFrameGenBridge();
+    }
+
+    // The convert pipeline for the FFX domain: one compute pass, source SRV
+    // (FP16 linear) to destination UAV (BGRA8 sRGB-encoded), 8x8 threads.
+    if (m_fgFfx) {
+        m_fgConvertRootSig.Reset();
+        m_psoFgConvert.Reset();
+        m_fgConvertHeap.Reset();
+        // NOT m_fgFfxInput / m_fgFfxOutput: those are the shared bridge
+        // textures, created before the backend came up and owned from here on.
+        // The first cut of this restructure left their old Reset lines in
+        // place and the renderer silently lost its references to them.
+
+        ComPtr<ID3DBlob> convert, convertError;
+        const HRESULT hr = D3DCompile(frame_gen_convert::kHlsl,
+                                      std::strlen(frame_gen_convert::kHlsl),
+                                      "framegen-convert", nullptr, nullptr, "main",
+                                      "cs_5_1", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                                      convert.GetAddressOf(), convertError.GetAddressOf());
+        if (FAILED(hr)) {
+            if (convertError) LOG((char*)convertError->GetBufferPointer());
+            LOG("Playback frame generation: the convert shader did not compile hr="
+                << HexText(hr) << ".");
+            m_fgFfxIsland=false;m_fgFfx.reset();
+        } else {
+            D3D12_ROOT_PARAMETER1 params[2]{};
+            D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
+            ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            ranges[0].NumDescriptors = 1;
+            ranges[0].BaseShaderRegister = 0;
+            ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+            ranges[1].NumDescriptors = 1;
+            ranges[1].BaseShaderRegister = 0;
+            ranges[1].OffsetInDescriptorsFromTableStart = 1;
+            params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            params[0].DescriptorTable.NumDescriptorRanges = 2;
+            params[0].DescriptorTable.pDescriptorRanges = ranges;
+            params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            params[1].Constants.Num32BitValues = 2;
+            params[1].Constants.ShaderRegister = 0;
+            D3D12_VERSIONED_ROOT_SIGNATURE_DESC sig{};
+            sig.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+            sig.Desc_1_1.NumParameters = 2;
+            sig.Desc_1_1.pParameters = params;
+            ComPtr<ID3DBlob> serialized, sigError;
+            const HRESULT sigHr = D3D12SerializeVersionedRootSignature(&sig, &serialized, &sigError);
+            if (FAILED(sigHr)) {
+                if (sigError) LOG((char*)sigError->GetBufferPointer());
+                LOG("Playback frame generation: the convert root signature did not serialize hr="
+                    << HexText(sigHr) << ".");
+                m_fgFfxIsland=false;m_fgFfx.reset();
+            } else {
+                const HRESULT rootHr = m_device->CreateRootSignature(
+                    0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+                    IID_PPV_ARGS(m_fgConvertRootSig.GetAddressOf()));
+                if (FAILED(rootHr)) {
+                    LOG("Playback frame generation: the convert root signature did not build hr="
+                        << HexText(rootHr) << ".");
+                    m_fgFfxIsland=false;m_fgFfx.reset();
+                } else {
+                    D3D12_COMPUTE_PIPELINE_STATE_DESC cpsd{};
+                    cpsd.pRootSignature = m_fgConvertRootSig.Get();
+                    cpsd.CS = {convert->GetBufferPointer(), convert->GetBufferSize()};
+                    const HRESULT psoHr = m_device->CreateComputePipelineState(
+                        &cpsd, IID_PPV_ARGS(m_psoFgConvert.GetAddressOf()));
+                    if (FAILED(psoHr)) {
+                        LOG("Playback frame generation: the convert pipeline state did not build hr="
+                            << HexText(psoHr) << ".");
+                        m_fgFfxIsland=false;m_fgFfx.reset();
+                    }
+                }
+            }
+            if (m_fgFfx) {
+                D3D12_DESCRIPTOR_HEAP_DESC heap{};
+                heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+                heap.NumDescriptors = 2;
+                heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+                const HRESULT heapHr = m_device->CreateDescriptorHeap(
+                    &heap, IID_PPV_ARGS(m_fgConvertHeap.GetAddressOf()));
+                if (FAILED(heapHr)) {
+                    LOG("Playback frame generation: the convert descriptor heap did not build hr="
+                        << HexText(heapHr) << ".");
+                    m_fgFfxIsland=false;m_fgFfx.reset();
+                } else {
+                    m_fgConvertDescriptorIncrement = m_device->GetDescriptorHandleIncrementSize(
+                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                }
+            }
+            if (m_fgFfx) {
+                // The shared bridge textures were created before the backend
+                // came up (the island opens them at InitializeIsolated); all
+                // that is left is their remembered state, which starts where
+                // the convert pass will write them.
+                m_fgFfxInputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                m_fgFfxOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+        }
+        if (!m_fgFfx) LOG("Playback frame generation: the BGRA8 convert pipeline could not be "
+                          "built; falling back to the matcher.");
+        LogGpuHealth("after convert pipeline", m_device.Get());
+    }
+
+    // The matcher fallback, kept verbatim for the no-SDK case.
+    m_psoFrameGen.Reset();
+    m_psoFrameGenFlow.Reset();
+    m_fgRootSig.Reset();
+    m_fgFlowRootSig.Reset();
+    m_fgDescriptorHeap.Reset();
+    m_fgFlowDescriptorHeap.Reset();
+    m_fgOutput.Reset();
+    m_fgHistory.Reset();
+    m_fgFlow.Reset();
+
+    auto compile = [](const char* text, size_t size, const char* label, ComPtr<ID3DBlob>& out) {
+        ComPtr<ID3DBlob> error;
+        const HRESULT hr = D3DCompile(text, size, label, nullptr, nullptr, "main", "cs_5_1",
+                                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, out.GetAddressOf(),
+                                     error.GetAddressOf());
+        if (FAILED(hr)) {
+            if (error) LOG((char*)error->GetBufferPointer());
+            return false;
+        }
+        return true;
+    };
+    auto makeRootSignature = [this](D3D12_ROOT_PARAMETER1* parameters, UINT count,
+                                    ComPtr<ID3D12RootSignature>& out) {
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC signature{};
+        signature.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+        signature.Desc_1_1.NumParameters = count;
+        signature.Desc_1_1.pParameters = parameters;
+        ComPtr<ID3DBlob> serialized, error;
+        if (FAILED(D3D12SerializeVersionedRootSignature(&signature, &serialized, &error)))
+            return false;
+        return SUCCEEDED(m_device->CreateRootSignature(0, serialized->GetBufferPointer(),
+                                                       serialized->GetBufferSize(),
+                                                       IID_PPV_ARGS(out.GetAddressOf())));
+    };
+
+    ComPtr<ID3DBlob> blendBlob, flowBlob;
+    if (!compile(frame_gen_blend::kHlsl, std::strlen(frame_gen_blend::kHlsl),
+                 "framegen-playback-blend", blendBlob))
+        return false;
+    if (!compile(frame_gen_flow::kHlsl, std::strlen(frame_gen_flow::kHlsl),
+                 "framegen-playback-flow", flowBlob))
+        return false;
+
+    // Blend: t0 history, t1 current, t2 per-tile flow; u0 the interpolated frame.
+    // Two tables so the flow pass can bind its own set (t0/t1 the same pair, u0
+    // the flow field) without fighting over one heap.
+    D3D12_DESCRIPTOR_RANGE1 blendRanges[2]{};
+    blendRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    blendRanges[0].NumDescriptors = 3;
+    blendRanges[0].BaseShaderRegister = 0;
+    blendRanges[0].OffsetInDescriptorsFromTableStart = 0;
+    blendRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    blendRanges[1].NumDescriptors = 1;
+    blendRanges[1].BaseShaderRegister = 0;
+    blendRanges[1].OffsetInDescriptorsFromTableStart = 3;
+    D3D12_ROOT_PARAMETER1 blendParams[2]{};
+    blendParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    blendParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    blendParams[0].DescriptorTable.NumDescriptorRanges = 2;
+    blendParams[0].DescriptorTable.pDescriptorRanges = blendRanges;
+    blendParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    blendParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    blendParams[1].Constants.Num32BitValues = 4;   // width, height, block, t as bits
+    blendParams[1].Constants.ShaderRegister = 0;
+    if (!makeRootSignature(blendParams, 2, m_fgRootSig)) return false;
+
+    // Flow: t0 history, t1 current; u0 the displacement field.
+    D3D12_DESCRIPTOR_RANGE1 flowRanges[2]{};
+    flowRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    flowRanges[0].NumDescriptors = 2;
+    flowRanges[0].BaseShaderRegister = 0;
+    flowRanges[0].OffsetInDescriptorsFromTableStart = 0;
+    flowRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    flowRanges[1].NumDescriptors = 1;
+    flowRanges[1].BaseShaderRegister = 0;
+    flowRanges[1].OffsetInDescriptorsFromTableStart = 2;
+    D3D12_ROOT_PARAMETER1 flowParams[2]{};
+    flowParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    flowParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    flowParams[0].DescriptorTable.NumDescriptorRanges = 2;
+    flowParams[0].DescriptorTable.pDescriptorRanges = flowRanges;
+    flowParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    flowParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    flowParams[1].Constants.Num32BitValues = 4;   // width, height, block, search
+    flowParams[1].Constants.ShaderRegister = 0;
+    if (!makeRootSignature(flowParams, 2, m_fgFlowRootSig)) return false;
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
+    compute.pRootSignature = m_fgRootSig.Get();
+    compute.CS = {blendBlob->GetBufferPointer(), blendBlob->GetBufferSize()};
+    if (FAILED(m_device->CreateComputePipelineState(&compute, IID_PPV_ARGS(m_psoFrameGen.GetAddressOf()))))
+        return false;
+    compute.pRootSignature = m_fgFlowRootSig.Get();
+    compute.CS = {flowBlob->GetBufferPointer(), flowBlob->GetBufferSize()};
+    if (FAILED(m_device->CreateComputePipelineState(&compute, IID_PPV_ARGS(m_psoFrameGenFlow.GetAddressOf()))))
+        return false;
+
+    auto makeHeap = [this](UINT count, ComPtr<ID3D12DescriptorHeap>& out, uint32_t& increment) {
+        D3D12_DESCRIPTOR_HEAP_DESC heap{};
+        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap.NumDescriptors = count;
+        heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(m_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(out.GetAddressOf()))))
+            return false;
+        increment = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        return true;
+    };
+    if (!makeHeap(4, m_fgDescriptorHeap, m_fgDescriptorIncrement)) return false;
+    if (!makeHeap(3, m_fgFlowDescriptorHeap, m_fgFlowDescriptorIncrement)) return false;
+
+    // Both frame textures sit at render resolution and in the same FP16 linear
+    // domain the converter blends in and the present chain already samples.
+    D3D12_RESOURCE_DESC target{};
+    target.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    target.Width = m_renderW;
+    target.Height = m_renderH;
+    target.DepthOrArraySize = 1;
+    target.MipLevels = 1;
+    target.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    target.SampleDesc.Count = 1;
+    target.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    if (FAILED(m_device->CreateCommittedResource(
+            &defaultHeap, D3D12_HEAP_FLAG_NONE, &target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            nullptr, IID_PPV_ARGS(m_fgOutput.GetAddressOf()))))
+        return false;
+    m_fgOutput->SetName(L"FrameGen_Interpolated_FP16");
+    m_fgOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    target.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (FAILED(m_device->CreateCommittedResource(
+            &defaultHeap, D3D12_HEAP_FLAG_NONE, &target,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+            IID_PPV_ARGS(m_fgHistory.GetAddressOf()))))
+        return false;
+    m_fgHistory->SetName(L"FrameGen_PreviousFrame_FP16");
+
+    // One displacement per 8x8 tile, so the field is the frame divided by the
+    // tile - which is exactly why it beats m_motion's 128x72 grid by an order of
+    // magnitude where it matters.
+    D3D12_RESOURCE_DESC flowDesc{};
+    flowDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    flowDesc.Width = (m_renderW + frame_gen_blend::kBlock - 1) / frame_gen_blend::kBlock;
+    flowDesc.Height = (m_renderH + frame_gen_blend::kBlock - 1) / frame_gen_blend::kBlock;
+    flowDesc.DepthOrArraySize = 1;
+    flowDesc.MipLevels = 1;
+    flowDesc.Format = DXGI_FORMAT_R16G16_FLOAT;
+    flowDesc.SampleDesc.Count = 1;
+    flowDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (FAILED(m_device->CreateCommittedResource(
+            &defaultHeap, D3D12_HEAP_FLAG_NONE, &flowDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            nullptr, IID_PPV_ARGS(m_fgFlow.GetAddressOf()))))
+        return false;
+    m_fgFlow->SetName(L"FrameGen_Flow_RG16F");
+    m_fgFlowState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    // The present pass samples the result in place of the source when the debug
+    // view selects it, so its view lives in the present chain's own heap. Which
+    // texture it points at follows the active path: FFX writes BGRA8, the
+    // matcher writes FP16.
+    //
+    // MipLevels is 1 on BOTH branches, and the FFX branch saying otherwise is
+    // what three days of "the runtime removes the device ~40 ms after its
+    // context is created" actually was. `view{}` leaves the field 0, and on
+    // this AMD driver a BGRA8 SRV over a 1-mip texture with MipLevels 0 takes
+    // the device down - the removal surfaces a few dozen ms later, which is
+    // why it looked asynchronous and context-related. The tell was the one
+    // run that survived: it had reset the backend before this line (the
+    // convert pipeline had failed), so the FFX branch - and only that branch -
+    // was skipped, and the device lived.
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Texture2D.MipLevels = 1;
+    if (m_fgFfx) {
+        view.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        m_device->CreateShaderResourceView(m_fgFfxOutput.Get(), &view, SRVCPU(GeneratedFrameSRV));
+        return true;
+    }
+    view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    m_device->CreateShaderResourceView(m_fgOutput.Get(), &view, SRVCPU(GeneratedFrameSRV));
+    return true;
+}
+
+void D3D12Renderer::RecordFrameGenConvert(ID3D12GraphicsCommandList* cmd)
+{
+    // The convert pass alone: FP16 linear -> BGRA8 sRGB into the shared
+    // m_fgFfxInput, recorded on the caller's list and nothing else. The island
+    // path ends the frame list right after this, so the pass is its own method
+    // rather than the head of RecordPlaybackFrameGen.
+    if (!m_psoFgConvert || !m_fgConvertRootSig || !m_fgConvertHeap || !m_fgFfxInput ||
+        !m_fgFfxOutput || !m_dlssColor)
+        return;
+
+    if (m_colorInRT) {
+        Barrier(cmd, m_dlssColor.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, GuideReadState);
+        m_colorInRT = false;
+    }
+    if (m_fgFfxInputState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        Barrier(cmd, m_fgFfxInput.Get(), m_fgFfxInputState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_fgFfxInputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if (m_fgFfxOutputState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        Barrier(cmd, m_fgFfxOutput.Get(), m_fgFfxOutputState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_fgFfxOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    auto convertSlot = [&](uint32_t index) {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle =
+            m_fgConvertHeap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += index * m_fgConvertDescriptorIncrement;
+        return handle;
+    };
+    D3D12_SHADER_RESOURCE_VIEW_DESC srcView{};
+    srcView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srcView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srcView.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    srcView.Texture2D.MipLevels = 1;
+    m_device->CreateShaderResourceView(m_dlssColor.Get(), &srcView, convertSlot(0));
+    D3D12_UNORDERED_ACCESS_VIEW_DESC dstView{};
+    dstView.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    dstView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    m_device->CreateUnorderedAccessView(m_fgFfxInput.Get(), nullptr, &dstView, convertSlot(1));
+
+    ID3D12DescriptorHeap* convertHeaps[] = {m_fgConvertHeap.Get()};
+    cmd->SetDescriptorHeaps(1, convertHeaps);
+    cmd->SetComputeRootSignature(m_fgConvertRootSig.Get());
+    cmd->SetPipelineState(m_psoFgConvert.Get());
+    cmd->SetComputeRootDescriptorTable(0, m_fgConvertHeap->GetGPUDescriptorHandleForHeapStart());
+    const uint32_t convertConstants[2] = {m_renderW, m_renderH};
+    cmd->SetComputeRoot32BitConstants(1, 2, convertConstants, 0);
+    cmd->Dispatch((m_renderW + frame_gen_convert::kThreadGroup - 1) / frame_gen_convert::kThreadGroup,
+                  (m_renderH + frame_gen_convert::kThreadGroup - 1) / frame_gen_convert::kThreadGroup, 1);
+    Barrier(cmd, m_fgFfxInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_fgFfxInputState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+}
+
+bool D3D12Renderer::RecordFrameGenPresentDraw(ID3D12GraphicsCommandList* cmd, uint32_t slot,
+                                              bool generated)
+{
+    // One present draw into the current backbuffer, with everything the
+    // non-generation present sets. `generated` selects the island's BGRA8
+    // output (or the matcher's FP16 one when the island is gone); otherwise the
+    // normal chain output is drawn exactly as the stock present does.
+    const present_scale::Target target = CurrentPresentTarget();
+    RecordVsr(cmd, slot, target);
+    const uint32_t bi = m_swapchain->GetCurrentBackBufferIndex();
+    Barrier(cmd, m_backbuffers[bi].Get(), D3D12_RESOURCE_STATE_PRESENT,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_VIEWPORT vp{0, 0, float(target.width), float(target.height), 0, 1};
+    D3D12_RECT sc{0, 0, LONG(target.width), LONG(target.height)};
+    cmd->RSSetViewports(1, &vp);
+    cmd->RSSetScissorRects(1, &sc);
+    auto brt = RTV(bi);
+    cmd->OMSetRenderTargets(1, &brt, FALSE, nullptr);
+    cmd->SetGraphicsRootSignature(m_rootSig.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const bool finalView = (m_debugView == DebugView::Final);
+    SetPresentConstants(cmd, finalView ? m_colorSettings : ColorSettings{},
+                        finalView ? m_comparison : ComparisonSettings{},
+                        finalView && m_hasReference, target.width, target.height);
+    ID3D12PipelineState* presentPso = BackbufferProgram(target.scaled, m_hdrOutput);
+    cmd->SetPipelineState(presentPso);
+    if (generated) {
+        if (m_fgFfx && m_fgFfxOutput && m_fgFfxIsland && !m_fgFfxFailed) {
+            // The barrier below must target the SAME resource the table above
+            // samples: pointing it at the matcher's m_fgOutput while sampling
+            // the FidelityFX output left that one pixel-sampled in a
+            // NON_PIXEL-only state, and the AMD driver answered with a device
+            // removal on the first generated frame.
+            Barrier(cmd, m_fgFfxOutput.Get(), m_fgFfxOutputState,
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmd->SetGraphicsRootDescriptorTable(RootView, SRVGPU(GeneratedFrameSRV));
+            cmd->DrawInstanced(3, 1, 0, 0);
+            Barrier(cmd, m_fgFfxOutput.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    m_fgFfxOutputState);
+        } else if (m_fgOutput) {
+            Barrier(cmd, m_fgOutput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmd->SetGraphicsRootDescriptorTable(RootView, SRVGPU(GeneratedFrameSRV));
+            cmd->DrawInstanced(3, 1, 0, 0);
+            Barrier(cmd, m_fgOutput.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        } else {
+            return false;
+        }
+    } else if (m_lastDLSSUsed) {
+        cmd->SetGraphicsRootDescriptorTable(RootView, SRVGPU(1));
+        cmd->DrawInstanced(3, 1, 0, 0);
+    } else if (UpscalePresentActive()) {
+        cmd->SetGraphicsRootDescriptorTable(RootView, SRVGPU(UpscaleSRV));
+        cmd->DrawInstanced(3, 1, 0, 0);
+    } else {
+        Barrier(cmd, m_dlssColor.Get(), GuideReadState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmd->SetGraphicsRootDescriptorTable(RootView, SRVGPU(4));
+        cmd->DrawInstanced(3, 1, 0, 0);
+        Barrier(cmd, m_dlssColor.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, GuideReadState);
+    }
+    Barrier(cmd, m_backbuffers[bi].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_PRESENT);
+    return true;
+}
+
+bool D3D12Renderer::WaitFgFenceValue(uint64_t value)
+{
+    // Bounded wait for a shared-fence value. Only the island-failure path uses
+    // it: the island's own completion wait covers the success case.
+    if (!value) return true;
+    if (!m_fgFfxFence) return false;
+    if (m_fgFfxFence->GetCompletedValue() >= value) return true;
+    if (!m_fenceEvent) return false;
+    if (FAILED(m_fgFfxFence->SetEventOnCompletion(value, m_fenceEvent))) return false;
+    return WaitForSingleObject(m_fenceEvent, 10000) == WAIT_OBJECT_0;
+}
+
+bool D3D12Renderer::EngageFrameGenIsland()
+{
+    // The island is created exactly once, here, at the end of Initialize: the
+    // renderer's device is fully built, the GPU is idle, and nothing the
+    // runtime's asynchronous initialization could collide with is in flight.
+    if (m_fgFfxIsland || m_fgFfxFailed) return m_fgFfxIsland;
+    if (!m_fgFfx || !m_fgFfxInput || !m_fgFfxOutput || !m_fgFfxFence ||
+        !m_fgFfxInputHandle || !m_fgFfxOutputHandle || !m_fgFfxFenceHandle) {
+        return false;
+    }
+    DXGI_ADAPTER_DESC1 adapterDesc{};
+    LUID adapterLuid{};
+    if (m_adapter && SUCCEEDED(m_adapter->GetDesc1(&adapterDesc)))
+        adapterLuid = adapterDesc.AdapterLuid;
+    if (!m_fgFfx->InitializeIsolated(adapterLuid, m_renderW, m_renderH,
+                                     DXGI_FORMAT_B8G8R8A8_UNORM,
+                                     m_fgFfxInputHandle, m_fgFfxOutputHandle,
+                                     m_fgFfxFenceHandle)) {
+        LOG("Playback frame generation: FidelityFX island unavailable ("
+            << utf8_text::FromWide(m_fgFfx->LastDetail()) << "); falling back to the matcher.");
+        m_fgFfxIsland=false;m_fgFfx.reset();
+        ReleaseFrameGenBridge();
+        return false;
+    }
+    m_fgFfxIsland = true;
+    LOG("Playback frame generation: AMD FidelityFX runtime engaged on its own device at "
+        << m_renderW << "x" << m_renderH << " in BGRA8 sRGB (island mode).");
+    LogGpuHealth("after FFX Initialize (island engaged)", m_device.Get());
+    return true;
+}
+
+void D3D12Renderer::ReleaseFrameGenBridge()
+{
+    // The handles are NT handles into this process only; the island opened its
+    // own references at InitializeIsolated, so closing these does not disturb
+    // it. The textures and the fence are plain renderer resources.
+    if (m_fgFfxInputHandle) { CloseHandle(m_fgFfxInputHandle); m_fgFfxInputHandle = nullptr; }
+    if (m_fgFfxOutputHandle) { CloseHandle(m_fgFfxOutputHandle); m_fgFfxOutputHandle = nullptr; }
+    if (m_fgFfxFenceHandle) { CloseHandle(m_fgFfxFenceHandle); m_fgFfxFenceHandle = nullptr; }
+    m_fgFfxFence.Reset();
+    m_fgFfxInput.Reset();
+    m_fgFfxOutput.Reset();
+    m_fgFfxInputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    m_fgFfxOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    m_fgFfxFenceValue = 0;
+    m_fgFfxIsland = false;
+}
+
+void D3D12Renderer::RecordPlaybackFrameGen(ID3D12GraphicsCommandList* cmd, float t, bool reset)
+{
+    if (!m_psoFrameGen || !m_psoFrameGenFlow || !m_fgHistory || !m_fgOutput || !m_fgFlow ||
+        !m_dlssColor)
+        return;
+
+    auto barrier = [&](ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+        // Equal before- and after-state is rejected by the retail runtime
+        // (cmd->Close() answers E_INVALIDARG), so a no-op transition is not
+        // recorded at all. Both destinations below carry a remembered state and
+        // can already be where this record wants them.
+        if (before == after) return;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = resource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = before;
+        b.Transition.StateAfter = after;
+        cmd->ResourceBarrier(1, &b);
+    };
+
+    // The FidelityFX island, when it is up, is driven from RecordAndPresentFrame
+    // (RunFrameGenIsland's logic inlined there): the convert pass ends the frame
+    // list, the shared fence is signalled, and the generation runs on the
+    // island's own device. What follows is the no-island path - the matcher.
+
+    // reset (first frame, or a cut): store the frame as history and produce no
+    // intermediate. Same contract as the converter's reset Evaluate.
+    if (reset) {
+        barrier(m_fgHistory.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+        barrier(m_dlssColor.Get(), GuideReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cmd->CopyResource(m_fgHistory.Get(), m_dlssColor.Get());
+        barrier(m_fgHistory.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        barrier(m_dlssColor.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, GuideReadState);
+        return;
+    }
+
+    // Both frames are already shader-readable by the time the present chain runs
+    // (the guide passes leave m_dlssColor in GuideReadState), so only the
+    // destinations have to move.
+    if (m_fgOutputState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        barrier(m_fgOutput.Get(), m_fgOutputState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_fgOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    // The guide textures are RENDER_TARGET until their pass writes them; a
+    // present-time read has to move them back to shader-readable first. The
+    // flags m_guidesInRT / m_colorInRT already track that. (m_motion is no
+    // longer an input here, but m_dlssColor still is.)
+    if (m_colorInRT) { barrier(m_dlssColor.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, GuideReadState); m_colorInRT = false; }
+
+    auto slot = [&](ID3D12DescriptorHeap* heap, uint32_t increment, uint32_t index) {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = heap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += index * increment;
+        return handle;
+    };
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Texture2D.MipLevels = 1;
+
+    // Pass 1: the matcher. Same block-matching the offline converter runs, one
+    // displacement per 8x8 tile between the history frame and this one.
+    barrier(m_fgFlow.Get(), m_fgFlowState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_fgFlowState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    m_device->CreateShaderResourceView(m_fgHistory.Get(), &view,
+                                       slot(m_fgFlowDescriptorHeap.Get(), m_fgFlowDescriptorIncrement, 0));
+    m_device->CreateShaderResourceView(m_dlssColor.Get(), &view,
+                                       slot(m_fgFlowDescriptorHeap.Get(), m_fgFlowDescriptorIncrement, 1));
+    D3D12_UNORDERED_ACCESS_VIEW_DESC flowUav{};
+    flowUav.Format = DXGI_FORMAT_R16G16_FLOAT;
+    flowUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    m_device->CreateUnorderedAccessView(m_fgFlow.Get(), nullptr, &flowUav,
+                                        slot(m_fgFlowDescriptorHeap.Get(), m_fgFlowDescriptorIncrement, 2));
+
+    ID3D12DescriptorHeap* flowHeap[] = {m_fgFlowDescriptorHeap.Get()};
+    cmd->SetDescriptorHeaps(1, flowHeap);
+    cmd->SetComputeRootSignature(m_fgFlowRootSig.Get());
+    cmd->SetPipelineState(m_psoFrameGenFlow.Get());
+    cmd->SetComputeRootDescriptorTable(0, m_fgFlowDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    const uint32_t flowConstants[4] = {m_renderW, m_renderH,
+                                        static_cast<uint32_t>(frame_gen_blend::kBlock), m_fgSearch};
+    cmd->SetComputeRoot32BitConstants(1, 4, flowConstants, 0);
+    cmd->Dispatch((m_renderW + frame_gen_blend::kBlock - 1) / frame_gen_blend::kBlock,
+                  (m_renderH + frame_gen_blend::kBlock - 1) / frame_gen_blend::kBlock, 1);
+    barrier(m_fgFlow.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_fgFlowState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    // Pass 2: the blend, warping both frames along that field. Per-tile indexing
+    // here, matching the field the matcher just wrote.
+    view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    m_device->CreateShaderResourceView(m_fgHistory.Get(), &view,
+                                       slot(m_fgDescriptorHeap.Get(), m_fgDescriptorIncrement, 0));
+    m_device->CreateShaderResourceView(m_dlssColor.Get(), &view,
+                                       slot(m_fgDescriptorHeap.Get(), m_fgDescriptorIncrement, 1));
+    view.Format = DXGI_FORMAT_R16G16_FLOAT;
+    m_device->CreateShaderResourceView(m_fgFlow.Get(), &view,
+                                       slot(m_fgDescriptorHeap.Get(), m_fgDescriptorIncrement, 2));
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+    uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    m_device->CreateUnorderedAccessView(m_fgOutput.Get(), nullptr, &uav,
+                                        slot(m_fgDescriptorHeap.Get(), m_fgDescriptorIncrement, 3));
+
+    uint32_t tBits = 0;
+    std::memcpy(&tBits, &t, sizeof(tBits));
+    cmd->SetDescriptorHeaps(1, m_fgDescriptorHeap.GetAddressOf());
+    cmd->SetComputeRootSignature(m_fgRootSig.Get());
+    cmd->SetPipelineState(m_psoFrameGen.Get());
+    cmd->SetComputeRootDescriptorTable(0, m_fgDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    const uint32_t constants[4] = {m_renderW, m_renderH,
+                                   static_cast<uint32_t>(frame_gen_blend::kBlock), tBits};
+    cmd->SetComputeRoot32BitConstants(1, 4, constants, 0);
+    cmd->Dispatch((m_renderW + 7) / 8, (m_renderH + 7) / 8, 1);
+
+    // The present draw samples the result as a texture, and the next frame's
+    // matcher samples this one as history.
+    barrier(m_fgOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_fgOutputState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    // This frame becomes the previous one for the next pair.
+    barrier(m_fgHistory.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_COPY_DEST);
+    barrier(m_dlssColor.Get(), GuideReadState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmd->CopyResource(m_fgHistory.Get(), m_dlssColor.Get());
+    barrier(m_fgHistory.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    barrier(m_dlssColor.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, GuideReadState);
+
+    // The blend bound its own descriptor heap; everything recorded after this
+    // (the present draw, the compositor) binds the present chain's heap.
+    ID3D12DescriptorHeap* present[] = {m_srvHeap.Get()};
+    cmd->SetDescriptorHeaps(1, present);
 }
 
 void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)

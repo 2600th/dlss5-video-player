@@ -34,7 +34,7 @@ public:
     bool Evaluate(ID3D12GraphicsCommandList* cmd, ID3D12Resource* backbuffer,
                   ID3D12Resource* motion, ID3D12Resource* depth, ID3D12Resource* outputInterpolated,
                   uint32_t multiFrameCount, uint32_t multiFrameIndex, bool reset,
-                  uint64_t backbufferFrameId = 0) override;
+                  uint64_t backbufferFrameId = 0, float frameTimeMs = 0.0f) override;
 
     uint64_t EvaluationCount() const override { return m_evaluations; }
     // Conservative until the matcher is measured on real footage: 1 generated
