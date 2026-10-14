@@ -221,6 +221,9 @@ struct TipFacts {
     double renderedFps{};
     double sourceFps{};
     uint64_t dropped{};
+    // Frame generation is interleaving a generated midpoint for every source
+    // frame, so `renderedFps` counts presents, not decoded frames.
+    bool frameGenerated{};
 };
 
 inline std::wstring OneDecimal(double value)
@@ -248,12 +251,16 @@ inline std::wstring TipText(Chip chip, const TipFacts& facts)
             text += L"; all of it in about " + EtaText(*facts.render.etaSeconds);
         return text + L".";
     }
-    case Chip::Fps:
-        return L"Frame rate\n" + std::to_wstring(std::lround(std::max(0.0, facts.renderedFps))) +
-               L" frames a second reached the screen, against the source's " +
+    case Chip::Fps: {
+        std::wstring text = L"Frame rate\n" + std::to_wstring(std::lround(std::max(0.0, facts.renderedFps))) +
+               L" frames a second reached the screen";
+        if (facts.frameGenerated)
+            text += L", half of them generated between the source's frames";
+        return text + L", against the source's " +
                std::to_wstring(std::lround(std::max(0.0, facts.sourceFps))) +
                L". Measured over the last three quarters of a second. Fewer than the source means frames are "
                L"being skipped to keep time.";
+    }
     case Chip::Dropped:
         return L"Dropped frames\n" + std::to_wstring(facts.dropped) +
                (facts.dropped == 1 ? L" frame was" : L" frames were") +

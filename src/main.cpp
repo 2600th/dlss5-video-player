@@ -6291,7 +6291,7 @@ private:
         if(id>=kChipTipIdBase&&id<kChipTipIdBase+status_chips::kChipCount){
             const size_t index=size_t(id-kChipTipIdBase);
             if(!m_cachedChips[index].visible)return {};
-            status_chips::TipFacts facts{RenderChipProgress(),0.0,0.0,m_submitFps,m_decoder.FrameRate(),m_droppedFrames};
+            status_chips::TipFacts facts{RenderChipProgress(),0.0,0.0,ScreenFps(),m_decoder.FrameRate(),m_droppedFrames,ScreenShowsGeneratedFrames()};
             if(m_liveSession&&m_liveRange.end100ns>m_liveRange.start100ns){
                 facts.rangeSeconds=double(m_liveRange.end100ns-m_liveRange.start100ns)*1e-7;
                 facts.paceRatio=LiveRealtimeRatio();
@@ -8984,8 +8984,16 @@ private:
         }
         return {};
     }
+    // Frames the screen actually shows per second: the decoder's submit rate
+    // (one per source frame), doubled while the FidelityFX island interleaves
+    // a generated midpoint frame for every source frame. A renderer without a
+    // live island - DLSS off, island failed - shows the plain submit rate.
+    double ScreenFps()const{
+        return (m_renderer&&m_renderer->PlaybackFrameGenDoubling())?m_submitFps*2.0:m_submitFps;
+    }
+    bool ScreenShowsGeneratedFrames()const{ return m_renderer&&m_renderer->PlaybackFrameGenDoubling(); }
     status_chips::Snapshot BuildStatusChips()const{
-        return status_chips::Build(m_loaded&&m_renderer!=nullptr,RenderChipProgress(),m_submitFps,
+        return status_chips::Build(m_loaded&&m_renderer!=nullptr,RenderChipProgress(),ScreenFps(),
                                    m_decoder.FrameRate(),m_droppedFrames);
     }
     // Called with the status line, which every state change and every

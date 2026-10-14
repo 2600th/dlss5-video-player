@@ -2033,6 +2033,16 @@ void status_chip_tips_say_what_was_measured_test()
     facts.renderedFps = 29.6;
     facts.sourceFps = 30.0;
     CHECK(TipText(Chip::Fps, facts).find(L"30 frames a second reached the screen, against the source's 30") != std::wstring::npos);
+    // With frame generation the rate counts presents, not decoded frames, and
+    // the tip says so; the plain tip is unchanged.
+    facts.renderedFps = 48.0;
+    facts.sourceFps = 24.0;
+    facts.frameGenerated = true;
+    const std::wstring generated = TipText(Chip::Fps, facts);
+    CHECK(generated.find(L"48 frames a second reached the screen, half of them generated") != std::wstring::npos);
+    CHECK(generated.find(L"against the source's 24") != std::wstring::npos);
+    facts.frameGenerated = false;
+    CHECK(TipText(Chip::Fps, facts).find(L"half of them generated") == std::wstring::npos);
     facts.dropped = 1;
     CHECK(TipText(Chip::Dropped, facts).find(L"1 frame was skipped") != std::wstring::npos);
     facts.dropped = 12;

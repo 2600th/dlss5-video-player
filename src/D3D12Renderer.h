@@ -650,6 +650,13 @@ public:
     // FidelityFX island came up; the call is harmless when it did not.
     void SetPlaybackFrameGeneration(bool on) { m_playbackFrameGen = on; }
     bool PlaybackFrameGeneration() const { return m_playbackFrameGen; }
+    // True while the FidelityFX island is actually doubling the swapchain
+    // presents - each source frame shown as the generated midpoint and then
+    // itself. A renderer whose island never came up, or whose island failed
+    // and was abandoned, still presents at the source rate and reports false;
+    // the status chip scales its rate by this, so it never claims frames the
+    // screen does not show.
+    bool PlaybackFrameGenDoubling() const { return m_playbackFrameGen&&m_fgFfxIsland&&!m_fgFfxFailed; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
     bool DLSSFeatureCreated() const { return m_dlss.FeatureCreated(); }
     uint64_t DLSSEvaluations() const { return m_dlss.EvaluationCount(); }
