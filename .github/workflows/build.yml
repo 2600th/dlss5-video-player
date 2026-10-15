@@ -80,7 +80,7 @@ jobs:
       # verifier's allowlist refuses anything else); they are kept here, with
       # the executables they match, so a dump from this build can be symbolised.
       - name: Upload symbols
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: symbols-${{ github.sha }}
           path: |
@@ -129,7 +129,7 @@ jobs:
       # Uploaded as the file itself, not re-zipped, so what is downloaded is the
       # verified package under its own name and runs as-is.
       - name: Upload core package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: dist/DLSSVideoPlayer-v*-core-win64.zip
           archive: false
