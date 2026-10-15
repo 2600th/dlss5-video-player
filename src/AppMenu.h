@@ -70,6 +70,7 @@ inline constexpr UINT IDM_VIEW_DEPTH = 305;
 // contiguous run and the radio check below can span it without a special case.
 inline constexpr UINT IDM_VIEW_FRAME_GENERATED = 306;
 inline constexpr UINT IDM_DLSS_UPSCALING = 308;
+inline constexpr UINT IDM_PLAYBACK_FRAME_GENERATION = 307;
 inline constexpr UINT IDM_FRAME_GENERATION = 309;
 inline constexpr UINT IDM_PREVIEW_FRAME = 310;
 inline constexpr UINT IDM_PREVIEW_CLIP = 311;
@@ -234,7 +235,8 @@ bool UpdateYouTubeQualitySelection(HMENU menuBar, YouTubeSourceQuality quality);
 bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                                bool neuralAvailable, bool neuralActive,
                                bool upscalingAvailable, bool upscalingActive,
-                               bool frameGenerationAvailable, bool frameGenerationRunning);
+                               bool frameGenerationAvailable, bool frameGenerationRunning,
+                               bool playbackFrameGenAvailable, bool playbackFrameGenRequested);
 // Range, preview and render commands, the render pause item and the receipt
 // item. markersAvailable: a source is loaded; rangeRenderAvailable: that source
 // can be range-rendered now (local/cached source, no active job).

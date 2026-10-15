@@ -14,6 +14,7 @@ enum class UiIcon {
     Sparkles,
     Upscaling,
     FrameGeneration,
+    FrameInterpolation,
     Crop,
     Adjustments,
     Debug,

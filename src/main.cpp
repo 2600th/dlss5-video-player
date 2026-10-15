@@ -367,6 +367,7 @@ static constexpr int HK_BACK_10 = 9002;
 static constexpr int HK_FORWARD_10 = 9003;
 static constexpr int HK_MUTE = 9004;
 static constexpr int HK_DLSS = 9005;
+static constexpr int HK_FRAME_GENERATION = 9008;
 static constexpr int HK_MEDIA_PLAY_PAUSE = 9006;
 static constexpr int HK_ADJUSTMENTS = 9007;
 
@@ -2381,23 +2382,16 @@ static bool ReadSavedAmdMultiPassSkip(const std::filesystem::path& settingsPath)
 // the playback clock, audio sync and seeking. This switch is the experiment
 // that runs the same generation live, on the FidelityFX island, presenting the
 // generated midpoint and then each source frame.
-static bool ReadSavedPlaybackFrameGeneration(const std::filesystem::path& settingsPath)
-{
-    return GetPrivateProfileIntW(L"FrameGeneration",L"Playback",0,settingsPath.c_str())!=0;
-}
-
-// Hands a freshly initialized renderer the frame-generation settings this
-// machine has saved. Every renderer creation site calls it, so a rebuild (the
-// hardware-decoder fallback among them) cannot silently lose the setting.
-static void ConfigurePlaybackFrameGeneration(D3D12Renderer* renderer,
-                                             const std::filesystem::path& settingsPath)
+// Hands a freshly initialized renderer the live frame-generation setting the
+// user chose. Every renderer creation site calls it, so a rebuild (the
+// hardware-decoder fallback among them) cannot silently lose the setting. The
+// choice itself lives on the player (m_playbackFrameGenRequested) and is
+// persisted to [Playback] FrameGenerationPlayback by SaveVideoSettings.
+static void ConfigurePlaybackFrameGeneration(D3D12Renderer* renderer, bool on)
 {
     if (renderer) {
-        const bool on = ReadSavedPlaybackFrameGeneration(settingsPath);
         renderer->SetPlaybackFrameGeneration(on);
-        LOG("Playback frame generation setting: " << (on ? "on" : "off")
-            << " ([FrameGeneration] Playback in " << utf8_text::FromWide(settingsPath.wstring())
-            << ").");
+        LOG("Playback frame generation setting: " << (on ? "on" : "off") << ".");
     }
 }
 
@@ -5214,6 +5208,10 @@ private:
         m_fill=ReadIniFloat(L"Playback",L"Fill",0.0f)==1.0f;
         m_neuralRequested=ReadIniFloat(L"Playback",L"NeuralView",1.0f)!=0.0f;
         m_upscalingRequested=ReadIniFloat(L"Playback",L"SuperResolution",0.0f)==1.0f;
+        // Live frame generation during playback: OFF by default. A missing key
+        // means off, so a fresh install or a cleared ini never turns it on
+        // without the user asking.
+        m_playbackFrameGenRequested=ReadIniFloat(L"Playback",L"FrameGenerationPlayback",0.0f)!=0.0f;
         m_playbackVsr=ReadIniFloat(L"Playback",L"RtxVsr",vsr_policy::kPlaybackDefault?1.0f:0.0f)!=0.0f;
         // Auto and the rung are separate keys on purpose. Every earlier version
         // persisted UpscaleHeight on every save, so a stored 1440 is the old
@@ -5382,6 +5380,7 @@ private:
         WriteIniFloat(L"Playback",L"Fill",m_fill?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"NeuralView",m_neuralRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"SuperResolution",m_upscalingRequested?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"FrameGenerationPlayback",m_playbackFrameGenRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"RtxVsr",m_playbackVsr?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleAuto",m_upscaleAuto?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
@@ -6067,7 +6066,8 @@ private:
         if(HMENU menu=GetMenu(m_hwnd)){
             app_menu::UpdateFeatureAvailability(menu,m_neuralRequested,neuralAvailable,neuralActive,
                                                 ToolbarActionEnabled(ToolbarAction::ToggleUpscaling),UpscalingActive(),
-                                                FrameGenerationAvailable(),m_frameGenWorker.joinable());
+                                                FrameGenerationAvailable(),m_frameGenWorker.joinable(),
+                                                m_loaded&&m_renderer!=nullptr,m_playbackFrameGenRequested);
             // Both one-shot conversions report themselves by becoming their own
             // cancel command, which is what the toolbar pill has always done.
             // A separate cancel row was a permanently greyed row and a second
@@ -7561,7 +7561,7 @@ private:
         ConfigureRendererSource();
         if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),ow,oh,guideW,guideH,m_activeQuality)||!RendererTookSourceLayout()){std::wstring e=T(L"error.renderer"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);m_renderer.reset();m_decoder.Close();ShowWindow(m_viewport,SW_HIDE);return false;}
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());
-        ConfigurePlaybackFrameGeneration(m_renderer.get(),SettingsPath());
+        ConfigurePlaybackFrameGeneration(m_renderer.get(),m_playbackFrameGenRequested);
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
         m_haveNext=m_decoder.ReadNext(m_next);if(!m_decoder.IsStillImage())Audio().Start(source,m_currentSec);Audio().SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_cachedSourceFile=localPayload;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
@@ -7720,7 +7720,7 @@ private:
                 // answer the switch, which is what UpscalingPresentAvailable asks.
                 candidate->renderer->UpscalingPresentAvailable()){
                 candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
-                ConfigurePlaybackFrameGeneration(candidate->renderer.get(),SettingsPath());
+                ConfigurePlaybackFrameGeneration(candidate->renderer.get(),m_playbackFrameGenRequested);
                 GuideFrame guide;
                 candidate->guides.SetControls(m_guides.Controls());
                 candidate->guides.SetSceneCutSensitivity(m_guides.SceneCutSensitivity());
@@ -7784,6 +7784,21 @@ private:
         }else if(!EnableUpscaling(EffectiveUpscaleHeight())){
             MessageBoxW(m_hwnd,L"DLSS upscaling could not start at this output size. Your current video is unchanged. See DLSSVideoPlayer.log for details.",L"DLSS Upscaling",MB_OK|MB_ICONINFORMATION);
         }
+    }
+    // Live frame generation during playback: a toggle like Neural Rendering and
+    // DLSS Upscaling. Flips the saved choice, hands it to the live renderer at
+    // once (the island engages on the next cadence decision) and persists it.
+    void TogglePlaybackFrameGeneration(){
+        if(!ToolbarActionEnabled(ToolbarAction::TogglePlaybackFrameGeneration)){
+            LOG("Playback frame generation toggle ignored: loaded="<<m_loaded
+                <<" renderer="<<(m_renderer!=nullptr)<<" seeking="<<(m_seeking||m_seekPending));
+            return;
+        }
+        m_playbackFrameGenRequested=!m_playbackFrameGenRequested;
+        if(m_renderer)m_renderer->SetPlaybackFrameGeneration(m_playbackFrameGenRequested);
+        SaveVideoSettings();
+        LOG("Playback frame generation "<<(m_playbackFrameGenRequested?"on":"off")<<" (persisted to [Playback] FrameGenerationPlayback).");
+        UpdateCachedStatus();InvalidateControls();
     }
     // `height` 0 selects Auto; anything else must name a rung. A refused
     // re-enable leaves the previous selection standing, the same way a failed
@@ -7961,7 +7976,7 @@ private:
                 ConfigureRendererSource();
                 const bool rebuilt=m_renderer->Initialize(window,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,m_activeQuality)&&
                     RendererTookSourceLayout();
-                if(rebuilt)ConfigurePlaybackFrameGeneration(m_renderer.get(),SettingsPath());
+                if(rebuilt)ConfigurePlaybackFrameGeneration(m_renderer.get(),m_playbackFrameGenRequested);
                 return rebuilt;
             });
         m_renderWnd=rebuild.window;
@@ -8931,7 +8946,7 @@ private:
     IdleSurfaceLayout IdleLayout()const{return StartLayout().core;}
     std::vector<ToolbarItem> ToolbarItems()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
-    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable()||StillImageRenderAvailable(),UpscalingAvailable(),FrameGenerationAvailable(),m_frameGenWorker.joinable()&&!m_frameGenCancelling};}
+    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable()||StillImageRenderAvailable(),UpscalingAvailable(),FrameGenerationAvailable(),m_frameGenWorker.joinable()&&!m_frameGenCancelling,m_loaded&&m_renderer!=nullptr};}
     std::optional<RECT> VolumeRect()const{if(!ControlsVisible())return std::nullopt;RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
@@ -9235,6 +9250,13 @@ private:
             }
             return{UiIcon::FrameGeneration,T(L"framegen.pill.generate"),enabled,false};
         }
+        // A toggle, like Neural Rendering and DLSS Upscaling: On/Off, or
+        // Unavailable when there is no loaded source or renderer to take it.
+        case ToolbarAction::TogglePlaybackFrameGeneration:{
+            if(enabled&&m_playbackFrameGenRequested)return{UiIcon::FrameInterpolation,T(L"playback_framegen.pill.on"),enabled,true};
+            if(enabled)return{UiIcon::FrameInterpolation,T(L"playback_framegen.pill.off"),enabled,false};
+            return{UiIcon::FrameInterpolation,T(L"playback_framegen.pill.unavailable"),false,false};
+        }
         case ToolbarAction::Aspect:return{UiIcon::Crop,m_fill||m_onePixel?L"Fit":L"Fill",enabled,m_fill||m_onePixel};
         case ToolbarAction::Adjustments:return{UiIcon::Adjustments,L"Color",enabled,m_adjustWnd!=nullptr};
         case ToolbarAction::DebugView:{const bool active=rendererReady&&m_renderer->GetDebugView()!=D3D12Renderer::DebugView::Final;return{UiIcon::Debug,L"Debug",enabled,active};}
@@ -9267,7 +9289,7 @@ private:
         if(showIcon){const HGDIOBJ measured=SelectObject(dc,m_iconFont);GetTextExtentPoint32W(dc,&glyph,1,&iconSize);SelectObject(dc,measured);}
         const HFONT textFont=m_fontSmall?m_fontSmall:m_font;const HGDIOBJ measuredText=SelectObject(dc,textFont);
         GetTextExtentPoint32W(dc,label.c_str(),static_cast<int>(label.size()),&textSize);
-        const bool featureLabel=action==ToolbarAction::ToggleNeuralRendering||action==ToolbarAction::ToggleUpscaling||action==ToolbarAction::ToggleFrameGeneration;
+        const bool featureLabel=action==ToolbarAction::ToggleNeuralRendering||action==ToolbarAction::ToggleUpscaling||action==ToolbarAction::ToggleFrameGeneration||action==ToolbarAction::TogglePlaybackFrameGeneration;
         int neededWidth=iconSize.cx+textSize.cx+Dip(2*kButtonHorizontalInsetDip+kButtonIconLabelGapDip);
         // A feature pill the layout has narrowed keeps its state and drops its
         // name, rather than ellipsising the state - the one part of the label
@@ -9949,12 +9971,13 @@ private:
         reg(HK_FORWARD_10,MOD_CONTROL|MOD_ALT,VK_RIGHT,"Ctrl+Alt+Right");
         reg(HK_MUTE,MOD_CONTROL|MOD_ALT,'M',"Ctrl+Alt+M");
         reg(HK_DLSS,MOD_CONTROL|MOD_ALT,'D',"Ctrl+Alt+D");
+        reg(HK_FRAME_GENERATION,MOD_CONTROL|MOD_ALT,'G',"Ctrl+Alt+G");
         reg(HK_ADJUSTMENTS,MOD_CONTROL|MOD_ALT,'C',"Ctrl+Alt+C");
         if(!RegisterHotKey(m_hwnd,HK_MEDIA_PLAY_PAUSE,MOD_NOREPEAT,VK_MEDIA_PLAY_PAUSE))LOG("Media Play/Pause hotkey unavailable winerr="<<GetLastError());
     }
-    void UnregisterOverlayHotkeys(){if(!m_hwnd)return;for(int id:{HK_PLAY_PAUSE,HK_BACK_10,HK_FORWARD_10,HK_MUTE,HK_DLSS,HK_ADJUSTMENTS,HK_MEDIA_PLAY_PAUSE})UnregisterHotKey(m_hwnd,id);}
+    void UnregisterOverlayHotkeys(){if(!m_hwnd)return;for(int id:{HK_PLAY_PAUSE,HK_BACK_10,HK_FORWARD_10,HK_MUTE,HK_DLSS,HK_FRAME_GENERATION,HK_ADJUSTMENTS,HK_MEDIA_PLAY_PAUSE})UnregisterHotKey(m_hwnd,id);}
     void HandleHotkey(int id){
-        switch(id){case HK_PLAY_PAUSE:case HK_MEDIA_PLAY_PAUSE:TogglePause();break;case HK_BACK_10:RequestSeek(Position()-10);break;case HK_FORWARD_10:RequestSeek(Position()+10);break;case HK_MUTE:ToggleMute();break;case HK_DLSS:ToggleNeuralRendering();break;case HK_ADJUSTMENTS:ShowAdjustments();break;}
+        switch(id){case HK_PLAY_PAUSE:case HK_MEDIA_PLAY_PAUSE:TogglePause();break;case HK_BACK_10:RequestSeek(Position()-10);break;case HK_FORWARD_10:RequestSeek(Position()+10);break;case HK_MUTE:ToggleMute();break;case HK_DLSS:ToggleNeuralRendering();break;case HK_FRAME_GENERATION:TogglePlaybackFrameGeneration();break;case HK_ADJUSTMENTS:ShowAdjustments();break;}
     }
 
     void OpenFromDialog(){if(!ToolbarActionEnabled(ToolbarAction::Open))return;auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
@@ -11487,7 +11510,7 @@ private:
         ConfigureRendererSource();
         if(!m_renderer||!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,DefaultNeuralCarrierQuality())||!RendererTookSourceLayout()){Unload();return false;}
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());m_activeQuality=DefaultNeuralCarrierQuality();
-        ConfigurePlaybackFrameGeneration(m_renderer.get(),SettingsPath());
+        ConfigurePlaybackFrameGeneration(m_renderer.get(),m_playbackFrameGenRequested);
         const ComparisonView desiredView=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;
         // Decoder start-up (and any hardware-decode fallback) is asynchronous:
         // wait for the first pair within the same bound the seek path uses.
@@ -11755,7 +11778,7 @@ private:
             return{};
         }
         candidate->renderer->SetDLSS(false);candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
-        ConfigurePlaybackFrameGeneration(candidate->renderer.get(),SettingsPath());
+        ConfigurePlaybackFrameGeneration(candidate->renderer.get(),m_playbackFrameGenRequested);
         if(m_renderer)candidate->renderer->SetDebugView(m_renderer->GetDebugView());
         candidate->configuration.inputWidth=candidate->renderer->DLSSInputW();candidate->configuration.inputHeight=candidate->renderer->DLSSInputH();
         return candidate;
@@ -12197,6 +12220,7 @@ private:
         case ToolbarAction::ToggleFrameGeneration:
             if(m_frameGenWorker.joinable())CancelFrameGeneration();else StartFrameGeneration();
             break;
+        case ToolbarAction::TogglePlaybackFrameGeneration:TogglePlaybackFrameGeneration();break;
         case ToolbarAction::Aspect:SetAspect(m_onePixel?false:!m_fill,false);break;
         case ToolbarAction::Adjustments:ShowAdjustments();break;
         case ToolbarAction::DebugView:ShowDebugMenu(anchor);break;
@@ -12542,6 +12566,7 @@ private:
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_NEURAL_RENDERING:ToggleNeuralRendering();break;
         case IDM_DLSS_UPSCALING:ToggleUpscaling();break;
+        case IDM_PLAYBACK_FRAME_GENERATION:TogglePlaybackFrameGeneration();break;
         case IDM_RTX_VSR_UPSCALING:TogglePlaybackVsr();break;
         case IDM_UPSCALE_AUTO:SetUpscaleTarget(0);break;
         case IDM_PROCESSING_SCALE_FIRST:case IDM_PROCESSING_SCALE_FIRST+1:case IDM_PROCESSING_SCALE_LAST:
@@ -12803,6 +12828,12 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // claiming history against a frame that is not its predecessor.
     bool m_guidesSkipped=false,m_layoutMismatchLogged=false;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
     bool m_upscalingRequested=false;
+    // Live frame generation during playback (the FidelityFX island that
+    // interpolates between source frames). Default off; the user's choice is
+    // persisted to [Playback] FrameGenerationPlayback and re-applied at every
+    // renderer creation. Distinct from the offline conversion the Frame
+    // Generation menu starts.
+    bool m_playbackFrameGenRequested=false;
     // The playback upscale's CAS strength, hundredths in the INI. Kept beside the
     // rung because it is the same control's second axis: the export path's
     // sharpness default is the same number (AmdUpscaleShader.h).

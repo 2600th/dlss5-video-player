@@ -36,6 +36,7 @@ inline const wchar_t* TipKey(ToolbarAction action)
     case ToolbarAction::ToggleNeuralRendering: return L"toolbar.tip.neural";
     case ToolbarAction::ToggleUpscaling: return L"toolbar.tip.upscaling";
     case ToolbarAction::ToggleFrameGeneration: return L"toolbar.tip.framegen";
+    case ToolbarAction::TogglePlaybackFrameGeneration: return L"toolbar.tip.playback_framegen";
     case ToolbarAction::Aspect: return L"toolbar.tip.aspect";
     case ToolbarAction::Adjustments: return L"toolbar.tip.color";
     case ToolbarAction::DebugView: return L"toolbar.tip.debug";
@@ -58,6 +59,7 @@ inline const wchar_t* MenuKey(ToolbarAction action)
     case ToolbarAction::Forward10: return L"menu.forward10";
     case ToolbarAction::Mute: return L"menu.mute";
     case ToolbarAction::ToggleNeuralRendering: return L"menu.neural_rendering";
+    case ToolbarAction::TogglePlaybackFrameGeneration: return L"menu.playback_frame_generation";
     case ToolbarAction::Aspect: return L"menu.aspectfit";
     case ToolbarAction::Adjustments: return L"menu.adjustments";
     case ToolbarAction::DebugView: return L"menu.final";

@@ -546,6 +546,7 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
         ToolbarAction::ToggleNeuralRendering,
         ToolbarAction::ToggleUpscaling,
         ToolbarAction::ToggleFrameGeneration,
+        ToolbarAction::TogglePlaybackFrameGeneration,
         ToolbarAction::Aspect,
         ToolbarAction::Adjustments,
         ToolbarAction::DebugView,
@@ -567,7 +568,7 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
     CHECK_EQ(required, toolbar_actions(narrow));
     for (const auto& item : narrow) CHECK(item.compact);
 
-    const auto wide = LayoutToolbar(1600, 180, 96);
+    const auto wide = LayoutToolbar(1760, 180, 96);
     CHECK_EQ(allActions, toolbar_actions(wide));
     for (const auto& item : wide) CHECK(!item.compact);
 
@@ -594,7 +595,7 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
 
 void toolbar_layout_preserves_group_separation_test()
 {
-    const auto items = LayoutToolbar(1600, 180, 96);
+    const auto items = LayoutToolbar(1760, 180, 96);
     const ToolbarItem* back = find_toolbar_item(items, ToolbarAction::Back10);
     const ToolbarItem* play = find_toolbar_item(items, ToolbarAction::PlayPause);
     const ToolbarItem* mute = find_toolbar_item(items, ToolbarAction::Mute);
@@ -619,7 +620,7 @@ void toolbar_layout_scales_hit_height_and_avoids_overlap_test()
 {
     const auto narrow = LayoutToolbar(320, 180, 96);
     const auto normal = LayoutToolbar(900, 180, 96);
-    const auto wide = LayoutToolbar(1600, 180, 96);
+    const auto wide = LayoutToolbar(1760, 180, 96);
     const auto scaled = LayoutToolbar(960, 300, 144);
 
     for (const auto* items : {&narrow, &normal, &wide}) {
@@ -636,7 +637,7 @@ void toolbar_layout_scales_hit_height_and_avoids_overlap_test()
     check_toolbar_items_do_not_overlap(scaled);
 
     CHECK_EQ(16L, wide.front().bounds.left);
-    CHECK(wide.back().bounds.right <= 1600 - 16);
+    CHECK(wide.back().bounds.right <= 1760 - 16);
     CHECK_EQ(24L, scaled.front().bounds.left);
     CHECK(scaled.back().bounds.right <= 960 - 24);
 }
@@ -739,7 +740,7 @@ void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
     CHECK_EQ(ToolbarAction::Open,
              NextFocusableToolbarAction(idleItems, ToolbarAction::Open, true, idle));
 
-    const auto loadedItems = LayoutToolbar(1600, 180, 96);
+    const auto loadedItems = LayoutToolbar(1760, 180, 96);
     const ToolbarAvailability withoutRenderer{true, false, false};
     CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering, withoutRenderer));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleUpscaling, withoutRenderer));
@@ -816,7 +817,7 @@ void open_action_content_keeps_idle_and_toolbar_copy_distinct_test()
 void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
 {
     const ToolbarAvailability loaded{true, false, true, false};
-    const auto wide = LayoutToolbar(1600, 180, 96);
+    const auto wide = LayoutToolbar(1760, 180, 96);
     const auto narrow = LayoutToolbar(320, 180, 96);
     const auto contains = [](std::span<const ToolbarItem> items, ToolbarAction action) {
         return std::any_of(items.begin(), items.end(),
@@ -2856,7 +2857,8 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     // would state a mode the player never has, so it gets an enable state and
     // nothing else, whatever its arguments say.
     CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
-                                              false, false, false, false));
+                                              false, false, false, false,
+                                              false, false));
     const UINT neural = GetMenuState(menu, app_menu::IDM_NEURAL_RENDERING, MF_BYCOMMAND);
     const UINT upscaling = GetMenuState(menu, app_menu::IDM_DLSS_UPSCALING, MF_BYCOMMAND);
     const UINT frameGeneration = GetMenuState(menu, app_menu::IDM_FRAME_GENERATION, MF_BYCOMMAND);
@@ -2869,13 +2871,27 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     // permanently-false argument could never show - still without a check,
     // with both toggles on and checked beside it.
     CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
-                                              true, true, true, true));
+                                              true, true, true, true,
+                                              false, false));
     const UINT enabledFrameGeneration =
         GetMenuState(menu, app_menu::IDM_FRAME_GENERATION, MF_BYCOMMAND);
     CHECK((enabledFrameGeneration & (MF_DISABLED | MF_GRAYED)) == 0);
     CHECK((enabledFrameGeneration & MF_CHECKED) == 0);
     CHECK((GetMenuState(menu, app_menu::IDM_NEURAL_RENDERING, MF_BYCOMMAND) & MF_CHECKED) != 0);
     CHECK((GetMenuState(menu, app_menu::IDM_DLSS_UPSCALING, MF_BYCOMMAND) & MF_CHECKED) != 0);
+    // The live playback frame-generation item is a real toggle like the two
+    // above: greyed while unavailable, enabled and checked once the player
+    // says it can run and the user has asked for it.
+    const UINT playbackFgGreyed =
+        GetMenuState(menu, app_menu::IDM_PLAYBACK_FRAME_GENERATION, MF_BYCOMMAND);
+    CHECK((playbackFgGreyed & (MF_DISABLED | MF_GRAYED)) != 0);
+    CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
+                                              true, true, true, true,
+                                              true, true));
+    const UINT playbackFgOn =
+        GetMenuState(menu, app_menu::IDM_PLAYBACK_FRAME_GENERATION, MF_BYCOMMAND);
+    CHECK((playbackFgOn & (MF_DISABLED | MF_GRAYED)) == 0);
+    CHECK((playbackFgOn & MF_CHECKED) != 0);
     // The converted file is unreachable until one exists: the item that opens
     // it is created greyed and only main.cpp's own state can enable it, so no
     // availability argument here may light it up.

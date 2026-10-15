@@ -88,6 +88,12 @@ private:
             {L"menu.upscale_history_per_frame", L"Per-frame (recommended)\t63-94"},
             {L"menu.frame_generation", L"Generate frames (higher frame rate)..."},
             {L"menu.cancel_frame_generation", L"Cancel frame generation"},
+            // The live, on-screen toggle, distinct from the offline conversion
+            // above. Default off; the player remembers the choice in the ini.
+            {L"menu.playback_frame_generation", L"Frame Generation during playback\tCtrl+Alt+G"},
+            {L"playback_framegen.pill.on", L"Interpolate \u00b7 On"},
+            {L"playback_framegen.pill.off", L"Interpolate \u00b7 Off"},
+            {L"playback_framegen.pill.unavailable", L"Interpolate \u00b7 Unavailable"},
             {L"menu.cancel_export_running", L"Cancel export"},
             {L"menu.show_framegen_output", L"Show last generated file"},
             // 2x is the default because a conversion costs minutes of GPU work
@@ -258,6 +264,7 @@ private:
             {L"toolbar.tip.neural", L"Neural Rendering (D)\nReplays the video through NVIDIA's neural model, which has to render the frames before you can watch them. Off plays the original."},
             {L"toolbar.tip.upscaling", L"DLSS Super Resolution\nRenders the picture larger than the source. On video it measured below a plain bicubic upscale; it is built for rendered games. Unavailable when the source already fills the panel - there is nothing to upscale then.\n\nRTX VSR, the default upscaler, works while this is off: DLSS > RTX VSR Upscaling."},
             {L"toolbar.tip.framegen", L"Frame Generation\nWrites a new file with generated frames between the real ones. This is a conversion that takes minutes, not a switch."},
+            {L"toolbar.tip.playback_framegen", L"Frame Generation during playback (Ctrl+Alt+G)\nInterpolates new frames between the real ones live, on screen, so motion looks smoother (the frame rate chip shows the higher rate). Off by default; the choice is remembered. This is the on-screen effect, not the file conversion started by Generate frames under DLSS."},
             {L"toolbar.tip.open", L"Open a file (Ctrl+O)\nA video, a photo or a GIF. Dropping a file on the window does the same."},
             {L"toolbar.tip.youtube", L"Open a YouTube link (Ctrl+L)\nPaste the address of a public video."},
             {L"toolbar.tip.back10", L"Back 10 seconds (Left)"},

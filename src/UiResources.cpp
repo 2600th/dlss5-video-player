@@ -39,6 +39,13 @@ wchar_t GlyphForIcon(UiIcon icon)
     // at 44/36 dip, where three identical sparkles hid which one starts a
     // minutes-long conversion.
     case UiIcon::FrameGeneration: return L'\xfdae'; // copy-plus
+    // movie: a film frame, the one glyph that reads as "video being played"
+    // rather than "a file being written". Verified present in the committed
+    // tabler-icons.ttf cmap (U+EAFA). Distinct from copy-plus (the offline
+    // conversion pill) and from arrows-maximize / sparkles, the other two
+    // feature pills, so the four never collapse to the same icon at narrow
+    // widths.
+    case UiIcon::FrameInterpolation: return L'\xeafa'; // movie
     case UiIcon::Crop: return L'\xea85';             // crop
     case UiIcon::Adjustments: return L'\xea03';      // adjustments
     case UiIcon::Debug: return L'\xea48';            // bug

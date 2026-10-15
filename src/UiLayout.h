@@ -16,6 +16,7 @@
 enum class ToolbarAction {
     Open, OpenYouTube, Back10, PlayPause, Stop, Forward10, Mute,
     ToggleNeuralRendering, ToggleUpscaling, ToggleFrameGeneration,
+    TogglePlaybackFrameGeneration,
     Aspect, Adjustments, DebugView, Fullscreen, None
 };
 
@@ -42,6 +43,11 @@ struct ToolbarAvailability {
     // can be started - so gating the pill on it alone made the Cancel label a
     // lie.
     bool frameGenerationConverting{false};
+    // The playback frame-generation toggle (the FidelityFX island that
+    // interpolates between source frames live, as against the offline
+    // conversion the ToggleFrameGeneration pill starts). Enabled whenever there
+    // is a loaded source and a renderer to hand the setting to.
+    bool playbackFrameGenerationAvailable{false};
 };
 
 class YouTubeResolutionLifecycle {

@@ -54,6 +54,16 @@ constexpr std::array kToolbarDefinitions{
     // keeps the state and drops the feature name (FeaturePillStateLabel) - the
     // icon and the tooltip still name it - so the floor is 850 dip.
     ToolbarDefinition{ToolbarAction::ToggleFrameGeneration, 264, 1, true, kFeaturePillNarrowWidthDip},
+    // The live playback toggle. A concise "Interpolate" label (the movie icon
+    // and the menu row "Frame Generation during playback" carry the full name)
+    // holds the pill at 196 dip, well under the 264 dip the offline conversion
+    // pill needs for "Frame Generation · Unavailable", so the 14-control bar
+    // still fits a ~1760 dip window instead of overflowing to the required set.
+    // Not required, like Aspect/Adjustments/DebugView: the bar shows it when
+    // there is room, and the switch is always reachable via the DLSS menu row
+    // (checked) and its Ctrl+Alt+G hotkey, so it is never buried at narrow
+    // window widths.
+    ToolbarDefinition{ToolbarAction::TogglePlaybackFrameGeneration, 196, 1, false, kFeaturePillNarrowWidthDip},
     ToolbarDefinition{ToolbarAction::Aspect, 72, 1, false},
     ToolbarDefinition{ToolbarAction::Adjustments, 66, 1, false},
     ToolbarDefinition{ToolbarAction::DebugView, 72, 2, false},
@@ -486,6 +496,13 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
         // to be separate facts.
         return availability.mediaLoaded &&
                (availability.frameGenerationAvailable || availability.frameGenerationConverting);
+    case ToolbarAction::TogglePlaybackFrameGeneration:
+        // Live interpolation between source frames: available whenever a source
+        // is loaded and a renderer can take the setting. The island itself
+        // reports whether the runtime admitted it, so the pill's unavailable
+        // arm carries that reason rather than a verdict.
+        return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
+               availability.playbackFrameGenerationAvailable;
     case ToolbarAction::Adjustments:
     case ToolbarAction::DebugView:
         return availability.mediaLoaded && availability.rendererReady;

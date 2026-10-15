@@ -294,6 +294,14 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(framegenMultiple, IDM_FRAMEGEN_HOLD_DUPLICATES, L"menu.framegen_hold_duplicates");
     AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(framegenMultiple),
                 localizer.Get(L"menu.framegen_multiple").c_str());
+    // Live interpolation between source frames (the FidelityFX island), distinct
+    // from the offline conversion above: a checkbox, not a one-shot action, so
+    // it carries a checkmark for its on state the way Neural Rendering and
+    // DLSS Upscaling do. Default off; the player writes the choice to the ini.
+    // Sits in the frame-generation block (no separator above it) so the menu
+    // keeps its Neural / Upscaling / Frame-generation grouping and no one-item
+    // group is formed.
+    add(dlss, IDM_PLAYBACK_FRAME_GENERATION, L"menu.playback_frame_generation");
     AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
 
     // --- Look before you commit. ------------------------------------------
@@ -342,7 +350,7 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     HMENU help = CreatePopupMenu();
     add(help, IDM_KEYBOARD_SHORTCUTS, L"menu.keyboard_shortcuts");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), localizer.Get(L"menu.help").c_str());
-    UpdateFeatureAvailability(bar, true, false, false, false, false, false, false);
+    UpdateFeatureAvailability(bar, true, false, false, false, false, false, false, false, false);
     UpdateRenderActionAvailability(bar, false, false, false, false, false);
     UpdateComparisonMenu(bar, false, false, IDM_COMPARE_NEURAL, false);
     return bar;
@@ -558,7 +566,8 @@ bool UpdateYouTubeQualitySelection(HMENU menuBar, YouTubeSourceQuality quality)
 bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                                bool neuralAvailable, bool neuralActive,
                                bool upscalingAvailable, bool upscalingActive,
-                               bool frameGenerationAvailable, bool frameGenerationRunning)
+                               bool frameGenerationAvailable, bool frameGenerationRunning,
+                               bool playbackFrameGenAvailable, bool playbackFrameGenRequested)
 {
     const auto update = [&](UINT command, bool available, bool checked) {
         const HMENU menu = find_menu_containing_command(menuBar, command);
@@ -575,10 +584,13 @@ bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
     // minutes-long conversion. It reports that a conversion is running by
     // becoming the cancel command, the way the toolbar pill does; a separate
     // permanently-greyed cancel row was a dead row and a second place for the
-    // two surfaces to disagree. The two real toggles keep their checkmarks.
+    // two surfaces to disagree. The two real toggles - Neural Rendering, DLSS
+    // Upscaling - and the live playback frame-generation checkbox keep their
+    // checkmarks.
     const HMENU frameGeneration = find_menu_containing_command(menuBar, IDM_FRAME_GENERATION);
     return update(IDM_NEURAL_RENDERING, neuralAvailable, neuralActive) &&
            update(IDM_DLSS_UPSCALING, upscalingAvailable, upscalingActive) &&
+           update(IDM_PLAYBACK_FRAME_GENERATION, playbackFrameGenAvailable, playbackFrameGenRequested) &&
            frameGeneration &&
            EnableMenuItem(frameGeneration, IDM_FRAME_GENERATION,
                MF_BYCOMMAND | ((frameGenerationAvailable || frameGenerationRunning) ? MF_ENABLED : MF_GRAYED)) !=
