@@ -1374,8 +1374,6 @@ private:
     bool m_fgResetPending = false;
     // Set only after a generated/source pair has actually been presented.
     bool m_fgDoublingActive = false;
-    bool m_fgResetPending = false;
-    bool m_fgDoublingActive = false;
     // The interval the current frame arrived with (RenderFrame's argument),
     // remembered so the generation record can pass it to FidelityFX.
     float m_fgFrameTimeMs = 0.0f;
