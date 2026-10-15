@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -405,11 +406,19 @@ bool FsrFrameGenBackend::UploadGuides(ID3D12GraphicsCommandList* cmd)
         m_lastDetail = L"FidelityFX's guides were created without their RTV heap.";
         return false;
     }
-    // GPU-side fill: depth = 1.0 (the far plane), motion = zero. The guides
+    // GPU-side fill: depth = 1.0 (the far plane), motion = NaN. The guides
     // were created in RENDER_TARGET state; the clears run there, and both move
     // to the shader-read state the descriptor chain declares afterwards.
     const FLOAT depthClear[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-    const FLOAT motionClear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    // Motion NaN, not zero: a zero field claims every pixel is static, which is
+    // a lie on moving video and makes the runtime's own consistency correction
+    // fight the real motion - it measured as bright overshoot speckles on
+    // high-contrast edges (1 % of pixels brighter than both source frames,
+    // 2026-10-15). NaN is the "no motion data here" encoding, which leaves the
+    // runtime nothing to contradict.
+    const FLOAT motionClear[4] = {std::numeric_limits<float>::quiet_NaN(),
+                                  std::numeric_limits<float>::quiet_NaN(),
+                                  0.0f, 0.0f};
     cmd->ClearRenderTargetView(m_guideRtvHeap->GetCPUDescriptorHandleForHeapStart(),
                                depthClear, 0, nullptr);
     const UINT rtvIncrement = m_device->GetDescriptorHandleIncrementSize(

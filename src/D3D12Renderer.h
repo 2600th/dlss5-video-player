@@ -647,6 +647,16 @@ public:
     uint32_t OutputH() const { return m_outputH; }
     void SetDebugView(DebugView v) { m_debugView = v; m_presentStale = true; }
     DebugView GetDebugView() const { return m_debugView; }
+    // Picture views keep the user's colour settings; raw diagnostics do not.
+    // A generated frame shown without the user's gamma reads brighter than the
+    // final beside it and the difference is taken for a generation defect
+    // (Gamma=0.95 read ~5 codes brighter at midtones, 2026-10-15). Motion
+    // vectors and depth are pseudo-colour diagnostics, where grading would
+    // distort what they diagnose.
+    bool DebugViewIsPicture() const {
+        return m_debugView == DebugView::Final || m_debugView == DebugView::Input
+            || m_debugView == DebugView::FrameGenerated;
+    }
     // Playback frame generation (cadence doubling). Meaningful only when the
     // FidelityFX island came up; the call is harmless when it did not.
     void SetPlaybackFrameGeneration(bool on)
@@ -877,7 +887,11 @@ private:
     // the source when DebugView::FrameGenerated is selected, so the intermediate
     // can be looked at without a second window or an export.
     static constexpr uint32_t GeneratedFrameSRV = UpscaleSRV + 1;
-    static constexpr uint32_t SRVCount = GeneratedFrameSRV + 1;
+    // The island's generated frame after the envelope clamp (t9): what the
+    // present samples when the clamp ran; the raw output at t8 stays the
+    // fallback and the debug-pixel probe.
+    static constexpr uint32_t GeneratedFrameClampedSRV = GeneratedFrameSRV + 1;
+    static constexpr uint32_t SRVCount = GeneratedFrameClampedSRV + 1;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
     // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two
@@ -949,6 +963,11 @@ private:
     // out of RecordPlaybackFrameGen so the island path can end the frame list
     // right after it.
     void RecordFrameGenConvert(ID3D12GraphicsCommandList* cmd);
+    // The envelope clamp on the island's generated frame (see
+    // FrameGenClampShader.h): records onto the caller's list after the island
+    // has retired, writing m_fgFfxClamped. False when the clamp resources are
+    // missing - the caller presents the raw output, as before the clamp.
+    bool RecordFrameGenClamp(ID3D12GraphicsCommandList* cmd);
     // One present draw into the current backbuffer. `generated` selects the
     // island's (or the matcher's) interpolated frame; otherwise the normal
     // chain output is drawn, exactly as the non-generation present does.
@@ -1360,12 +1379,31 @@ private:
     // FP16 pair, so the two paths hold separate resources.
     Microsoft::WRL::ComPtr<ID3D12Resource> m_fgFfxInput;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_fgFfxOutput;
+    // The previous frame's converted input, kept so the clamp pass can build
+    // the envelope the generated frame must stay inside (see
+    // RecordFrameGenClamp). CopyResource'd from m_fgFfxInput before the convert
+    // pass overwrites it, every island frame.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgFfxPrevInput;
+    // The generated frame after the envelope clamp - the texture the presents
+    // sample when the clamp ran. Renderer-private; the island never sees it.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgFfxClamped;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_fgClampRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoFgClamp;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgClampHeap;
+    // True for the frames whose generated present should sample the clamped
+    // texture; false when the clamp resources are missing or the pass failed,
+    // which falls back to the raw island output.
+    bool m_fgClampRan = false;
+    // Set when the clamp's first run has been logged, once.
+    bool m_fgClampReported = false;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_fgConvertRootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoFgConvert;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgConvertHeap;
     uint32_t m_fgConvertDescriptorIncrement = 0;
     D3D12_RESOURCE_STATES m_fgFfxInputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES m_fgFfxOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES m_fgFfxPrevInputState = D3D12_RESOURCE_STATE_COPY_DEST;
+    D3D12_RESOURCE_STATES m_fgFfxClampedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     // FidelityFX wants a per-frame counter that only ever advances by one, and
     // a real inter-frame interval it scales its motion estimate by.
     uint64_t m_fgFrameId = 0;

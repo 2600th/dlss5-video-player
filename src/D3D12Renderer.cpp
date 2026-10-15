@@ -2,6 +2,7 @@
 #include "AmdUpscaleShader.h"
 #include "FrameGenBlendShader.h"
 #include "FrameGenColorConvertShader.h"
+#include "FrameGenClampShader.h"
 #include "FrameGenFlowShader.h"
 #include "FsrFrameGenBackend.h"
 #include "NvencDirect.h"
@@ -1806,6 +1807,9 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         if(!DeviceHR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset frame list after frame generation")) return false;
         ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
         const bool showGenerated=generated&&!resetFg;
+        // The clamp records on this same list, before the present draws on it;
+        // its result decides which texture the generated present samples.
+        m_fgClampRan=showGenerated&&RecordFrameGenClamp(cmd);
         if(m_playbackFrameGen&&showGenerated&&!m_fgCadenceReported){
             // Once: the health line counts rendered source frames, not swapchain
             // presents, so this is the only place the doubled cadence is visible
@@ -1860,7 +1864,7 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);
         D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         const bool finalView=(m_debugView==DebugView::Final);
-        SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
+        SetPresentConstants(cmd,DebugViewIsPicture()?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
         ID3D12PipelineState* presentPso=BackbufferProgram(target.scaled,m_hdrOutput);
         // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
         // debug/fallback presentation pass is temporarily made pixel-shader readable.
@@ -2268,6 +2272,137 @@ bool D3D12Renderer::CreateFrameGenResources()
                 m_fgFfxInputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
                 m_fgFfxOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             }
+            // The envelope clamp (FrameGenClampShader.h): renderer-private
+            // textures and one compute pass. Unlike the convert pipeline this
+            // is a quality guard, not a capability - a failure here logs and
+            // keeps the island, presenting the raw output as before.
+            if (m_fgFfx) {
+                D3D12_HEAP_PROPERTIES localHeap{};
+                localHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+                D3D12_RESOURCE_DESC localTex{};
+                localTex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                localTex.Width = m_renderW;
+                localTex.Height = m_renderH;
+                localTex.DepthOrArraySize = 1;
+                localTex.MipLevels = 1;
+                localTex.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                localTex.SampleDesc = {1, 0};
+                localTex.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+                // The clamped copy is written through a UAV, so it carries the
+                // UAV flag and starts in UAV state; the previous-input copy is
+                // only ever CopyResource'd and sampled, which needs no flag.
+                D3D12_RESOURCE_DESC clampedTex = localTex;
+                clampedTex.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+                const bool localTextures =
+                    SUCCEEDED(m_device->CreateCommittedResource(
+                        &localHeap, D3D12_HEAP_FLAG_NONE, &localTex,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                        IID_PPV_ARGS(m_fgFfxPrevInput.GetAddressOf()))) &&
+                    SUCCEEDED(m_device->CreateCommittedResource(
+                        &localHeap, D3D12_HEAP_FLAG_NONE, &clampedTex,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        nullptr, IID_PPV_ARGS(m_fgFfxClamped.GetAddressOf())));
+                if (localTextures) {
+                    m_fgFfxPrevInput->SetName(L"FrameGen_FfxPrevInput_BGRA8");
+                    m_fgFfxClamped->SetName(L"FrameGen_FfxClamped_BGRA8");
+                    m_fgFfxPrevInputState = D3D12_RESOURCE_STATE_COPY_DEST;
+                    m_fgFfxClampedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                } else {
+                    LOG("Playback frame generation: the clamp textures could not be "
+                        "created; presenting the raw island output.");
+                    m_fgFfxPrevInput.Reset();
+                    m_fgFfxClamped.Reset();
+                }
+            }
+            if (m_fgFfx && m_fgFfxClamped) {
+                ComPtr<ID3DBlob> clamp, clampError;
+                const HRESULT clampHr = D3DCompile(frame_gen_clamp::kHlsl,
+                                                   std::strlen(frame_gen_clamp::kHlsl),
+                                                   "framegen-clamp", nullptr, nullptr, "main",
+                                                   "cs_5_1", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                                                   clamp.GetAddressOf(), clampError.GetAddressOf());
+                if (FAILED(clampHr)) {
+                    if (clampError) LOG((char*)clampError->GetBufferPointer());
+                    LOG("Playback frame generation: the clamp shader did not compile hr="
+                        << HexText(clampHr) << "; presenting the raw island output.");
+                    m_fgFfxPrevInput.Reset();
+                    m_fgFfxClamped.Reset();
+                } else {
+                    // Three SRVs (generated, current, previous) and one UAV
+                    // (clamped), in the shape of the convert table.
+                    D3D12_ROOT_PARAMETER1 clampParams[2]{};
+                    D3D12_DESCRIPTOR_RANGE1 clampRanges[2]{};
+                    clampRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+                    clampRanges[0].NumDescriptors = 3;
+                    clampRanges[0].BaseShaderRegister = 0;
+                    clampRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+                    clampRanges[1].NumDescriptors = 1;
+                    clampRanges[1].BaseShaderRegister = 0;
+                    clampRanges[1].OffsetInDescriptorsFromTableStart = 3;
+                    clampParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                    clampParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+                    clampParams[0].DescriptorTable.NumDescriptorRanges = 2;
+                    clampParams[0].DescriptorTable.pDescriptorRanges = clampRanges;
+                    clampParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+                    clampParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+                    clampParams[1].Constants.Num32BitValues = 2;
+                    clampParams[1].Constants.ShaderRegister = 0;
+                    D3D12_VERSIONED_ROOT_SIGNATURE_DESC clampSig{};
+                    clampSig.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+                    clampSig.Desc_1_1.NumParameters = 2;
+                    clampSig.Desc_1_1.pParameters = clampParams;
+                    ComPtr<ID3DBlob> clampSerialized, clampSigError;
+                    const HRESULT clampSigHr = D3D12SerializeVersionedRootSignature(
+                        &clampSig, &clampSerialized, &clampSigError);
+                    const HRESULT rootHr = SUCCEEDED(clampSigHr)
+                        ? m_device->CreateRootSignature(
+                            0, clampSerialized->GetBufferPointer(), clampSerialized->GetBufferSize(),
+                            IID_PPV_ARGS(m_fgClampRootSig.GetAddressOf()))
+                        : clampSigHr;
+                    D3D12_COMPUTE_PIPELINE_STATE_DESC cpsd{};
+                    cpsd.pRootSignature = m_fgClampRootSig.Get();
+                    cpsd.CS = {clamp->GetBufferPointer(), clamp->GetBufferSize()};
+                    const HRESULT psoHr = m_fgClampRootSig
+                        ? m_device->CreateComputePipelineState(
+                            &cpsd, IID_PPV_ARGS(m_psoFgClamp.GetAddressOf()))
+                        : E_FAIL;
+                    D3D12_DESCRIPTOR_HEAP_DESC clampHeapDesc{};
+                    clampHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+                    clampHeapDesc.NumDescriptors = 4;
+                    clampHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+                    const HRESULT heapHr = m_psoFgClamp
+                        ? m_device->CreateDescriptorHeap(
+                            &clampHeapDesc, IID_PPV_ARGS(m_fgClampHeap.GetAddressOf()))
+                        : E_FAIL;
+                    if (SUCCEEDED(heapHr)) {
+                        D3D12_SHADER_RESOURCE_VIEW_DESC clampSrv{};
+                        clampSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                        clampSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                        clampSrv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                        clampSrv.Texture2D.MipLevels = 1;
+                        D3D12_UNORDERED_ACCESS_VIEW_DESC clampUav{};
+                        clampUav.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                        clampUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                        auto clampSlot = [&](uint32_t index) {
+                            D3D12_CPU_DESCRIPTOR_HANDLE handle =
+                                m_fgClampHeap->GetCPUDescriptorHandleForHeapStart();
+                            handle.ptr += index * m_fgConvertDescriptorIncrement;
+                            return handle;
+                        };
+                        m_device->CreateShaderResourceView(m_fgFfxOutput.Get(), &clampSrv, clampSlot(0));
+                        m_device->CreateShaderResourceView(m_fgFfxInput.Get(), &clampSrv, clampSlot(1));
+                        m_device->CreateShaderResourceView(m_fgFfxPrevInput.Get(), &clampSrv, clampSlot(2));
+                        m_device->CreateUnorderedAccessView(m_fgFfxClamped.Get(), nullptr, &clampUav, clampSlot(3));
+                    } else {
+                        LOG("Playback frame generation: the clamp pipeline did not build hr="
+                            << HexText(SUCCEEDED(clampSigHr) ? heapHr : (FAILED(rootHr) ? rootHr : psoHr))
+                            << "; presenting the raw island output.");
+                        m_fgClampRootSig.Reset();
+                        m_psoFgClamp.Reset();
+                        m_fgClampHeap.Reset();
+                    }
+                }
+            }
         }
         if (!m_fgFfx) LOG("Playback frame generation: the BGRA8 convert pipeline could not be "
                           "built; falling back to the matcher.");
@@ -2452,6 +2587,9 @@ bool D3D12Renderer::CreateFrameGenResources()
     if (m_fgFfx) {
         view.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         m_device->CreateShaderResourceView(m_fgFfxOutput.Get(), &view, SRVCPU(GeneratedFrameSRV));
+        if (m_fgFfxClamped)
+            m_device->CreateShaderResourceView(m_fgFfxClamped.Get(), &view,
+                                               SRVCPU(GeneratedFrameClampedSRV));
         return true;
     }
     view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -2479,6 +2617,23 @@ void D3D12Renderer::RecordFrameGenConvert(ID3D12GraphicsCommandList* cmd)
     if (m_fgFfxOutputState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         Barrier(cmd, m_fgFfxOutput.Get(), m_fgFfxOutputState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     m_fgFfxOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    // The clamp needs this frame AND the previous one, so copy the input
+    // before the dispatch below overwrites it. The copy runs on every island
+    // frame, reset or not: a reset frame's copy is stale by one scene, but
+    // reset frames never present a generated frame, so the stale copy is only
+    // ever read by a clamp that was skipped.
+    if (m_fgFfxPrevInput) {
+        Barrier(cmd, m_fgFfxInput.Get(), m_fgFfxInputState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        m_fgFfxInputState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        if (m_fgFfxPrevInputState != D3D12_RESOURCE_STATE_COPY_DEST)
+            Barrier(cmd, m_fgFfxPrevInput.Get(), m_fgFfxPrevInputState,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+        m_fgFfxPrevInputState = D3D12_RESOURCE_STATE_COPY_DEST;
+        cmd->CopyResource(m_fgFfxPrevInput.Get(), m_fgFfxInput.Get());
+        Barrier(cmd, m_fgFfxInput.Get(), m_fgFfxInputState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        m_fgFfxInputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
 
     auto convertSlot = [&](uint32_t index) {
         D3D12_CPU_DESCRIPTOR_HANDLE handle =
@@ -2511,6 +2666,56 @@ void D3D12Renderer::RecordFrameGenConvert(ID3D12GraphicsCommandList* cmd)
     m_fgFfxInputState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 }
 
+bool D3D12Renderer::RecordFrameGenClamp(ID3D12GraphicsCommandList* cmd)
+{
+    // Reads the retired island's generated frame plus both converted sources,
+    // writes the clamped copy the presents sample. The island's own wait has
+    // already retired its writes, so the output is settled on this device; the
+    // pass runs on the caller's list, before the present draws on it.
+    if (!cmd || !m_psoFgClamp || !m_fgClampRootSig || !m_fgClampHeap ||
+        !m_fgFfxClamped || !m_fgFfxPrevInput)
+        return false;
+    if (m_fgFfxOutputState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+        Barrier(cmd, m_fgFfxOutput.Get(), m_fgFfxOutputState,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_fgFfxOutputState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if (m_fgFfxPrevInputState != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+        Barrier(cmd, m_fgFfxPrevInput.Get(), m_fgFfxPrevInputState,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_fgFfxPrevInputState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    // m_fgFfxInput is already pixel/compute-readable here: the convert pass
+    // left it in NON_PIXEL_SHADER_RESOURCE for the island.
+
+    auto clampSlot = [&](uint32_t index) {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle =
+            m_fgClampHeap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += index * m_fgConvertDescriptorIncrement;
+        return handle;
+    };
+    ID3D12DescriptorHeap* clampHeaps[] = {m_fgClampHeap.Get()};
+    cmd->SetDescriptorHeaps(1, clampHeaps);
+    cmd->SetComputeRootSignature(m_fgClampRootSig.Get());
+    cmd->SetPipelineState(m_psoFgClamp.Get());
+    cmd->SetComputeRootDescriptorTable(0, m_fgClampHeap->GetGPUDescriptorHandleForHeapStart());
+    const uint32_t clampConstants[2] = {m_renderW, m_renderH};
+    cmd->SetComputeRoot32BitConstants(1, 2, clampConstants, 0);
+    cmd->Dispatch((m_renderW + frame_gen_clamp::kThreadGroup - 1) / frame_gen_clamp::kThreadGroup,
+                  (m_renderH + frame_gen_clamp::kThreadGroup - 1) / frame_gen_clamp::kThreadGroup, 1);
+    m_fgFfxClampedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    ID3D12DescriptorHeap* srvHeaps[] = {m_srvHeap.Get()};
+    cmd->SetDescriptorHeaps(1, srvHeaps);
+    // Hand the output back in the state the next convert pass barriers from,
+    // keeping the invariant the island has always been handed.
+    Barrier(cmd, m_fgFfxOutput.Get(), m_fgFfxOutputState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_fgFfxOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if (!m_fgClampReported) {
+        m_fgClampReported = true;
+        LOG("Playback frame generation: the envelope clamp is active - generated "
+            "frames are held to the min/max of their two source frames.");
+    }
+    return true;
+}
+
 bool D3D12Renderer::RecordFrameGenPresentDraw(ID3D12GraphicsCommandList* cmd, uint32_t slot,
                                               bool generated)
 {
@@ -2532,24 +2737,38 @@ bool D3D12Renderer::RecordFrameGenPresentDraw(ID3D12GraphicsCommandList* cmd, ui
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const bool finalView = (m_debugView == DebugView::Final);
-    SetPresentConstants(cmd, finalView ? m_colorSettings : ColorSettings{},
+    SetPresentConstants(cmd, DebugViewIsPicture() ? m_colorSettings : ColorSettings{},
                         finalView ? m_comparison : ComparisonSettings{},
                         finalView && m_hasReference, target.width, target.height);
     ID3D12PipelineState* presentPso = BackbufferProgram(target.scaled, m_hdrOutput);
     cmd->SetPipelineState(presentPso);
     if (generated) {
         if (m_fgFfx && m_fgFfxOutput && m_fgFfxIsland && !m_fgFfxFailed) {
-            // The barrier below must target the SAME resource the table above
-            // samples: pointing it at the matcher's m_fgOutput while sampling
-            // the FidelityFX output left that one pixel-sampled in a
-            // NON_PIXEL-only state, and the AMD driver answered with a device
-            // removal on the first generated frame.
-            Barrier(cmd, m_fgFfxOutput.Get(), m_fgFfxOutputState,
-                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            cmd->SetGraphicsRootDescriptorTable(RootView, SRVGPU(GeneratedFrameSRV));
-            cmd->DrawInstanced(3, 1, 0, 0);
-            Barrier(cmd, m_fgFfxOutput.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                    m_fgFfxOutputState);
+            if (m_fgClampRan && m_fgFfxClamped) {
+                // The clamped copy, written by the clamp dispatch earlier on
+                // this same list. Same barrier discipline as the raw output
+                // below: the barrier targets the resource the table samples.
+                Barrier(cmd, m_fgFfxClamped.Get(), m_fgFfxClampedState,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                m_fgFfxClampedState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                cmd->SetGraphicsRootDescriptorTable(RootView, SRVGPU(GeneratedFrameClampedSRV));
+                cmd->DrawInstanced(3, 1, 0, 0);
+                Barrier(cmd, m_fgFfxClamped.Get(), m_fgFfxClampedState,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                m_fgFfxClampedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            } else {
+                // The barrier below must target the SAME resource the table above
+                // samples: pointing it at the matcher's m_fgOutput while sampling
+                // the FidelityFX output left that one pixel-sampled in a
+                // NON_PIXEL-only state, and the AMD driver answered with a device
+                // removal on the first generated frame.
+                Barrier(cmd, m_fgFfxOutput.Get(), m_fgFfxOutputState,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                cmd->SetGraphicsRootDescriptorTable(RootView, SRVGPU(GeneratedFrameSRV));
+                cmd->DrawInstanced(3, 1, 0, 0);
+                Barrier(cmd, m_fgFfxOutput.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                        m_fgFfxOutputState);
+            }
         } else if (m_fgOutput) {
             Barrier(cmd, m_fgOutput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -2635,6 +2854,16 @@ void D3D12Renderer::ReleaseFrameGenBridge()
     m_fgFfxOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     m_fgFfxFenceValue = 0;
     m_fgFfxIsland = false;
+    // The clamp's renderer-private resources ride the same lifecycle: the
+    // island is the only thing that produces a frame for them to clamp.
+    m_fgFfxPrevInput.Reset();
+    m_fgFfxClamped.Reset();
+    m_fgClampRootSig.Reset();
+    m_psoFgClamp.Reset();
+    m_fgClampHeap.Reset();
+    m_fgFfxPrevInputState = D3D12_RESOURCE_STATE_COPY_DEST;
+    m_fgFfxClampedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    m_fgClampRan = false;
 }
 
 void D3D12Renderer::RecordPlaybackFrameGen(ID3D12GraphicsCommandList* cmd, float t, bool reset)
@@ -3790,7 +4019,7 @@ void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCR
     cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     const bool finalView=(m_debugView==DebugView::Final);
-    SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
+    SetPresentConstants(cmd,DebugViewIsPicture()?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
     ID3D12PipelineState* presentPso=bgraTarget?m_psoPresentScaledBgra.Get():BackbufferProgram(target.scaled,hdrTarget);
 
     if(m_debugView==DebugView::MotionVectors||m_debugView==DebugView::Depth)PrepareGuideView(cmd);
