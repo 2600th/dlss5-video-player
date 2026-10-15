@@ -37,6 +37,7 @@
 #include "TemporalGuides.h"
 #include "Log.h"
 #include "PlaybackTiming.h"
+#include "PlaybackFrameGenPolicy.h"
 #include "LiveSessionPolicy.h"
 #include "FrameRatePolicy.h"
 #include "PlaybackCadence.h"
@@ -2880,8 +2881,9 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK((GetMenuState(menu, app_menu::IDM_NEURAL_RENDERING, MF_BYCOMMAND) & MF_CHECKED) != 0);
     CHECK((GetMenuState(menu, app_menu::IDM_DLSS_UPSCALING, MF_BYCOMMAND) & MF_CHECKED) != 0);
     // The live playback frame-generation item is a real toggle like the two
-    // above: greyed while unavailable, enabled and checked once the player
-    // says it can run and the user has asked for it.
+    // above: greyed while unavailable, enabled and checked only once the
+    // renderer says the island is actually doubling presents. A saved request
+    // with no live island must not leave this row checked.
     const UINT playbackFgGreyed =
         GetMenuState(menu, app_menu::IDM_PLAYBACK_FRAME_GENERATION, MF_BYCOMMAND);
     CHECK((playbackFgGreyed & (MF_DISABLED | MF_GRAYED)) != 0);
@@ -2892,6 +2894,13 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
         GetMenuState(menu, app_menu::IDM_PLAYBACK_FRAME_GENERATION, MF_BYCOMMAND);
     CHECK((playbackFgOn & (MF_DISABLED | MF_GRAYED)) == 0);
     CHECK((playbackFgOn & MF_CHECKED) != 0);
+    CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
+                                              true, true, true, true,
+                                              true, false));
+    const UINT playbackFgRequestedButInactive =
+        GetMenuState(menu, app_menu::IDM_PLAYBACK_FRAME_GENERATION, MF_BYCOMMAND);
+    CHECK((playbackFgRequestedButInactive & (MF_DISABLED | MF_GRAYED)) == 0);
+    CHECK((playbackFgRequestedButInactive & MF_CHECKED) == 0);
     // The converted file is unreachable until one exists: the item that opens
     // it is created greyed and only main.cpp's own state can enable it, so no
     // availability argument here may light it up.
@@ -2899,6 +2908,28 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK(showOutput != static_cast<UINT>(-1));
     CHECK((showOutput & (MF_DISABLED | MF_GRAYED)) != 0);
     if (menu) DestroyMenu(menu);
+}
+
+void playback_frame_generation_policy_separates_request_from_runtime_state_test()
+{
+    using playback_frame_gen::DoublingActive;
+    using playback_frame_gen::RuntimeAvailable;
+    using playback_frame_gen::ResetHistory;
+    using playback_frame_gen::RuntimeStatus;
+
+    CHECK(RuntimeAvailable(RuntimeStatus{false, true, false, false}));
+    CHECK(!RuntimeAvailable(RuntimeStatus{false, false, false, false}));
+    CHECK(!RuntimeAvailable(RuntimeStatus{false, true, true, false}));
+    CHECK(DoublingActive(RuntimeStatus{true, true, false, true}));
+    CHECK(!DoublingActive(RuntimeStatus{false, true, false, true}));
+    CHECK(!DoublingActive(RuntimeStatus{true, false, false, true}));
+    CHECK(!DoublingActive(RuntimeStatus{true, true, true, true}));
+    CHECK(!DoublingActive(RuntimeStatus{true, true, false, false}));
+
+    CHECK(ResetHistory(0, false, false));
+    CHECK(ResetHistory(12, true, false));
+    CHECK(ResetHistory(12, false, true));
+    CHECK(!ResetHistory(12, false, false));
 }
 
 void debug_view_popup_contains_all_existing_views_and_selection_test()
@@ -15990,6 +16021,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test),
     TEST_CASE(advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test),
     TEST_CASE(feature_menu_uses_distinct_controls_and_honest_availability_test),
+    TEST_CASE(playback_frame_generation_policy_separates_request_from_runtime_state_test),
     TEST_CASE(debug_view_popup_contains_all_existing_views_and_selection_test),
     TEST_CASE(range_preview_and_comparison_menus_route_keys_and_gate_availability_test),
     TEST_CASE(player_menu_is_english_only_and_retains_advanced_commands_test),

@@ -6067,7 +6067,8 @@ private:
             app_menu::UpdateFeatureAvailability(menu,m_neuralRequested,neuralAvailable,neuralActive,
                                                 ToolbarActionEnabled(ToolbarAction::ToggleUpscaling),UpscalingActive(),
                                                 FrameGenerationAvailable(),m_frameGenWorker.joinable(),
-                                                m_loaded&&m_renderer!=nullptr,m_playbackFrameGenRequested);
+                                                PlaybackFrameGenerationSupported(),
+                                                PlaybackFrameGenerationActive());
             // Both one-shot conversions report themselves by becoming their own
             // cancel command, which is what the toolbar pill has always done.
             // A separate cancel row was a permanently greyed row and a second
@@ -7587,7 +7588,7 @@ private:
         m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_decodeNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_cachedTemporal={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;m_gesture={};m_peekOriginal=false;m_dragMix=false;m_middlePan=false;m_renderTracking=false;
         m_seekPending=false;m_seeking=false;m_layoutMismatchLogged=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_nextPairFrame.reset();m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
         m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();m_sourceCache.reset();
-        if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
+        if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();SyncPlaybackFrameGenMenuIfChanged();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
     // Two engines answer this switch: NGX's evaluate where the machine has it,
@@ -7799,6 +7800,12 @@ private:
         SaveVideoSettings();
         LOG("Playback frame generation "<<(m_playbackFrameGenRequested?"on":"off")<<" (persisted to [Playback] FrameGenerationPlayback).");
         UpdateCachedStatus();InvalidateControls();
+    }
+    bool PlaybackFrameGenerationSupported()const{
+        return m_renderer&&m_renderer->PlaybackFrameGenerationSupported();
+    }
+    bool PlaybackFrameGenerationActive()const{
+        return m_renderer&&m_renderer->PlaybackFrameGenDoubling();
     }
     // `height` 0 selects Auto; anything else must name a rung. A refused
     // re-enable leaves the previous selection standing, the same way a failed
@@ -8946,7 +8953,7 @@ private:
     IdleSurfaceLayout IdleLayout()const{return StartLayout().core;}
     std::vector<ToolbarItem> ToolbarItems()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
-    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable()||StillImageRenderAvailable(),UpscalingAvailable(),FrameGenerationAvailable(),m_frameGenWorker.joinable()&&!m_frameGenCancelling,m_loaded&&m_renderer!=nullptr};}
+    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable()||StillImageRenderAvailable(),UpscalingAvailable(),FrameGenerationAvailable(),m_frameGenWorker.joinable()&&!m_frameGenCancelling,PlaybackFrameGenerationSupported()};}
     std::optional<RECT> VolumeRect()const{if(!ControlsVisible())return std::nullopt;RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
@@ -8977,9 +8984,18 @@ private:
         for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);return;}
     }
     void UpdateCachedStatus(){
+        SyncPlaybackFrameGenMenuIfChanged();
         UpdateStatusChips();SyncTimelineMedia();SyncMediaTransport();SyncStartScreen();RefreshNeuralApplyState();
         const std::wstring status=BuildStatusText();if(status==m_cachedStatus)return;
         m_cachedStatus=status;if(m_hwnd){if(m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}else InvalidateRect(m_hwnd,nullptr,FALSE);}
+    }
+    void SyncPlaybackFrameGenMenuIfChanged(){
+        const bool available=PlaybackFrameGenerationSupported();
+        const bool active=PlaybackFrameGenerationActive();
+        if(available==m_playbackFrameGenMenuAvailable&&active==m_playbackFrameGenMenuActive)return;
+        m_playbackFrameGenMenuAvailable=available;
+        m_playbackFrameGenMenuActive=active;
+        SyncFeatureMenuState();
     }
     // How far the render behind playback has got, for the render chip. A live
     // session reports its whole range, holes and all, at the pace it is
@@ -9251,9 +9267,11 @@ private:
             return{UiIcon::FrameGeneration,T(L"framegen.pill.generate"),enabled,false};
         }
         // A toggle, like Neural Rendering and DLSS Upscaling: On/Off, or
-        // Unavailable when there is no loaded source or renderer to take it.
+        // Unavailable when the live island cannot run. On reads what the screen is
+        // doing, not the saved request: a reset frame or a failed island is not
+        // interpolation.
         case ToolbarAction::TogglePlaybackFrameGeneration:{
-            if(enabled&&m_playbackFrameGenRequested)return{UiIcon::FrameInterpolation,T(L"playback_framegen.pill.on"),enabled,true};
+            if(enabled&&PlaybackFrameGenerationActive())return{UiIcon::FrameInterpolation,T(L"playback_framegen.pill.on"),enabled,true};
             if(enabled)return{UiIcon::FrameInterpolation,T(L"playback_framegen.pill.off"),enabled,false};
             return{UiIcon::FrameInterpolation,T(L"playback_framegen.pill.unavailable"),false,false};
         }
@@ -12834,6 +12852,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // renderer creation. Distinct from the offline conversion the Frame
     // Generation menu starts.
     bool m_playbackFrameGenRequested=false;
+    bool m_playbackFrameGenMenuAvailable=false;
+    bool m_playbackFrameGenMenuActive=false;
     // The playback upscale's CAS strength, hundredths in the INI. Kept beside the
     // rung because it is the same control's second axis: the export path's
     // sharpness default is the same number (AmdUpscaleShader.h).

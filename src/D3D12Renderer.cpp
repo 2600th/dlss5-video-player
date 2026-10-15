@@ -1768,11 +1768,12 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     // stream that never resets, which made the first cut of this pass hand the
     // runtime reset=true on every single frame, so it never accumulated
     // history and no generated frame was ever presented.
-    const bool firstIslandFrame = (m_fgFrameId == 0);
-    const bool resetFg = firstIslandFrame || temporalReset;
+    const bool resetFg = playback_frame_gen::ResetHistory(
+        m_fgFrameId, temporalReset, m_fgResetPending);
     const bool fgWanted=m_playbackFrameGen||m_debugView==DebugView::FrameGenerated;
     const bool islandWanted=m_fgFfxIsland&&!m_fgFfxFailed&&m_psoFgConvert&&m_fgFfxInput&&m_fgFfxOutput;
     if(islandWanted&&fgWanted){
+        m_fgDoublingActive=false;
         RecordFrameGenConvert(cmd);
         if(!DeviceHR(cmd->Close(),"Close frame list before frame generation")) return false;
         {ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);}
@@ -1780,6 +1781,7 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         if(!DeviceHR(m_queue->Signal(m_fgFfxFence.Get(),waitValue),"Signal shared frame-generation fence")) return false;
         const bool generated=m_fgFfx->EvaluateIsolated(m_fgFfxInput.Get(),m_fgFfxOutput.Get(),
                                                         waitValue,resetFg,++m_fgFrameId,m_fgFrameTimeMs);
+        m_fgResetPending=false;
         if(generated&&!m_fgIslandReported){
             // Once, so a field log can tell "the island never ran" from "the
             // island ran and the picture is wrong".
@@ -1829,8 +1831,11 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
             if(!RecordFrameGenPresentDraw(present,slot,false)) return false;
             if(!DeviceHR(present->Close(),"Close source present list")) return false;
             {ID3D12CommandList*ls[]={present};m_queue->ExecuteCommandLists(1,ls);}
-            return PresentSwapchain("Present source frame");
+            const bool presented=PresentSwapchain("Present source frame");
+            m_fgDoublingActive=m_playbackFrameGen&&showGenerated&&presented;
+            return presented;
         }
+        m_fgDoublingActive=false;
         // Debug view, or a reset frame under playback generation: one present
         // of the generated frame when there is one, of the source otherwise.
         if(!RecordFrameGenPresentDraw(cmd,slot,showGenerated)) return false;

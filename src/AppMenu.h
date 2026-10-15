@@ -236,7 +236,7 @@ bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                                bool neuralAvailable, bool neuralActive,
                                bool upscalingAvailable, bool upscalingActive,
                                bool frameGenerationAvailable, bool frameGenerationRunning,
-                               bool playbackFrameGenAvailable, bool playbackFrameGenRequested);
+                               bool playbackFrameGenAvailable, bool playbackFrameGenActive);
 // Range, preview and render commands, the render pause item and the receipt
 // item. markersAvailable: a source is loaded; rangeRenderAvailable: that source
 // can be range-rendered now (local/cached source, no active job).

@@ -567,7 +567,7 @@ bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                                bool neuralAvailable, bool neuralActive,
                                bool upscalingAvailable, bool upscalingActive,
                                bool frameGenerationAvailable, bool frameGenerationRunning,
-                               bool playbackFrameGenAvailable, bool playbackFrameGenRequested)
+                               bool playbackFrameGenAvailable, bool playbackFrameGenActive)
 {
     const auto update = [&](UINT command, bool available, bool checked) {
         const HMENU menu = find_menu_containing_command(menuBar, command);
@@ -590,7 +590,7 @@ bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
     const HMENU frameGeneration = find_menu_containing_command(menuBar, IDM_FRAME_GENERATION);
     return update(IDM_NEURAL_RENDERING, neuralAvailable, neuralActive) &&
            update(IDM_DLSS_UPSCALING, upscalingAvailable, upscalingActive) &&
-           update(IDM_PLAYBACK_FRAME_GENERATION, playbackFrameGenAvailable, playbackFrameGenRequested) &&
+           update(IDM_PLAYBACK_FRAME_GENERATION, playbackFrameGenAvailable, playbackFrameGenActive) &&
            frameGeneration &&
            EnableMenuItem(frameGeneration, IDM_FRAME_GENERATION,
                MF_BYCOMMAND | ((frameGenerationAvailable || frameGenerationRunning) ? MF_ENABLED : MF_GRAYED)) !=

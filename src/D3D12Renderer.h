@@ -13,6 +13,7 @@
 #include "DLSSBackend.h"
 #include "FrameGenBackend.h"
 #include "FsrFrameGenBackend.h"
+#include "PlaybackFrameGenPolicy.h"
 #include "PixelLayout.h"
 #include "MediaSource.h"
 #include "FrameIdentity.h"
@@ -648,15 +649,29 @@ public:
     DebugView GetDebugView() const { return m_debugView; }
     // Playback frame generation (cadence doubling). Meaningful only when the
     // FidelityFX island came up; the call is harmless when it did not.
-    void SetPlaybackFrameGeneration(bool on) { m_playbackFrameGen = on; }
+    void SetPlaybackFrameGeneration(bool on)
+    {
+        if (on && !m_playbackFrameGen) m_fgResetPending = true;
+        if (!on) m_fgDoublingActive = false;
+        m_playbackFrameGen = on;
+    }
     bool PlaybackFrameGeneration() const { return m_playbackFrameGen; }
+    bool PlaybackFrameGenerationSupported() const
+    {
+        return playback_frame_gen::RuntimeAvailable({m_playbackFrameGen, m_fgFfxIsland,
+                                                      m_fgFfxFailed, m_fgDoublingActive});
+    }
     // True while the FidelityFX island is actually doubling the swapchain
     // presents - each source frame shown as the generated midpoint and then
     // itself. A renderer whose island never came up, or whose island failed
     // and was abandoned, still presents at the source rate and reports false;
     // the status chip scales its rate by this, so it never claims frames the
     // screen does not show.
-    bool PlaybackFrameGenDoubling() const { return m_playbackFrameGen&&m_fgFfxIsland&&!m_fgFfxFailed; }
+    bool PlaybackFrameGenDoubling() const
+    {
+        return playback_frame_gen::DoublingActive({m_playbackFrameGen, m_fgFfxIsland,
+                                                    m_fgFfxFailed, m_fgDoublingActive});
+    }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
     bool DLSSFeatureCreated() const { return m_dlss.FeatureCreated(); }
     uint64_t DLSSEvaluations() const { return m_dlss.EvaluationCount(); }
@@ -1355,6 +1370,12 @@ private:
     // a real inter-frame interval it scales its motion estimate by.
     uint64_t m_fgFrameId = 0;
     bool m_fgFfxFailed = false;
+    // A re-enabled session must not reuse the runtime's pre-off history.
+    bool m_fgResetPending = false;
+    // Set only after a generated/source pair has actually been presented.
+    bool m_fgDoublingActive = false;
+    bool m_fgResetPending = false;
+    bool m_fgDoublingActive = false;
     // The interval the current frame arrived with (RenderFrame's argument),
     // remembered so the generation record can pass it to FidelityFX.
     float m_fgFrameTimeMs = 0.0f;
