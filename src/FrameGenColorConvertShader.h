@@ -12,6 +12,33 @@
 // D3D12 note: writing float4(r,g,b,a) through a UAV on a B8G8R8A8_UNORM
 // texture stores channels in the format's byte order but reads back in RGBA
 // order, so the shader does linear->sRGB encoding only; no channel swizzle.
+//
+// ============================ CONTRACT ============================
+// What this pass writes is sRGB-ENCODED, and so is everything downstream of it
+// inside the runtime's domain: the island's output and the envelope clamp both
+// copy these values through unchanged. The textures are created
+// DXGI_FORMAT_B8G8R8A8_UNORM because that is the format FidelityFX is handed,
+// and a UNORM texture does not carry a gamma tag - the ENCODING is a property
+// of what was stored, not of the resource.
+//
+// The backbuffer pass is the one reader that must undo it, and it does not do
+// so in the shader: it works in linear light and applies COMPOSE_ENCODE
+// (LinearToSRGB for an SDR backbuffer) at the very end, exactly as it does for
+// the FP16 LINEAR textures it otherwise reads (m_dlssColor, m_dlssOutput).
+// Therefore EVERY SRV through which a generated frame reaches that pass must be
+// DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, so the SAMPLER performs the decode. Created
+// as plain _UNORM instead, the pass receives the encoded value, believes it is
+// linear, and encodes it a second time - the whole picture arrives about 1.49x
+// brighter every other present, which is the white flash reported with playback
+// frame generation on.
+//
+// The clamp's descriptors are the deliberate exception: it compares and writes
+// in the encoded domain, where the transfer is monotonic so the min/max
+// envelope is exact, and it samples through its own heap (m_fgClampHeap) whose
+// views stay _UNORM because the values it copies must survive unchanged.
+//
+// See CreateFrameGenResources in D3D12Renderer.cpp for the two views, and
+// run-fg/probe_srgb_domain.py for the measurement that pins the ratios.
 namespace frame_gen_convert {
 
 constexpr char kHlsl[] = R"hlsl(

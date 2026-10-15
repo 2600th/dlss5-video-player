@@ -2585,7 +2585,31 @@ bool D3D12Renderer::CreateFrameGenResources()
     view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     view.Texture2D.MipLevels = 1;
     if (m_fgFfx) {
-        view.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        // _UNORM_SRGB, NOT _UNORM.
+        //
+        // The bridge textures are created B8G8R8A8_UNORM (the format FidelityFX
+        // is handed), but what the convert pass stores in them is sRGB-ENCODED:
+        // it applies the transfer on the way in, because the runtime's motion
+        // estimation is only validated in that domain. The view below is the one
+        // the backbuffer pass samples, and that pass works in LINEAR light and
+        // applies the encoding itself at the very end - COMPOSE_ENCODE is
+        // LinearToSRGB for an SDR backbuffer, as it is for every other texture
+        // the pass reads (m_dlssColor / m_dlssOutput are FP16 linear).
+        //
+        // Left as _UNORM the sampler performs no gamma conversion, so the pass
+        // receives the encoded value and encodes it again: a stored 0.20 comes
+        // out at 0.47, mid-grey 0.50 at 0.71, 0.80 at 0.90. Every generated
+        // frame therefore reaches the screen roughly twice as bright as either
+        // source frame it sits between, and because the cadence alternates
+        // generated/source, the picture visibly strobes. That is the white flash
+        // reported with playback frame generation on: whole-frame, on any
+        // content, in both windowed and fullscreen.
+        //
+        // The clamp's own descriptors in m_fgClampHeap deliberately stay _UNORM:
+        // it reads and writes in the encoded domain, where the transfer is
+        // monotonic so the min/max envelope is exact, and its UAV is a separate
+        // view. Only the view the present chain samples changes here.
+        view.Format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         m_device->CreateShaderResourceView(m_fgFfxOutput.Get(), &view, SRVCPU(GeneratedFrameSRV));
         if (m_fgFfxClamped)
             m_device->CreateShaderResourceView(m_fgFfxClamped.Get(), &view,
