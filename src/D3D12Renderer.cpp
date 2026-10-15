@@ -1476,6 +1476,12 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     // FidelityFX runtime scales its motion estimate by the real interval, and
     // the value only exists as this argument.
     m_fgFrameTimeMs=frameTimeMs;
+    // The upscaler gets the same two facts the frame generation does: the real
+    // interval (FSR scales its accumulation by it) and whether this frame is
+    // continuous with the last one. The reset is latched rather than passed,
+    // because the upscale is recorded several passes later.
+    m_upsFrameTimeMs=frameTimeMs;
+    if(temporalReset)m_upsResetPending=true;
     FollowWindowSize();
     if(m_gpuUnusable)return false;
     const bool nv12Source=m_sourceLayout==PixelLayout::Nv12;
@@ -1944,6 +1950,11 @@ bool D3D12Renderer::CreateUpscalePresentResources()
         // rung has to release the pair it built for the larger one.
         m_psoUpscaleSharp.Reset();m_psoUpscaleStretch.Reset();m_upscaleRootSig.Reset();
         m_upscaleRtvHeap.Reset();m_upscaleSrvHeap.Reset();m_upscaleSharp.Reset();m_upscaleStretch.Reset();
+        // A rung that no longer grows has no upscaler at all: the FSR context,
+        // if one was built for the larger rung, is sized to that rung and has
+        // to go with it.
+        m_fsrUpscale.reset();
+        m_fsrUpscaleActive = false;
         m_upscaleOffered = false;
         return true;
     }
@@ -2020,7 +2031,11 @@ bool D3D12Renderer::CreateUpscalePresentResources()
     target.MipLevels = 1;
     target.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     target.SampleDesc.Count = 1;
-    target.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    // RENDER_TARGET for the filters that draw into it and UNORDERED_ACCESS for
+    // FSR, which writes it as a UAV. Both are declared because which of the two
+    // runs is decided once here and never per frame.
+    target.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     D3D12_HEAP_PROPERTIES defaultHeap{};
     defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
     if (FAILED(m_device->CreateCommittedResource(
@@ -2088,6 +2103,42 @@ bool D3D12Renderer::CreateUpscalePresentResources()
     if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(m_psoUpscaleSharp.GetAddressOf()))))
         return false;
     m_upscaleOffered = true;
+
+    // ---- AMD FSR Upscaling 4.1.1, when this machine can run it -------------
+    //
+    // It is a replacement for the stretch half of the pair above and nothing
+    // else: the same linear FP16 frame at the same size in, the same target at
+    // the same rung out, and the sharpen below it unchanged. A machine without
+    // the runtime, a GPU it refuses, or a ratio past the largest one it defines
+    // keeps the filter that was just built, and the log says which and why.
+    m_fsrUpscaleActive = false;
+    m_fsrUpscale.reset();
+    const float ratio = static_cast<float>(m_outputW) / static_cast<float>(m_renderW);
+    if (ratio > 3.0f) {
+        LOG("Playback upscale: the rung is " << ratio
+            << "x the source, past FSR's largest defined ratio (3.0x); the "
+               "stretch-and-sharpen will serve the SR switch.");
+        return true;
+    }
+    std::wstring missing;
+    if (!FsrUpscaleBackend::RuntimePresent(nullptr, &missing)) {
+        LOG("Playback upscale: no FSR 4 runtime (" << utf8_text::FromWide(missing)
+            << "); the stretch-and-sharpen will serve the SR switch.");
+        return true;
+    }
+    auto backend = std::make_unique<FsrUpscaleBackend>();
+    if (!backend->Initialize(m_device.Get(), m_renderW, m_renderH, m_outputW, m_outputH,
+                             DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT)) {
+        LOG("Playback upscale: FSR 4 would not start ("
+            << utf8_text::FromWide(backend->LastDetail())
+            << "); the stretch-and-sharpen will serve the SR switch.");
+        return true;
+    }
+    m_fsrUpscale = std::move(backend);
+    m_fsrUpscaleActive = true;
+    m_upsResetPending = true;
+    LOG("Playback upscale: AMD FSR Upscaling 4.1.1 is serving the SR switch at "
+        << m_renderW << "x" << m_renderH << " -> " << m_outputW << "x" << m_outputH);
     return true;
 }
 
@@ -3038,8 +3089,12 @@ void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)
     // all run above this and never learn a second geometry exists.
     // The neural frame sits in GuideReadState whenever the conversion pass has
     // let go of it, which is the state the present pass would have found it in;
-    // m_colorInRT is the renderer's own record of exactly that fact.
-    if (!m_colorInRT) Barrier(cmd, m_dlssColor.Get(), GuideReadState,
+    // m_colorInRT is the renderer's own record of exactly that fact. FSR reads
+    // it in exactly that state (NON_PIXEL_SHADER_RESOURCE is what the vendor
+    // asks for on DX12), so only the filter's own draws move it to a pixel
+    // shader resource.
+    const bool useFsr = m_fsrUpscaleActive && m_fsrUpscale && m_fsrUpscale->Available();
+    if (!useFsr && !m_colorInRT) Barrier(cmd, m_dlssColor.Get(), GuideReadState,
                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     // The stretch reads the frame at the render size - what the conversion
     // pass wrote - and writes the capture at the output rung. On this path the
@@ -3070,16 +3125,54 @@ void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)
         cmd->DrawInstanced(3, 1, 0, 0);
     };
     // ---- stretch: the neural frame to the output rung ----------------------
-    Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-            D3D12_RESOURCE_STATE_RENDER_TARGET);
-    {
-        D3D12_GPU_DESCRIPTOR_HANDLE neural = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-        neural.ptr += static_cast<UINT64>(m_srvInc) * 4u;
-        draw(m_psoUpscaleStretch.Get(), rtvBase, neural);
+    //
+    // FSR, when it is running, IS this pass: it writes the same target as a
+    // UAV from the same frame. The filter stays as the fallback, and a dispatch
+    // that fails drops FSR for good rather than alternating between the two.
+    bool stretched = false;
+    if (useFsr) {
+        Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        stretched = m_fsrUpscale->Dispatch(cmd, m_dlssColor.Get(), m_upscaleStretch.Get(),
+                                           m_upsResetPending, m_upsFrameTimeMs);
+        Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (stretched) {
+            m_upsResetPending = false;
+        } else {
+            LOG("Playback upscale: FSR 4 failed to dispatch ("
+                << utf8_text::FromWide(m_fsrUpscale->LastDetail())
+                << "); falling back to the stretch-and-sharpen from this frame on.");
+            m_fsrUpscale->Shutdown();
+            m_fsrUpscaleActive = false;
+            // Fall through: this frame still has to be stretched, or the
+            // sharpen below reads a target nobody wrote.
+        }
     }
-    Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if (!stretched) {
+        Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_RENDER_TARGET);
+        // The FSR dispatch, if there was one, may have left the runtime's own
+        // descriptor heap bound; every piece of state the draw needs is set
+        // here rather than before the branch.
+        cmd->SetDescriptorHeaps(1, heaps);
+        cmd->SetGraphicsRootSignature(m_upscaleRootSig.Get());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->RSSetViewports(1, &viewport);
+        cmd->RSSetScissorRects(1, &scissor);
+        draw(m_psoUpscaleStretch.Get(), rtvBase, SRVGPU(4));
+        Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
     // ---- sharpen: CAS over the stretched frame's own neighbourhood ---------
+    // Rebound whoever wrote the stretched frame: a compute dispatch leaves its
+    // own root signature and descriptor heap current, and the graphics state
+    // above was recorded before it.
+    cmd->SetDescriptorHeaps(1, heaps);
+    cmd->SetGraphicsRootSignature(m_upscaleRootSig.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->RSSetViewports(1, &viewport);
+    cmd->RSSetScissorRects(1, &scissor);
     Barrier(cmd, m_upscaleSharp.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_RENDER_TARGET);
     {
@@ -3089,8 +3182,11 @@ void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)
     }
     Barrier(cmd, m_upscaleSharp.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    if (!m_colorInRT) Barrier(cmd, m_dlssColor.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                              GuideReadState);
+    // FSR read the frame in the state the conversion pass left it, so there is
+    // nothing to put back on that path.
+    if (!useFsr && !m_colorInRT) Barrier(cmd, m_dlssColor.Get(),
+                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                         GuideReadState);
     // The backbuffer pass binds tables out of the present chain's own heap.
     ID3D12DescriptorHeap* presentHeaps[] = {m_srvHeap.Get()};
     cmd->SetDescriptorHeaps(1, presentHeaps);

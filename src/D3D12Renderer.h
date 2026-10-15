@@ -13,6 +13,7 @@
 #include "DLSSBackend.h"
 #include "FrameGenBackend.h"
 #include "FsrFrameGenBackend.h"
+#include "FsrUpscaleBackend.h"
 #include "PlaybackFrameGenPolicy.h"
 #include "PixelLayout.h"
 #include "MediaSource.h"
@@ -639,6 +640,18 @@ public:
     // with the very "No DLSS" pill this route exists to retire. UpscalePresentActive
     // is the narrower question: whether THIS frame is drawn through the filter.
     bool UpscalingPresentAvailable() const { return m_dlss.Available() || m_upscaleOwnEngine; }
+    // Which amplifier is drawing the picture right now, for the status line:
+    // the FSR 4 backend that took the stretch half over, or the stretch-and-
+    // sharpen filter that serves when it cannot (no runtime, a GPU it refuses,
+    // a ratio past 3.0x, or a dispatch that failed). Only meaningful while
+    // UpscalePresentActive() holds - with DLSS up, DLSS is the engine and the
+    // question has no answer worth printing.
+    const wchar_t* PresentUpscaleEngineName() const
+    {
+        if (m_fsrUpscaleActive && m_fsrUpscale && m_fsrUpscale->Available())
+            return L"FSR4";
+        return L"CAS";
+    }
     void SetUpscaleSharpness(float sharpness) { m_upscaleSharpness = sharpness; }
     float UpscaleSharpness() const { return m_upscaleSharpness; }
     uint32_t DLSSInputW() const { return m_renderW; }
@@ -1415,6 +1428,17 @@ private:
     // The interval the current frame arrived with (RenderFrame's argument),
     // remembered so the generation record can pass it to FidelityFX.
     float m_fgFrameTimeMs = 0.0f;
+    // The playback upscale, when this machine can run AMD FSR Upscaling 4.1.1:
+    // it replaces ONLY the stretch half of the pair below, so a machine without
+    // it - or a runtime that refuses it - keeps the filter it always used and
+    // no other pass learns the difference.
+    std::unique_ptr<FsrUpscaleBackend> m_fsrUpscale;
+    bool m_fsrUpscaleActive = false;
+    // FSR's history is invalid wherever the source's is: a seek, a cut, a
+    // switch, or the first frame. Latched from the frame's temporal reset and
+    // consumed by the next upscale.
+    bool m_upsResetPending = true;
+    float m_upsFrameTimeMs = 16.6667f;
     // Playback frame generation as a feature rather than a debug view: each
     // source frame is presented twice - the generated midpoint between it and
     // its predecessor, then the frame itself - which is the cadence MPCVR-FSR-
