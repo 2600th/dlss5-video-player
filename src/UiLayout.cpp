@@ -501,7 +501,15 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
         // is loaded and a renderer can take the setting. The island itself
         // reports whether the runtime admitted it, so the pill's unavailable
         // arm carries that reason rather than a verdict.
-        return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
+        //
+        // Seeking is deliberately not a condition here. Restating it is what
+        // made the pill grey out while the main-window timeline was being
+        // dragged (a scrub), even though the identically-named menu item stayed
+        // live - the same inconsistency the export Frame Generation pill was
+        // already fixed for. The toggle only flips a persisted flag and
+        // reconfigures the renderer, which is safe mid-seek, so there is no
+        // reason to disable the button for the duration of a drag.
+        return availability.mediaLoaded && availability.rendererReady &&
                availability.playbackFrameGenerationAvailable;
     case ToolbarAction::Adjustments:
     case ToolbarAction::DebugView:

@@ -7666,8 +7666,23 @@ private:
     }
     std::wstring UpscalingStatus()const{
         if(!m_upscalingError.empty())return m_upscalingError;
-        if(UpscalingActive())return L"DLSS Upscaling on \u00b7 "+std::to_wstring(m_renderer->OutputW())+L"×"+std::to_wstring(m_renderer->OutputH())+
-            (m_upscaleAuto?L" (auto)":L"");
+        if(UpscalingActive()){
+            std::wstring text=L"DLSS Upscaling on \u00b7 "+std::to_wstring(m_renderer->OutputW())+L"\u00d7"+std::to_wstring(m_renderer->OutputH())+
+                (m_upscaleAuto?L" (auto)":L"");
+            // Which amplifier is actually drawing it. The switch is served by
+            // AMD FSR 4 when this machine can run it and by the stretch-and-
+            // sharpen filter when it cannot - a runtime that is missing, a GPU
+            // it refuses, a rung past its 3.0x ceiling, or a dispatch that
+            // failed - and the line read the same "DLSS Upscaling on" either
+            // way. Naming it is the one fact about the picture a viewer cannot
+            // read off the picture itself. Only the present chain gets a name:
+            // with the neural route up, DLSS is the engine and already said.
+            if(m_renderer->UpscalePresentActive()){
+                text+=L" \u00b7 ";
+                text+=m_renderer->PresentUpscaleEngineName();
+            }
+            return text;
+        }
         // RTX VSR is the upscaler whenever DLSS Upscaling is off and the picture is
         // shown larger than the video; the line names it and the size it made.
         if(m_loaded&&m_renderer&&m_renderer->PlaybackVsrShown())
@@ -8996,6 +9011,12 @@ private:
         m_playbackFrameGenMenuAvailable=available;
         m_playbackFrameGenMenuActive=active;
         SyncFeatureMenuState();
+        // The menu item and the toolbar pill read the same availability, but only
+        // the menu was being refreshed here. Without an explicit repaint the pill
+        // kept its last drawn (stale) enabled visual until a hover forced one - so
+        // it looked disabled at playback start even though frame generation was
+        // already supported. Repaint just that pill on every transition.
+        InvalidateToolbarAction(ToolbarAction::TogglePlaybackFrameGeneration);
     }
     // How far the render behind playback has got, for the render chip. A live
     // session reports its whole range, holes and all, at the pace it is

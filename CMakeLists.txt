@@ -303,6 +303,9 @@ add_library(player_render OBJECT
     # and NeuralWorker, which links this library but not player_app, would
     # otherwise carry an unresolved reference to it.
     src/FsrFrameGenBackend.cpp src/FsrFrameGenBackend.h src/FsrFrameGenAbi.h
+    # AMD FSR Upscaling 4.1.1 as the playback upscaler. Same reason as the
+    # frame generation: the renderer instantiates it directly.
+    src/FsrUpscaleBackend.cpp src/FsrUpscaleBackend.h src/FsrUpscaleAbi.h
     src/VsrEngine.cpp src/VsrEngine.h src/VsrPolicy.h
     src/TemporalGuides.cpp src/TemporalGuides.h
     src/OpticalFlowNvof.cpp src/OpticalFlowNvof.h
