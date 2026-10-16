@@ -12,6 +12,13 @@ cmake --build build-ninja --target DLSSVideoPlayer
 rem Stage the freshly built exe into run-fg (the manual run/test staging dir that
 rem holds the FFX DLLs + ffmpeg + the smoke/ab python harnesses). build-fsr4.bat
 rem and CMake POST_BUILD only write to build-ninja, so sync run-fg on success.
+rem
+rem The neural helper has to move with the player. It is a separate process the
+rem live session launches, and the two talk over an in-process protocol: a stale
+rem NeuralWorker.exe next to a fresh player renders zero frames and the session
+rem dies as "retry-exhausted" (2026-10-17). Syncing only the player is what left
+rem the run-fg copy two days behind.
 if %ERRORLEVEL% EQU 0 (
     copy /Y build-ninja\DLSSVideoPlayer.exe run-fg\
+    copy /Y build-ninja\Release\neural-runtime\NeuralWorker.exe run-fg\neural-runtime\
 )

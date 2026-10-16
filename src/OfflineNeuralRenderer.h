@@ -316,6 +316,10 @@ public:
     virtual bool RequestFeatureRehook() { return false; }
     // Classification of the most recent failed Submit.
     virtual NeuralRenderFailure LastFailure() const = 0;
+    // The backend's own words for that failure, when it has any. LastFailure
+    // says what kind of thing went wrong; without this the reason is lost and a
+    // job that rendered nothing can only describe its own symptom.
+    virtual std::string LastError() const { return {}; }
     virtual double LastNeuralGpuMs() const { return 0.0; }
     virtual uint64_t PeakLocalVideoMemoryMiB() const { return 0; }
 };

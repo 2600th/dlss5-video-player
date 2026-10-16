@@ -1042,7 +1042,15 @@ public:
         if (attempt.failure != NeuralRenderFailure::None) {
             CancelOutput();source_.Close();
             result_.historyResets=attempt.historyResets;
-            return Fail(attempt.failure, AttemptFailureDetail(attempt.failure));
+            // AttemptFailureDetail names the kind of failure, which is a symptom;
+            // the backend's own error is the reason. Reported alone, "a frame
+            // failed every retry" left a reader with no way to tell a refused
+            // frame size from a removed device (2026-10-17: a session that
+            // rendered zero frames and said nothing else).
+            std::wstring detail=AttemptFailureDetail(attempt.failure);
+            const std::string reason=EvaluatorErrorDetail();
+            if(!reason.empty())detail+=L" The neural backend said: "+utf8_text::ToWide(reason);
+            return Fail(attempt.failure, std::move(detail));
         }
         source_.Close();
         result_.metrics=attempt.metrics.Finish();
@@ -2023,6 +2031,14 @@ private:
         const NeuralRenderFailure failure = evaluator_.LastFailure();
         return failure == NeuralRenderFailure::None ? NeuralRenderFailure::Neural : failure;
     }
+    // The backend's own words for the frame it refused. Not every evaluator
+    // keeps any - the NVIDIA adapter has no single last-error string - so this
+    // is asked for rather than assumed, the same way the guide generator is.
+    std::string EvaluatorErrorDetail()
+    {
+        if constexpr (requires{ evaluator_.LastError(); }) return evaluator_.LastError();
+        else return {};
+    }
     // The neural backend's own Evaluate tally: the NGX count in production, and
     // whatever the injected evaluator vouches for in the tests.
     uint64_t NeuralEvaluations() { return evaluator_.NeuralEvaluations(); }
@@ -2900,6 +2916,7 @@ struct AmdLmxxfEvaluatorAdapter {
     // Why the last bring-up failed, kept because a failed Initialize drops the
     // evaluator and LastFailure() would then have nothing left to ask.
     NeuralRenderFailure broughtUpFailure{NeuralRenderFailure::None};
+    std::string broughtUpError;
 
     bool Reused()const{return reused;}
     // Told before Initialize, because the reuse question is where the count
@@ -2941,7 +2958,8 @@ struct AmdLmxxfEvaluatorAdapter {
         broughtUpOutputH=jobOutputH;
         if(evaluator->Initialize(nullptr,w,h,ow,oh,fps,guides))return true;
         broughtUpFailure=evaluator->LastFailure();
-        LOG("AMD neural runtime did not come up for "<<w<<"x"<<h<<": "<<evaluator->LastError());
+        broughtUpError=evaluator->LastError();
+        LOG("AMD neural runtime did not come up for "<<w<<"x"<<h<<": "<<broughtUpError);
         evaluator.reset();
         return false;
     }
@@ -2993,6 +3011,11 @@ struct AmdLmxxfEvaluatorAdapter {
     NeuralRenderFailure LastFailure()const{
         return evaluator?evaluator->LastFailure():broughtUpFailure;
     }
+    // The reason behind it. A failed Initialize drops the evaluator, so the
+    // bring-up's words are kept alongside its verdict the same way.
+    std::string LastError()const{
+        return evaluator?evaluator->LastError():broughtUpError;
+    }
     uint64_t PeakLocalVideoMemoryMiB()const{return evaluator?evaluator->PeakLocalVideoMemoryMiB():0;}
     // The point sample, which is what SampleMemoryFootprint asks for. Production
     // answers the same question off the D3D12Renderer it owns.
@@ -3010,7 +3033,7 @@ struct AmdLmxxfEvaluatorAdapter {
     // renderer is gone, so the caller's two-footprint comparison still reads.
     bool ReleaseFeatureForIdle()const{return false;}
     void Release(){DiscardPending();evaluator.reset();reused=false;
-                   width=height=0;broughtUpFailure=NeuralRenderFailure::None;}
+                   width=height=0;broughtUpFailure=NeuralRenderFailure::None;broughtUpError.clear();}
     // Diagnostics the evaluator keeps and this struct would otherwise hide. Views
     // rather than copies, and empty rather than a dummy value with no evaluator:
     // a caller that logs them gets nothing to print, which is the truth.

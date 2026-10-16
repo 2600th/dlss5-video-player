@@ -199,7 +199,9 @@ public:
     uint64_t CurrentLocalVideoMemoryMiB() const noexcept { return currentLocalVramMib_; }
 
     // Diagnostics. Empty until the corresponding step ran.
-    const std::string& LastError() const noexcept { return lastError_; }
+    // Also the interface's: the renderer reports it beside the failure kind,
+    // which is the only place a run that rendered nothing says why.
+    std::string LastError() const override { return lastError_; }
     const std::string& AdapterName() const noexcept { return adapterName_; }
     // The runtime's own GetStatus line after PrepareSession: arch, module count,
     // HIP readiness. The ABI 3 capabilities struct no longer carries hip_ready.
