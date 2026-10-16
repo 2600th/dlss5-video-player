@@ -64,6 +64,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     uint32_t attempts = 0;
     bool created = false;
     NVSDK_NGX_Result ngxResult = NVSDK_NGX_Result_Fail;
+    NgxNeuralCapability capability;
     {
         const auto [gridW, gridH] = TemporalGuideGenerator::AnalysisGrid(kProbeWidth, kProbeHeight, kProbeFps);
         D3D12RendererOwner renderer = MakeD3D12Renderer();
@@ -118,6 +119,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
             }
             created = renderer->DLSSFeatureCreated();
             ngxResult = renderer->DLSSLastResult();
+            capability = renderer->DLSSNeuralCapability();
             if (!created && failure.empty()) failure = L"Feature 18 was not created within the probe budget.";
             // The "did not inject" verdict is NOT decided here. The in-loop poll
             // runs every fourth frame, so arming in the last three frames of the
@@ -141,7 +143,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
                   std::to_wstring(attempts) + L" probe frames.";
     const bool ok = failure.empty() && created && evidence.Valid();
     const NeuralPreflightDiagnosis diagnosis =
-        DiagnoseNeuralPreflight(gpu, observations, created, evidence.Valid(), failure);
+        DiagnoseNeuralPreflight(gpu, observations, created, evidence.Valid(), failure, capability, RunningOnWindows10());
     if (!ok && failure.empty()) failure = L"Feature 18 runtime evidence did not arm the inline interception contract.";
     // The classified sentence names the code and the action; the generic one
     // is only what is left when nothing could be classified.
@@ -172,6 +174,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     const NeuralModelStore modelStore =
         ResolveNeuralModelStore(gpu.driverVersion, {}, std::chrono::milliseconds{0});
     json += ",\"modelStore\":" + NeuralModelStoreJson(modelStore);
+    json += ",\"ngxCapability\":" + NgxNeuralCapabilityJson(capability);
     json += ",\"modules\":[";
     for (size_t index = 0; index < modules.size(); ++index) {
         const RuntimeModuleReceipt& module = modules[index];

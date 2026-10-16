@@ -54,6 +54,9 @@ struct Facts {
     // Whether that proxy is the build the player's download installs. Another
     // build loads too - a user put it there - and the line says so.
     bool frameGenAddonPinned{true};
+    // framegen_addon::LossyNote for its ini: empty unless a setting makes the
+    // generated frames differ from NVIDIA's.
+    std::wstring frameGenAddonLossy;
     VsrState rtxVsr{VsrState::Unknown};
 };
 
@@ -108,9 +111,10 @@ inline std::vector<Line> CapabilityLines(const Facts& facts)
     case VsrState::MissingRuntime: lines.push_back(Line{L"RTX VSR", L"nvngx_vsr.dll is missing beside the player", Mark::Info}); break;
     }
     if (!facts.frameGenAddon.empty())
-        lines.push_back(Line{L"Frame Generation", facts.frameGenAddonPinned
+        lines.push_back(Line{L"Frame Generation", (facts.frameGenAddonPinned
             ? std::wstring(L"dlssg_sm86 add-on found and loaded · unofficial RTX 20/30 support")
-            : std::wstring(L"dlssg_sm86 add-on loaded · not the build the player installs (its digest is in the log)"), Mark::Info});
+            : std::wstring(L"dlssg_sm86 add-on loaded · not the build the player installs (its digest is in the log)")) +
+            (facts.frameGenAddonLossy.empty() ? std::wstring() : L" · " + facts.frameGenAddonLossy), Mark::Info});
     if (facts.fps1080 || facts.fps1440) {
         std::wstring value;
         if (facts.fps1080) value = FpsText(*facts.fps1080) + L" at 1080p";

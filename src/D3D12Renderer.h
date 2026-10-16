@@ -618,6 +618,7 @@ public:
     bool DLSSFeatureCreated() const { return m_dlss.FeatureCreated(); }
     uint64_t DLSSEvaluations() const { return m_dlss.EvaluationCount(); }
     NVSDK_NGX_Result DLSSLastResult() const { return m_dlss.LastResult(); }
+    const NgxNeuralCapability& DLSSNeuralCapability() const { return m_dlss.NeuralCapability(); }
     // Signals and drains the queue. The player's seek path keeps the short
     // teardown budget; the offline renderer passes the render budget.
     d3d12_renderer_detail::FenceWaitResult WaitGPU(

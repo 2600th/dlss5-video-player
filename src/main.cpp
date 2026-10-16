@@ -139,6 +139,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "MediaTransportPolicy.h"
 #include "StartScreenPolicy.h"
 #include "FrameGenAddon.h"
+#include "KeepAwake.h"
 #include "CompareBarPolicy.h"
 #include "CompareViewPolicy.h"
 #include "CompareMaskPolicy.h"
@@ -1304,7 +1305,10 @@ static void LoadFrameGenAddon(bool safeMode) {
     // The digest says which build loaded: the pinned one the offer installs, or
     // another a user put there by hand, which loads too but is named as such.
     if(addon.loaded)LOG("dlssg_sm86 add-on loaded for Frame Generation: "<<WideToUtf8((*directory/addon.proxy).wstring())
-                        <<" sha256="<<addon.sha256<<(addon.pinned?" (the pinned 0.3.5 build)":" (not the build the player installs)"));
+                        <<" sha256="<<addon.sha256<<(addon.pinned?" (the pinned 0.3.5 build)":" (not the build the player installs)")
+                        <<" layout="<<(addon.settings.directoryLayout?"0.4":"0.3")
+                        <<" Optimized="<<(addon.settings.optimized?std::to_string(*addon.settings.optimized):std::string("unset"))
+                        <<" Preset="<<(addon.settings.preset.empty()?std::string("unset"):WideToUtf8(addon.settings.preset)));
     else LOG("dlssg_sm86 add-on found but its "<<WideToUtf8(addon.proxy)<<" did not load: error "<<addon.error);
 }
 
@@ -3394,7 +3398,7 @@ private:
         const auto output=PickExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());if(output.empty())return;
         CachedExportRequest request{m_neuralPath,std::filesystem::path(m_path),output};request.displayAspect=ExportDisplayAspect(m_decoder.Width(),m_decoder.Height(),m_decoder.DisplayAspectRatio());if(!m_cachedRange.Whole()){request.rangeStartSeconds=double(m_cachedRange.start100ns)*1e-7;request.rangeDurationSeconds=double(m_cachedRange.end100ns-m_cachedRange.start100ns)*1e-7;}
         const auto helpers=ExecutableDirectory();HWND target=m_hwnd;auto* completions=&m_exportCompletions;
-        try{m_exportWorker=std::jthread([target,request,helpers,completions](std::stop_token stop){auto completion=std::make_unique<ExportCompletion>();completion->output=request.output;completion->result=CachedVideoExporter(helpers).Run(request,stop);completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});});}
+        try{m_exportWorker=std::jthread([target,request,helpers,completions](std::stop_token stop){const KeepAwake awake(L"Saving a converted video");auto completion=std::make_unique<ExportCompletion>();completion->output=request.output;completion->result=CachedVideoExporter(helpers).Run(request,stop);completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});});}
         catch(const std::system_error&){MessageBoxW(m_hwnd,T(L"export.worker_failed").c_str(),T(L"export.title.failed").c_str(),MB_OK|MB_ICONERROR);return;}
         SyncFeatureMenuState();UpdateCachedStatus();
     }
@@ -4111,6 +4115,7 @@ private:
         const bool neuralInput=input.neural;
         try{
             m_frameGenWorker=std::jthread([target,request,helpers,completions,progressMessages,displayTitle,neuralInput](std::stop_token stop){
+                const KeepAwake awake(L"Generating frames for a video");
                 auto completion=std::make_unique<FrameGenerationCompletion>();
                 completion->output=request.output;
                 completion->multiplier=request.multiplier;
@@ -4424,7 +4429,8 @@ private:
         if(const auto parsed=ParseNvidiaDriverVersion(m_opt.detectedGpu.driverVersion))detected=FormatNvidiaDriverVersion(*parsed);
         return T(L"driver.below_floor")+L"\n\n"+T(L"driver.detected")+detected+L"\n"+
                T(L"driver.minimum")+FormatNvidiaDriverVersion(kNeuralDriverFloor)+L"\n"+
-               T(L"driver.verified")+FormatNvidiaDriverVersion(kNeuralDriverRecommended);
+               T(L"driver.verified")+FormatNvidiaDriverVersion(kNeuralDriverRecommended)+
+               (RunningOnWindows10()?L"\n\n"+std::wstring(kWindows10DriverNote):std::wstring());
     }
     // Built on this thread for the same reason as the driver notice above.
     NeuralCacheFailureText CacheFailureText()const{
@@ -6904,6 +6910,7 @@ private:
         HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{
             m_exportWorker=std::jthread([=](std::stop_token stop){
+                const KeepAwake awake(L"Exporting a video with DLSS stages");
                 auto completion=std::make_unique<ExportCompletion>();
                 completion->output=job.destination;
                 // The worker has always reported frames; this is what listens.
@@ -7779,7 +7786,7 @@ private:
         start_screen::Facts facts{};
         facts.gpu=m_opt.detectedGpu.description;facts.generation=m_opt.detectedGpu.generation;
         facts.driverVersion=m_opt.detectedGpu.driverVersion;facts.safeMode=m_opt.safeMode;
-        if(FrameGenAddonState().loaded){facts.frameGenAddon=FrameGenAddonState().proxy;facts.frameGenAddonPinned=FrameGenAddonState().pinned;}
+        if(FrameGenAddonState().loaded){facts.frameGenAddon=FrameGenAddonState().proxy;facts.frameGenAddonPinned=FrameGenAddonState().pinned;facts.frameGenAddonLossy=framegen_addon::LossyNote(FrameGenAddonState().settings);}
         facts.rtxVsr=!VsrEngine::kBuilt?start_screen::VsrState::NotInBuild
                     :!framegen_addon::RegularFile(ExecutableDirectory()/L"nvngx_vsr.dll")?start_screen::VsrState::MissingRuntime
                     :m_playbackVsr?start_screen::VsrState::On:start_screen::VsrState::Off;
@@ -10865,7 +10872,7 @@ private:
             m_coldStart=std::make_shared<NeuralColdStartRecord>();
             job.coldStart=m_coldStart;
             job.sourceDigestMemo=m_sourceDigestMemo;
-            m_neuralWorker=std::jthread([job=std::move(job)](std::stop_token stop){NeuralJobRun(job,std::move(stop)).Run();});
+            m_neuralWorker=std::jthread([job=std::move(job)](std::stop_token stop){const KeepAwake awake(L"Rendering a video with DLSS 5");NeuralJobRun(job,std::move(stop)).Run();});
         }catch(const std::system_error&){m_neuralLifecycle.Invalidate();SyncSourceActionAvailability();const std::wstring message=L"The neural pre-render worker could not start.";MessageBoxW(m_hwnd,message.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);return false;}
         return true;
     }
@@ -12670,7 +12677,10 @@ static int RunProbeCommand(const render_command::Command& command,RenderConsole&
             frameGeneration=maxMultiplier>=2?"up to "+std::to_string(maxMultiplier)+"x":"unavailable"+(capability.detail.empty()?std::string():": "+WideToUtf8(capability.detail));
         }
         text("frame_generation",frameGeneration);
-        if(FrameGenAddonState().loaded)text("frame_generation_addon","dlssg_sm86 ("+WideToUtf8(FrameGenAddonState().proxy)+")");
+        if(FrameGenAddonState().loaded){
+            const std::wstring lossy=framegen_addon::LossyNote(FrameGenAddonState().settings);
+            text("frame_generation_addon","dlssg_sm86 ("+WideToUtf8(FrameGenAddonState().proxy)+")"+(lossy.empty()?std::string():"; "+WideToUtf8(lossy)));
+        }
 
         // sr runs on RTX VSR in the player wherever that can run, and on DLSS in the
         // helper otherwise; either makes the stage available.
@@ -12694,6 +12704,7 @@ static int RunProbeCommand(const render_command::Command& command,RenderConsole&
 }
 
 static int RunRenderCommand(const render_command::Parsed& parsed,const std::vector<std::wstring>& userArguments){
+    const KeepAwake awake(L"Converting a video from the command line");
     using namespace render_command;
     RenderConsole console;
     const Localizer loc;

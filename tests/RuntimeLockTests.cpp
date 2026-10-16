@@ -634,6 +634,31 @@ void neural_preflight_diagnosis_blames_the_actionable_cause_test()
     CHECK(Contains(platform.detail, L"616.64"));
     CHECK_EQ(std::string_view("platformRefusal"), std::string_view(NeuralPreflightCauseName(platform.cause)));
 
+    // NGX's own DLSS-NR floor (P1.38): it explains a failed probe and names
+    // the core's minimum, and never overrules a probe that succeeded.
+    NgxNeuralCapability wantsUpdate;
+    wantsUpdate.needsUpdatedDriver = true;
+    wantsUpdate.minimumDriver = NvidiaDriverVersion{618, 20};
+    const NeuralPreflightDiagnosis ngxFloor =
+        DiagnoseNeuralPreflight(blackwell, platformError, true, false, {}, wantsUpdate);
+    CHECK_EQ(NeuralPreflightCause::DriverBelowFloor, ngxFloor.cause);
+    CHECK(Contains(ngxFloor.detail, L"618.20"));
+    CHECK(Contains(ngxFloor.detail, L"NGX"));
+    CHECK(!Contains(ngxFloor.detail, L"Windows 11"));
+    const NeuralPreflightDiagnosis ngxFloorWindows10 =
+        DiagnoseNeuralPreflight(blackwell, platformError, true, false, {}, wantsUpdate, true);
+    CHECK(Contains(ngxFloorWindows10.detail, L"Windows 11"));
+    const NeuralPreflightDiagnosis ngxIgnoredOnSuccess =
+        DiagnoseNeuralPreflight(ampere, {}, true, true, {}, wantsUpdate);
+    CHECK_EQ(NeuralPreflightCause::None, ngxIgnoredOnSuccess.cause);
+    NgxNeuralCapability satisfied;
+    satisfied.needsUpdatedDriver = false;
+    satisfied.minimumDriver = NvidiaDriverVersion{618, 20};
+    CHECK_EQ(NeuralPreflightCause::PlatformRefusal,
+             DiagnoseNeuralPreflight(blackwell, platformError, true, false, {}, satisfied).cause);
+    CHECK(Contains(NgxNeuralCapabilityJson(wantsUpdate), "\"dlssnrMinimumDriver\":\"618.20\""));
+    CHECK(Contains(NgxNeuralCapabilityJson({}), "\"dlssnrAvailable\":null"));
+
     // Architecture and memory refusals are the runtime's answer whatever the
     // driver is, so the driver floor never masks them.
     const auto architecture = CollectFeature18Observations(

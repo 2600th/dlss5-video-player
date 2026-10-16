@@ -98,12 +98,22 @@ struct NeuralPreflightDiagnosis {
 };
 
 // Classifies a finished probe. `created`/`evidenceValid` are the probe's own
-// verdicts and `probeFailure` the sentence it produced, if any.
+// verdicts and `probeFailure` the sentence it produced, if any. `capability`
+// is what the driver's NGX core reported for DLSS-NR: when it says the driver
+// needs updating, a failed probe blames the driver and names the core's
+// minimum, which outranks this project's measured floor. A probe that
+// succeeded is never overruled by it. `windows10` adds kWindows10DriverNote to
+// a driver diagnosis.
 NeuralPreflightDiagnosis DiagnoseNeuralPreflight(const DetectedGpu& gpu,
                                                  std::span<const Feature18Observation> observations,
                                                  bool created,
                                                  bool evidenceValid,
-                                                 std::wstring_view probeFailure);
+                                                 std::wstring_view probeFailure,
+                                                 const NgxNeuralCapability& capability = {},
+                                                 bool windows10 = false);
+
+// The receipt's `"ngxCapability":{...}` member.
+std::string NgxNeuralCapabilityJson(const NgxNeuralCapability& capability);
 const char* NeuralPreflightCauseName(NeuralPreflightCause cause) noexcept;
 
 struct RuntimeModuleReceipt {

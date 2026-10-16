@@ -126,6 +126,31 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
     if (!NVSDK_NGX_FAILED(availResult)) {
         LOG("NGX capability: SuperSampling.Available=" << srAvailable);
     }
+    // The public SDK headers do not define the DLSS-NR names, so they are
+    // spelled out; a core that does not know them reports a failure and the
+    // member stays empty.
+    {
+        int value = 0;
+        if (!NVSDK_NGX_FAILED(NVSDK_NGX_Parameter_GetI(m_params, "DLSSNR.Available", &value)))
+            m_neuralCapability.available = value != 0;
+        if (!NVSDK_NGX_FAILED(NVSDK_NGX_Parameter_GetI(m_params, "DLSSNR.NeedsUpdatedDriver", &value)))
+            m_neuralCapability.needsUpdatedDriver = value != 0;
+        unsigned int major = 0, minor = 0;
+        if (!NVSDK_NGX_FAILED(NVSDK_NGX_Parameter_GetUI(m_params, "DLSSNR.MinDriverVersionMajor", &major)) &&
+            !NVSDK_NGX_FAILED(NVSDK_NGX_Parameter_GetUI(m_params, "DLSSNR.MinDriverVersionMinor", &minor)) &&
+            major != 0)
+            m_neuralCapability.minimumDriver = NvidiaDriverVersion{major, minor};
+        const auto flag = [](const std::optional<bool>& v) { return v ? (*v ? "1" : "0") : "unreported"; };
+        std::string minimum = "unreported";
+        if (m_neuralCapability.minimumDriver) {
+            minimum.clear();
+            for (const wchar_t c : FormatNvidiaDriverVersion(*m_neuralCapability.minimumDriver))
+                minimum.push_back(static_cast<char>(c));  // digits and a dot
+        }
+        LOG("NGX capability: DLSSNR.Available=" << flag(m_neuralCapability.available)
+            << " DLSSNR.NeedsUpdatedDriver=" << flag(m_neuralCapability.needsUpdatedDriver)
+            << " DLSSNR.MinDriverVersion=" << minimum);
+    }
 
     float sharpness=0.0f;
     if (preserveSource) {

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -53,6 +54,64 @@ std::wstring ProxyToLoad(IsFileBeside&& isFileBeside)
     return {};
 }
 
+// The settings in the add-on's ini that change what it generates. 0.4.0
+// (2026-10-14) moved its runtime into a `dlssg_sm86\` directory beside the
+// proxy and `Optimized` from [FrameGeneration] to [DLSSG], and raised the
+// factory `Optimized` from 1 to 2. Its README: 0 stock kernels, 1 every
+// acceleration with output bit-identical to NVIDIA's, 2 adds lossy image
+// kernels ("about 50 dB PSNR or better"), 3 everything lossy; `[DLSSG]
+// Preset=C` is "FG Lite", faster with slightly lower quality. The player pins
+// 0.3.5, whose factory level is 1, and only reports what a hand-installed
+// build is set to.
+struct Settings {
+    bool directoryLayout{};          // 0.4.0 and later: dlssg_sm86\ beside the proxy
+    std::optional<int> optimized;    // empty when the ini does not set it
+    std::wstring preset;             // [DLSSG] Preset, empty when unset
+};
+
+inline std::wstring TrimIniValue(std::wstring value)
+{
+    if (const size_t comment = value.find_first_of(L";#"); comment != std::wstring::npos) value.resize(comment);
+    while (!value.empty() && iswspace(value.back())) value.pop_back();
+    size_t start = 0;
+    while (start < value.size() && iswspace(value[start])) ++start;
+    return value.substr(start);
+}
+
+inline Settings ReadSettings(const std::filesystem::path& directory)
+{
+    Settings settings;
+    const DWORD attributes = GetFileAttributesW((directory / L"dlssg_sm86").c_str());
+    settings.directoryLayout = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    const std::wstring ini = (directory / kMarkerFile).wstring();
+    const auto readString = [&](const wchar_t* section, const wchar_t* key) {
+        wchar_t buffer[64]{};
+        GetPrivateProfileStringW(section, key, L"", buffer, static_cast<DWORD>(std::size(buffer)), ini.c_str());
+        return TrimIniValue(buffer);
+    };
+    for (const wchar_t* section : {L"DLSSG", L"FrameGeneration"}) {
+        const std::wstring text = readString(section, L"Optimized");
+        if (text.size() == 1 && text[0] >= L'0' && text[0] <= L'9') {
+            settings.optimized = text[0] - L'0';
+            break;
+        }
+    }
+    settings.preset = readString(L"DLSSG", L"Preset");
+    return settings;
+}
+
+// What the start screen and the receipt say about a setting that makes the
+// generated frames differ from NVIDIA's; empty when nothing does.
+inline std::wstring LossyNote(const Settings& settings)
+{
+    std::wstring note;
+    if (settings.optimized && *settings.optimized >= 2)
+        note = L"Optimized=" + std::to_wstring(*settings.optimized) + L" uses lossy kernels (1 matches NVIDIA's output)";
+    if (settings.preset == L"C" || settings.preset == L"c")
+        note += (note.empty() ? L"" : L" · ") + std::wstring(L"Preset C (FG Lite) trades quality for speed");
+    return note;
+}
+
 struct LoadResult {
     std::wstring proxy;      // the proxy's file name; empty when none was found
     bool loaded{};
@@ -64,6 +123,7 @@ struct LoadResult {
     // and the log is where a mismatch is worth seeing.
     std::string sha256;
     bool pinned{};
+    Settings settings;
 };
 
 // Defined after kPinnedFiles, below.
@@ -96,6 +156,7 @@ inline LoadResult LoadBeside(const std::filesystem::path& directory)
     // this is the file the process is running.
     result.sha256 = Sha256File(path).value_or(std::string());
     result.pinned = !result.sha256.empty() && PinnedBuild(result.proxy, result.sha256);
+    result.settings = ReadSettings(directory);
     return result;
 }
 

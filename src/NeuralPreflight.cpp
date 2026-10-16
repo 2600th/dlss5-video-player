@@ -730,6 +730,18 @@ std::optional<uint32_t> ParseFeature18CreateResult(std::span<const Feature18Obse
     return result;
 }
 
+std::string NgxNeuralCapabilityJson(const NgxNeuralCapability& capability)
+{
+    const auto flag = [](const std::optional<bool>& value) -> std::string {
+        return value ? (*value ? "true" : "false") : "null";
+    };
+    std::string minimum = "null";
+    if (capability.minimumDriver) minimum = "\"" + JsonEscapeWide(FormatNvidiaDriverVersion(*capability.minimumDriver)) + "\"";
+    return "{\"dlssnrAvailable\":" + flag(capability.available) +
+           ",\"dlssnrNeedsUpdatedDriver\":" + flag(capability.needsUpdatedDriver) +
+           ",\"dlssnrMinimumDriver\":" + minimum + "}";
+}
+
 const char* NeuralPreflightCauseName(NeuralPreflightCause cause) noexcept
 {
     const size_t index = static_cast<size_t>(cause);
@@ -741,7 +753,9 @@ NeuralPreflightDiagnosis DiagnoseNeuralPreflight(const DetectedGpu& gpu,
                                                  std::span<const Feature18Observation> observations,
                                                  bool created,
                                                  bool evidenceValid,
-                                                 std::wstring_view probeFailure)
+                                                 std::wstring_view probeFailure,
+                                                 const NgxNeuralCapability& capability,
+                                                 bool windows10)
 {
     constexpr uint32_t kFeatureNotSupported = 0xbad00001u;  // NVSDK_NGX_Result_FAIL_FeatureNotSupported
     constexpr uint32_t kPlatformError = 0xbad00002u;        // NVSDK_NGX_Result_FAIL_PlatformError
@@ -753,15 +767,27 @@ NeuralPreflightDiagnosis DiagnoseNeuralPreflight(const DetectedGpu& gpu,
     // went on to satisfy is history, not a verdict.
     if (created && evidenceValid && probeFailure.empty()) return diagnosis;
 
-    // ClassifyNeuralDriver, with the parsed number kept for the message.
+    // ClassifyNeuralDriver, with the parsed number kept for the message. When
+    // the NGX core says the driver needs updating, its own minimum is the
+    // floor the message names, if it is above this project's.
     const std::optional<NvidiaDriverVersion> driver = ParseNvidiaDriverVersion(gpu.driverVersion);
-    const bool belowFloor = driver && *driver < kNeuralDriverFloor;
-    const std::wstring recommended = FormatNvidiaDriverVersion(kNeuralDriverRecommended);
+    const bool coreWantsUpdate = capability.needsUpdatedDriver.value_or(false);
+    NvidiaDriverVersion floor = kNeuralDriverFloor;
+    if (coreWantsUpdate && capability.minimumDriver && kNeuralDriverFloor < *capability.minimumDriver)
+        floor = *capability.minimumDriver;
+    const bool belowFloor = coreWantsUpdate || (driver && *driver < floor);
+    const NvidiaDriverVersion target = kNeuralDriverRecommended < floor ? floor : kNeuralDriverRecommended;
+    const std::wstring recommended = FormatNvidiaDriverVersion(target);
     const auto blameDriver = [&] {
         diagnosis.cause = NeuralPreflightCause::DriverBelowFloor;
-        diagnosis.detail = L"NVIDIA driver " + FormatNvidiaDriverVersion(*driver) + L" is below the " +
-                           FormatNvidiaDriverVersion(kNeuralDriverFloor) +
-                           L" minimum for neural rendering. Update to " + recommended + L" or newer, then try again.";
+        const std::wstring installed = driver ? L"NVIDIA driver " + FormatNvidiaDriverVersion(*driver)
+                                              : std::wstring(L"The installed NVIDIA driver");
+        diagnosis.detail = coreWantsUpdate
+            ? installed + L" is older than NVIDIA's NGX asks for neural rendering (" + FormatNvidiaDriverVersion(floor) +
+                  L" or newer). Update to " + recommended + L" or newer, then try again."
+            : installed + L" is below the " + FormatNvidiaDriverVersion(floor) +
+                  L" minimum for neural rendering. Update to " + recommended + L" or newer, then try again.";
+        if (windows10) diagnosis.detail += L" " + std::wstring(kWindows10DriverNote);
     };
 
     if (diagnosis.ngxResult == kFeatureNotSupported) {

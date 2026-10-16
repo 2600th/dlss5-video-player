@@ -4,6 +4,7 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
 #include "NgxSession.h"
+#include "RuntimePolicy.h"
 
 constexpr NVSDK_NGX_PerfQuality_Value DefaultNeuralCarrierQuality() noexcept
 {
@@ -63,6 +64,8 @@ public:
     // that rather than reporting DLSS as simply unavailable.
     bool SourceOutsideSupportedRange() const { return m_sourceOutsideRange; }
     NVSDK_NGX_Result LastResult() const { return m_lastResult; }
+    // Read once, right after the capability parameters are obtained.
+    const NgxNeuralCapability& NeuralCapability() const { return m_neuralCapability; }
 
 private:
     bool CreateFeature(ID3D12GraphicsCommandList* cmd);
@@ -84,6 +87,7 @@ private:
     uint32_t m_outputW = 0, m_outputH = 0;
     NVSDK_NGX_PerfQuality_Value m_quality = DefaultNeuralCarrierQuality();
     NVSDK_NGX_Result m_lastResult = NVSDK_NGX_Result_Fail;
+    NgxNeuralCapability m_neuralCapability;
     bool m_initialized = false;
     bool m_sessionLeaseAcquired = false;
     bool m_available = false;

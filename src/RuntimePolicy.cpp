@@ -463,3 +463,16 @@ bool NeuralPublishDurationsMatch(
            std::llabs(resultDuration100ns - expectedDuration100ns) <= tolerance100ns;
 }
 
+
+bool RunningOnWindows10()
+{
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return false;
+    const auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+    if (!rtlGetVersion) return false;
+    OSVERSIONINFOW info{};
+    info.dwOSVersionInfoSize = sizeof(info);
+    if (rtlGetVersion(&info) != 0) return false;
+    return info.dwMajorVersion == 10 && info.dwBuildNumber < 22000;
+}

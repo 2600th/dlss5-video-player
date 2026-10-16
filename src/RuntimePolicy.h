@@ -111,6 +111,30 @@ inline std::wstring FormatNvidiaDriverVersion(NvidiaDriverVersion version)
 inline constexpr NvidiaDriverVersion kNeuralDriverFloor{610, 47};
 inline constexpr NvidiaDriverVersion kNeuralDriverRecommended{616, 64};
 
+// What the driver's NGX core reports for DLSS-NR, read from the capability
+// parameters `DLSSNR.Available`, `DLSSNR.NeedsUpdatedDriver` and
+// `DLSSNR.MinDriverVersionMajor/Minor` (names from the driver's _nvngx.dll;
+// NVIDIA's RTX Remix integration reads the same ones). Each member is empty
+// when the core did not report it. The preflight probe stays the verdict: the
+// community runtime runs on drivers this flag may call too old (610.47 is
+// measured here, its published floor is 616.56), so the flag only names the
+// driver once the probe has failed.
+struct NgxNeuralCapability {
+    std::optional<bool> available;
+    std::optional<bool> needsUpdatedDriver;
+    std::optional<NvidiaDriverVersion> minimumDriver;
+};
+
+// NVIDIA's Game Ready and Studio drivers for Windows 10 end with October
+// 2026's; later ones need Windows 11. Shown wherever the player asks for a
+// newer driver on Windows 10, because there that advice can run out.
+inline constexpr std::wstring_view kWindows10DriverNote =
+    L"On Windows 10, NVIDIA drivers released after October 2026 need Windows 11.";
+
+// True on Windows 10 (build below 22000). RtlGetVersion, because
+// GetVersionEx answers what the manifest declares rather than what runs.
+bool RunningOnWindows10();
+
 enum class NeuralDriverSupport { Unknown, BelowFloor, Supported };
 
 inline NeuralDriverSupport ClassifyNeuralDriver(std::wstring_view dxgiVersion)
