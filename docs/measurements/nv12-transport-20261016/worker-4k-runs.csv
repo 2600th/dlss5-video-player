@@ -1,0 +1,7 @@
+run,processing_fps,ms_per_frame,neural_gpu_ms_p50,guide_ms_mean,capture_ms_mean,peak_local_vram_mib,wall_seconds,encoder
+real-game-motion-4k__m1-4k-bgra__1,48.43,20.65,8.797,1.579,0.55,2910,12.78,hevc_nvenc
+real-game-motion-4k__m1-4k-bgra__2,50.07,19.97,9.266,1.567,0.549,2910,12.64,hevc_nvenc
+real-game-motion-4k__m1-4k-bgra__3,40.23,24.86,8.893,2.239,0.645,2910,13.44,hevc_nvenc
+real-game-motion-4k__m1-4k-nv12__1,50.59,19.77,9.341,1.423,0.538,2802,18.41,hevc_nvenc
+real-game-motion-4k__m1-4k-nv12__2,39.5,25.32,9.276,9.294,0.703,2803,13.15,hevc_nvenc
+real-game-motion-4k__m1-4k-nv12__3,50.69,19.73,9.395,1.393,0.484,2803,12.33,hevc_nvenc

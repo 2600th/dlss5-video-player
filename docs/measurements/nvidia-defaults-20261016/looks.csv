@@ -1,0 +1,51 @@
+clip,row,reference,candidate,identical,frames,change_to_reference,distance_to_source,reference_to_source,distance_share
+real-film-cuts,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,26,0.0,2.9181,2.9181,1.0
+real-film-cuts,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,26,0.0,2.9181,2.9181,1.0
+real-film-cuts,Remix defaults vs Standard (gov 1),m1-p1#1,m1-remix#1,False,26,1.502,2.2275,2.9181,0.7633
+real-film-cuts,Remix defaults vs Standard (gov 0),m1-g0-p1#1,m1-g0-remix#1,False,26,1.502,2.2275,2.9181,0.7633
+real-film-cuts,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,26,1.4949,2.2164,2.8903,0.7668
+real-film-cuts,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,26,0.13,2.2164,2.2275,0.995
+real-game-cuts,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,17,0.0,4.6597,4.6597,1.0
+real-game-cuts,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,17,0.0,4.6597,4.6597,1.0
+real-game-cuts,Remix defaults vs Standard (gov 1),m1-p1#1,m1-remix#1,False,17,2.506,3.1089,4.6597,0.6672
+real-game-cuts,Remix defaults vs Standard (gov 0),m1-g0-p1#1,m1-g0-remix#1,False,17,2.506,3.1089,4.6597,0.6672
+real-game-cuts,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,17,2.4924,3.0844,4.6289,0.6663
+real-game-cuts,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,17,0.2418,3.0844,3.1089,0.9921
+real-game-motion,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,Remix defaults vs Standard (gov 1),m1-p1#1,m1-remix#1,False,19,2.928,3.417,5.628,0.6071
+real-game-motion,Remix defaults vs Standard (gov 0),m1-g0-p1#1,m1-g0-remix#1,False,19,2.928,3.417,5.628,0.6071
+real-game-motion,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,19,2.901,3.411,5.6044,0.6086
+real-game-motion,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,19,0.26,3.411,3.417,0.9982
+orig-faces,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,26,0.0,4.0194,4.0194,1.0
+orig-faces,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,26,0.0,4.0194,4.0194,1.0
+orig-faces,Remix defaults vs Standard (gov 1),m1-p1#1,m1-remix#1,False,26,1.8558,2.8851,4.0194,0.7178
+orig-faces,Remix defaults vs Standard (gov 0),m1-g0-p1#1,m1-g0-remix#1,False,26,1.8558,2.8851,4.0194,0.7178
+orig-faces,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,26,1.8899,2.8396,3.9421,0.7203
+orig-faces,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,26,0.2228,2.8396,2.8851,0.9842
+orig-game-motion,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,Remix defaults vs Standard (gov 1),m1-p1#1,m1-remix#1,False,17,3.4902,3.9601,6.757,0.5861
+orig-game-motion,Remix defaults vs Standard (gov 0),m1-g0-p1#1,m1-g0-remix#1,False,17,3.4902,3.9601,6.757,0.5861
+orig-game-motion,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,17,3.4789,3.9416,6.7317,0.5855
+orig-game-motion,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,17,0.2794,3.9416,3.9601,0.9953
+real-film-cuts,Gentle preset vs Standard,m1-p1#1,m1-gentle#1,False,26,1.4721,2.0882,2.9181,0.7156
+real-film-cuts,Local tone 0.30 alone vs Standard,m1-p1#1,m1-tone030#1,False,26,1.3449,2.4319,2.9181,0.8334
+real-film-cuts,Remix defaults vs Gentle,m1-gentle#1,m1-remix#1,False,26,0.6687,2.2275,2.0882,1.0667
+real-film-cuts,Remix defaults vs Local tone 0.30 alone,m1-tone030#1,m1-remix#1,False,26,0.4525,2.2275,2.4319,0.9159
+real-game-cuts,Gentle preset vs Standard,m1-p1#1,m1-gentle#1,False,17,2.5613,2.8985,4.6597,0.622
+real-game-cuts,Local tone 0.30 alone vs Standard,m1-p1#1,m1-tone030#1,False,17,2.2383,3.4079,4.6597,0.7314
+real-game-cuts,Remix defaults vs Gentle,m1-gentle#1,m1-remix#1,False,17,0.9445,3.1089,2.8985,1.0726
+real-game-cuts,Remix defaults vs Local tone 0.30 alone,m1-tone030#1,m1-remix#1,False,17,0.6469,3.1089,3.4079,0.9123
+real-game-motion,Gentle preset vs Standard,m1-p1#1,m1-gentle#1,False,19,2.8601,3.4432,5.628,0.6118
+real-game-motion,Local tone 0.30 alone vs Standard,m1-p1#1,m1-tone030#1,False,19,2.644,3.7441,5.628,0.6653
+real-game-motion,Remix defaults vs Gentle,m1-gentle#1,m1-remix#1,False,19,1.1985,3.417,3.4432,0.9924
+real-game-motion,Remix defaults vs Local tone 0.30 alone,m1-tone030#1,m1-remix#1,False,19,0.6896,3.417,3.7441,0.9126
+orig-faces,Gentle preset vs Standard,m1-p1#1,m1-gentle#1,False,26,1.9184,2.6826,4.0194,0.6674
+orig-faces,Local tone 0.30 alone vs Standard,m1-p1#1,m1-tone030#1,False,26,1.6779,3.1659,4.0194,0.7876
+orig-faces,Remix defaults vs Gentle,m1-gentle#1,m1-remix#1,False,26,0.8125,2.8851,2.6826,1.0755
+orig-faces,Remix defaults vs Local tone 0.30 alone,m1-tone030#1,m1-remix#1,False,26,0.5519,2.8851,3.1659,0.9113
+orig-game-motion,Gentle preset vs Standard,m1-p1#1,m1-gentle#1,False,17,3.4974,3.8941,6.757,0.5763
+orig-game-motion,Local tone 0.30 alone vs Standard,m1-p1#1,m1-tone030#1,False,17,3.1068,4.4393,6.757,0.657
+orig-game-motion,Remix defaults vs Gentle,m1-gentle#1,m1-remix#1,False,17,1.449,3.9601,3.8941,1.017
+orig-game-motion,Remix defaults vs Local tone 0.30 alone,m1-tone030#1,m1-remix#1,False,17,0.8712,3.9601,4.4393,0.8921

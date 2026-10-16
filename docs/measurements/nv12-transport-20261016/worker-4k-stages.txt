@@ -1,0 +1,38 @@
+== m1-4k-nv12 (3 renders of real-game-motion-4k, 228 frames, Standard rung)
+FFmpeg raw NV12 process started with CUDA decode + GPU scale.
+FFmpeg raw NV12 process started with CUDA decode + GPU scale.
+Decoder frame queue: frames=228 wallMs=5361.4 perFrameMs: pipeRead=1.907 blockedWait=1.101 emptyPoll=0.000 emptySleep=0.000 queueFullWait=20.505 other=0.001 reads=780 polls=0 queueFullWaits=223 zeroFills=6
+Render stage read n=228 mean=1.01587 p50=0.0036 p95=0.0074 totalMs=231.619
+Render stage submit(guide+render+gate) n=228 mean=16.315 p50=17.333 p95=20.6574 totalMs=3719.82
+Render stage render-loop throughput n=228 mean=23.9738 p50=19.1731 p95=24.0949 totalMs=5466.02
+FFmpeg raw NV12 process started with CUDA decode + GPU scale.
+FFmpeg raw NV12 process started with CUDA decode + GPU scale.
+Decoder frame queue: frames=228 wallMs=6631.3 perFrameMs: pipeRead=3.194 blockedWait=1.076 emptyPoll=0.104 emptySleep=0.034 queueFullWait=24.675 other=0.002 reads=1020 polls=5 queueFullWaits=218 zeroFills=6
+Render stage read n=228 mean=0.922037 p50=0.0042 p95=0.0147 totalMs=210.224
+Render stage submit(guide+render+gate) n=228 mean=23.1891 p50=17.6355 p95=68.8924 totalMs=5287.11
+Render stage render-loop throughput n=228 mean=29.3341 p50=18.8957 p95=76.3832 totalMs=6688.17
+FFmpeg raw NV12 process started with CUDA decode + GPU scale.
+FFmpeg raw NV12 process started with CUDA decode + GPU scale.
+Decoder frame queue: frames=228 wallMs=5311.9 perFrameMs: pipeRead=2.086 blockedWait=0.969 emptyPoll=0.000 emptySleep=0.000 queueFullWait=20.241 other=0.002 reads=910 polls=0 queueFullWaits=223 zeroFills=6
+Render stage read n=228 mean=0.94283 p50=0.004 p95=0.0083 totalMs=214.965
+Render stage submit(guide+render+gate) n=228 mean=14.7577 p50=17.2469 p95=20.0775 totalMs=3364.76
+Render stage render-loop throughput n=228 mean=23.7701 p50=19.3137 p95=23.3035 totalMs=5419.58
+== m1-4k-bgra (3 renders of real-game-motion-4k, 228 frames, Standard rung)
+FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+Decoder frame queue: frames=228 wallMs=5727.0 perFrameMs: pipeRead=3.737 blockedWait=17.657 emptyPoll=0.239 emptySleep=0.018 queueFullWait=3.463 other=0.005 reads=75747 polls=3 queueFullWaits=12 zeroFills=6
+Render stage read n=228 mean=11.7757 p50=12.42 p95=16.6017 totalMs=2684.86
+Render stage submit(guide+render+gate) n=228 mean=6.56094 p50=5.4241 p95=12.6052 totalMs=1495.9
+Render stage render-loop throughput n=228 mean=24.8678 p50=20.477 p95=26.0149 totalMs=5669.85
+FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+Decoder frame queue: frames=228 wallMs=5484.8 perFrameMs: pipeRead=3.982 blockedWait=15.808 emptyPoll=0.021 emptySleep=0.018 queueFullWait=4.223 other=0.003 reads=66464 polls=3 queueFullWaits=22 zeroFills=6
+Render stage read n=228 mean=2.85585 p50=0.0046 p95=11.7558 totalMs=651.134
+Render stage submit(guide+render+gate) n=228 mean=13.1114 p50=15.4322 p95=19.7568 totalMs=2989.41
+Render stage render-loop throughput n=228 mean=24.4744 p50=19.5732 p95=24.1888 totalMs=5580.17
+FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+Decoder frame queue: frames=228 wallMs=6635.6 perFrameMs: pipeRead=3.555 blockedWait=21.258 emptyPoll=0.677 emptySleep=0.031 queueFullWait=3.578 other=0.005 reads=75858 polls=5 queueFullWaits=15 zeroFills=6
+Render stage read n=228 mean=10.8594 p50=7.2163 p95=16.7138 totalMs=2475.94
+Render stage submit(guide+render+gate) n=228 mean=12.0592 p50=10.7132 p95=19.0151 totalMs=2749.5
+Render stage render-loop throughput n=228 mean=28.407 p50=19.69 p95=27.1128 totalMs=6476.81

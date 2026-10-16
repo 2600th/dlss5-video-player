@@ -1,0 +1,56 @@
+clip,row,reference,candidate,identical,frames,change_to_reference,distance_to_source,reference_to_source,distance_share
+real-film-cuts,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,26,0.0,2.9181,2.9181,1.0
+real-film-cuts,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,26,0.0,2.9181,2.9181,1.0
+real-film-cuts,"RenoDX 8.5 vs 6.5.3 (gov 1, as written)",m1-p1#1,m1-r85-p1#1,False,26,0.1884,2.8903,2.9181,0.9905
+real-film-cuts,RenoDX 8.5 rendered again (gov 1),m1-r85-p1#1,m1-r85-p1#2,True,26,0.0,2.8903,2.8903,1.0
+real-film-cuts,RenoDX 8.5 vs 6.5.3 (gov 0),m1-g0-p1#1,m1-r85-g0-p1#1,False,26,0.1884,2.8903,2.9181,0.9905
+real-film-cuts,RenoDX 8.5 rendered again (gov 0),m1-r85-g0-p1#1,m1-r85-g0-p1#2,True,26,0.0,2.8903,2.8903,1.0
+real-film-cuts,"RenoDX 8.5, Detail stability off, vs 6.5.3",m1-p1#1,m1-r85-ds1#1,False,26,0.0156,2.9047,2.9181,0.9954
+real-film-cuts,"RenoDX 8.5, Detail stability off, rendered again",m1-r85-ds1#1,m1-r85-ds1#2,True,26,0.0,2.9047,2.9047,1.0
+real-film-cuts,RenoDX 8.5 Detail stability Auto vs Off,m1-r85-ds1#1,m1-r85-p1#1,False,26,0.1746,2.8903,2.9047,0.995
+real-film-cuts,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,26,1.4949,2.2164,2.8903,0.7668
+real-film-cuts,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,26,0.13,2.2164,2.2275,0.995
+real-game-cuts,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,17,0.0,4.6597,4.6597,1.0
+real-game-cuts,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,17,0.0,4.6597,4.6597,1.0
+real-game-cuts,"RenoDX 8.5 vs 6.5.3 (gov 1, as written)",m1-p1#1,m1-r85-p1#1,False,17,0.3358,4.6289,4.6597,0.9934
+real-game-cuts,RenoDX 8.5 rendered again (gov 1),m1-r85-p1#1,m1-r85-p1#2,True,17,0.0,4.6289,4.6289,1.0
+real-game-cuts,RenoDX 8.5 vs 6.5.3 (gov 0),m1-g0-p1#1,m1-r85-g0-p1#1,False,17,0.3358,4.6289,4.6597,0.9934
+real-game-cuts,RenoDX 8.5 rendered again (gov 0),m1-r85-g0-p1#1,m1-r85-g0-p1#2,True,17,0.0,4.6289,4.6289,1.0
+real-game-cuts,"RenoDX 8.5, Detail stability off, vs 6.5.3",m1-p1#1,m1-r85-ds1#1,False,17,0.0045,4.6574,4.6597,0.9995
+real-game-cuts,"RenoDX 8.5, Detail stability off, rendered again",m1-r85-ds1#1,m1-r85-ds1#2,True,17,0.0,4.6574,4.6574,1.0
+real-game-cuts,RenoDX 8.5 Detail stability Auto vs Off,m1-r85-ds1#1,m1-r85-p1#1,False,17,0.3318,4.6289,4.6574,0.9939
+real-game-cuts,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,17,2.4924,3.0844,4.6289,0.6663
+real-game-cuts,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,17,0.2418,3.0844,3.1089,0.9921
+real-game-motion,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,"RenoDX 8.5 vs 6.5.3 (gov 1, as written)",m1-p1#1,m1-r85-p1#1,False,19,0.3585,5.6044,5.628,0.9958
+real-game-motion,RenoDX 8.5 rendered again (gov 1),m1-r85-p1#1,m1-r85-p1#2,True,19,0.0,5.6044,5.6044,1.0
+real-game-motion,RenoDX 8.5 vs 6.5.3 (gov 0),m1-g0-p1#1,m1-r85-g0-p1#1,False,19,0.3585,5.6044,5.628,0.9958
+real-game-motion,RenoDX 8.5 rendered again (gov 0),m1-r85-g0-p1#1,m1-r85-g0-p1#2,True,19,0.0,5.6044,5.6044,1.0
+real-game-motion,"RenoDX 8.5, Detail stability off, vs 6.5.3",m1-p1#1,m1-r85-ds1#1,False,19,0.0,5.628,5.628,1.0
+real-game-motion,"RenoDX 8.5, Detail stability off, rendered again",m1-r85-ds1#1,m1-r85-ds1#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,RenoDX 8.5 Detail stability Auto vs Off,m1-r85-ds1#1,m1-r85-p1#1,False,19,0.3585,5.6044,5.628,0.9958
+real-game-motion,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,19,2.901,3.411,5.6044,0.6086
+real-game-motion,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,19,0.26,3.411,3.417,0.9982
+orig-faces,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,26,0.0,4.0194,4.0194,1.0
+orig-faces,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,26,0.0,4.0194,4.0194,1.0
+orig-faces,"RenoDX 8.5 vs 6.5.3 (gov 1, as written)",m1-p1#1,m1-r85-p1#1,False,26,0.3751,3.9421,4.0194,0.9808
+orig-faces,RenoDX 8.5 rendered again (gov 1),m1-r85-p1#1,m1-r85-p1#2,True,26,0.0,3.9421,3.9421,1.0
+orig-faces,RenoDX 8.5 vs 6.5.3 (gov 0),m1-g0-p1#1,m1-r85-g0-p1#1,False,26,0.3751,3.9421,4.0194,0.9808
+orig-faces,RenoDX 8.5 rendered again (gov 0),m1-r85-g0-p1#1,m1-r85-g0-p1#2,True,26,0.0,3.9421,3.9421,1.0
+orig-faces,"RenoDX 8.5, Detail stability off, vs 6.5.3",m1-p1#1,m1-r85-ds1#1,False,26,0.1013,3.984,4.0194,0.9912
+orig-faces,"RenoDX 8.5, Detail stability off, rendered again",m1-r85-ds1#1,m1-r85-ds1#2,True,26,0.0,3.984,3.984,1.0
+orig-faces,RenoDX 8.5 Detail stability Auto vs Off,m1-r85-ds1#1,m1-r85-p1#1,False,26,0.287,3.9421,3.984,0.9895
+orig-faces,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,26,1.8899,2.8396,3.9421,0.7203
+orig-faces,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,26,0.2228,2.8396,2.8851,0.9842
+orig-game-motion,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,"RenoDX 8.5 vs 6.5.3 (gov 1, as written)",m1-p1#1,m1-r85-p1#1,False,17,0.3902,6.7317,6.757,0.9963
+orig-game-motion,RenoDX 8.5 rendered again (gov 1),m1-r85-p1#1,m1-r85-p1#2,True,17,0.0,6.7317,6.7317,1.0
+orig-game-motion,RenoDX 8.5 vs 6.5.3 (gov 0),m1-g0-p1#1,m1-r85-g0-p1#1,False,17,0.3902,6.7317,6.757,0.9963
+orig-game-motion,RenoDX 8.5 rendered again (gov 0),m1-r85-g0-p1#1,m1-r85-g0-p1#2,True,17,0.0,6.7317,6.7317,1.0
+orig-game-motion,"RenoDX 8.5, Detail stability off, vs 6.5.3",m1-p1#1,m1-r85-ds1#1,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,"RenoDX 8.5, Detail stability off, rendered again",m1-r85-ds1#1,m1-r85-ds1#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,RenoDX 8.5 Detail stability Auto vs Off,m1-r85-ds1#1,m1-r85-p1#1,False,17,0.3902,6.7317,6.757,0.9963
+orig-game-motion,RenoDX 8.5 Remix vs 8.5 Standard,m1-r85-p1#1,m1-r85-remix#1,False,17,3.4789,3.9416,6.7317,0.5855
+orig-game-motion,RenoDX 8.5 Remix vs 6.5.3 Remix,m1-remix#1,m1-r85-remix#1,False,17,0.2794,3.9416,3.9601,0.9953

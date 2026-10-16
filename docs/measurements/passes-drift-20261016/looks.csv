@@ -1,0 +1,31 @@
+clip,row,reference,candidate,identical,frames,change_to_reference,distance_to_source,reference_to_source,distance_share
+real-film-cuts,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,26,0.0,2.9181,2.9181,1.0
+real-film-cuts,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,26,0.0,2.9181,2.9181,1.0
+real-film-cuts,2 passes vs 1,m1-p1#1,m1-p2#1,False,26,2.1641,4.7121,2.9181,1.6148
+real-film-cuts,3 passes vs 1,m1-p1#1,m1-p3#1,False,26,4.0144,6.4656,2.9181,2.2157
+real-film-cuts,4 passes vs 1,m1-p1#1,m1-p4#1,False,26,5.6966,8.0779,2.9181,2.7682
+real-film-cuts,4 passes rendered again,m1-p4#1,m1-p4#2,True,26,0.0,8.0779,8.0779,1.0
+real-game-cuts,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,17,0.0,4.6597,4.6597,1.0
+real-game-cuts,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,17,0.0,4.6597,4.6597,1.0
+real-game-cuts,2 passes vs 1,m1-p1#1,m1-p2#1,False,17,3.4197,7.6086,4.6597,1.6329
+real-game-cuts,3 passes vs 1,m1-p1#1,m1-p3#1,False,17,6.3279,10.3319,4.6597,2.2173
+real-game-cuts,4 passes vs 1,m1-p1#1,m1-p4#1,False,17,8.8999,12.7402,4.6597,2.7341
+real-game-cuts,4 passes rendered again,m1-p4#1,m1-p4#2,True,17,0.0,12.7402,12.7402,1.0
+real-game-motion,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,2 passes vs 1,m1-p1#1,m1-p2#1,False,19,4.4373,9.7482,5.628,1.7321
+real-game-motion,3 passes vs 1,m1-p1#1,m1-p3#1,False,19,8.3996,13.5884,5.628,2.4144
+real-game-motion,4 passes vs 1,m1-p1#1,m1-p4#1,False,19,11.9989,17.068,5.628,3.0327
+real-game-motion,4 passes rendered again,m1-p4#1,m1-p4#2,True,19,0.0,17.068,17.068,1.0
+orig-faces,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,26,0.0,4.0194,4.0194,1.0
+orig-faces,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,26,0.0,4.0194,4.0194,1.0
+orig-faces,2 passes vs 1,m1-p1#1,m1-p2#1,False,26,2.6331,6.2136,4.0194,1.5459
+orig-faces,3 passes vs 1,m1-p1#1,m1-p3#1,False,26,4.8065,8.1729,4.0194,2.0333
+orig-faces,4 passes vs 1,m1-p1#1,m1-p4#1,False,26,6.7196,9.9048,4.0194,2.4642
+orig-faces,4 passes rendered again,m1-p4#1,m1-p4#2,True,26,0.0,9.9048,9.9048,1.0
+orig-game-motion,Standard rendered again (gov 1),m1-p1#1,m1-p1#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,Standard rendered again (gov 0),m1-g0-p1#1,m1-g0-p1#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,2 passes vs 1,m1-p1#1,m1-p2#1,False,17,5.7078,12.174,6.757,1.8017
+orig-game-motion,3 passes vs 1,m1-p1#1,m1-p3#1,False,17,11.0176,17.3559,6.757,2.5686
+orig-game-motion,4 passes vs 1,m1-p1#1,m1-p4#1,False,17,15.8656,22.0695,6.757,3.2662
+orig-game-motion,4 passes rendered again,m1-p4#1,m1-p4#2,True,17,0.0,22.0695,22.0695,1.0

@@ -1,0 +1,220 @@
+# [RenoDX.DLSS5] key names found in the add-on binaries (strings -n 4, grep -o '\bNR[A-Z][A-Za-z0-9]*')
+# 6.5.3: renodx-dlss5.addon64 sha256 342341f669f1d64e0c70c8593a07a2fab5075e073dfae97c331c9a6776260a0a
+# 8.5.0-rc10: renodx-dlss5.addon64 sha256 dcd93881e976ad033d83c2bb01f4bc3e4ddc59c15fe0dd4ca165bc5fc7d1ac68 (zip renodx-dlss5_8.5.0-rc10.zip sha256 a745040cb2e93e3a1500a6c5a322972acc4c5c667108fcea31c748285d6364a9)
+# '<' only in 6.5.3, '>' only in 8.5.0-rc10 (NRPassColor/NRPassIntensity/NRPassTransfer in 6.5.3 are format-string stems of NRPass%dColor etc.)
+> NRAutoFgFallback
+> NRCostMeter
+> NRCrashDump
+> NRDetailStability
+> NRDisableRelease
+> NRDisplayPedestal
+> NREditTrace
+> NRFeedMode
+> NRHookPoint
+> NRLookBrighten
+> NRLookColour
+> NRLookDarken
+> NRLookDetail
+> NRLookDetailRadius
+> NRLookHalo
+> NRLookHaloBrightSide
+> NRLookHighlights
+> NRLookHue
+> NRLookMaxBrighten
+> NRLookMaxColour
+> NRLookMaxDarken
+> NRLookMidtones
+> NRLookMode
+> NRLookShadows
+> NRLookStabilize
+> NRLookStabilizeDetail
+> NRLookStabilizeMs
+> NRLookStrength
+> NRLookTone
+> NRLookUpsample
+> NRNeuralFloorGuard
+> NRNormCutAware
+> NROutputRect
+< NRPassColor
+< NRPassIntensity
+< NRPassTransfer
+> NRPass2AutoMask
+> NRPass2Color
+> NRPass2FollowPass1
+> NRPass2Intensity
+> NRPass2LocalTone
+> NRPass2Skin
+> NRPass2Structure
+> NRPass2Style
+> NRPass2Transfer
+> NRPass2UICorrection
+> NRPass3AutoMask
+> NRPass3Color
+> NRPass3FollowPass1
+> NRPass3Intensity
+> NRPass3LocalTone
+> NRPass3Skin
+> NRPass3Structure
+> NRPass3Style
+> NRPass3Transfer
+> NRPass3UICorrection
+> NRPass4AutoMask
+> NRPass4Color
+> NRPass4FollowPass1
+> NRPass4Intensity
+> NRPass4LocalTone
+> NRPass4Skin
+> NRPass4Structure
+> NRPass4Style
+> NRPass4Transfer
+> NRPass4UICorrection
+> NRPresentEncoding
+> NRPresentFgSource
+> NRPresentFrames
+> NRPresentGuides
+> NRPresentMVecUnits
+> NRPresentPreFg
+> NRPresentPreFgContract
+> NRPresentUICorrection
+> NRPresentWhiteNits
+> NRPresentWhiteSource
+> NRReportHost
+> NRScreenshotFormat
+> NRScreenshotJpegQuality
+> NRScreenshotLayout
+> NRScreenshotMaxMB
+> NRScreenshotPlanes
+> NRScreenshotSource
+> NRSdrBlackRestore
+> NRShutdownQuiesce
+> NRSkinIndependent
+> NRStyleHighlightGuard
+> NRVkStateRestore
+> NRWorksetFreePolicy
+
+# DLSSNR.* NGX keys: identical sets except DLSSNR.GlobalToneStrength (6.5.3 only)
+
+# The [RenoDX.DLSS5] section 8.5.0-rc10 wrote back after loading the player's config (ConfigVersion 6 -> 7):
+ConfigVersion=7
+EnableHooks=2
+NeuralUplift=1
+NRAutoMask=1
+NRChainedHistory=1
+NRChromaClamp=1
+NRCodecMode=2
+NRColorStrength=1
+NRCostMeter=1
+NRDepthMode=0
+NRDetailStability=0
+NRDiffuseWhiteNits=203
+NRDisableRelease=0
+NRDisplayPedestal=0
+NREditTrace=0
+NRFeedMode=0
+NRFollowInputRes=0
+NRGpuTimers=0
+NRHookPoint=0
+NRIntensity=1
+NRLinearUnitNits=0
+NRLocalStructure=1
+NRLocalTone=1
+NRLookBrighten=1
+NRLookColour=1
+NRLookDarken=1
+NRLookDetail=1
+NRLookDetailRadius=1
+NRLookHalo=0
+NRLookHaloBrightSide=0
+NRLookHighlights=1
+NRLookHue=1
+NRLookMaxBrighten=0
+NRLookMaxColour=0
+NRLookMaxDarken=0
+NRLookMidtones=1
+NRLookMode=0
+NRLookShadows=1
+NRLookStabilize=0
+NRLookStabilizeDetail=0
+NRLookStabilizeMs=60
+NRLookStrength=1
+NRLookTone=1
+NRLookUpsample=0
+NRMaxWorksets=4
+NRMVecScaleX=1
+NRMVecScaleY=1
+NRNeuralFloorGuard=1
+NRNormAttackStops=4
+NRNormCutAware=1
+NRNormGovernor=1
+NRNormReleaseStops=0.5
+NRNormSlewStops=0.02
+NRPaperWhiteScale=2.5375
+NRPass2AutoMask=0
+NRPass2Color=1
+NRPass2FollowPass1=1
+NRPass2Intensity=1
+NRPass2LocalTone=1
+NRPass2Skin=-1
+NRPass2Structure=1
+NRPass2Style=0
+NRPass2Transfer=1
+NRPass2UICorrection=0
+NRPass3AutoMask=0
+NRPass3Color=1
+NRPass3FollowPass1=1
+NRPass3Intensity=1
+NRPass3LocalTone=1
+NRPass3Skin=-1
+NRPass3Structure=1
+NRPass3Style=0
+NRPass3Transfer=1
+NRPass3UICorrection=0
+NRPass4AutoMask=0
+NRPass4Color=1
+NRPass4FollowPass1=1
+NRPass4Intensity=1
+NRPass4LocalTone=1
+NRPass4Skin=-1
+NRPass4Structure=1
+NRPass4Style=0
+NRPass4Transfer=1
+NRPass4UICorrection=0
+NRPasses=1
+NRPQCalibration=1
+NRPresentEncoding=0
+NRPresentFgSource=0
+NRPresentFrames=0
+NRPresentGuides=0
+NRPresentUICorrection=1
+NRPresentWhiteNits=0
+NRPreset=0
+NRProxyAnchor=4
+NRResolutionScale=1
+NRScreenshotFormat=0
+NRScreenshotJpegQuality=95
+NRScreenshotKey=116
+NRScreenshotLayout=0
+NRScreenshotMaxMB=10
+NRScreenshotSource=0
+NRShutdownQuiesce=1
+NRSkinIndependent=1
+NRSkinStructure=-1
+NRSourceEncoding=0
+NRSourcePrimaries=0
+NRStyle=0
+NRStyleHighlightGuard=0
+NRToggleKey=117
+NRTransferMode=0
+NRTransferStrength=1
+NRUICorrection=0
+NRWorksetFreePolicy=0
+UiLanguage=auto
+UiMode=modern
+
+
+# What 8.5.0-rc10 logged it sent to NGX ("NR pass 1 model:" lines, orig-faces):
+# shipped keys:                 style=0 local_tone=1 structure=1 skin=-1 auto_mask=1 ui_correction=0 skin_independent=1 sent_structure=1 sent_skin=1
+# Remix (tone .3/struct .7/skin .5): style=0 local_tone=0.3 structure=0.7 skin=0.5 auto_mask=1 ui_correction=0 skin_independent=1 sent_structure=0.7 sent_skin=0.5
+# Local structure 1.50:          style=0 local_tone=1 structure=1.5 skin=-1 auto_mask=1 ui_correction=0 skin_independent=1 sent_structure=1 sent_skin=1
+# 1.50 + NRSkinIndependent=0:    style=0 local_tone=1 structure=1.5 skin=-1 auto_mask=1 ui_correction=0 skin_independent=0 sent_structure=1.5 sent_skin=-1
+# NRDetailStability: 0 = Auto (logged "Detail stability engaged ... (Auto)" in the player's after-upscale path), 1 = off (no line), 2 = Always
