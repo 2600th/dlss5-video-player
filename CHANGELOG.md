@@ -7,6 +7,83 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## 0.28.3 - 2026-10-16
+
+YouTube links play again, a long render no longer lets Windows sleep under it,
+and the player says more about the driver and the frame-generation add-on it
+runs with. Renders made with 0.28.2 are reused: nothing here changes a rendered
+pixel.
+
+### Fixed
+
+- **YouTube links play again.** yt-dlp 2026.08.19, the latest stable release,
+  fails on many YouTube videos ("Playback on other websites has been disabled
+  ... UNPLAYABLE", [yt-dlp #17497](https://github.com/yt-dlp/yt-dlp/issues/17497)).
+  The player now bundles the official nightly 2026.10.10.233141, which has the
+  fix ([yt-dlp #17723](https://github.com/yt-dlp/yt-dlp/pull/17723)), pinned by
+  SHA-256 like every other helper.
+- **Windows no longer sleeps in the middle of a render.** A whole-video render,
+  an export, frame generation, `--render` and `dlss5-convert` hold a system
+  power request while they run (`powercfg /requests` names it); the display may
+  still turn off.
+
+### Changed
+
+- **A refused neural render names the driver NVIDIA's NGX asks for.** The
+  preflight now reads DLSS-NR's own capability from the driver
+  (`DLSSNR.NeedsUpdatedDriver` and its minimum version) and records it in the
+  receipt. When the render is refused and NGX says the driver is too old, the
+  message names NGX's minimum instead of only this project's measured 610.47.
+  A render that works is never refused because of it: the community runtime
+  runs on drivers that flag can call too old.
+- **Windows 10:** a message asking for a newer driver adds that NVIDIA's
+  drivers released after October 2026 need Windows 11.
+- **dlssg_for_sm86 0.4.0 is recognised.** A hand-installed 0.4.0 (its
+  `dlssg_sm86\` folder beside the player) loads as before, and the start screen,
+  the log and the conversion's receipt name a setting that makes generated
+  frames differ from NVIDIA's: 0.4.0's factory `Optimized=2` adds lossy kernels,
+  and `Preset=C` is FG Lite. The one-click download stays on 0.3.5, whose
+  factory setting matches NVIDIA's output bit for bit.
+- **Download only from the release page.** The README, the site and every
+  release's notes name <https://github.com/2600th/dlss5-video-player/releases> as
+  the only official download, and each release links its VirusTotal scans.
+  Re-uploads of DLSS 5 tools under other accounts have carried malware.
+- `THIRD_PARTY.md` says the DLSS5 add-on's source is not public as far as the
+  project found, and that its MIT notice covers the RenoDX framework.
+
+### Measured
+
+Seven questions answered on an RTX 5090 before the next features are built.
+Nothing shipped changes because of them; each report says what it decides.
+
+- **Stacked passes do not darken the picture**, unlike another player's
+  three-pass finding. Brightness moves −2.3 % to +2.1 % from one to four passes,
+  in both directions. Each pass does compound the model's change: faces turn
+  cooler and flicker rises
+  ([report](docs/measurements/passes-drift-20261016/REPORT.md)).
+- **NVENC adaptive quantisation and lookahead lose**: 15-77 % more bits for the
+  same VMAF, so the encode stays as it is
+  ([report](docs/measurements/nvenc-aq-20261016/REPORT.md)).
+- **The runtime's per-pixel control mask cannot be reached** through RenoDX
+  6.5.3 or 8.5, so face and tone protection will be blends after the model
+  ([report](docs/measurements/control-mask-20261016/REPORT.md)).
+- **RenoDX 8.5.0-rc10 renders at the same pace but not the same picture** with
+  the player's settings. Its default Detail stability moves every render, and
+  its independent skin default drops Strong's structure. It waits for its final
+  release ([report](docs/measurements/renodx-85-20261016/REPORT.md)).
+- **NVIDIA's RTX Remix defaults are about as strong as Gentle**
+  ([report](docs/measurements/nvidia-defaults-20261016/REPORT.md)), and **the
+  4K NV12 pipe costs about 2 ms**, off the frame's critical path
+  ([report](docs/measurements/nv12-transport-20261016/REPORT.md)).
+
+### For builders and contributors
+
+- `tools/benchmark/analyze.py --yardstick` adds the VMAF v1 models,
+  ColorVideoVDP and a "lost change" score that catches a frozen or
+  over-smoothed render the stability numbers would rank best. Without the flag
+  its output is unchanged
+  ([report](docs/measurements/yardstick-20261016/REPORT.md)).
+
 ## 0.28.2 - 2026-10-04
 
 Neural settings now do what they say, and say what they do. Renders made with the
