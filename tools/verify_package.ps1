@@ -63,7 +63,7 @@ function Get-ExpectedPackageFiles {
             'neural-runtime/sl.dlss_g.dll', 'neural-runtime/sl.dlss_nr.dll', 'neural-runtime/sl.interposer.dll', 'neural-runtime/sl.nis.dll',
             'neural-runtime/sl.pcl.dll', 'neural-runtime/sl.reflex.dll', 'README.md', 'LICENSE', 'SECURITY.md',
             'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
-            'THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt',
+            'THIRD_PARTY_LICENSES/yt-dlp-2026.10.10.233141.txt',
             'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
             'THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt',
             'THIRD_PARTY_LICENSES/ffmpeg-bundled-notices.txt',

@@ -17,10 +17,10 @@
     },
     {
       "name": "yt-dlp.exe",
-      "size": 17840399,
-      "sha256": "66674953FE251B89F4D08C5F0E35E0728679BD67AB3D7D05C0562AF101DD3E7A",
+      "size": 17842237,
+      "sha256": "E7CAFC44DB8AA433DA8DD78303B9157F2C1DD509C4CBFCD8418081B7E1D26A7A",
       "signatureStatus": "NotSigned",
-      "provenance": "Official yt-dlp 2026.08.19 Windows release fetched by the pinned helper script."
+      "provenance": "Official yt-dlp nightly 2026.10.10.233141 Windows build (yt-dlp/yt-dlp-nightly-builds, from yt-dlp commit 897341241f2bfb2439fe0367f4c7c9ccd29a3828) fetched by the pinned helper script."
     },
     {
       "name": "deno.exe",

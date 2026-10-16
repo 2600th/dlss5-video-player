@@ -285,7 +285,7 @@ else {
         @('CONTRIBUTING.md', (Join-Path $repositoryRoot 'CONTRIBUTING.md')),
         @('CHANGELOG.md', (Join-Path $repositoryRoot 'CHANGELOG.md')),
         @('THIRD_PARTY.md', (Join-Path $repositoryRoot 'THIRD_PARTY.md')),
-        @('THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\yt-dlp-2026.08.19.txt')),
+        @('THIRD_PARTY_LICENSES/yt-dlp-2026.10.10.233141.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\yt-dlp-2026.10.10.233141.txt')),
         @('THIRD_PARTY_LICENSES/deno-2.9.5.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\deno-2.9.5.txt')),
         @('THIRD_PARTY_LICENSES/ffmpeg.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\ffmpeg.txt')),
         # The licence ffmpeg.exe and ffprobe.exe are conveyed under (GPLv3
