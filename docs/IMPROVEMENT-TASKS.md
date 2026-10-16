@@ -10,13 +10,17 @@ _Refreshed on 2026-10-16 against 0.28.2 (f42cb39) with a landscape survey
 and P3.14-P3.20 are new, several open items gained evidence, and the work is
 grouped into [milestones](#milestones)._
 
+_Re-checked against 0.28.3 (4dec5c3) on 2026-10-16. M0 and M1 landed, but
+several of their Test steps were not run, and two CHANGELOG claims were never
+tried. Those gaps are P1.45-P1.48 (milestone M1.1), P2.59 and P2.60._
+
 Open work only, highest priority first. Completed items are removed rather
 than ticked; what shipped is in `CHANGELOG.md` and git history. When a task
 lands, delete it from this file in the same change.
 
 **IDs are never reused.** Source comments cite them (`P2.8`, `P3.7`), so a
 new task takes the next free number in its tier even when lower numbers are
-free. Next free: **P0.20, P1.45, P2.59, P3.21**.
+free. Next free: **P0.20, P1.49, P2.61, P3.21**.
 
 Sources: three code audits (neural helper/cache/runtime; decode, playback,
 audio and export; app shell, build, CI and release) and two web surveys of the
@@ -66,6 +70,10 @@ clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
 | ID | Task | Effort | Impact | Milestone |
 | --- | --- | :---: | --- | :---: |
 | **P1** | **Next** | | | |
+| [P1.45](#p145) | Prove the keep-awake request | S | Pipeline | M1.1 |
+| [P1.46](#p146) | dlssg_for_sm86 0.4.0: settings tests and a real load | S | Pipeline | M1.1 |
+| [P1.47](#p147) | Driver messages: an honest NGX capability, a tested Windows 10 check | S | Pipeline, Player | M1.1 |
+| [P1.48](#p148) | YouTube through the player, against the old yt-dlp | S | Player, Release | M1.1 |
 | [P1.44](#p144) | Reconcile the two brightness instruments | S | Pipeline | M3 |
 | **P2** | **High-value features** | | | |
 | | _Comparison and review_ | | | |
@@ -84,6 +92,8 @@ clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
 | [P2.37](#p237) | Opt-in: bake the Mix, mask and adjustments into exports | M | Pipeline | M4 |
 | [P2.46](#p246) | Grain restore after the model | S-M | Player | M4 |
 | | _Render and export_ | | | |
+| [P2.59](#p259) | NVENC AQ at 4K with VMAF v1, through the direct session | S | Pipeline | M5 |
+| [P2.60](#p260) | Re-time M1 on the RTX 4080 SUPER | S | Pipeline | M5 |
 | [P2.35](#p235) | Resume, pause and join renders across sessions | M-L | Pipeline | M5 |
 | [P2.47](#p247) | Pre-warm the helper; remember the preflight verdict | M | Pipeline | M5 |
 | [P2.48](#p248) | Background renders yield to playback and other apps | M | Pipeline | M5 |
@@ -104,7 +114,7 @@ clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
 | | _Carried over_ | | | |
 | [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | M8 |
 | **P3** | **Strategic or large** | | | |
-| [P3.14](#p314) | Runtime refresh: RenoDX 8.5 and NVIDIA's October model | M-L | Pipeline, Release | M1 / gated |
+| [P3.14](#p314) | Runtime refresh: RenoDX 8.5 and NVIDIA's October model | M-L | Pipeline, Release | M8 |
 | [P3.9](#p39) | HDR output of the render | L | Pipeline | M7 |
 | [P3.18](#p318) | A measured HDR→SDR peak for the model's input | M | Pipeline | M7 |
 | [P3.15](#p315) | NVIDIA Video Effects SDK: frame generation and VSR modes | M-L | Pipeline | M8 |
@@ -133,10 +143,11 @@ L one to two weeks.
 | | Release | Theme | Tasks | Size | Needs first |
 | --- | --- | --- | --- | :---: | --- |
 | **M0, M1** | 0.28.3 | Shipped on 2026-10-16: YouTube, provenance, runtime readiness, seven measurements | - | - | - |
+| **M1.1** | 0.28.4 | Prove what 0.28.3 claims | P1.45, P1.46, P1.47, P1.48 | ~2 days | - |
 | **M2** | 0.29.0 | One relearn: the UI restructure | P2.54, P2.55, P2.52, P2.41, P2.42 | ~2 weeks | - |
 | **M3** | 0.30.0 | Judge it: the review loop | P2.31, P2.29, P2.30, P2.28, P1.44 | ~2 weeks | M2 (compare-bar slots) |
 | **M4** | 0.31.0 | Fix it: faces, flicker and colour | P2.43, P2.36, P2.45, P2.37, P2.46 | ~3 weeks | M2 (Picture panel zones), M3 (tools to judge it) |
-| **M5** | 0.32.0 | Never lose work, never wait | P2.35, P2.47, P2.48, P2.49, P2.51, P2.53 | ~2-3 weeks | runs beside M3-M4 |
+| **M5** | 0.32.0 | Never lose work, never wait | P2.35, P2.47, P2.48, P2.49, P2.51, P2.53, P2.59, P2.60 | ~2-3 weeks | runs beside M3-M4 |
 | **M6** | 0.33.0 | Share and inspect | P2.27, P2.33, P2.32, P2.34, P2.40 | ~2 weeks | M3 (worst frames feed the frame pack) |
 | **M7** | 0.34.0 | HDR end to end | P3.9, P3.18, P2.56 | ~3 weeks | - |
 | **M8** | - | Gated or strategic | P3.14 (October model), P3.15, P3.16, P3.17, P3.19, P3.20, P2.38, P2.39, P2.4, P3.5, P3.6, P3.8, P3.10-P3.13 | - | each item's blocker |
@@ -149,6 +160,16 @@ zero-copy line stays parked. Stacked passes drift both ways, so there is no
 correction. RenoDX 8.5 is adoptable with three config changes (P3.14). Owner
 actions still open: close #15, fixed in 0.28.2 and answered on 10-04; decide on
 #3, which has waited on its reporter since 09-09.
+
+**M1.1 is a patch, and comes before M2.** A check after the release found
+Test steps that 0.28.3 skipped. Nobody read `powercfg /requests` during a job
+(P1.39), and nobody loaded a real 0.4.0 (P1.40): both are claims in its
+CHANGELOG. On driver 617.14 NGX reports nothing useful, so P1.38's message has
+never fired. The trailers were resolved on the command line, not in the player
+(P0.19). Each task either proves its claim or corrects it in 0.28.4's
+CHANGELOG. The measurement gaps go with the work they inform: AQ at 4K (P2.59)
+and the RTX 4080 SUPER timings (P2.60) in M5, the drift run's sixth clip in
+P1.44, and RenoDX 8.5's leftovers in P3.14.
 
 **Interrupt rule.** When NVIDIA's October model is obtainable, P3.14 pre-empts
 the running milestone and ships as its own minor release: it re-keys every
@@ -204,6 +225,98 @@ P1.41 was measured in the same release and needs no correction
 to four passes the mean luma moves −1.10 to +1.74 codes, in both directions;
 each pass compounds the model's own change, faces cool, and flicker rises.
 
+<a id="p145"></a>
+### P1.45 · Prove the keep-awake request
+
+`S` · **Pipeline** · _quality-neutral; follow-up to P1.39_
+
+- **Problem.** 0.28.3 holds a `PowerRequestSystemRequired` request through
+  renders, exports, frame generation and `--render` (`KeepAwake.h`). Its
+  CHANGELOG says `powercfg /requests` names the request, but nobody looked, and
+  the guard has no test. A request created but not set, or closed early, would
+  let the PC sleep as before, and a failure is silent: the guard does not log.
+- **Where.** `KeepAwake.h`, the five guarded jobs in `main.cpp`, `tests/`.
+- **Fix.** Read `powercfg /requests` from an elevated prompt during a
+  `dlss5-convert` run and again after it ends. The reason string should be
+  listed under SYSTEM while the job runs and be gone afterwards. Add a unit test
+  that `Active()` is true inside the scope and that a second guard is
+  independent. Log when the request cannot be created. If the request does not
+  show, fix it and say so in 0.28.4's CHANGELOG.
+- **Test.** The unit test; the two `powercfg` readings in the PR.
+
+<a id="p146"></a>
+### P1.46 · dlssg_for_sm86 0.4.0: settings tests and a real load
+
+`S` · **Pipeline** · _follow-up to P1.40; a real load needs an RTX 20 or 30_
+
+- **Problem.** 0.28.3 reads `Optimized` and `Preset` from `dlssg_sm86.ini` and
+  names a lossy value (`FrameGenAddon.h` `ReadSettings`, `LossyNote`), but no
+  test covers that parsing. Its CHANGELOG says a hand-installed 0.4.0 "loads as
+  before". That rests on the `version.dll` proxy pick tested since 0.27.2: no
+  real 0.4.0 was loaded. 0.4.0 crashes on some older drivers
+  ([#640](https://github.com/sdli1995/dlssg_for_sm86/issues/640),
+  [#642](https://github.com/sdli1995/dlssg_for_sm86/issues/642)).
+- **Where.** `FrameGenAddon.h`, `tests/PolicyTests.cpp`, the frame generation
+  smokes.
+- **Fix.** Fixture tests:
+  - `Optimized` under `[DLSSG]`, under the older `[FrameGeneration]`, absent,
+    padded with spaces, and at 0, 1 and 2;
+  - `Preset=C`;
+  - no ini at all;
+  - the `dlssg_sm86\` directory present or missing.
+
+  Then download 0.4.0 into a new empty folder, check it against the release's
+  digest, install it beside a build, and run `DlssgProbeSmoke`,
+  `DlssgEvaluateSmoke` and `FrameGenerationSmoke` on an RTX 20 or 30 card. It
+  must load, and the start screen and log must name `Optimized=2` as lossy. If
+  no such card is available, say that the load is untested. If it does not load,
+  0.28.4 corrects the claim.
+- **Test.** The fixture tests; the smoke logs from the real load.
+
+<a id="p147"></a>
+### P1.47 · Driver messages: an honest NGX capability, a tested Windows 10 check
+
+`S` · **Pipeline, Player** · _follow-up to P1.38 and P1.37_
+
+- **Problem.** On driver 617.14 both the player and the helper read
+  `DLSSNR.Available=0` and `NeedsUpdatedDriver=0` with no minimum. That was in
+  every hardware-suite log on 2026-10-16, while the community runtime rendered.
+  NGX's capability block describes NVIDIA's own NR path, not the feature RenoDX
+  creates. So the preflight receipt records `"dlssnrAvailable":false` on a
+  working setup, and the NGX-named floor P1.38 added has never fired. The
+  Windows 10 note's wording is tested, but `RunningOnWindows10()` and
+  `NeuralDriverNoticeText` are not.
+- **Where.** `DLSSBackend.cpp`, `NeuralPreflight.cpp` (`NgxNeuralCapabilityJson`),
+  `RuntimePolicy.cpp`, `main.cpp`.
+- **Fix.** Treat `Available=0` with no minimum as not reported: write `null` in
+  the receipt and "not reported" in the log, so a working setup never reads as
+  unavailable. Keep the floor message for a driver that reports a minimum, and
+  find out whether any driver does for this path (dxvk-remix
+  [ec31464](https://github.com/NVIDIAGameWorks/dxvk-remix/commit/ec31464) reads
+  the same keys). If none does, say in `docs/ARCHITECTURE.md` that the floor is
+  a fallback for a future runtime. Split the version check into a pure
+  `IsWindows10Build(major, build)` and test it (19045 yes; 22000 and 26300 no),
+  and test the notice text with the flag set and clear.
+- **Test.** Unit tests for the receipt values and the Windows 10 check.
+
+<a id="p148"></a>
+### P1.48 · YouTube through the player, against the old yt-dlp
+
+`S` · **Player, Release** · _follow-up to P0.19_
+
+- **Problem.** 0.28.3's yt-dlp nightly was checked by resolving three built-in
+  trailers on the command line (all at 2160p). Nobody opened one through
+  **File > Game trailers** in the packaged player, or showed a link failing on
+  2026.08.19, so the fix is inferred from yt-dlp's issue thread.
+- **Where.** `YouTubeResolver.cpp`, the packaged player.
+- **Fix.** In the 0.28.3 package, open two trailers from **File > Game
+  trailers** and one pasted link, and play each past the first minute. Run the
+  same links through 2026.08.19 and record which fail. Consider a
+  `network`-labelled CTest, outside the hardware and CI tiers, that resolves one
+  public trailer with the bundled yt-dlp. It would catch the next YouTube break
+  before a user does.
+- **Test.** The playback notes in the PR; the network test if added.
+
 <a id="p144"></a>
 ### P1.44 · Reconcile the two brightness instruments
 
@@ -218,7 +331,8 @@ each pass compounds the model's own change, faces cool, and flicker rises.
   render report would show whichever is wrong.
 - **Where.** `TemporalMetrics.h`, `tools/benchmark/m1.py`, `analyze.py`.
 - **Fix.** Score one Lossless render both ways on the same frames, find the
-  step that differs, and fix the instrument that is wrong.
+  step that differs, and fix the instrument that is wrong. While there, add the
+  sixth clip and an unchained run, which passes-drift-20261016 left out.
 - **Test.** Both agree within 0.1 code on the passes-drift clips.
 
 ---
@@ -546,6 +660,35 @@ see Parked.
 - **Where.** `GpuPreference.cpp`, `NeuralWorker.cpp`, `NeuralCache.cpp`,
   `AppMenu.cpp`. Confirm the cache key separates renders by adapter.
 
+<a id="p259"></a>
+### P2.59 · NVENC AQ at 4K with VMAF v1, through the direct session
+
+`S` · **Pipeline** · _measurement; reopens the Parked AQ line only if it wins_
+
+- **What.** Repeat [nvenc-aq-20261016](measurements/nvenc-aq-20261016/REPORT.md)
+  where it was weakest:
+  - on a 4K clip, since the size complaints are about 4K;
+  - scored with VMAF v1 (P1.42's `--vmaf-v1`) beside v0.6.1 and CAMBI;
+  - encoded through the player's direct NVENC session (`NvencDirect.cpp`), not
+    FFmpeg's `hevc_nvenc` with the same settings.
+- **Why.** The 1080p verdict was a 15-77 % BD-rate loss. That margin is wide,
+  but the task asked for VMAF v1 and the direct session, and AQ does best on
+  large flat areas at 4K.
+- **Where.** `tools/benchmark/nvenc_aq.py`, `docs/measurements/`.
+
+<a id="p260"></a>
+### P2.60 · Re-time M1 on the RTX 4080 SUPER
+
+`S` · **Pipeline** · _measurement_
+
+- **What.** Run the timing halves of M1 on the RTX 4080 SUPER, as M1 planned:
+  the 4K NV12 transport share (P2.57), the cost per neural pass (P1.41), and
+  RenoDX 8.5's model time (P3.14). Every M1 run was on the RTX 5090.
+- **Why.** At the 4080 SUPER's 4K pace (14.8 fps) the transport share should be
+  smaller still. The cost per pass and its VRAM, about +505 MiB a pass on the
+  5090, are what those users meet, and the pass ladder's descriptions quote them.
+- **Where.** `tools/benchmark/m1.py`, `pipe_transport.py`, `docs/measurements/`.
+
 <a id="p251"></a>
 ### P2.51 · Deinterlace interlaced sources before the model
 
@@ -759,7 +902,9 @@ not blocked.
   filters the model's edit and moves every render 0.33 codes, and
   `NRSkinIndependent=0`, since the default caps Local structure at 1 and
   silently drops Strong's 1.50. Re-check on the final 8.5, not rc10. It does
-  not expose the control mask.
+  not expose the control mask. Not yet done for this half: the quality gate on
+  8.5, which controls Visual Enhancer v15 dropped with its runtime path, and
+  dlssnr 310.8.Lecram.
 - **The October model.** NVIDIA's
   [2026-10-13 announcement](https://www.nvidia.com/en-us/geforce/news/dlss-5-faster-ai-model-hogwarts-legacy-rtx-spark-laptops/)
   claims twice the speed, 20 % less VRAM at 4K and comparable fidelity, in NBA
@@ -987,7 +1132,7 @@ are not proposed again.
 | **Linux or mobile ports, multi-GPU splitting of one render, "auto" model recommendation** | Feature 18 on Windows D3D12 is the product. Separate GPU choices for AI and for NVENC is the useful form (`GpuPreference.cpp`). |
 | **Running the model on AMD or Intel** | Community projects do it (DLSS-NR-on-AMD, an Xe2 port); the product is RTX-only by design. |
 | **Full zero-copy decode/encode rewrite** | The ffmpeg child is load-bearing: codec coverage, process isolation for the runtime lock, and the benchmark harness. Only the narrow encode side was worth doing, and it shipped as direct NVENC. The NV12 pipe left costs about 2 ms of a 19.2 ms 4K frame, on the decoder thread and off the critical path ([nv12-transport-20261016](measurements/nv12-transport-20261016/REPORT.md)). |
-| **NVENC adaptive quantisation and lookahead** | They lose at matched size: +15 % to +77 % more bits for the same VMAF, and lower VMAF at the shipped size; the only gain is a little less banding on the 8-bit rung ([nvenc-aq-20261016](measurements/nvenc-aq-20261016/REPORT.md)). |
+| **NVENC adaptive quantisation and lookahead** | They lose at matched size: +15 % to +77 % more bits for the same VMAF, and lower VMAF at the shipped size; the only gain is a little less banding on the 8-bit rung ([nvenc-aq-20261016](measurements/nvenc-aq-20261016/REPORT.md)). Scored at 1080p with v0.6.1 through FFmpeg's encoder; P2.59 checks 4K with VMAF v1 before this is final. |
 | **A preset from NVIDIA's RTX Remix NR defaults** | It lands at 67 % of Standard's distance from the source, against Gentle's 64 %, so on strength it is a second Gentle ([nvidia-defaults-20261016](measurements/nvidia-defaults-20261016/REPORT.md)). Only as a named "NVIDIA reference" look, if the owner wants one. |
 | **AV1 export** | Needs a 40-series NVENC. The High rung's HEVC Main10 covers the need everywhere. |
 | **GPU-utilization cap for RTX VSR** | The SDK exposes only `VSR.QualityLevel` 0-4; NVIDIA App's control is a driver setting for its Auto mode, and the player already has a Low-Ultra ladder. |
