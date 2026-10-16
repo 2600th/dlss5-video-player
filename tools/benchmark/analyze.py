@@ -29,6 +29,17 @@ Per run (all frames decoded to rgb24 through FFmpeg, streamed, never cached in R
   two-pass      metric deltas of pass-2 profiles versus their single-pass
                 counterpart on the same clip
 
+Opt-in (P1.42; the default run's output is unchanged without them):
+  --lost-change the frozen-output guard paired with flicker+/sigma+/false mv: per
+                consecutive pair, the change the output added where the source did not
+                change, and the share of the source's change the output lost (source
+                moved, output did not), per pixel and per guide-grid cell
+  --vmaf-v1     VMAF v1 (chroma, built-in CAMBI, 4K and HFR models; pinned, fetched and
+                hash-verified by quality.py) plus v0.6.1 in the same pass
+  --cvvdp       ColorVideoVDP JOD on the GPU, overall and per channel (transient = visible
+                temporal difference, rg/yv = chroma)
+  --yardstick   all three
+
 --sample-every strides the dE/PSNR/SSIM/OCR/face block alone. Sigma, the motion field
 and the cut test always see every consecutive pair, and all three are withheld whole
 when the output frame count does not match the source, because frame i of one file is
@@ -37,11 +48,13 @@ then not frame i of the other.
 Writes analysis/analysis.json, analysis/report.md and per-run metrics.json.
 
     python tools/benchmark/analyze.py [--corpus DIR] [--runs DIR] [--sample-every N] [--no-ocr] [--no-faces]
+                                      [--match GLOB] [--lost-change] [--vmaf-v1] [--cvvdp] [--yardstick]
 """
 from __future__ import annotations
 
 import argparse
 import difflib
+import fnmatch
 import json
 import statistics
 import sys
@@ -64,6 +77,12 @@ SAMPLE_EVERY = 15
 # threshold swept there transfers unchanged.
 CELL_TOLERANCE = 2 / 255  # "unchanged": two 8-bit levels of a cell's normalized luma
 MIN_SHOT_FRAMES = 3
+# The pixel half of the frozen-output guard uses the same two levels, in 8-bit luma, as
+# the line between "the source changed here" and noise; a pair where less than this share
+# of the source's pixels changed is a held/duplicate source frame and is skipped whole,
+# so a motionless stretch cannot drive the lost-change ratio through a near-zero denominator.
+PIXEL_TOLERANCE = 2.0
+STILL_PAIR_SHARE = 0.001
 
 
 def ssim_gray(a: np.ndarray, b: np.ndarray) -> float:
@@ -143,11 +162,13 @@ class MotionField:
     those pairs are what it exists to find.
     """
 
-    def __init__(self, width: int, height: int, fps: float, cuts: set[int]):
+    def __init__(self, width: int, height: int, fps: float, cuts: set[int], soft_cuts=()):
         self.grid = GuideGrid(width, height, fps)
         self.cuts = cuts
+        self.soft_cuts = [tuple(span) for span in soft_cuts or ()]
         self.detect_source, self.detect_output = CutRun(fps), CutRun(fps)
         self.static = self.invented = self.pairs = 0
+        self.moving_source = self.lost = 0
         self.flips_source = self.flips_output = self.transitions = 0
         self.previous = self.verdicts = None
 
@@ -165,6 +186,9 @@ class MotionField:
         static = ~moving[0]
         self.static += int(static.sum())
         self.invented += int((static & moving[1]).sum())
+        if not any(first < index <= last for first, last in self.soft_cuts):
+            self.moving_source += int(moving[0].sum())
+            self.lost += int((moving[0] & ~moving[1]).sum())
         self.pairs += 1
         if self.verdicts is not None:
             self.flips_source += int((moving[0] != self.verdicts[0]).sum())
@@ -183,6 +207,54 @@ class MotionField:
                     transitions=self.transitions, flip_rate_source=rate(self.flips_source),
                     flip_rate_output=rate(self.flips_output),
                     flip_rate_added=rate(self.flips_output - self.flips_source))
+
+    def lost_result(self) -> dict:
+        """The mirror of false_motion_rate: of the cells the source moved, the fraction the
+        output held static. A frozen or over-smoothed render scores high here while its
+        false mv and flips+ look perfect. Pairs inside soft-cut spans are left out too."""
+        return dict(moving_cells=self.moving_source, lost_cells=self.lost,
+                    lost_motion_rate=self.lost / self.moving_source if self.moving_source else None)
+
+
+class ChangeBalance:
+    """flicker+ split into its two halves, per pixel, so they cannot cancel.
+
+    flicker+ is mean |dY_out| - mean |dY_src|: a render that adds shimmer and one that stops
+    following the source move it in opposite directions, and a frozen render scores as
+    "smoother than the source". Per consecutive pair (manifest cuts, soft-cut spans and
+    held/duplicate source pairs excluded), on 8-bit luma:
+
+      added  mean over all pixels of max(|dY_out| - |dY_src|, 0): change the output has that
+             the source does not, in luma levels per pair
+      lost   over the pixels where the source changed by more than PIXEL_TOLERANCE, the sum
+             of max(|dY_src| - |dY_out|, 0) over the sum of |dY_src|: the share of the
+             source's own change the output did not carry. 0 = every change carried,
+             1 = frozen. Pooled over pairs (a ratio of sums, never a mean of per-pair ratios)
+    """
+
+    def __init__(self, cuts: set[int], soft_cuts=()):
+        self.cuts, self.soft_cuts = cuts, [tuple(span) for span in soft_cuts or ()]
+        self.pairs = self.still_pairs = 0
+        self.added = self.lost = self.source_change = 0.0
+
+    def add(self, index: int, ds: np.ndarray, do: np.ndarray) -> None:
+        """ds, do: |Y_t - Y_(t-1)| of source and output for the pair ending at index."""
+        if index in self.cuts or any(first < index <= last for first, last in self.soft_cuts):
+            return
+        moving = ds > PIXEL_TOLERANCE
+        if moving.mean() < STILL_PAIR_SHARE:
+            self.still_pairs += 1
+            return
+        self.pairs += 1
+        gap = do - ds
+        self.added += float(np.maximum(gap, 0).mean())
+        self.lost += float(np.maximum(-gap[moving], 0).sum(dtype=np.float64))
+        self.source_change += float(ds[moving].sum(dtype=np.float64))
+
+    def result(self) -> dict:
+        return dict(pairs=self.pairs, still_pairs_skipped=self.still_pairs, tolerance=PIXEL_TOLERANCE,
+                    added=self.added / self.pairs if self.pairs else None,
+                    lost_share=self.lost / self.source_change if self.source_change else None)
 
 
 def delta_e(a: np.ndarray, b: np.ndarray) -> float:
@@ -256,7 +328,8 @@ def active_text(clip: dict, seconds: float) -> list[str]:
     return [t["text"] for t in clip["text"] if t["start_s"] <= seconds < t["end_s"]]
 
 
-def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | None, sample_every: int) -> dict:
+def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | None, sample_every: int,
+                lost_change: bool = False, vmaf: bool = False, cvvdp: bool = False) -> dict:
     result = json.loads((run / "result.json").read_text(encoding="utf-8"))
     metrics = dict(run=run.name, clip=result["clip"], category=result["category"], profile=result["profile"],
                    repeat=result["repeat"], passes=result["passes"], ok=bool(result["result"].get("ok")),
@@ -285,7 +358,8 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
     ocr_rows, face_rows = [], []
     # The pair metrics ignore sample_every on purpose: a stride would measure a different
     # clip's worth of motion under the same name. Sampling stays inside the block below.
-    field = MotionField(w, h, clip["fps"], cuts)
+    field = MotionField(w, h, clip["fps"], cuts, clip.get("soft_cuts"))
+    balance = ChangeBalance(cuts, clip.get("soft_cuts")) if lost_change else None
     sigma_src, sigma_out = ShotSigma(), ShotSigma()
     prev_src_y = prev_out_y = None
     prev_src_emb = prev_out_emb = None
@@ -299,8 +373,11 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
         sigma_out.add(oy)
         field.add(index, s, o)
         if prev_src_y is not None and index not in cuts:
-            flick_src.append(float(np.abs(sy - prev_src_y).mean()))
-            flick_out.append(float(np.abs(oy - prev_out_y).mean()))
+            ds, do = np.abs(sy - prev_src_y), np.abs(oy - prev_out_y)
+            flick_src.append(float(ds.mean()))
+            flick_out.append(float(do.mean()))
+            if balance:
+                balance.add(index, ds, do)
         prev_src_y, prev_out_y = sy, oy
         if index % sample_every == 0:
             de.append(delta_e(s, o))
@@ -381,8 +458,31 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
                                   source_vs_output_cosine_min=min(sims),
                                   source_drift_mean=statistics.fmean(drift_s) if drift_s else None,
                                   output_drift_mean=statistics.fmean(drift_o) if drift_o else None))
+    if balance:
+        metrics["change"] = dict(balance.result(), **(field.lost_result() if metrics["frame_count_matches_source"]
+                                                      else dict(moving_cells=None, lost_cells=None,
+                                                                lost_motion_rate=None)))
+    perceptual(metrics, Path(result["source"]), output, clip, vmaf, cvvdp)
     write_json(run / "metrics.json", metrics)
     return metrics
+
+
+def perceptual(metrics: dict, source: Path, output: Path, clip: dict, vmaf: bool, cvvdp: bool) -> None:
+    """Full-reference perceptual scores (quality.py), only on frame-aligned outputs."""
+    if not (vmaf or cvvdp):
+        return
+    import quality
+    if not metrics.get("frame_count_matches_source"):
+        reason = "output frame count does not match the source, so frame i is not frame i"
+        if vmaf:
+            metrics["vmaf_v1"] = dict(withheld=reason)
+        if cvvdp:
+            metrics["cvvdp"] = dict(withheld=reason)
+        return
+    if vmaf:
+        metrics["vmaf_v1"] = quality.vmaf_v1(source, output, clip["height"], clip["fps"])
+    if cvvdp:
+        metrics["cvvdp"] = quality.cvvdp(source, output, clip["width"], clip["height"], clip["frames"], clip["fps"])
 
 
 def fmt(value, digits=3):
@@ -413,7 +513,7 @@ def summarize(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     summary = []
     for (clip, prof), runs in sorted(groups.items()):
         med = lambda *path: median_of(runs, *path)
-        summary.append(dict(
+        row = dict(
             clip=clip, profile=prof, guides=runs[0].get("guides", ""), repeats=len(runs),
             passes=runs[0]["passes"],
             deterministic=len({r["output_digest"] for r in runs}) == 1 if len(runs) > 1 else None,
@@ -440,7 +540,20 @@ def summarize(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
             if runs[0].get("faces") else None,
             face_drift_output=statistics.median(r["faces"]["output_drift_mean"] or 0 for r in runs)
             if runs[0].get("faces") else None,
-            history_resets=med("history_resets")))
+            history_resets=med("history_resets"))
+        # The P1.42 columns exist only when a run carries them, so a default analysis
+        # writes the same analysis.json it always did.
+        if any(r.get("change") for r in runs):
+            row.update(change_added=med("change", "added"), change_lost_share=med("change", "lost_share"),
+                       lost_motion_rate=med("change", "lost_motion_rate"))
+        if any("vmaf_v1_mean" in (r.get("vmaf_v1") or {}) for r in runs):
+            row.update(vmaf_v1=med("vmaf_v1", "vmaf_v1_mean"), vmaf_v1_p5=med("vmaf_v1", "vmaf_v1_p5"),
+                       vmaf_v061=med("vmaf_v1", "vmaf_v061_mean"), cambi_added=med("vmaf_v1", "cambi_added"),
+                       speed_chroma_uv=med("vmaf_v1", "speed_chroma_uv"))
+        if any("jod" in (r.get("cvvdp") or {}) for r in runs):
+            row.update(jod=med("cvvdp", "jod"), jod_transient=med("cvvdp", "jod_channel", "transient"),
+                       jod_rg=med("cvvdp", "jod_channel", "rg"), jod_yv=med("cvvdp", "jod_channel", "yv"))
+        summary.append(row)
     by_key = {(s["clip"], s["profile"]): s for s in summary}
     keys = ("flicker_added", "temporal_sigma_added", "temporal_sigma_output", "false_motion_rate",
             "cell_flip_added", "cut_f1_output", "delta_e_mean", "psnr_mean", "ssim_mean", "ocr_output",
@@ -489,6 +602,31 @@ def report(summary: list[dict], two_pass: list[dict], guide_ab: list[dict], rows
             fmt(s["delta_e_mean"], 2), fmt(s["psnr_mean"], 2), fmt(s["ssim_mean"], 4),
             f"{fmt(s['ocr_output'])}|{fmt(s['ocr_source'])}" if s["ocr_output"] is not None else "-",
             fmt(s["face_cosine"]), fmt(s["history_resets"], 0)]) + " |")
+    yard = [s for s in summary if any(k in s for k in ("change_added", "vmaf_v1", "jod"))]
+    if yard:
+        g = lambda s, k, d=3: fmt(s.get(k), d)
+        lines += ["", "## Yardstick (P1.42)", "",
+                  "Every temporal number next to its frozen-output guard. `added` = mean per pixel of "
+                  "max(|dY_out| - |dY_src|, 0), luma levels per pair; `lost` = share of the source's own change "
+                  "(pixels where it moved > 2 levels) the output did not carry, 0 = all carried, 1 = frozen; "
+                  "`lost mv` = fraction of the cells the source moved that the output held static (the mirror of "
+                  "`false mv`). Cuts, soft-cut spans and held source pairs are excluded. A render that only got "
+                  "calmer lowers flicker+ and raises `lost`; one that got better lowers flicker+ and leaves `lost` "
+                  "alone. VMAF v1 = mean (p5) of the v1 model for the clip's size and rate, at 10 bits; `CAMBI+` = "
+                  "banding of the output minus the source's; `chroma` = v1's speed_chroma_uv feature (0 = none). "
+                  "JOD = ColorVideoVDP, 10 = indistinguishable, ~0.1 is about the smallest visible step; "
+                  "`trans` and `rg|yv` pool one channel alone (temporal, and the two chroma channels).", "",
+                  "| clip | profile | flicker+ | sigma+ | added | lost | false mv | lost mv | VMAF v1 (p5) | v0.6.1 "
+                  "| CAMBI+ | chroma | JOD | JOD trans | JOD rg|yv |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for s in yard:
+            lines.append("| " + " | ".join([
+                s["clip"], s["profile"], g(s, "flicker_added"), g(s, "temporal_sigma_added"), g(s, "change_added"),
+                g(s, "change_lost_share"), g(s, "false_motion_rate", 4), g(s, "lost_motion_rate", 4),
+                f"{g(s, 'vmaf_v1', 2)} ({g(s, 'vmaf_v1_p5', 2)})" if s.get("vmaf_v1") is not None else "-",
+                g(s, "vmaf_v061", 2), g(s, "cambi_added", 2), g(s, "speed_chroma_uv", 2), g(s, "jod", 2),
+                g(s, "jod_transient", 2),
+                f"{g(s, 'jod_rg', 2)}|{g(s, 'jod_yv', 2)}" if s.get("jod") is not None else "-"]) + " |")
     failed = [r for r in rows if not r["ok"]]
     if failed:
         lines += ["", "## Failed runs", ""] + [f"- {r['run']}: {r['failure']}" for r in failed]
@@ -558,10 +696,20 @@ def main() -> int:
     parser.add_argument("--no-ocr", action="store_true")
     parser.add_argument("--no-faces", action="store_true")
     parser.add_argument("--force", action="store_true", help="recompute runs that already have metrics.json")
+    parser.add_argument("--match", help="only runs whose directory name matches this glob, e.g. 'real-*__knob-*'")
+    parser.add_argument("--lost-change", action="store_true",
+                        help="frozen-output guard: added change and lost change per pixel and per cell")
+    parser.add_argument("--vmaf-v1", action="store_true", help="VMAF v1 + v0.6.1 + CAMBI through libvmaf")
+    parser.add_argument("--cvvdp", action="store_true", help="ColorVideoVDP JOD on the GPU")
+    parser.add_argument("--yardstick", action="store_true", help="--lost-change --vmaf-v1 --cvvdp")
     args = parser.parse_args()
+    if args.yardstick:
+        args.lost_change = args.vmaf_v1 = args.cvvdp = True
+    wanted = [key for key, on in (("change", args.lost_change), ("vmaf_v1", args.vmaf_v1), ("cvvdp", args.cvvdp))
+              if on]
     manifest = load_manifest(args.corpus)
     clips = {c["name"]: c for c in manifest["clips"]}
-    dirs = run_dirs(args.runs)
+    dirs = [d for d in run_dirs(args.runs) if not args.match or fnmatch.fnmatch(d.name, args.match)]
     if not dirs:
         print(f"no runs under {args.runs}", file=sys.stderr)
         return 1
@@ -583,11 +731,29 @@ def main() -> int:
             continue
         clip = clips[name]
         cached = run / "metrics.json"
-        if cached.exists() and not args.force:
-            rows.append(json.loads(cached.read_text(encoding="utf-8")))
+        previous = json.loads(cached.read_text(encoding="utf-8")) if cached.exists() else None
+        missing = [k for k in wanted if previous is not None and previous.get("ok") and k not in previous]
+        if previous is not None and not args.force and not missing:
+            rows.append(previous)
             print(f"cached {run.name}", flush=True)
             continue
-        m = analyze_run(run, clip, ocr, faces, args.sample_every)
+        if previous is not None and not args.force and "change" not in missing:
+            # Only perceptual scores were asked for: add them to the cached metrics
+            # instead of decoding the whole run again.
+            recorded = json.loads((run / "result.json").read_text(encoding="utf-8"))
+            output = run / "output.mkv" if (run / "output.mkv").exists() else Path(recorded["output"])
+            perceptual(previous, Path(recorded["source"]), output, clip, "vmaf_v1" in missing, "cvvdp" in missing)
+            write_json(cached, previous)
+            rows.append(previous)
+            print(f"cached {run.name} + {', '.join(missing)}", flush=True)
+            continue
+        m = analyze_run(run, clip, ocr, faces, args.sample_every, args.lost_change, args.vmaf_v1, args.cvvdp)
+        # Without --force, blocks an earlier opt-in run computed and this one did not are kept.
+        for key in ("change", "vmaf_v1", "cvvdp"):
+            if previous and not args.force and key in previous and key not in m:
+                m[key] = previous[key]
+        if any(k in m for k in ("change", "vmaf_v1", "cvvdp")):
+            write_json(cached, m)
         rows.append(m)
         print(f"{run.name}: ok={m['ok']} psnr={fmt(m.get('psnr_mean'), 2)} dE={fmt(m.get('delta_e_mean'), 2)} "
               f"flicker+={fmt(m.get('flicker_added'))} sigma+={fmt(m.get('temporal_sigma_added'))} "

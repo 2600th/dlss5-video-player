@@ -17,6 +17,9 @@ python tools/benchmark/run.py --clips text-subtitles cuts-motion --profiles base
 python tools/benchmark/run.py --ablation --repeats 2   # every profile in run.ABLATION
 python tools/benchmark/run.py --profiles depth-constant depth-proxy  # the depth A/B
 python tools/benchmark/analyze.py                      # build-upscaling/benchmark-work/analysis/report.md
+python tools/benchmark/analyze.py --yardstick          # + frozen-output guard, VMAF v1, ColorVideoVDP (P1.42)
+python tools/benchmark/analyze.py --match "real-*__knob-*" --vmaf-v1   # a subset; adds scores to cached metrics
+python tools/benchmark/quality.py fetch                # the pinned VMAF v1 models, hash-verified
 python tools/benchmark/blind.py --pairs-per-clip 3     # sealed A/B pairs for one-pass vs two-pass
 python tools/benchmark/knobs.py --clips real-film-cuts real-game-cuts  # which settings change the image
 python tools/benchmark/guidefiles.py truth             # true depth/motion of the near/far clips
@@ -38,6 +41,7 @@ directory holding `ffmpeg.exe` and `ffprobe.exe`.
 | `corpus.py` | Deterministic FFV1 corpus generator; `--clips` builds a subset, `--check` re-hashes an existing corpus |
 | `run.py` | Profiles, ablation matrix, two-pass, preflight receipts, worker launches, NVML sampling |
 | `analyze.py` | Per-run metrics, medians per clip/profile, guide and two-pass deltas, cut scores, `report.md` |
+| `quality.py` | The opt-in perceptual scores `analyze.py` calls: VMAF v1 through FFmpeg's libvmaf (models pinned to Netflix/vmaf v3.2.1, fetched and SHA-256-verified), ColorVideoVDP streamed through the GPU |
 | `cutmirror.py` | The mirror of `src/TemporalGuides.cpp`'s cut path (analysis grid, cell luma, global search, histogram overlap, per-cell match costs, both criteria, the debounce), shared by `analyze.py` and `cutlab.py` |
 | `cutlab.py` | Scores the cut criterion itself against the manifest's labelled cuts and sweeps it; `--ladder` scores the four Scene cuts rungs the player offers; needs no GPU, no worker and no render |
 | `duplab.py` | Scores `scene_cut::IsDuplicateDecodedPair` - frame generation's hold-a-repeat test - on corpus clips re-timed onto twos through libx264, against the real pairs of the same files and a small object crossing a still frame; needs no GPU |
@@ -52,6 +56,7 @@ directory holding `ffmpeg.exe` and `ffprobe.exe`.
 | `build-upscaling/benchmark-work/profiles/<profile>/` | Isolated runtime clone, `ffmpeg.exe`/`ffprobe.exe` hard links, `profile.json`, `preflight.json` |
 | `build-upscaling/benchmark-work/runs/<clip>__<profile>__<rep>/` | `output.mkv`, `result.json`, `pass1.bin` (raw metadata pipe), `gpu.csv`, copied `ReShade.log`/`.ini`, `frames.md5`, `metrics.json` |
 | `build-upscaling/benchmark-work/analysis/` | `analysis.json`, `report.md` |
+| `build-upscaling/benchmark-work/vmaf-models/<commit>/` | The VMAF v1 model JSONs `quality.py fetch` downloads (BSD-2-Clause-Patent, not committed) |
 | `build-upscaling/benchmark-work/blind/` | `pairs/`, `key.json`, `ballot.csv` |
 
 ## Corpus
@@ -361,6 +366,39 @@ not frame *i* of the other.
 | OCR out/src | rapidocr on sampled frames; character-level `SequenceMatcher` ratio of the manifest strings active at that timestamp against the recognized text, for output and for the source (the source figure is the OCR engine's own ceiling) |
 | face cos | resnet18 (ImageNet, penultimate layer) cosine between the source face crop and the same crop of the output; boxes from OpenCV Haar frontal+profile cascades on the source. `faces.output_drift_mean` in `metrics.json` is the frame-to-frame embedding drift of the output versus the source's own drift |
 | resets | `history_resets` from the worker result |
+
+### The yardstick (P1.42, opt-in)
+
+A stability number on its own rewards a render that stops following the source
+([Frozen History, arXiv 2610.15752](https://arxiv.org/abs/2610.15752)): a frozen or
+over-smoothed output has *negative* `flicker+` and `sigma+`, perfect `false mv` and
+`flips+`. `--lost-change` pairs them with the change the output lost; `--vmaf-v1` and
+`--cvvdp` add perceptual full-reference scores that see chroma, banding and temporal
+differences. None of the three changes the default output: without the flags,
+`metrics.json`, `analysis.json` and `report.md` are byte-identical to before. With any
+of them, `report.md` gains a **Yardstick (P1.42)** table and `metrics.json` the blocks
+below. On a cached run, `--vmaf-v1`/`--cvvdp` add their block without re-decoding the
+rest; `--lost-change` needs the full pass. `--yardstick` turns on all three, `--match`
+limits the run to directory names matching a glob.
+
+| Metric (`metrics.json` key) | Definition |
+|---|---|
+| added (`change.added`) | per consecutive pair, mean over all pixels of max(\|dY_out\| − \|dY_src\|, 0) in 8-bit luma levels, meaned over pairs: change the output has that the source does not. `flicker+` is exactly this term minus its mirror (the per-pixel shortfall), so a render can add shimmer in one place and freeze another and still read 0 there; split, they cannot cancel |
+| lost (`change.lost_share`) | over the pixels where the source changed by more than 2 levels, Σ max(\|dY_src\| − \|dY_out\|, 0) / Σ \|dY_src\|, pooled over pairs: the share of the source's own change the output did not carry. 0 = all carried, 1 = frozen. Manifest cuts, `soft_cuts` spans and held source pairs (under 0.1 % of pixels moving, `change.still_pairs_skipped`) are excluded, so no near-zero denominator |
+| lost mv (`change.lost_motion_rate`) | the mirror of `false mv` on the same grid and tolerance: of the cells the source moved, the fraction whose output stayed within 2/255. Withheld with the other grid metrics on a frame-count mismatch |
+| VMAF v1 (`vmaf_v1.*`) | libvmaf in `external/ffmpeg` (86da14d, v3.2.1 + 8 commits) with the v1 model for the clip: `vmaf_v1.0.16_3d0h` up to 1080 lines, `_1d5h_2160` above, the `_hfr` variant above 45 fps. Both inputs converted to 10-bit 4:2:0 (models_v1.md). Mean, p5 and min, and v0.6.1 from the same pass for continuity |
+| CAMBI+ (`vmaf_v1.cambi_added`) | v1's built-in CAMBI banding score of the output minus the same score of the source (CAMBI is no-reference, so the source is scored in its own pass) |
+| chroma (`vmaf_v1.speed_chroma_uv`) | v1's chroma feature: the chroma distortion the v1 model itself weighs; 0 = none |
+| JOD (`cvvdp.jod`) | ColorVideoVDP 0.5.7 (`standard_fhd` display up to 1080 lines, `standard_4k` above; sRGB SDR; the clip's true fps), output against source, streamed two frames at a time, GPU memory capped at 8 GB. 10 = indistinguishable, about 0.1 JOD is the smallest step a viewer notices |
+| JOD trans / rg / yv (`cvvdp.jod_channel`) | the metric's own pooling applied to one channel at a time with the others zeroed: `transient` is visible temporal difference (flicker, and also lost motion - it is symmetric), `rg` and `yv` the two chroma channels. Not additive; read them as which channel the loss lives in |
+
+Read a temporal row as a pair: a change that lowers `flicker+`/`sigma+` and leaves
+`lost` and `lost mv` where they were made the render steadier; one that lowers them
+while `lost` climbs made it follow the source less. A relight that lowers contrast also
+raises `lost` a little, since the same motion then moves fewer levels, so compare
+against `intensity-0` and the shipped state rather than against zero. The measured
+floor and the synthetic checks are in
+[yardstick-20261016](../../docs/measurements/yardstick-20261016/REPORT.md).
 
 Two-pass rows in `report.md` list metric deltas against `baseline` on the same clip,
 and any profile whose guide string differs from `baseline`'s gets the same deltas in a
