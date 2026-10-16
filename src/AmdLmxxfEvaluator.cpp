@@ -1691,9 +1691,14 @@ bool AmdLmxxfEvaluator::ReadBackProduced(std::vector<uint8_t>& out)
     const uint32_t columns = upscaling ? upscaleWidth_ : width_;
 
     void* mapped = nullptr;
-    const D3D12_RANGE readRange{0, static_cast<SIZE_T>(footprint.Footprint.Height) *
-                                        footprint.Footprint.RowPitch};
-    if (FAILED(buffer->Map(0, &readRange, &mapped)))
+    // No read range: on a READBACK heap the range is only a hint about what the
+    // CPU will read, and the whole resource is always a legal answer. Passing
+    // Height*RowPitch instead overruns the buffer whenever the row pitch is
+    // padded - a width that is not a multiple of 64 pixels, where the pitch is
+    // rounded up but the last row only carries the real row bytes - and Map
+    // then fails with E_INVALIDARG. That is why an 800x432 source rendered zero
+    // frames while a 1280x720 one was fine.
+    if (FAILED(buffer->Map(0, nullptr, &mapped)))
         return Fail(NeuralRenderFailure::Neural, "the readback buffer would not map");
     out.assign(static_cast<size_t>(columns) * rows * 4u, 0);
     for (uint32_t row = 0; row < rows; ++row) {
