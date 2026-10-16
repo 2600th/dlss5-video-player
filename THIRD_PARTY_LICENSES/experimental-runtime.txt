@@ -11,8 +11,10 @@ NVIDIA Streamline: https://github.com/NVIDIA-RTX/Streamline
     License: nvidia-streamline-MIT.txt
 ReShade: https://github.com/crosire/reshade
     License: reshade-BSD-3-Clause.txt
-RenoDX: https://github.com/clshortfuse/renodx
+RenoDX framework: https://github.com/clshortfuse/renodx
     License: renodx-MIT.txt
+RenoDX DLSS5 add-on (renodx-dlss5.addon64): binary from the RankFTW/rhi-repo
+    release mirror; no public source was found for it.
 
 Each named license file is in this folder, beside this notice.
 

@@ -19,7 +19,9 @@ param(
 #   3. write its .sha256 in the form `sha256sum -c` reads;
 #   4. attach both to the draft release for this VERSION, refusing to replace
 #      an asset already there;
-#   5. with -Publish, publish the draft. attest-release-asset.yml then attests
+#   5. add VirusTotal lookup links for the complete and core zips to the
+#      draft's notes, replacing the ones an earlier run added;
+#   6. with -Publish, publish the draft. attest-release-asset.yml then attests
 #      the published zip against that .sha256 by itself.
 #
 # It needs the GitHub CLI, signed in with permission to edit releases.
@@ -37,6 +39,77 @@ $assetPath = Join-Path $distRoot $assetName
 
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw 'The GitHub CLI (gh) is not on PATH.' }
 
+# The SHA-256 a .sha256 asset on the draft records for its zip.
+function Get-AttachedSha256([string]$zipName) {
+    $directory = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory -Path $directory | Out-Null
+    try {
+        $ErrorActionPreference = 'Continue'
+        & gh release download $tag --pattern "$zipName.sha256" --dir $directory 2>$null
+        $downloaded = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        $path = Join-Path $directory "$zipName.sha256"
+        if ($downloaded -ne 0 -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Release $tag has no $zipName.sha256 to read." }
+        $line = (Get-Content -LiteralPath $path -Raw).Trim()
+        if ($line -notmatch '^([0-9a-fA-F]{64})\s') { throw "$zipName.sha256 on $tag does not start with a SHA-256: '$line'." }
+        return $Matches[1].ToLowerInvariant()
+    } finally {
+        Remove-Item -LiteralPath $directory -Recurse -Force
+    }
+}
+
+# Puts VirusTotal lookup links for both zips in the draft's notes, between
+# markers, so a second run replaces them rather than adding another copy.
+# 'gh release edit --notes-file' replaces the whole body, so the rest of it is
+# read first and kept as it is.
+function Set-ScanLinks([string]$completeHash) {
+    $coreName = "DLSSVideoPlayer-v$version-core-win64.zip"
+    $coreHash = Get-AttachedSha256 $coreName
+    # The notes carry non-ASCII text (README writes "2 x 2" with a multiplication
+    # sign), and Windows PowerShell decodes a native command's output with the
+    # console code page, which would garble it on the way back in.
+    $consoleEncoding = [Console]::OutputEncoding
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
+    try {
+        $ErrorActionPreference = 'Continue'
+        $bodyJson = & gh release view $tag --json 'body' 2>$null
+        $viewed = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+    } finally {
+        [Console]::OutputEncoding = $consoleEncoding
+    }
+    if ($viewed -ne 0 -or -not $bodyJson) { throw "Reading the notes of $tag failed." }
+    $body = [string](($bodyJson -join "`n") | ConvertFrom-Json).body
+    $begin = '<!-- virustotal -->'
+    $end = '<!-- /virustotal -->'
+    $block = @(
+        $begin,
+        '### Scan reports',
+        '',
+        'VirusTotal lookups by SHA-256. A link shows a report only once the file has been submitted there.',
+        '',
+        ('- `{0}`: https://www.virustotal.com/gui/file/{1}' -f $assetName, $completeHash),
+        ('- `{0}`: https://www.virustotal.com/gui/file/{1}' -f $coreName, $coreHash),
+        $end
+    ) -join "`n"
+    $pattern = '(?s)' + [regex]::Escape($begin) + '.*?' + [regex]::Escape($end)
+    if ($body -match $pattern) {
+        $body = [regex]::Replace($body, $pattern, { param($m) $block })
+    } else {
+        $body = $body.TrimEnd() + "`n`n" + $block + "`n"
+    }
+    $notesPath = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
+    try {
+        [IO.File]::WriteAllText($notesPath, $body)
+        & gh release edit $tag --notes-file $notesPath
+        if ($LASTEXITCODE -ne 0) { throw "Adding the VirusTotal links to the notes of $tag failed." }
+    } finally {
+        Remove-Item -LiteralPath $notesPath -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "Added VirusTotal links for $assetName and $coreName to the notes of $tag."
+    Write-Host "Submit both zips at https://www.virustotal.com/gui/home/upload; until then the links show no report."
+}
+
 # The draft has to exist and still be a draft: publishing twice, or attaching to
 # a release people may already be downloading, is not this script's job.
 # Windows PowerShell turns a native command's stderr into an error record, which
@@ -53,6 +126,7 @@ if (-not $release.isDraft) { throw "Release $tag is already published; attach or
 $attached = @(@($release.assets) | Where-Object { $_.name -in @($assetName, "$assetName.sha256") } | ForEach-Object { $_.name })
 if ($attached.Count -eq 2) {
     # An earlier run attached both and left the draft for a look.
+    Set-ScanLinks (Get-AttachedSha256 $assetName)
     if (-not $Publish) { Write-Host "$assetName and its .sha256 are already attached to the draft $tag."; return }
     & gh release edit $tag --draft=false
     if ($LASTEXITCODE -ne 0) { throw "Publishing $tag failed." }
@@ -99,6 +173,7 @@ Write-Host "sha256 $hash"
 & gh release upload $tag $assetPath $checksumPath
 if ($LASTEXITCODE -ne 0) { throw "Uploading to $tag failed." }
 Write-Host "Attached $assetName and its .sha256 to the draft $tag."
+Set-ScanLinks $hash
 
 if ($Publish) {
     & gh release edit $tag --draft=false

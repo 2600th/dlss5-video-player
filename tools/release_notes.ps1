@@ -91,6 +91,11 @@ if ($stale.Count) {
 }
 $summary = ($lines[$start..($end - 1)] -join "`n").TrimEnd()
 
+# Re-uploads of DLSS 5 tools under other accounts have carried malware, so every
+# body names the one place this project publishes. README's Download section and
+# the site say the same.
+$officialDownload = 'The only official download location is https://github.com/2600th/dlss5-video-player/releases; copies anywhere else are not this project''s.'
+
 # CI builds, tests and attests the core zip. The complete zip with the neural
 # runtime is what the README tells people to download, and CI cannot fetch that
 # runtime, so the release is created as a draft and the maintainer attaches the
@@ -102,6 +107,7 @@ $intro = @(
     ('Download `dlss5-video-player-v{0}-win64.zip`: the player with its neural runtime.' -f $version),
     ('`DLSSVideoPlayer-v{0}-core-win64.zip` is the player alone, built and attested by CI.' -f $version),
     'Each has a `.sha256` beside it. GitHub''s "Source code" zip does not run.',
+    $officialDownload,
     ''
 )
 $tail = @(
@@ -109,5 +115,6 @@ $tail = @(
     ('Every change: [CHANGELOG.md for {0}](https://github.com/{1}/blob/{2}/CHANGELOG.md).' -f $version, $Repository, $tag)
 )
 $body = (($intro + $summary + $tail) -join "`n").TrimEnd() + "`n"
+if (-not $body.Contains($officialDownload)) { throw 'The release body lost the official download notice.' }
 [IO.File]::WriteAllText($OutFile, $body)
 Write-Host "Release notes: $($body.Length) characters from README's $version entry, written to $OutFile."

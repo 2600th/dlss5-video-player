@@ -41,6 +41,10 @@ unscaled. [Four more, including one where the model makes the picture worse](doc
 Each zip has a `.sha256` beside it. GitHub's "Source code" zip won't run: it
 has no runtime.
 
+The only official download location is
+<https://github.com/2600th/dlss5-video-player/releases>. Copies anywhere else,
+including other GitHub accounts, are not this project's.
+
 ### Check what you downloaded
 
 The checksum shows the file arrived intact; the attestation shows this
@@ -193,29 +197,30 @@ Two ways under **DLSS > Convert & export**, and one from the command line:
 Several open-source projects put DLSS 5's neural pass on video. This one is
 built to watch the result and check it: it renders the whole video while you
 watch, keeps the render, and shows the original beside it on the same frame.
-As of 2026-10-02, from each project's README, releases and issues (details in
+As of 2026-10-16, from each project's README, releases and issues (details in
 [RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md); corrections welcome):
 
-| | **DLSS 5 Video Player** (this) | [Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) v14.0 | [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) v2.1.9 | [Veyra](https://github.com/Likely7/Veyra-NRVideo) 2.0.0 | [DLSS5Tool](https://github.com/banbanzhige/DLSS5Tool) v2.3.3 |
+| | **DLSS 5 Video Player** (this) | [Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) v16.0 | [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) v2.4.0 | [Veyra](https://github.com/Likely7/Veyra-NRVideo) 2.0.8 | [DLSS5Tool](https://github.com/banbanzhige/DLSS5Tool) v3.0.0 |
 | --- | --- | --- | --- | --- | --- |
-| What it is | A player that renders the whole video in the background, plus export | A converter with a stage pipeline, plus a Live mode | An overlay on the whole desktop, plus file conversion | A real-time player for files, capture cards and game streams | A converter with a preview |
-| Neural render you can keep, seek and re-watch | Yes: rendered frames are cached and reused | No: Live keeps a 2–30 s buffer | No: real time | No: real time | Export only |
+| What it is | A player that renders the whole video in the background, plus export | A converter with a stage pipeline; its Live mode was removed in v16.0 | An overlay on the whole desktop, plus file conversion | A real-time player for files, capture cards and game streams | A converter with a preview; since v3.0.0 also enhances a running window live |
+| Neural render you can keep, seek and re-watch | Yes: rendered frames are cached and reused | Export only; previews cache a short range | No: real time | No: real time | Export only; the preview can pre-render ahead |
 | Compare tools | Split, Wipe, Difference, Side by side, 2×2, loupe, hold for original, against RTX VSR | Split, 2-Up | Before/after wipe | Original/enhanced toggle | Wipe, side by side |
-| Upscaling | RTX VSR by default in playback and export, DLSS SR on request; [measured](docs/measurements/vsr-quality-20261002/REPORT.md) | RTX VSR and DLSS SR stages, off by default | None (by design) | DLSS SR, RTX VSR or FSR | RTX VSR 2× or 4× |
-| Frame generation | DLSS-G 2–5× as a conversion; RTX 20/30 through an offered, hash-checked add-on | DLSS-G as a conversion | DLSS-G 2–4×, live | DLSS-G, XeSS or FSR up to 6×, live | DLSS-G 2×, export |
-| Inputs | Local video, public YouTube, photos, GIFs | Images, video, URLs, YouTube, Twitch | Anything on screen, files | Files, images, capture cards, PS5, PC and Xbox streams | Images, video, image sequences |
-| Keeps audio / subtitles / chapters on export | Yes / yes / yes | Yes / no / yes | Audio yes | Audio and subtitles yes | Audio yes |
+| Upscaling | RTX VSR by default in playback and export, DLSS SR on request; [measured](docs/measurements/vsr-quality-20261002/REPORT.md) | RTX VSR, DLSS SR and Video Effects SDK VSR stages, off by default | None (by design) | DLSS SR, RTX VSR or FSR | RTX VSR 2× or 4× |
+| Frame generation | DLSS-G 2–5× as a conversion; RTX 20/30 through an offered, hash-checked add-on | DLSS-G or NVIDIA Video Frame Generation, as a conversion | DLSS-G 2–4×, live | DLSS-G, XeSS or FSR up to 6×, live | 2–4× interpolation, export |
+| Inputs | Local video, public YouTube, photos, GIFs | Images, including camera RAW, and video | Anything on screen, files | Files, images, capture cards, PS5, PC and Xbox streams | Images, video, image sequences; a running window live |
+| Keeps audio / subtitles / chapters on export | Yes / yes / yes | Yes / on some paths / yes | Audio yes | Audio and subtitles yes | Audio yes |
 | HDR | HDR shown on HDR displays; exports are SDR | 10-bit HDR export, SDR→HDR | HDR10 recording (experimental capture) | HDR kept, HEVC Main10 export | HDR10/HLG export |
 | Command line | `dlss5-convert`: files, folders, JSON report | `VE_CLI.exe` | No; a GUI queue | Not documented | Not documented |
-| Download | 377 MB (36 MB without the neural runtime) | 726 MB | 230 MB | 409 MB | 580 MB lite |
+| Download | 377 MB (36 MB without the neural runtime) | 531 MB (.7z) | 229 MB | 719 MB (NVIDIA) | 588 MB lite |
 | Verifying the download | SHA-256, GitHub attestations, a file manifest and a verifier script | GitHub's per-file digest | SHA256SUMS and a runtime manifest | SHA-256 files | Runtime hashes |
-| Licence | MIT | Source-available, its own terms | PolyForm Strict (non-commercial) | GPL-3.0 (AGPL for its streaming part) | MIT |
+| Licence | MIT | Source-available, its own terms | PolyForm Strict (non-commercial) | GPL-3.0 (AGPL for its streaming part) | GPL-3.0 since v3.0.0; MIT before |
 
 Of the five, only this player keeps the render, so a seek lands on rendered
 frames and a video you come back to is already done. It compares the render
 with the original on the same frame in more ways than any of the others, RTX
-VSR included; only its export keeps subtitles and chapters as well as audio;
-and only its downloads carry GitHub attestations of what this repository
+VSR included; its export keeps subtitles and chapters as well as audio, which
+of the others only Visual Enhancer does, and subtitles only on some paths; and
+only its downloads carry GitHub attestations of what this repository
 built. Its upscaler was chosen by measurement, and the
 [report](docs/measurements/vsr-quality-20261002/REPORT.md) is public.
 
@@ -346,6 +351,10 @@ how the toggle works, not what every source will gain.
 - **Driver 610.47 or newer.** Older drivers refuse neural rendering on any card,
   and the player tells you up front. See
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
+  On Windows 10, NVIDIA's last Game Ready and Studio drivers are October 2026's,
+  with quarterly security updates only after that
+  ([NVIDIA](https://nvidia.custhelp.com/app/answers/detail/a_id/5695/~/geforce-support-plan-for-windows-10)),
+  so a future runtime that needs a newer driver will need Windows 11.
 - **Which GPU does what:**
 
   | GPU | Neural rendering | RTX VSR upscaling | DLSS Super Resolution | Frame generation |

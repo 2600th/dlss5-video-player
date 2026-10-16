@@ -3,8 +3,10 @@ RenoDX - neural-runtime/renodx-dlss5.addon64
 The complete package ships the RenoDX DLSS 5 ReShade add-on as
 neural-runtime/renodx-dlss5.addon64, unmodified: add-on release 6.5.3 (file
 version 0.2026.0917.1432) from the RankFTW/rhi-repo release mirror, pinned by
-SHA-256 in packaging/runtime-lock.json. It is unsigned. RenoDX's source is
-published at https://github.com/clshortfuse/renodx.
+SHA-256 in packaging/runtime-lock.json. It is unsigned. The RenoDX framework's
+source is published at https://github.com/clshortfuse/renodx; no public source
+for this add-on was found there or elsewhere (checked 2026-10-16), and the
+mirror states no licence for it (see THIRD_PARTY.md).
 
 RenoDX is licensed under the MIT License. The notice below is reproduced
 unmodified from the LICENSE file on that repository's main branch; the

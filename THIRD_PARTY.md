@@ -122,15 +122,18 @@ licence, from tag v6.8.0, is included as
 
 ## RenoDX
 
-Source and license information: https://github.com/clshortfuse/renodx
+The selected `renodx-dlss5.addon64` 6.5.3 binary comes from the
+`RankFTW/rhi-repo` release mirror
+(https://github.com/RankFTW/rhi-repo/releases/tag/renodx-dlss5-6.5.3). It is
+unsigned and enabled by default on every detected NVIDIA RTX GPU. No public
+source for this add-on was found: the RenoDX framework repository,
+https://github.com/clshortfuse/renodx, holds no DLSS5 add-on in `src/addons`
+(devkit, dlssfix and fpslimiter only, checked 2026-10-16).
 
-RenoDX is MIT-licensed; its licence is included as
-`THIRD_PARTY_LICENSES/renodx-MIT.txt`.
-
-The selected `renodx-dlss5.addon64` 6.5.3 asset comes from the
-`RankFTW/rhi-repo` release mirror. It is unsigned and enabled by default on
-every detected NVIDIA RTX GPU. Redistribution permission for the combined
-experimental runtime set remains unresolved.
+The RenoDX framework is MIT-licensed; its licence is included as
+`THIRD_PARTY_LICENSES/renodx-MIT.txt`. The mirror's release page states no
+licence for the DLSS5 add-on binary itself. Redistribution permission for
+the combined experimental runtime set remains unresolved.
 
 The player's `[RenoDX.DLSS5]` configuration contract was adapted from the
 MIT-licensed `jlrouzies-fr/DLSS5-Feeder` project. Its copyright and license are
@@ -153,11 +156,15 @@ OpenSSL and the rest), which ask for them to travel with a binary copy.
 
 ## yt-dlp
 
-Source and tag: https://github.com/yt-dlp/yt-dlp/tree/2026.08.19
+Source: https://github.com/yt-dlp/yt-dlp/tree/897341241f2bfb2439fe0367f4c7c9ccd29a3828,
+the commit the official nightly build 2026.10.10.233141 was generated from
+(https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/tag/2026.10.10.233141).
+The player ships a nightly because the latest stable release, 2026.08.19,
+cannot play many YouTube videos.
 
 The official Windows executable is a PyInstaller bundle containing GPLv3+
-components. Its complete tagged bundled notices are included as
-`THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt`; it is not described as
+components. Its complete bundled notices at that commit are included as
+`THIRD_PARTY_LICENSES/yt-dlp-2026.10.10.233141.txt`; it is not described as
 Unlicense-only.
 
 ## Deno

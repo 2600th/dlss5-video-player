@@ -739,7 +739,7 @@
     <p class="section__note">
       Several open-source projects put DLSS&nbsp;5&rsquo;s neural pass on video. This one is built to watch the result and
       check it: it renders the whole video while you watch, keeps the render, and shows the original beside it on the same
-      frame. As of 2&nbsp;October 2026, from each project&rsquo;s own README, releases and issues; the
+      frame. As of 16&nbsp;October 2026, from each project&rsquo;s own README, releases and issues; the
       <a href="{{REPO_URL}}/blob/main/docs/RELATED_PROJECTS.md" rel="noopener">full list</a> has more, and corrections are welcome.
     </p>
   </div>
@@ -751,25 +751,25 @@
         <tr>
           <td></td>
           <th scope="col" class="versus__ours">This player</th>
-          <th scope="col"><a href="https://github.com/Merserk/dlss5-visual-enhancer" rel="noopener">Visual Enhancer</a> <span class="versus__ver">v14.0</span></th>
-          <th scope="col"><a href="https://github.com/perseval-BLR/NeuralScreen" rel="noopener">NeuralScreen</a> <span class="versus__ver">v2.1.9</span></th>
-          <th scope="col"><a href="https://github.com/Likely7/Veyra-NRVideo" rel="noopener">Veyra</a> <span class="versus__ver">2.0.0</span></th>
-          <th scope="col"><a href="https://github.com/banbanzhige/DLSS5Tool" rel="noopener">DLSS5Tool</a> <span class="versus__ver">v2.3.3</span></th>
+          <th scope="col"><a href="https://github.com/Merserk/dlss5-visual-enhancer" rel="noopener">Visual Enhancer</a> <span class="versus__ver">v16.0</span></th>
+          <th scope="col"><a href="https://github.com/perseval-BLR/NeuralScreen" rel="noopener">NeuralScreen</a> <span class="versus__ver">v2.4.0</span></th>
+          <th scope="col"><a href="https://github.com/Likely7/Veyra-NRVideo" rel="noopener">Veyra</a> <span class="versus__ver">2.0.8</span></th>
+          <th scope="col"><a href="https://github.com/banbanzhige/DLSS5Tool" rel="noopener">DLSS5Tool</a> <span class="versus__ver">v3.0.0</span></th>
         </tr>
       </thead>
       <tbody>
-        <tr><th scope="row">What it is</th><td class="versus__ours">Plays the video while rendering all of it in the background, and exports</td><td>Converts through a stage pipeline; a Live mode plays through it</td><td>An overlay on the whole desktop, plus file conversion</td><td>Plays files, capture cards and game streams in real time</td><td>Converts, with a preview</td></tr>
-        <tr><th scope="row">Render you keep</th><td class="versus__ours">Yes: rendered frames are cached, seekable and re-watched</td><td>No: Live keeps a 2&ndash;30&nbsp;s buffer</td><td>No: real time</td><td>No: real time</td><td>Export only</td></tr>
+        <tr><th scope="row">What it is</th><td class="versus__ours">Plays the video while rendering all of it in the background, and exports</td><td>Converts through a stage pipeline; its Live mode was removed in v16.0</td><td>An overlay on the whole desktop, plus file conversion</td><td>Plays files, capture cards and game streams in real time</td><td>Converts, with a preview; since v3.0.0 also enhances a running window live</td></tr>
+        <tr><th scope="row">Render you keep</th><td class="versus__ours">Yes: rendered frames are cached, seekable and re-watched</td><td>Export only; previews cache a short range</td><td>No: real time</td><td>No: real time</td><td>Export only; the preview can pre-render ahead</td></tr>
         <tr><th scope="row">Compare</th><td class="versus__ours">Split, Wipe, Difference, Side by side, 2&times;2, loupe, hold for original, against RTX VSR</td><td>Split, 2-Up</td><td>Before/after wipe</td><td>Original/enhanced toggle</td><td>Wipe, side by side</td></tr>
-        <tr><th scope="row">Upscaling</th><td class="versus__ours">RTX VSR by default in playback and export; DLSS SR on request; <a href="#limits">measured</a></td><td>RTX VSR and DLSS SR stages, off by default</td><td>None, by design</td><td>DLSS SR, RTX VSR or FSR</td><td>RTX VSR 2&times; or 4&times;</td></tr>
-        <tr><th scope="row">Frame gen.</th><td class="versus__ours">DLSS-G 2&ndash;5&times; as a conversion; RTX 20/30 through an offered, hash-checked add-on</td><td>DLSS-G as a conversion</td><td>DLSS-G 2&ndash;4&times;, live</td><td>DLSS-G, XeSS or FSR up to 6&times;, live</td><td>DLSS-G 2&times;, export</td></tr>
-        <tr><th scope="row">Inputs</th><td class="versus__ours">Local video, public YouTube, photos, GIFs</td><td>Images, video, URLs, YouTube, Twitch</td><td>Anything on screen, files</td><td>Files, images, capture cards, PS5, PC and Xbox streams</td><td>Images, video, image sequences</td></tr>
-        <tr><th scope="row">Export keeps</th><td class="versus__ours">Audio, subtitles and chapters</td><td>Audio and chapters; not subtitles</td><td>Audio</td><td>Audio and subtitles</td><td>Audio</td></tr>
+        <tr><th scope="row">Upscaling</th><td class="versus__ours">RTX VSR by default in playback and export; DLSS SR on request; <a href="#limits">measured</a></td><td>RTX VSR, DLSS SR and Video Effects SDK VSR stages, off by default</td><td>None, by design</td><td>DLSS SR, RTX VSR or FSR</td><td>RTX VSR 2&times; or 4&times;</td></tr>
+        <tr><th scope="row">Frame gen.</th><td class="versus__ours">DLSS-G 2&ndash;5&times; as a conversion; RTX 20/30 through an offered, hash-checked add-on</td><td>DLSS-G or NVIDIA Video Frame Generation, as a conversion</td><td>DLSS-G 2&ndash;4&times;, live</td><td>DLSS-G, XeSS or FSR up to 6&times;, live</td><td>2&ndash;4&times; interpolation, export</td></tr>
+        <tr><th scope="row">Inputs</th><td class="versus__ours">Local video, public YouTube, photos, GIFs</td><td>Images, including camera RAW, and video</td><td>Anything on screen, files</td><td>Files, images, capture cards, PS5, PC and Xbox streams</td><td>Images, video, image sequences; a running window live</td></tr>
+        <tr><th scope="row">Export keeps</th><td class="versus__ours">Audio, subtitles and chapters</td><td>Audio and chapters; subtitles on some paths</td><td>Audio</td><td>Audio and subtitles</td><td>Audio</td></tr>
         <tr><th scope="row">HDR</th><td class="versus__ours">Shown on HDR displays; exports are SDR</td><td>10-bit HDR export; SDR&rarr;HDR</td><td>HDR10 recording; capture experimental</td><td>Kept; HEVC Main10 export</td><td>HDR10/HLG export</td></tr>
         <tr><th scope="row">Command line</th><td class="versus__ours"><code>dlss5-convert</code>: files, folders, JSON report</td><td><code>VE_CLI.exe</code></td><td>No; a GUI queue</td><td>Not documented</td><td>Not documented</td></tr>
-        <tr><th scope="row">Download</th><td class="versus__ours"><span class="data">377&nbsp;MB</span>, or <span class="data">36&nbsp;MB</span> without the runtime</td><td><span class="data">726&nbsp;MB</span></td><td><span class="data">230&nbsp;MB</span></td><td><span class="data">409&nbsp;MB</span></td><td><span class="data">580&nbsp;MB</span> lite</td></tr>
+        <tr><th scope="row">Download</th><td class="versus__ours"><span class="data">377&nbsp;MB</span>, or <span class="data">36&nbsp;MB</span> without the runtime</td><td><span class="data">531&nbsp;MB</span> (.7z)</td><td><span class="data">229&nbsp;MB</span></td><td><span class="data">719&nbsp;MB</span> NVIDIA</td><td><span class="data">588&nbsp;MB</span> lite</td></tr>
         <tr><th scope="row">Verify</th><td class="versus__ours">SHA-256, GitHub attestations, a manifest and a verifier</td><td>GitHub&rsquo;s per-file digest</td><td>SHA256SUMS and a runtime manifest</td><td>SHA-256 files</td><td>Runtime hashes</td></tr>
-        <tr><th scope="row">Licence</th><td class="versus__ours">MIT</td><td>Source-available, its own terms</td><td>PolyForm Strict, non-commercial</td><td>GPL-3.0; AGPL for streaming</td><td>MIT</td></tr>
+        <tr><th scope="row">Licence</th><td class="versus__ours">MIT</td><td>Source-available, its own terms</td><td>PolyForm Strict, non-commercial</td><td>GPL-3.0; AGPL for streaming</td><td>GPL-3.0 since v3.0.0; MIT before</td></tr>
       </tbody>
     </table>
   </div>
@@ -777,8 +777,8 @@
   <p class="versus__pick">
     Of the five, only this player keeps the render, so a seek lands on rendered frames and a video you come back to is
     already done. It compares the render with the original on the same frame in more ways than any of the others, RTX VSR
-    included; only its export keeps subtitles and chapters as well as audio; and only its downloads carry GitHub
-    attestations of what this repository built.
+    included; its export keeps subtitles and chapters as well as audio, which of the others only Visual Enhancer does, and
+    subtitles only on some paths; and only its downloads carry GitHub attestations of what this repository built.
   </p>
   <p class="versus__caveat">
     None of these projects is an NVIDIA product, and each runs the neural pass on a runtime NVIDIA has not published for this
@@ -795,6 +795,9 @@
     {{VERSION_LABEL}}, published {{RELEASE_DATE}}. Free, with no account and
     no installer: unzip it and run it. Every build is on the
     <a href="{{RELEASE_URL}}" rel="noopener">release page</a> with its checksum.
+    The only official download location is
+    <a href="https://github.com/2600th/dlss5-video-player/releases" rel="noopener">github.com/2600th/dlss5-video-player/releases</a>;
+    copies anywhere else are not this project&rsquo;s.
     <!-- unreleased --><span class="unreleased-note">The features marked
     <span class="new" title="In main, after v0.27.2; the next release carries it">New</span> come from <code>main</code>, after v0.27.2: RTX
     VSR as the upscaler for playback and for Super Resolution exports. The next

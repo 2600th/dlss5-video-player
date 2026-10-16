@@ -30,7 +30,14 @@ with the detected, minimum and verified numbers, and the startup log carries the
 same verdict. DXGI reports the driver as `32.0.15.6614`-style; that is
 566.14, and `32.0.16.1664` is 616.64.
 
-Update the driver, then start the render again. A GPU whose architecture the
+Update the driver, then start the render again. On Windows 10 that has a
+limit: NVIDIA's
+[GeForce support plan for Windows 10](https://nvidia.custhelp.com/app/answers/detail/a_id/5695/~/geforce-support-plan-for-windows-10)
+makes October 2026's the last Game Ready driver for it, with Studio drivers on
+the same plan and only quarterly security updates after that. A future runtime
+whose floor is above that driver will need Windows 11.
+
+A GPU whose architecture the
 runtime itself refuses fails differently, with `0xbad00001`, and no driver
 update changes that. `0xbad0000d` is GPU memory: choose a lower source
 resolution or close other GPU applications.
