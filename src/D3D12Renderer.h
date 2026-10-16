@@ -641,15 +641,18 @@ public:
     // is the narrower question: whether THIS frame is drawn through the filter.
     bool UpscalingPresentAvailable() const { return m_dlss.Available() || m_upscaleOwnEngine; }
     // Which amplifier is drawing the picture right now, for the status line:
-    // the FSR 4 backend that took the stretch half over, or the stretch-and-
-    // sharpen filter that serves when it cannot (no runtime, a GPU it refuses,
-    // a ratio past 3.0x, or a dispatch that failed). Only meaningful while
-    // UpscalePresentActive() holds - with DLSS up, DLSS is the engine and the
-    // question has no answer worth printing.
+    // the FSR 4 backend (tier 1), the FSR1 EASU shader that takes the stretch
+    // half over when FSR 4 cannot start (tier 2: no runtime, a GPU it refuses,
+    // a ratio past 3.0x, or a dispatch that failed), or the stretch-and-
+    // sharpen CATMULL-ROM filter that serves only when even EASU's PSO failed
+    // to compile (tier 3). Only meaningful while UpscalePresentActive() holds
+    // - with DLSS up, DLSS is the engine and the question has no answer.
     const wchar_t* PresentUpscaleEngineName() const
     {
         if (m_fsrUpscaleActive && m_fsrUpscale && m_fsrUpscale->Available())
             return L"FSR4";
+        if (m_easuActive)
+            return L"FSR1";
         return L"CAS";
     }
     void SetUpscaleSharpness(float sharpness) { m_upscaleSharpness = sharpness; }
@@ -1319,6 +1322,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_upscaleRootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoUpscaleStretch;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoUpscaleSharp;
+    // FSR1 EASU, the middle rung of the upscale chain: replaces the
+    // Catmull-Rom stretch (same input, same target, CAS still sharpens below).
+    // A pure-shader pass, so it is available whenever the PSO compiles.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoUpscaleEasu;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_upscaleSrvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_upscaleRtvHeap;
     // Playback frame generation. m_fgHistory is the previous frame's copy, and
@@ -1434,6 +1441,12 @@ private:
     // no other pass learns the difference.
     std::unique_ptr<FsrUpscaleBackend> m_fsrUpscale;
     bool m_fsrUpscaleActive = false;
+    // FSR1 EASU, the middle tier (see PresentUpscaleEngineName). True when its
+    // PSO compiled; it then serves every frame FSR 4 does not.
+    bool m_easuActive = false;
+    // EASU's four constant vectors (con0, con1) as float, computed from the
+    // render and output sizes in CreateUpscalePresentResources.
+    float m_easuCon[8] = {};
     // FSR's history is invalid wherever the source's is: a seek, a cut, a
     // switch, or the first frame. Latched from the frame's temporal reset and
     // consumed by the next upscale.

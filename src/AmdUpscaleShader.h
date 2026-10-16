@@ -124,6 +124,127 @@ float4 PSAmdCas(V i):SV_Target{
     float3 outC=(((b+d)+(f+h))*w+e)/(1.0+4.0*w);
     return float4(outC,1);
 }
+
+// FSR1 EASU (FidelityFX Super Resolution 1, the edge-adaptive spatial
+// upsample) is the middle rung of the upscale chain: it replaces ONLY the
+// Catmull-Rom stretch, writing the same linear FP16 frame at the same output
+// rung into the same target, so the CAS sharpen below runs unchanged. It is a
+// pure shader - no runtime - so where the FSR 4 backend cannot start (no
+// runtime, a GPU it refuses, a ratio past 3.0x) EASU is the upscaler, and
+// only a PSO compile failure drops the chain to the Catmull-Rom stretch.
+//
+// The 12-tap kernel, the direction/length accumulation and the
+// Lanczos-with-lobes weight are the AMD reference algorithm (ffxFsrEasuFloat,
+// FidelityFX SDK). The reference packs four texels per gather fetch; that
+// packing is flattened here into 12 point samples at exact texel centres -
+// the player already reads the frame through a POINT-clamped sampler, so the
+// taps land on centres and the frame edge clamps instead of reading garbage.
+// con0 and con1 are computed on the CPU from the render and output sizes
+// (see CreateUpscalePresentResources) and passed as float4; there is no bit
+// packing because this is the host path, not the SDK's GPU-constant macros.
+cbuffer EasuParams:register(b0){float4 con0;float4 con1;};
+void EasuSet(inout float2 dir,inout float len,float w,float lA,float lB,float lC,float lD,float lE){
+    // Direction is the '+' diff of the local gradient; length is the gradient
+    // reversal shaped to 0..1. w is the bilinear weight for this of the four
+    // sub-positions - a compile-time immediate, so the branches fold out.
+    float dc=lD-lC;float cb=lC-lB;
+    float lx=max(abs(dc),abs(cb));lx=(lx>1e-7)?1.0/lx:0.0;
+    float dx=lD-lB;dir.x+=dx*w;lx=saturate(abs(dx)*lx);lx*=lx;len+=lx*w;
+    float ec=lE-lC;float ca=lC-lA;
+    float ly=max(abs(ec),abs(ca));ly=(ly>1e-7)?1.0/ly:0.0;
+    float dy=lE-lA;dir.y+=dy*w;ly=saturate(abs(dy)*ly);ly*=ly;len+=ly*w;
+}
+void EasuTap(inout float3 aC,inout float aW,float2 pixelOffset,float2 dir,float2 len2,float lob,float clp,float3 color){
+    // Rotate the offset by the gradient direction, stretch it anisotropically,
+    // then the lanczos2-with-lobes weight as the reference writes it.
+    float2 ro;
+    ro.x=pixelOffset.x*dir.x+pixelOffset.y*dir.y;
+    ro.y=pixelOffset.x*(-dir.y)+pixelOffset.y*dir.x;
+    ro*=len2;
+    float d2=ro.x*ro.x+ro.y*ro.y;
+    d2=min(d2,clp);
+    float wB=(2.0/5.0)*d2-1.0;
+    float wA=lob*d2-1.0;
+    wB*=wB;wA*=wA;
+    wB=(25.0/16.0)*wB+(-(25.0/16.0-1.0));
+    float w=wB*wA;
+    aC+=color*w;aW+=w;
+}
+float4 PSAmdEasu(V i):SV_Target{
+    uint2 ip=(uint2)i.p.xy;
+    float2 pp=(float2)ip*con0.xy+con0.zw;
+    float2 fp=floor(pp);
+    pp-=fp;
+    int2 base=(int2)fp;
+    // 1/renderSize, to turn each integer tap into a texel-centre UV.
+    float2 texel=con1.xy;
+    float3 b =Input.SampleLevel(PointClamp,(float2(base.x+0,base.y-1)+0.5)*texel,0).rgb;
+    float3 c =Input.SampleLevel(PointClamp,(float2(base.x+1,base.y-1)+0.5)*texel,0).rgb;
+    float3 e =Input.SampleLevel(PointClamp,(float2(base.x-1,base.y+0)+0.5)*texel,0).rgb;
+    float3 f =Input.SampleLevel(PointClamp,(float2(base.x+0,base.y+0)+0.5)*texel,0).rgb;
+    float3 g =Input.SampleLevel(PointClamp,(float2(base.x+1,base.y+0)+0.5)*texel,0).rgb;
+    float3 h =Input.SampleLevel(PointClamp,(float2(base.x+2,base.y+0)+0.5)*texel,0).rgb;
+    float3 i2=Input.SampleLevel(PointClamp,(float2(base.x-1,base.y+1)+0.5)*texel,0).rgb;
+    float3 j =Input.SampleLevel(PointClamp,(float2(base.x+0,base.y+1)+0.5)*texel,0).rgb;
+    float3 k =Input.SampleLevel(PointClamp,(float2(base.x+1,base.y+1)+0.5)*texel,0).rgb;
+    float3 l =Input.SampleLevel(PointClamp,(float2(base.x+2,base.y+1)+0.5)*texel,0).rgb;
+    float3 n =Input.SampleLevel(PointClamp,(float2(base.x+0,base.y+2)+0.5)*texel,0).rgb;
+    float3 o =Input.SampleLevel(PointClamp,(float2(base.x+1,base.y+2)+0.5)*texel,0).rgb;
+    // Luma proxy per tap (luma*2 in two FMAs) - the reference's scalar weight.
+    float bL=0.5*b.b+0.5*b.r+b.g;
+    float cL=0.5*c.b+0.5*c.r+c.g;
+    float eL=0.5*e.b+0.5*e.r+e.g;
+    float fL=0.5*f.b+0.5*f.r+f.g;
+    float gL=0.5*g.b+0.5*g.r+g.g;
+    float hL=0.5*h.b+0.5*h.r+h.g;
+    float iL=0.5*i2.b+0.5*i2.r+i2.g;
+    float jL=0.5*j.b+0.5*j.r+j.g;
+    float kL=0.5*k.b+0.5*k.r+k.g;
+    float lL=0.5*l.b+0.5*l.r+l.g;
+    float nL=0.5*n.b+0.5*n.r+n.g;
+    float oL=0.5*o.b+0.5*o.r+o.g;
+    // Accumulate direction and edge length at the four bilinear sub-positions.
+    float2 dir=float2(0.0,0.0);
+    float len=0.0;
+    EasuSet(dir,len,(1.0-pp.x)*(1.0-pp.y),bL,eL,fL,gL,jL);
+    EasuSet(dir,len,pp.x*(1.0-pp.y),      cL,fL,gL,hL,kL);
+    EasuSet(dir,len,(1.0-pp.x)*pp.y,      fL,iL,jL,kL,nL);
+    EasuSet(dir,len,pp.x*pp.y,            gL,jL,kL,lL,oL);
+    // Normalise the direction; a near-zero gradient points along +x.
+    float2 dir2=dir*dir;
+    float dirR=dir2.x+dir2.y;
+    bool zro=dirR<(1.0/32768.0);
+    dirR=zro?1.0:rsqrt(dirR);
+    dir.x=zro?1.0:dir.x;
+    dir*=dirR;
+    // Shape the length and the anisotropic window.
+    len=len*0.5;len*=len;
+    float stretch=(dir.x*dir.x+dir.y*dir.y)*rcp(max(abs(dir.x),abs(dir.y)));
+    float2 len2v=float2(1.0+(stretch-1.0)*len,1.0+(-0.5)*len);
+    float lob=0.5+((1.0/4.0-0.04)-0.5)*len;
+    float clp=rcp(lob);
+    // Accumulate the 12 weighted taps.
+    float3 aC=float3(0.0,0.0,0.0);
+    float aW=0.0;
+    EasuTap(aC,aW,float2(0.0,-1.0)-pp,dir,len2v,lob,clp,b);
+    EasuTap(aC,aW,float2(1.0,-1.0)-pp,dir,len2v,lob,clp,c);
+    EasuTap(aC,aW,float2(-1.0,1.0)-pp,dir,len2v,lob,clp,i2);
+    EasuTap(aC,aW,float2(0.0,1.0)-pp,dir,len2v,lob,clp,j);
+    EasuTap(aC,aW,float2(0.0,0.0)-pp,dir,len2v,lob,clp,f);
+    EasuTap(aC,aW,float2(-1.0,0.0)-pp,dir,len2v,lob,clp,e);
+    EasuTap(aC,aW,float2(1.0,1.0)-pp,dir,len2v,lob,clp,k);
+    EasuTap(aC,aW,float2(2.0,1.0)-pp,dir,len2v,lob,clp,l);
+    EasuTap(aC,aW,float2(2.0,0.0)-pp,dir,len2v,lob,clp,h);
+    EasuTap(aC,aW,float2(1.0,0.0)-pp,dir,len2v,lob,clp,g);
+    EasuTap(aC,aW,float2(1.0,2.0)-pp,dir,len2v,lob,clp,o);
+    EasuTap(aC,aW,float2(0.0,2.0)-pp,dir,len2v,lob,clp,n);
+    // Dering against the four nearest neighbours (f, g, j, k - the reference's
+    // packed min/max set), so a single bright or dark texel cannot ring.
+    float3 min4=min(min(f,g),min(j,k));
+    float3 max4=max(max(f,g),max(j,k));
+    float3 pix=min(max4,max(min4,aC/aW));
+    return float4(pix,1.0);
+}
 )";
 
 // The profile the entry point `entry` compiles under, for either of the two

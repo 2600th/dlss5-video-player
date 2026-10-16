@@ -1950,11 +1950,13 @@ bool D3D12Renderer::CreateUpscalePresentResources()
         // rung has to release the pair it built for the larger one.
         m_psoUpscaleSharp.Reset();m_psoUpscaleStretch.Reset();m_upscaleRootSig.Reset();
         m_upscaleRtvHeap.Reset();m_upscaleSrvHeap.Reset();m_upscaleSharp.Reset();m_upscaleStretch.Reset();
+        m_psoUpscaleEasu.Reset();
         // A rung that no longer grows has no upscaler at all: the FSR context,
         // if one was built for the larger rung, is sized to that rung and has
         // to go with it.
         m_fsrUpscale.reset();
         m_fsrUpscaleActive = false;
+        m_easuActive = false;
         m_upscaleOffered = false;
         return true;
     }
@@ -1972,10 +1974,14 @@ bool D3D12Renderer::CreateUpscalePresentResources()
         }
         return true;
     };
-    ComPtr<ID3DBlob> vs, stretchPs, sharpPs;
+    ComPtr<ID3DBlob> vs, stretchPs, sharpPs, easuPs;
     if (!compile("VS", vs)) return false;
     if (!compile("PSAmdUpscale", stretchPs)) return false;
     if (!compile("PSAmdCas", sharpPs)) return false;
+    // FSR1 EASU: the middle tier. It is a pure shader, so a compile failure is
+    // the only thing that can take it out of the chain (then CATMULL-ROM runs).
+    if (!compile("PSAmdEasu", easuPs)) { m_easuActive = false; }
+    else m_easuActive = true;
 
     // The static sampler is POINT because both passes sample at exact texel
     // centres: the Catmull-Rom weights are the whole filter and the CAS taps
@@ -2102,7 +2108,30 @@ bool D3D12Renderer::CreateUpscalePresentResources()
     pso.PS = {sharpPs->GetBufferPointer(), sharpPs->GetBufferSize()};
     if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(m_psoUpscaleSharp.GetAddressOf()))))
         return false;
+    pso.PS = {easuPs->GetBufferPointer(), easuPs->GetBufferSize()};
+    if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(m_psoUpscaleEasu.GetAddressOf())))) {
+        LOG("Playback upscale: FSR1 EASU PSO would not build; the "
+            "stretch-and-sharpen will serve the SR switch.");
+        m_easuActive = false;
+    }
     m_upscaleOffered = true;
+
+    // FSR1 EASU constants (CPU side, mirror ffxFsrPopulateEasuConstants). No
+    // dynamic resolution here, so inputViewport == inputSize == render size.
+    // Only con0 (scale + offset into input space) and con1.xy (1/renderSize)
+    // are used by the direct-sample EASU; con1.zw are kept for ABI symmetry.
+    {
+        const float rw = static_cast<float>(m_renderW), rh = static_cast<float>(m_renderH);
+        const float ow = static_cast<float>(m_outputW), oh = static_cast<float>(m_outputH);
+        m_easuCon[0] = rw / ow;
+        m_easuCon[1] = rh / oh;
+        m_easuCon[2] = 0.5f * rw / ow - 0.5f;
+        m_easuCon[3] = 0.5f * rh / oh - 0.5f;
+        m_easuCon[4] = 1.0f / rw;
+        m_easuCon[5] = 1.0f / rh;
+        m_easuCon[6] = 1.0f / rw;
+        m_easuCon[7] = -1.0f / rh;
+    }
 
     // ---- AMD FSR Upscaling 4.1.1, when this machine can run it -------------
     //
@@ -2114,31 +2143,46 @@ bool D3D12Renderer::CreateUpscalePresentResources()
     m_fsrUpscaleActive = false;
     m_fsrUpscale.reset();
     const float ratio = static_cast<float>(m_outputW) / static_cast<float>(m_renderW);
+    // FSR 4 is the top tier; it starts only when the loader is present, the GPU
+    // is one it supports, and the ratio is within the largest it defines.
+    bool fsrServing = false;
     if (ratio > 3.0f) {
         LOG("Playback upscale: the rung is " << ratio
-            << "x the source, past FSR's largest defined ratio (3.0x); the "
-               "stretch-and-sharpen will serve the SR switch.");
-        return true;
+            << "x the source, past FSR's largest defined ratio (3.0x); FSR 4 "
+               "will not start.");
+    } else {
+        std::wstring missing;
+        if (!FsrUpscaleBackend::RuntimePresent(nullptr, &missing)) {
+            LOG("Playback upscale: no FSR 4 runtime (" << utf8_text::FromWide(missing)
+                << "); FSR 4 will not start.");
+        } else {
+            auto backend = std::make_unique<FsrUpscaleBackend>();
+            if (!backend->Initialize(m_device.Get(), m_renderW, m_renderH, m_outputW, m_outputH,
+                                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT)) {
+                LOG("Playback upscale: FSR 4 would not start ("
+                    << utf8_text::FromWide(backend->LastDetail()) << ").");
+            } else {
+                m_fsrUpscale = std::move(backend);
+                m_fsrUpscaleActive = true;
+                m_upsResetPending = true;
+                fsrServing = true;
+            }
+        }
     }
-    std::wstring missing;
-    if (!FsrUpscaleBackend::RuntimePresent(nullptr, &missing)) {
-        LOG("Playback upscale: no FSR 4 runtime (" << utf8_text::FromWide(missing)
-            << "); the stretch-and-sharpen will serve the SR switch.");
-        return true;
+    // One decisive line for the log and the self-test: which tier actually
+    // serves the SR switch. FSR 4 first; FSR1 EASU next (a pure shader, so it
+    // is available whenever its PSO compiled); the Catmull-Rom stretch only if
+    // even EASU's PSO failed to build.
+    if (fsrServing) {
+        LOG("Playback upscale: AMD FSR Upscaling 4.1.1 is serving the SR switch at "
+            << m_renderW << "x" << m_renderH << " -> " << m_outputW << "x" << m_outputH);
+    } else if (m_easuActive) {
+        LOG("Playback upscale: FSR1 EASU is serving the SR switch at "
+            << m_renderW << "x" << m_renderH << " -> " << m_outputW << "x" << m_outputH);
+    } else {
+        LOG("Playback upscale: the Catmull-Rom stretch-and-sharpen is serving the SR "
+            "switch at " << m_renderW << "x" << m_renderH << " -> " << m_outputW << "x" << m_outputH);
     }
-    auto backend = std::make_unique<FsrUpscaleBackend>();
-    if (!backend->Initialize(m_device.Get(), m_renderW, m_renderH, m_outputW, m_outputH,
-                             DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT)) {
-        LOG("Playback upscale: FSR 4 would not start ("
-            << utf8_text::FromWide(backend->LastDetail())
-            << "); the stretch-and-sharpen will serve the SR switch.");
-        return true;
-    }
-    m_fsrUpscale = std::move(backend);
-    m_fsrUpscaleActive = true;
-    m_upsResetPending = true;
-    LOG("Playback upscale: AMD FSR Upscaling 4.1.1 is serving the SR switch at "
-        << m_renderW << "x" << m_renderH << " -> " << m_outputW << "x" << m_outputH);
     return true;
 }
 
@@ -3145,9 +3189,42 @@ void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)
                 << "); falling back to the stretch-and-sharpen from this frame on.");
             m_fsrUpscale->Shutdown();
             m_fsrUpscaleActive = false;
+            // FSR read the neural frame as NON_PIXEL; the pixel-shader stretch
+            // below (EASU, then CATMULL-ROM) needs it as PIXEL. The top of this
+            // function only made that transition when FSR was not going to run,
+            // so a mid-frame FSR failure has to make it here.
+            if (!m_colorInRT)
+                Barrier(cmd, m_dlssColor.Get(), GuideReadState,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             // Fall through: this frame still has to be stretched, or the
             // sharpen below reads a target nobody wrote.
         }
+    }
+    // ---- stretch: the FSR1 EASU middle tier -------------------------------
+    //
+    // EASU replaces the Catmull-Rom stretch whenever FSR 4 is not serving: it
+    // is a pure shader, so it is available on every machine this path runs on.
+    // It reads the same linear FP16 neural frame and writes the same target,
+    // and CAS below it is none the wiser. A PSO compile failure (m_easuActive
+    // false) skips it and the Catmull-Rom below serves instead. The draw is
+    // inlined rather than through the `draw` lambda because that lambda bakes
+    // in the Catmull-Rom constants (SrcW/SrcH/...); EASU needs its own.
+    if (!stretched && m_easuActive) {
+        Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cmd->SetDescriptorHeaps(1, heaps);
+        cmd->SetGraphicsRootSignature(m_upscaleRootSig.Get());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->RSSetViewports(1, &viewport);
+        cmd->RSSetScissorRects(1, &scissor);
+        cmd->OMSetRenderTargets(1, &rtvBase, FALSE, nullptr);
+        cmd->SetPipelineState(m_psoUpscaleEasu.Get());
+        cmd->SetGraphicsRootDescriptorTable(0, SRVGPU(4));
+        cmd->SetGraphicsRoot32BitConstants(1, 8, m_easuCon, 0);
+        cmd->DrawInstanced(3, 1, 0, 0);
+        Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        stretched = true;
     }
     if (!stretched) {
         Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
