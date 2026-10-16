@@ -5,18 +5,24 @@ _Audited against 0.26.0 (13f92b7) on 2026-09-25. Status re-checked against
 what part is done. File:line citations are as of the audit and have drifted by
 up to ~75 lines in `main.cpp`; search for the named symbol._
 
+_Refreshed on 2026-10-16 against 0.28.2 (f42cb39) with a landscape survey
+(`reports/landscape-refresh-2026-10-16.md`): P0.19, P1.35-P1.43, P2.43-P2.58
+and P3.14-P3.20 are new, several open items gained evidence, and the work is
+grouped into [milestones](#milestones)._
+
 Open work only, highest priority first. Completed items are removed rather
 than ticked; what shipped is in `CHANGELOG.md` and git history. When a task
 lands, delete it from this file in the same change.
 
 **IDs are never reused.** Source comments cite them (`P2.8`, `P3.7`), so a
 new task takes the next free number in its tier even when lower numbers are
-free. Next free: **P0.19, P1.35, P2.43, P3.14**.
+free. Next free: **P0.20, P1.45, P2.59, P3.21**.
 
 Sources: three code audits (neural helper/cache/runtime; decode, playback,
 audio and export; app shell, build, CI and release) and two web surveys of the
 DLSS 5 landscape, on 2026-09-25, plus the open items carried over from the
-2026-09-23 list.
+2026-09-23 list; the 2026-10-01 improvement-ideas survey and the 2026-10-04 UI
+proposal (`reports/`, not committed); and the 2026-10-16 landscape refresh.
 
 ## How to read it
 
@@ -57,59 +63,163 @@ clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
 
 ## Summary
 
-| ID | Task | Effort | Impact | |
+| ID | Task | Effort | Impact | Milestone |
 | --- | --- | :---: | --- | :---: |
-| **P0** | **Fix before the next release** | | | |
-| | _Nothing open_ | | | |
 | **P1** | **Next** | | | |
-| | _Nothing open_ | | | |
+| [P1.44](#p144) | Reconcile the two brightness instruments | S | Pipeline | M3 |
 | **P2** | **High-value features** | | | |
 | | _Comparison and review_ | | | |
-| [P2.27](#p227) | Save a comparison clip | S-M | Player, Pipeline | |
-| [P2.28](#p228) | Compare two neural presets on one frame | M | Player | |
-| [P2.29](#p229) | Flicker-map compare view | M | Player | |
-| [P2.30](#p230) | Per-frame metric lane and worst-frames navigator | M | Player, Pipeline | |
-| [P2.31](#p231) | Loop In/Out and slow-motion playback | S-M | Player | |
-| [P2.32](#p232) | Scopes and a pixel probe | M | Player | |
-| [P2.33](#p233) | Comparison frame pack | S-M | Player | |
-| [P2.34](#p234) | Several pinnable magnifiers | S-M | Player | |
+| [P2.31](#p231) | Loop In/Out, slow motion and a backward frame step | S-M | Player | M3 |
+| [P2.29](#p229) | Flicker-map compare view | M | Player | M3 |
+| [P2.30](#p230) | Per-frame metric lane and worst-frames navigator | M | Player, Pipeline | M3 |
+| [P2.28](#p228) | Compare two to four neural presets on one frame | M | Player | M3 |
+| [P2.27](#p227) | Save a comparison clip | S-M | Player, Pipeline | M6 |
+| [P2.32](#p232) | Scopes and a pixel probe | M | Player | M6 |
+| [P2.33](#p233) | Comparison frame pack | S-M | Player | M6 |
+| [P2.34](#p234) | Several pinnable magnifiers | S-M | Player | M6 |
+| | _Temporal and look_ | | | |
+| [P2.43](#p243) | Temporal stability v2: steady the edit, timed by the frame | M-L | Pipeline, Player | M4 |
+| [P2.36](#p236) | Opt-in face protection mask | M-L | Player, Pipeline | M4 |
+| [P2.45](#p245) | Post-model look protections: tone range and band-split Mix | M | Player | M4 |
+| [P2.37](#p237) | Opt-in: bake the Mix, mask and adjustments into exports | M | Pipeline | M4 |
+| [P2.46](#p246) | Grain restore after the model | S-M | Player | M4 |
 | | _Render and export_ | | | |
-| [P2.35](#p235) | Resume and join partial renders across sessions | M-L | Pipeline | |
-| [P2.36](#p236) | Opt-in face protection mask | M-L | Player, Pipeline | |
-| [P2.37](#p237) | Opt-in: bake the Mix and mask into exports | M | Pipeline | |
-| [P2.38](#p238) | Measure DLSS SR presets L and M | S | Pipeline | |
-| [P2.39](#p239) | RTX VSR on the neural render | M | Player, Pipeline | |
-| [P2.40](#p240) | Opt-in subtitle burn-in for MP4 and GIF | M | Pipeline | |
-| | _Input and convenience_ | | | |
-| [P2.41](#p241) | Clipboard copy and paste | S | Player | |
-| [P2.42](#p242) | YouTube captions | S | Player | |
+| [P2.35](#p235) | Resume, pause and join renders across sessions | M-L | Pipeline | M5 |
+| [P2.47](#p247) | Pre-warm the helper; remember the preflight verdict | M | Pipeline | M5 |
+| [P2.48](#p248) | Background renders yield to playback and other apps | M | Pipeline | M5 |
+| [P2.49](#p249) | Choose the GPU for the neural render | M | Pipeline, Player | M5 |
+| [P2.51](#p251) | Deinterlace interlaced sources before the model | M | Pipeline | M5 |
+| [P2.53](#p253) | Say a long job finished, outside the window | S | Player | M5 |
+| [P2.40](#p240) | Opt-in subtitle burn-in for MP4 and GIF | M | Pipeline | M6 |
+| [P2.38](#p238) | Measure DLSS SR presets L and M | S | Pipeline | M8 |
+| [P2.39](#p239) | RTX VSR on the neural render | M | Player, Pipeline | M8 |
+| | _Interface, input and convenience_ | | | |
+| [P2.54](#p254) | The UI restructure, in one release | L | Player, Docs | M2 |
+| [P2.55](#p255) | UI small wins | S-M | Player | M2 |
+| [P2.52](#p252) | Resume where you left off; next file in the folder | S | Player | M2 |
+| [P2.41](#p241) | Clipboard copy and paste | S | Player | M2 |
+| [P2.42](#p242) | YouTube captions | S | Player | M2 |
+| | _HDR_ | | | |
+| [P2.56](#p256) | Try an FP16 scRGB swap chain for HDR presentation | S-M | Player | M7 |
 | | _Carried over_ | | | |
-| [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | |
+| [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | M8 |
 | **P3** | **Strategic or large** | | | |
-| [P3.9](#p39) | HDR output of the render | L | Pipeline | |
-| [P3.10](#p310) | Processing scale above 100% as an export-only rung | M | Pipeline | |
-| [P3.11](#p311) | Compare against an external file | M-L | Player | |
-| [P3.12](#p312) | Network sources beyond YouTube | M | Player | |
-| [P3.13](#p313) | Render queue (owner's decision) | M | Pipeline | |
-| [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | |
-| [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | |
-| [P3.8](#p38) | Repository media hygiene | S | Release | |
+| [P3.14](#p314) | Runtime refresh: RenoDX 8.5 and NVIDIA's October model | M-L | Pipeline, Release | M1 / gated |
+| [P3.9](#p39) | HDR output of the render | L | Pipeline | M7 |
+| [P3.18](#p318) | A measured HDR→SDR peak for the model's input | M | Pipeline | M7 |
+| [P3.15](#p315) | NVIDIA Video Effects SDK: frame generation and VSR modes | M-L | Pipeline | M8 |
+| [P3.16](#p316) | Frame Generation "Performance mode" as a labelled rung | S | Pipeline | M8 |
+| [P3.17](#p317) | A JavaScript runtime for yt-dlp after Deno | S | Release | M8 |
+| [P3.19](#p319) | Overlap the per-frame stages | L | Pipeline | M8 |
+| [P3.20](#p320) | A residual-composite reduced-scale rung | M | Pipeline | M8 |
+| [P3.10](#p310) | Processing scale above 100% as an export-only rung | M | Pipeline | M8 |
+| [P3.11](#p311) | Compare against an external file | M-L | Player | M8 |
+| [P3.12](#p312) | Network sources beyond YouTube | M | Player | M8 |
+| [P3.13](#p313) | Render queue (owner's decision) | M | Pipeline | M8 |
+| [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | M8 |
+| [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | M8 |
+| [P3.8](#p38) | Repository media hygiene | S | Release | M8 |
+
+---
+
+<a id="milestones"></a>
+## Milestones
+
+Grouped by release, by what each group needs first, and by code area, so one
+branch touches one part of the tree. Each milestone is one minor release
+unless it says otherwise. Effort: S is half a day to a day, M two to five days,
+L one to two weeks.
+
+| | Release | Theme | Tasks | Size | Needs first |
+| --- | --- | --- | --- | :---: | --- |
+| **M0, M1** | 0.28.3 | Shipped on 2026-10-16: YouTube, provenance, runtime readiness, seven measurements | - | - | - |
+| **M2** | 0.29.0 | One relearn: the UI restructure | P2.54, P2.55, P2.52, P2.41, P2.42 | ~2 weeks | - |
+| **M3** | 0.30.0 | Judge it: the review loop | P2.31, P2.29, P2.30, P2.28, P1.44 | ~2 weeks | M2 (compare-bar slots) |
+| **M4** | 0.31.0 | Fix it: faces, flicker and colour | P2.43, P2.36, P2.45, P2.37, P2.46 | ~3 weeks | M2 (Picture panel zones), M3 (tools to judge it) |
+| **M5** | 0.32.0 | Never lose work, never wait | P2.35, P2.47, P2.48, P2.49, P2.51, P2.53 | ~2-3 weeks | runs beside M3-M4 |
+| **M6** | 0.33.0 | Share and inspect | P2.27, P2.33, P2.32, P2.34, P2.40 | ~2 weeks | M3 (worst frames feed the frame pack) |
+| **M7** | 0.34.0 | HDR end to end | P3.9, P3.18, P2.56 | ~3 weeks | - |
+| **M8** | - | Gated or strategic | P3.14 (October model), P3.15, P3.16, P3.17, P3.19, P3.20, P2.38, P2.39, P2.4, P3.5, P3.6, P3.8, P3.10-P3.13 | - | each item's blocker |
+
+**M0 and M1 shipped together as 0.28.3** (2026-10-16), a patch because nothing
+in them changes a rendered pixel. The measurements decided four later designs.
+The control mask is not reachable, so M4's protections are post-model blends.
+AQ loses, so M5's encode default stays. The NV12 transport is small, so the
+zero-copy line stays parked. Stacked passes drift both ways, so there is no
+correction. RenoDX 8.5 is adoptable with three config changes (P3.14). Owner
+actions still open: close #15, fixed in 0.28.2 and answered on 10-04; decide on
+#3, which has waited on its reporter since 09-09.
+
+**Interrupt rule.** When NVIDIA's October model is obtainable, P3.14 pre-empts
+the running milestone and ships as its own minor release: it re-keys every
+cache entry, changes the pace forecasts, and may raise the driver floor.
+
+**M2 before M3 and M4.** The UI proposal's restructure creates the places the
+next controls go: compare-bar contextual controls for the loop, speed and
+flicker map, and the Picture panel's "instant" zone for the protections and
+grain. Restructuring first means users relearn once and the docs are rewritten
+once. If user-visible review features matter more this month, swap M2 and M3;
+the cost is placing the compare-bar controls twice.
+
+**M5 runs beside M3 and M4.** It touches the worker, cache, decode child and
+NVENC; M3 and M4 touch the player shell, the compare views and the present
+path. Separate worktrees, separate branches.
+
+**The quality rule still decides defaults.** M4, P2.51 and P3.18 change
+pixels: each is opt-in, or on by default only where it moves quality up
+(deinterlacing a flagged-interlaced source, an encode that wins at matched
+size), each is a cache- or export-key term, and each is scored with P1.42.
 
 ---
 ---
 
 # P0 — Fix before the next release
 
-Nothing open. P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`).
+P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`). P0.19 landed in 0.28.3
+(2026-10-16): the yt-dlp nightly 2026.10.10.233141, pinned by SHA-256.
+
+Nothing open.
 
 ---
 
 # P1 — Next
 
-Nothing open. P1.24-P1.34 landed on 2026-09-30 (branch `fix/p1-all-and-cli`),
-with the `dlss5-convert` command-line converter. The release-tag protection
-P1.30 asked for is repository ruleset 24245175: `refs/tags/dlss5-video-player-v*`
-cannot be updated or deleted.
+P1.24-P1.34 landed on 2026-09-30 (branch `fix/p1-all-and-cli`), with the
+`dlss5-convert` command-line converter. The release-tag protection P1.30 asked
+for is repository ruleset 24245175: `refs/tags/dlss5-video-player-v*` cannot be
+updated or deleted.
+
+P1.35-P1.40, P1.42 and P1.43 landed in 0.28.3 (2026-10-16). Two parts stay
+with the owner. One is asking the DLSS5 add-on's distributor (RankFTW/rhi-repo,
+or ShortFuse) for its source and licence; `THIRD_PARTY.md` says what was found
+until then. The other is Authenticode signing (cost, identity). P1.38 reads
+NGX's `DLSSNR.*` floor but uses it only to explain a failed probe, never to
+refuse a setup the probe accepts, since NGX's floor sits above the 610.47 the
+runtime was measured working on. P1.40 recognises 0.4.0 and names a lossy
+`Optimized`; the one-click pin stays at 0.3.5, which already has the
+re-creation fix.
+
+P1.41 was measured in the same release and needs no correction
+([passes-drift-20261016](measurements/passes-drift-20261016/REPORT.md)). From one
+to four passes the mean luma moves −1.10 to +1.74 codes, in both directions;
+each pass compounds the model's own change, faces cool, and flicker rises.
+
+<a id="p144"></a>
+### P1.44 · Reconcile the two brightness instruments
+
+`S` · **Pipeline** · _measurement infrastructure_
+
+- **Problem.** On the same five renders, the mean of the Y plane puts one pass
+  0.6-1.5 codes darker than the source. The worker's own `luma_shift` puts it
+  about 1.2 codes brighter
+  ([passes-drift-20261016](measurements/passes-drift-20261016/REPORT.md)). The
+  pass-to-pass drift agrees within 0.3 codes, so one instrument has an offset:
+  sampled cells, range, or a transfer step. P2.30's metric lane and the
+  render report would show whichever is wrong.
+- **Where.** `TemporalMetrics.h`, `tools/benchmark/m1.py`, `analyze.py`.
+- **Fix.** Score one Lossless render both ways on the same frames, find the
+  step that differs, and fix the instrument that is wrong.
+- **Test.** Both agree within 0.1 code on the passes-drift clips.
 
 ---
 
@@ -132,7 +242,9 @@ the comparison features below are aimed at making those visible.
 `S-M` · **Player, Pipeline**
 
 - **What.** Split, wipe, side by side or 2x2 as a labelled MP4 over In/Out,
-  built from the cached render plus the source (`hstack`/`overlay`/`drawtext`).
+  built from the cached render plus the source (`hstack`/`overlay`/`drawtext`),
+  plus a 9:16 stacked layout, since "off vs on" clips are mostly shared as
+  Shorts.
 - **Why.** "Off vs on" clips are how DLSS 5 is judged
   ([TechRadar](https://www.techradar.com/computing/nvidias-dlss-5-is-going-viral-for-all-the-wrong-reasons-here-are-the-5-most-controversial-examples-of-the-ai-powered-breakthrough-in-action)).
   The player saves comparison stills only; Visual Enhancer's 2-Up is preview
@@ -141,14 +253,18 @@ the comparison features below are aimed at making those visible.
   `main.cpp`, `RenderCommandLine.h`.
 
 <a id="p228"></a>
-### P2.28 · Compare two neural presets on one frame
+### P2.28 · Compare two to four neural presets on one frame
 
 `M` · **Player**
 
 - **What.** Preset A vs preset B in two panes with shared zoom, on the paused
-  frame first; pane B comes from a second settings key in the cache.
+  frame first; pane B comes from a second settings key in the cache. Then up
+  to four "finalists" in the 2 × 2, a short marked range so flicker differences
+  show, and "Keep this one", which makes the choice the video's setting.
 - **Why.** Choosing a preset today means re-rendering and remembering.
-  DLSS5-Image-Converter ships "Compare styles".
+  DLSS5-Image-Converter ships "Compare styles"; Improve-ImgSLI's master adds
+  "Keep best / Compare finalists"
+  ([37b2bfd](https://github.com/Loganavter/Improve-ImgSLI/commit/37b2bfddb0db5046496588f12561adee174b626c)).
 - **Where.** `NeuralPresets.h`, `CompareViewPolicy.h`, `AppMenu.cpp`.
 
 <a id="p229"></a>
@@ -183,12 +299,14 @@ the comparison features below are aimed at making those visible.
   `TimelinePolicy.h`, `main.cpp`.
 
 <a id="p231"></a>
-### P2.31 · Loop In/Out and slow-motion playback
+### P2.31 · Loop In/Out, slow motion and a backward frame step
 
 `S-M` · **Player**
 
 - **What.** Loop the marked range; play at 1/2, 1/4 and 1/8 speed on the
-  exact cached frames (no interpolation), audio muted.
+  exact cached frames (no interpolation), audio muted; and step back a frame
+  with `,`, as mpv does. Only `.` steps today (`StepCachedFrame` in
+  `main.cpp`); on a rendered range the cache makes a back-step nearly free.
 - **Why.** Temporal artefacts are judged by looping a short range slowly.
   ICAT and [video-compare](https://github.com/pixop/video-compare) both do it;
   nothing in `src/` does.
@@ -201,7 +319,10 @@ the comparison features below are aimed at making those visible.
 `M` · **Player**
 
 - **What.** Waveform, vectorscope and histogram for original vs render, and a
-  pixel probe showing both values under the cursor.
+  pixel probe showing both values under the cursor. RGB and YUV modes, and
+  legal-range shading, which video-compare declined because FFmpeg's histogram
+  filter cannot draw it
+  ([#154](https://github.com/pixop/video-compare/issues/154), 2026-10-13).
 - **Why.** Makes the colour-shift complaints measurable ("washed out",
   saturation loss, pink lips). video-compare has them; `src/` has none.
 - **Where.** `D3D12Renderer.cpp`, `UiLayout.cpp`, `AppMenu.cpp`.
@@ -213,7 +334,10 @@ the comparison features below are aimed at making those visible.
 
 - **What.** N frames (at markers, random, or the worst flicker) saved as
   source and render PNG pairs in the slow.pics layout, with a local HTML
-  viewer. Local only; upload only on explicit request.
+  viewer. Local only; upload only on explicit request. Automatic picks keep a
+  minimum spacing and skip black or solid frames, as
+  [Pear v1.1.0](https://github.com/rlaphoenix/Pear/releases/tag/v1.1.0) does
+  (2026-10-07).
 - **Why.** The encoding community's standard workflow
   ([thewiki.moe](https://thewiki.moe/tutorials/comparison/),
   [Pear](https://github.com/rlaphoenix/Pear)).
@@ -229,51 +353,232 @@ the comparison features below are aimed at making those visible.
 - **Why.** [Improve-ImgSLI v9.0.0](https://github.com/Loganavter/Improve-ImgSLI/releases/tag/v9.0.0).
 - **Where.** `CompareViewPolicy.h`, `D3D12Renderer.cpp`, `UiLayout.cpp`.
 
+## Temporal and look
+
+Faces moving, flicker and colour shift are still the complaints that make
+people abandon a tool's version
+([VE #95](https://github.com/Merserk/dlss5-visual-enhancer/issues/95),
+[NeuralScreen #151](https://github.com/perseval-BLR/NeuralScreen/issues/151),
+[#160](https://github.com/perseval-BLR/NeuralScreen/issues/160)). Two things
+changed on 2026-10-08: the runtime's own control mask became usable in a
+shipping tool, and "steady the edit, not the frame" became the common
+stabiliser design. Measure first (M1), then build (M4).
+
+M1's verdicts (0.28.3): the runtime's control mask cannot be reached through
+either RenoDX ([control-mask-20261016](measurements/control-mask-20261016/REPORT.md)),
+so every protection below is a blend after the model. NVIDIA's RTX Remix
+defaults land at Gentle's strength
+([nvidia-defaults-20261016](measurements/nvidia-defaults-20261016/REPORT.md));
+see Parked.
+
+<a id="p243"></a>
+### P2.43 · Temporal stability v2: steady the edit, timed by the frame
+
+`M-L` · **Pipeline, Player** · _new rungs; off by default until they win P1.42's yardstick_
+
+- **What.** Three changes to the Temporal stability pass:
+  1. **History by frame time.** `w' = w^(Δt/Δt_ref)`, so a rung is the same
+     time constant at 24p and 60p; `TemporalStabilityPolicy.h` has no frame
+     duration today.
+     [NeuralScreen v2.4.0](https://github.com/perseval-BLR/NeuralScreen/releases/tag/v2.4.0)
+     fixed shading trailing on moving faces this way.
+  2. **Edit-only mode.** Warp and blend `render − source` along motion and add
+     it to the current source, so source detail is never delayed.
+     [NeuralScreen v2.2.0](https://github.com/perseval-BLR/NeuralScreen/releases/tag/v2.2.0):
+     edit instability down 43-49 %, strength within 2 %, 0.1-0.3 ms a frame.
+     The Resolve plugin's anti-flicker
+     ([0.4.1](https://github.com/SAOG0721/DaVinci-Resolve-DLSS5/releases/tag/v0.4.1))
+     and [Dlss5VideoEnc](https://github.com/Johnwikix/Dlss5VideoEnc) do the
+     same.
+  3. **Trust motion only where it beats none.** Keep an NVOFA vector only where
+     it predicts better than zero motion (NeuralScreen: "jelly" on still
+     background beside a moving object, 91.7 % to 0 %), and judge cuts on
+     aligned frames (false resets 4.8 % to 0.6 %).
+- **Why.** The shipped pass blends the whole frame and "costs some fine
+  detail" (`docs/USAGE.md`).
+- **Where.** `TemporalStabilityShader.h`, `TemporalStabilityPolicy.h`,
+  `TemporalSettings.h`, `FlowGate.h`, `SceneCut.h`, `tools/benchmark/cutlab.py`.
+- **Risk.** Change 1 moves the pixels of existing stability renders, so it is a
+  cache-key term for those settings. Measure on faces specifically.
+- **Note.** RenoDX 8.5's Detail stability, on by default, is change 2 inside
+  the add-on: a filter on the model's edit along the motion vectors
+  ([renodx-85-20261016](measurements/renodx-85-20261016/REPORT.md)). Score it
+  with P1.42's yardstick before building the player's own.
+
+<a id="p245"></a>
+### P2.45 · Post-model look protections: tone range and band-split Mix
+
+`M` · **Player** · _opt-in, instant like Mix; exported only through P2.37_
+
+- **What.** Two controls beside Mix: a tone-range mask that keeps the source in
+  the shadows or highlights, and a band-split Mix with two directions, "keep
+  source tone" (the source's low frequencies and chroma under the model's
+  detail) and "keep source detail" (the reverse), gated by the existing
+  source-alignment test so copied edges do not ghost.
+- **Why.** "DLSS 5 destroys pronounced shadows", and sliders did not fix it
+  ([VE #85](https://github.com/Merserk/dlss5-visual-enhancer/issues/85)). The
+  Resolve plugin ([0.4.0](https://github.com/SAOG0721/DaVinci-Resolve-DLSS5/releases/tag/v0.4.0):
+  hue, shadow and highlight protection), Veyra 2.0.4 and the OBS filter now all
+  protect on the correction. [Hi-Light](https://arxiv.org/abs/2601.23167)
+  (Apache-2.0 code) gives the band-split recipe and its ghosting warning.
+- **Where.** `D3D12Renderer.cpp`, `CompareMaskPolicy.h`, `SliderPolicy.h`, the
+  Image adjustments dialog in `main.cpp`.
+- **Note.** The in-model mask is not reachable through RenoDX
+  ([control-mask-20261016](measurements/control-mask-20261016/REPORT.md)), so
+  both controls are post-model.
+
+<a id="p246"></a>
+### P2.46 · Grain restore after the model
+
+`S-M` · **Player** · _opt-in, instant; lower value_
+
+- **What.** Seeded, animated film grain added back after the model, sized from
+  the grain loss the render report already measures.
+- **Why.** [Visual Enhancer v14.0](https://github.com/Merserk/dlss5-visual-enhancer/releases/tag/v14.0)
+  added a grain stage (amount, size, colour, tonal response, seed).
+- **Where.** `D3D12Renderer.cpp`, `TemporalMetrics.h`, `NeuralReceipt.cpp`.
+
+<a id="p236"></a>
+### P2.36 · Opt-in face protection mask
+
+`M-L` · **Player, Pipeline** · _off by default; a blend after the model_
+
+- **What.** Faces from Windows' built-in
+  [`FaceDetector`](https://learn.microsoft.com/en-us/uwp/api/windows.media.faceanalysis.facedetector)
+  (no model download) feed a mask frame by frame; the render report gains a
+  face-region colour shift. The mask feeds the existing Mix mask after the
+  model. The runtime's own control mask is not reachable through RenoDX
+  ([control-mask-20261016](measurements/control-mask-20261016/REPORT.md)); an
+  upstream change that forwards `DLSSNR.ControlMask` would reopen that route.
+- **Why.** Missing masks are the cited cause of identity changes
+  ([Held Games](https://heldgames.com/guides/dlss-5-official-vs-mod)); Visual
+  Enhancer shipped Face/Skin Protection and replaced it with the control mask
+  in v15; the player's own tooltip says Skin structure "is not face
+  protection" (`Localization.h`).
+- **Where.** A new face-mask policy and detector, `CompareMaskPolicy.h`,
+  `D3D12Renderer.cpp`, `TemporalMetrics.h`, `NeuralReceipt.cpp`.
+- **Risk.** Misses profile and small faces, so the mask pops; needs a hold and
+  feather over time. If `FaceDetector` misses too many,
+  [YuNet 2026may](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)
+  (MIT) is the fallback, at the cost of ONNX Runtime in the package.
+
+<a id="p237"></a>
+### P2.37 · Opt-in: bake the Mix, mask and adjustments into exports
+
+`M` · **Pipeline**
+
+- **What.** Apply the Mix, the mask, the P2.45 protections and the image
+  adjustments to "Save converted video" (e.g. `maskedmerge`), recorded in the
+  receipt.
+- **Why.** Today they affect only what you watch (`docs/USAGE.md`), and since
+  0.28.2 the export dialog says so. The Resolve filter exposes Output Mix; it is
+  the direct answer to "too much" on faces.
+- **Where.** `ExportPipeline.h`, `MediaPipeline.cpp`, `CompareMaskPolicy.h`.
+
 ## Render and export
 
 <a id="p235"></a>
-### P2.35 · Resume and join partial renders across sessions
+### P2.35 · Resume, pause and join renders across sessions
 
 `M-L` · **Pipeline** · _quality-neutral_
 
 - **What.** Treat an earlier or interrupted run's segments as coverage when a
   video is reopened, and join partial renders, instead of rendering again.
+  Pause a render or export and release the GPU, resume from the last committed
+  segment, and pause safely when Windows suspends (`PBT_APMSUSPEND`).
 - **Why.** Both are stated limits in the README. Losing long renders is the
   category's loudest complaint
-  ([Topaz: 17 hours lost](https://community.topazlabs.com/t/pause-resume-threw-away-17-hours-of-rendered-footage/83266)).
-  `NeuralSegmentIndex` already tags segments by run and merges runs.
+  ([Topaz: 17 hours lost](https://community.topazlabs.com/t/pause-resume-threw-away-17-hours-of-rendered-footage/83266)),
+  and [Visual Enhancer v15.0](https://github.com/Merserk/dlss5-visual-enhancer/releases/tag/v15.0)
+  now ships all three parts. `NeuralSegmentIndex` already tags segments by run
+  and merges runs.
 - **Where.** `NeuralCache.cpp`, `NeuralSegmentIndex.h`,
-  `OfflineNeuralRenderer.cpp`.
+  `OfflineNeuralRenderer.cpp`, `main.cpp` (power notifications).
 
-<a id="p236"></a>
-### P2.36 · Opt-in face protection mask
+<a id="p247"></a>
+### P2.47 · Pre-warm the helper; remember the preflight verdict
 
-`M-L` · **Player, Pipeline** · _off by default_
+`M` · **Pipeline** · _quality-neutral_
 
-- **What.** Faces from Windows' built-in
-  [`FaceDetector`](https://learn.microsoft.com/en-us/uwp/api/windows.media.faceanalysis.facedetector)
-  (no model download) feed the existing Mix mask frame by frame; the render
-  report gains a face-region colour shift.
-- **Why.** Missing masks are the cited cause of identity changes
-  ([Held Games](https://heldgames.com/guides/dlss-5-official-vs-mod)); Visual
-  Enhancer ships Face/Skin Protection; the player's own tooltip says Skin
-  structure "is not face protection" (`Localization.h:363`).
-- **Where.** A new face-mask policy and detector, `CompareMaskPolicy.h`,
-  `D3D12Renderer.cpp`, `TemporalMetrics.h`, `NeuralReceipt.cpp`.
-- **Risk.** Misses profile and small faces, so the mask pops; needs a hold and
-  feather over time.
+- **What.** Start the preflight and priming speculatively when a file opens or
+  a link resolves; cache the preflight verdict per runtime-lock digest, driver
+  version and adapter LUID; skip pre-warming on battery.
+- **Why.** The first `D` takes 7.9-9.0 s to the first rendered frame, 3.8 s of
+  it the preflight probe (`CHANGELOG.md`, `docs/VERIFICATION-matrix.md`), and
+  the first press is when a new user judges the tool. An idle helper holds
+  about 1,061 MiB of VRAM, hence the battery rule. RenoDX arms only after its
+  120 priming frames, so the saving may be the probe alone.
+- **Where.** `NeuralPreflight.cpp`, `ResidentHelperPolicy.h`, `WarmUpPolicy.h`,
+  `NeuralWorker.cpp`.
 
-<a id="p237"></a>
-### P2.37 · Opt-in: bake the Mix and mask into exports
+<a id="p248"></a>
+### P2.48 · Background renders yield to playback and other apps
 
-`M` · **Pipeline**
+`M` · **Pipeline** · _quality-neutral_
 
-- **What.** Apply the Mix and mask to "Save converted video" (e.g.
-  `maskedmerge`), recorded in the receipt.
-- **Why.** Today they affect only what you watch (`docs/USAGE.md:256-257`).
-  The Resolve filter exposes Output Mix; it is the direct answer to "too
-  much" on faces.
-- **Where.** `ExportPipeline.h`, `MediaPipeline.cpp`, `CompareMaskPolicy.h`.
+- **What.** Lower GPU priority for the helper's work when it renders away from
+  the playhead (`IDXGIDevice::SetGPUThreadPriority` or D3D12 queue priority),
+  EcoQoS and below-normal process priority for background-only work, and a
+  setting for it.
+- **Why.** NeuralScreen measured NR falling from 54.1 to about 1.1 fps when a
+  GPU-heavy app held the foreground
+  ([#142](https://github.com/perseval-BLR/NeuralScreen/issues/142)), and its
+  users now ask for process priority
+  ([#170](https://github.com/perseval-BLR/NeuralScreen/issues/170)). A player
+  rendering behind its own playhead creates that contention itself.
+- **Where.** `NeuralWorker.cpp`, `NeuralWorkerMain.cpp`, `LiveSessionPolicy.h`,
+  `RenderPacePolicy.h`.
+
+<a id="p249"></a>
+### P2.49 · Choose the GPU for the neural render
+
+`M` · **Pipeline, Player**
+
+- **What.** A neural-GPU picker by adapter LUID, and optionally a second GPU
+  for whole background renders. Splitting one render across GPUs stays Parked.
+- **Why.** Multi-GPU threads are a steady class
+  ([Veyra #35](https://github.com/Likely7/Veyra-NRVideo/issues/35),
+  [NeuralScreen #157](https://github.com/perseval-BLR/NeuralScreen/issues/157),
+  [Neural Coprocessor #52](https://github.com/maohgad-web/Neural-coprocessor/issues/52),
+  19 comments), and Visual Enhancer's most-discussed thread was a 10x slowdown
+  fixed by choosing the GPU. The Parked list already prefers separate GPU
+  choices (`GpuPreference.cpp`).
+- **Where.** `GpuPreference.cpp`, `NeuralWorker.cpp`, `NeuralCache.cpp`,
+  `AppMenu.cpp`. Confirm the cache key separates renders by adapter.
+
+<a id="p251"></a>
+### P2.51 · Deinterlace interlaced sources before the model
+
+`M` · **Pipeline** · _input conditioning; a cache- and export-key term_
+
+- **What.** Detect interlaced sources (`field_order` and per-frame flags) and
+  deinterlace them in the decode child (`bwdif`, frame rate kept) or with
+  NVDEC's adaptive deinterlacer before the model sees the frame. On for sources
+  flagged interlaced, with an off switch.
+- **Why.** Nothing in `src/` deinterlaces a source (only interlaced display
+  modes are filtered, `main.cpp`), so DVD rips and broadcast captures, which
+  the player otherwise handles (the 0.27.0 anamorphic fix), reach the model
+  combed. Asked for in [Veyra #41](https://github.com/Likely7/Veyra-NRVideo/issues/41)
+  (2026-10-15). The Parked line grouped deinterlacing with tasks that need a
+  model; this one does not.
+- **Where.** `VideoDecoder.cpp`, `MediaPipeline.cpp`, `MediaTools.h`,
+  `NeuralCache.cpp`, `ExportPipeline.h`.
+- **Test.** 1080i and 480i fixtures show no combing in the rendered frame;
+  progressive sources stay byte-identical.
+
+<a id="p253"></a>
+### P2.53 · Say a long job finished, outside the window
+
+`S` · **Player**
+
+- **What.** A Windows notification when an export, `--render` or whole-video
+  render finishes or fails, with Open folder and Play result, and a level
+  setting (All / Errors / None).
+- **Why.** The in-app toast shows only inside the window; NeuralScreen v2.4.0
+  added the level setting. Taskbar progress exists in `main.cpp`, but its
+  comment records no fill on Windows 11 26200; check whether the shell's
+  one-progress-per-button-group rule is the cause.
+- **Where.** `main.cpp`, `ConvertMain.cpp`, `StatusNotePolicy.h`.
 
 <a id="p238"></a>
 ### P2.38 · Measure DLSS SR presets L and M
@@ -286,7 +591,8 @@ the comparison features below are aimed at making those visible.
   2nd-generation transformer
   ([NVIDIA, 2026-01-06](https://www.nvidia.com/en-us/geforce/news/dlss-4-5-dynamic-multi-frame-gen-6x-2nd-gen-transformer-super-res/))
   post-dates the "loses to bicubic" measurement, and the pinned 310.9.1 DLL
-  defines L and M.
+  defines L and M. Veyra 2.0.7 (2026-10-12) now offers K, M and L, and
+  dlssg_for_sm86 0.4.0 runs L and M on RTX 20/30 in INT8.
 - **Where.** `DLSSBackend.cpp`, `UpscalingPolicy.h`, `docs/measurements/`.
 
 <a id="p239"></a>
@@ -308,6 +614,8 @@ the comparison features below are aimed at making those visible.
   asks for it.
 - **Where.** `VsrEngine.cpp`, `UpscalingPolicy.h`, `ExportPipeline.h`,
   `OfflineNeuralRenderer.cpp`. Becomes an export key term.
+- **Candidate.** The NVIDIA Video Effects SDK's VSR "HighBitrate" mode, meant
+  for clean sources, may suit a neural render better than RTX VSR (P3.15).
 
 <a id="p240"></a>
 ### P2.40 · Opt-in subtitle burn-in for MP4 and GIF
@@ -321,7 +629,54 @@ the comparison features below are aimed at making those visible.
   (`MediaPipeline.cpp:1014`).
 - **Where.** `ExportPipeline.h`, `SubtitleOverlay.cpp`, `AppMenu.cpp`.
 
-## Input and convenience
+## Interface, input and convenience
+
+<a id="p254"></a>
+### P2.54 · The UI restructure, in one release
+
+`L` · **Player, Docs** · _from the 2026-10-04 UI proposal_
+
+- **What.** Items X1-X4 and X6 of the UI proposal
+  (`reports/ui-review/PROPOSAL.md` §3 and §6, not committed): the new menu bar;
+  the Picture panel, with Neural settings and Image adjustments in one surface
+  split into "re-renders" and "instant" zones; the toolbar re-slot (a DLSS 5
+  split button carrying the preset, an Upscaler pill, Export); the upscaler as
+  radios; and Compare at the top level with contextual controls on the compare
+  bar.
+- **Why.** 0.28.2 shipped the proposal's "Now" list inside the old structure.
+  Moving menus, panel and toolbar together means users relearn once and the
+  docs are rewritten once, and it makes the places M3 and M4's controls go
+  into.
+- **Where.** `AppMenu.cpp`, `main.cpp`, `UiLayout.cpp`, `CompareBarPolicy.h`,
+  `ToolbarTipPolicy.h`, `Localization.h`, `docs/USAGE.md`, README, `site/`.
+- **Risk.** About 28 "DLSS > …" paths in the docs and strings; ship a "where
+  things moved" table in the CHANGELOG. ini keys stay where they are.
+
+<a id="p255"></a>
+### P2.55 · UI small wins
+
+`S-M` · **Player**
+
+- **What.** From the same proposal: a right-click menu on the picture (X5), the
+  export dialog defaulting to what you are watching (X7), Help > About, User
+  guide and Open log folder, with Check for updates moved there (X8), Re-render
+  from here (X9), and the pipeline chip with the full settings summary in its
+  tooltip (X10).
+- **Where.** `AppMenu.cpp`, `main.cpp`, `StatusChipPolicy.h`, `StageExport.cpp`.
+
+<a id="p252"></a>
+### P2.52 · Resume where you left off; next file in the folder
+
+`S` · **Player**
+
+- **What.** Remember the position per video in the per-source store, beside
+  the subtitle delay and mask; open the next or previous file in the folder.
+- **Why.** mpv's `save-position-on-quit` and `autocreate-playlist`; Veyra
+  shipped a playlist in 2.0.7 after
+  [#21](https://github.com/Likely7/Veyra-NRVideo/issues/21). Neither exists in
+  `src/`.
+- **Where.** `RecentMedia.cpp`, `main.cpp`, `AppMenu.cpp`,
+  `DroppedFilesPolicy.h`.
 
 <a id="p241"></a>
 ### P2.41 · Clipboard copy and paste
@@ -345,6 +700,21 @@ the comparison features below are aimed at making those visible.
   subtitles; the resolver never requests captions
   (`YouTubeResolver.cpp:888`).
 - **Where.** `YouTubeResolver.cpp`, `SubtitleOverlay.cpp`, `SubtitlePolicy.h`.
+
+## HDR
+
+<a id="p256"></a>
+### P2.56 · Try an FP16 scRGB swap chain for HDR presentation
+
+`S-M` · **Player** · _presentation only; verify before switching_
+
+- **What.** Present HDR originals through an FP16 scRGB swap chain instead of
+  R10G10B10A2 HDR10, after measuring both on the wire.
+- **Why.** One capture study on Blackwell found FP16 scRGB exact to rounding,
+  while R10G10B10A2 showed 49 two-code jumps and 600 nits arriving as 603.8
+  ([HDR swap-chain capture](https://github.com/yadonpapa/20260830_HDR-Swapchain-Capture)).
+  One source and one GPU generation, so measure first.
+- **Where.** `D3D12Renderer.cpp`, `HdrPolicy.h`.
 
 ## Carried over
 
@@ -370,6 +740,36 @@ more promising guide (P3.6).
 
 # P3 — Strategic or large
 
+<a id="p314"></a>
+### P3.14 · Runtime refresh: RenoDX 8.5 and NVIDIA's October model
+
+`M-L` · **Pipeline, Release** · _a runtime change re-keys every cache entry_
+
+**Blocker:** the October model's DLL is not obtainable yet. The RenoDX half is
+not blocked.
+
+- **RenoDX 8.5.** renodx-dlss5 8.5.0-rc10 (2026-09-26) and dlssnr 310.8.Lecram
+  (2026-09-24) are on the mirror the player pins from
+  ([RankFTW/rhi-repo](https://github.com/RankFTW/rhi-repo/releases)); the
+  player pins 6.5.3 and 310.8.SF-v2 (`tools/fetch_neural_runtime.ps1`).
+  Measured in M1 ([renodx-85-20261016](measurements/renodx-85-20261016/REPORT.md)):
+  it loads on the pinned ReShade and DLSS-NR and renders at the same pace, but
+  not the same picture. To adopt it, stamp `kNeuralConfigVersion` "7" (8.5
+  migrates 6 and leaves a `.bak`). Also write `NRDetailStability=1`, since Auto
+  filters the model's edit and moves every render 0.33 codes, and
+  `NRSkinIndependent=0`, since the default caps Local structure at 1 and
+  silently drops Strong's 1.50. Re-check on the final 8.5, not rc10. It does
+  not expose the control mask.
+- **The October model.** NVIDIA's
+  [2026-10-13 announcement](https://www.nvidia.com/en-us/geforce/news/dlss-5-faster-ai-model-hogwarts-legacy-rtx-spark-laptops/)
+  claims twice the speed, 20 % less VRAM at 4K and comparable fidelity, in NBA
+  2K27 from 2026-10-16 and RTX Remix from 2026-10-23. When a DLL can be
+  obtained it pre-empts the running milestone: re-run knobs, the per-GPU pace
+  tables, VRAM and the quality gate; the CHANGELOG says earlier renders render
+  again once; P1.38 catches a higher driver floor.
+- Keep the old runtime selectable until the new one passes, so "same look as
+  the last version" can be shown, not claimed.
+
 <a id="p39"></a>
 ### P3.9 · HDR output of the render
 
@@ -384,7 +784,27 @@ more promising guide (P3.6).
   ([Topaz](https://www.topazlabs.com/news/the-expansion-release)).
 - **Where.** `HdrPolicy.h`, `HdrToneMapGpu.cpp`, `NvencDirect.cpp`,
   `ExportPipeline.h`.
+- **Reference.** NVIDIA's own design, in RTX Remix (MIT): an ACES fit to LDR,
+  the model in LDR, then a per-pixel ratio back to the original HDR with a
+  highlight-recovery blend
+  ([inverse tone map](https://github.com/NVIDIAGameWorks/dxvk-remix/blob/main/src/dxvk/shaders/rtx/pass/tonemap/tonemapping_inverse_tonemapping.comp.slang),
+  [ecf646d](https://github.com/NVIDIAGameWorks/dxvk-remix/commit/ecf646d)).
+  It is the per-pixel ratio design above, plus highlight recovery.
 - **Risk.** Halos where the model relit the scene.
+
+<a id="p318"></a>
+### P3.18 · A measured HDR→SDR peak for the model's input
+
+`M` · **Pipeline** · _opt-in input conditioning; cache-key term_
+
+The player maps HDR from static MaxCLL and mastering metadata (`HdrPolicy.h`,
+`HdrToneMap.h`), which is MPC Video Renderer's "Metadata" method. MPC VR's new
+"Measured" method takes each frame's peak from a compute histogram, smooths it
+over 3 s with a 640-nit floor and resets at cuts
+([PR #292](https://github.com/Aleksoid1978/VideoRenderer/commit/1c0715065dcdd5c64afb2b023f48532e35ea683d),
+2026-10-14); libplacebo's master moved to per-cone tone mapping on maxRGB scene
+statistics (LGPL; reimplement from the description). Both handle wrong or
+missing metadata. Measure for brightness pumping before offering it.
 
 <a id="p310"></a>
 ### P3.10 · Processing scale above 100% as an export-only rung
@@ -430,6 +850,68 @@ more promising guide (P3.6).
 have one; the README lists it as unsupported in the player, and watch folders
 are parked on the grounds that `dlss5-convert` covers batch work.
 
+<a id="p315"></a>
+### P3.15 · NVIDIA Video Effects SDK: frame generation and VSR modes
+
+`M-L` · **Pipeline** · _Ada and Blackwell only_
+
+**Blocker:** the SDK's licence, and whether its NGC-hosted models may be
+redistributed.
+
+Video Frame Generation (2x or 4x, an exact target rate by timestep, scene-cut
+bypass, 10-bit) as a frame-generation export engine beside DLSSG plus NVOFA,
+and VSR's HighBitrate and Deblur modes as candidates for upscaling the neural
+render (P2.39)
+([docs](https://docs.nvidia.com/maxine/vfx/latest/Filters/VideoFrameGeneration.html)).
+Visual Enhancer v16.0, Veyra 2.0.6-2.0.7 and Lunarc 1.2.2 adopted them within
+two weeks. Measure against DLSSG on the frame-generation harness first, and
+offer it as a labelled engine choice, never a silent switch.
+
+<a id="p316"></a>
+### P3.16 · Frame Generation "Performance mode" as a labelled rung
+
+`S` · **Pipeline** · _watch; never the default_
+
+**Blocker:** it is a driver and NVIDIA app override (Preset C, app 11.0.9.565
+beta), and Streamline 2.14.1's `sl_dlss_g.h` has no preset field. Veyra 2.0.8
+reaches it through game-harvested 310.9.16 DLLs, which the player does not
+take. Offer it only once a public SDK exposes it, as a rung with its measured
+cost.
+
+<a id="p317"></a>
+### P3.17 · A JavaScript runtime for yt-dlp after Deno
+
+`S` · **Release** · _watch_
+
+Deno's development ends after a year of maintenance releases
+([deno.com, 2026-10-09](https://deno.com/blog/cloudflare)), and yt-dlp is
+choosing a new default runtime
+([#17799](https://github.com/yt-dlp/yt-dlp/issues/17799)). The player bundles
+Deno 2.9.5 for `--js-runtimes`. Follow #17799 and swap the bundled runtime when
+yt-dlp settles, hash-pinned like the rest.
+
+<a id="p319"></a>
+### P3.19 · Overlap the per-frame stages
+
+`L` · **Pipeline** · _quality-neutral; a real restructuring_
+
+From the 2026-10-01 survey. Run guides for frame N+1 while NR runs on N and
+capture and encode on N-1, with per-stage fences replacing the capture fence
+wait inside the 7.35 ms fixed term (`docs/ARCHITECTURE.md`). The one-frame
+`FramePrefetch` is the only overlap the current loop allows. It must not redo
+anything on the "already optimised" list.
+
+<a id="p320"></a>
+### P3.20 · A residual-composite reduced-scale rung
+
+`M` · **Pipeline** · _opt-in labelled rung_
+
+From the 2026-10-01 survey. Run the model at 75 % or 50 % and composite its
+upscaled change onto the native frame, instead of upscaling the result with
+DLSS SR, so native-resolution text and edges survive (NeuralScreen's Boost).
+It mainly fixes the softness of today's 75 % and 50 % rungs rather than adding
+speed. Its own cache-key term; never a default.
+
 ---
 
 <a id="p35"></a>
@@ -445,6 +927,11 @@ Driver 616.64 enables DLSS 5 officially on RTX 50 and downloads its models to
 be found there for an app that is not on NVIDIA's list, preferring it on RTX
 50 would remove the "modified, unsigned" warning for those users. Record
 which runtime ran in the receipt. Keep the community build for RTX 20-40.
+
+**Since 2026-10-16.** RTX Remix with DLSS 5 ships on 2026-10-23 with NVIDIA's
+own NR integration (headers from the `ngx_sdk_dlnr` packman package). Check
+whether it distributes a signed `nvngx_dlssnr.dll`, under what licence, and
+whether that settles the redistribution question in `THIRD_PARTY.md`.
 
 ---
 
@@ -492,12 +979,16 @@ are not proposed again.
 | --- | --- |
 | **Custom model loading (.pth/.onnx)** | Structurally impossible: NGX feature 18 has fixed weights. chaiNNer-style tools are a different category. |
 | **Watch folders** | Requested at Topaz since 2022 and never shipped, with no sign that users urgently need it. `dlss5-convert` covers the batch case: files, folders and wildcards, skipping what is done. |
-| **Stabilization, deinterlacing, colorization, face restoration** | Each needs a model we cannot obtain. Inferior versions dilute a single-model product. |
+| **Stabilization, colorization, face restoration** | Each needs a model we cannot obtain. Inferior versions dilute a single-model product. (Deinterlacing was listed here until 2026-10-16; it needs no model and is P2.51.) |
+| **Model reuse every Nth frame; residual amplification above 1×** | Both trade stability or fidelity for speed or punch ([optiscaler-dlss5](https://github.com/Skynizz/optiscaler-dlss5), Veyra 2.0.4), and the runtime renders Intensity above 1.00 as 1.00 (0.28.2). |
+| **Live window or desktop capture** | A different product. Visual Enhancer removed its Live workspace in v16.0 (2026-10-14). |
 | **8K/16K output, 480 fps frame generation** | Marketing checkboxes that no panel can show. Cadence-aware multiple selection is the right design, so say that instead. |
 | **Cloud rendering / credits / tiering** | Being MIT and free is an asset against a closed competitor. |
 | **Linux or mobile ports, multi-GPU splitting of one render, "auto" model recommendation** | Feature 18 on Windows D3D12 is the product. Separate GPU choices for AI and for NVENC is the useful form (`GpuPreference.cpp`). |
 | **Running the model on AMD or Intel** | Community projects do it (DLSS-NR-on-AMD, an Xe2 port); the product is RTX-only by design. |
-| **Full zero-copy decode/encode rewrite** | The ffmpeg child is load-bearing: codec coverage, process isolation for the runtime lock, and the benchmark harness. Only the narrow encode side was worth doing, and it shipped as direct NVENC. |
+| **Full zero-copy decode/encode rewrite** | The ffmpeg child is load-bearing: codec coverage, process isolation for the runtime lock, and the benchmark harness. Only the narrow encode side was worth doing, and it shipped as direct NVENC. The NV12 pipe left costs about 2 ms of a 19.2 ms 4K frame, on the decoder thread and off the critical path ([nv12-transport-20261016](measurements/nv12-transport-20261016/REPORT.md)). |
+| **NVENC adaptive quantisation and lookahead** | They lose at matched size: +15 % to +77 % more bits for the same VMAF, and lower VMAF at the shipped size; the only gain is a little less banding on the 8-bit rung ([nvenc-aq-20261016](measurements/nvenc-aq-20261016/REPORT.md)). |
+| **A preset from NVIDIA's RTX Remix NR defaults** | It lands at 67 % of Standard's distance from the source, against Gentle's 64 %, so on strength it is a second Gentle ([nvidia-defaults-20261016](measurements/nvidia-defaults-20261016/REPORT.md)). Only as a named "NVIDIA reference" look, if the owner wants one. |
 | **AV1 export** | Needs a 40-series NVENC. The High rung's HEVC Main10 covers the need everywhere. |
 | **GPU-utilization cap for RTX VSR** | The SDK exposes only `VSR.QualityLevel` 0-4; NVIDIA App's control is a driver setting for its Auto mode, and the player already has a Low-Ultra ladder. |
 | **"Guide preview" view** | Already shipped as the Motion vectors and Depth views. |
@@ -610,3 +1101,14 @@ top findings against source.
 The 2026-09-23 audit (23d71d9) used the same shape: playback, neural and
 build/CI/docs audits plus pipeline and UX research. Its open items are carried
 over above.
+
+**2026-10-16, against f42cb39 (0.28.2).** No code audit. Three research agents,
+read-only: the DLSS 5 ecosystem through `gh` (releases, commits and issues
+since 2026-10-01, new repositories, impostors); NVIDIA, Microsoft, FFmpeg,
+yt-dlp and metrics at primary sources; adjacent players, review tools and
+papers. The lead re-checked the claims that create tasks: the yt-dlp breakage
+and fix, the dxvk-remix commit and its files, the rhi-repo releases, the
+Visual Enhancer v15.0 and NeuralScreen v2.2.0 notes, Veyra #41, the RenoDX
+repository's add-ons, and the matching absences in `src/` (power requests,
+control mask, deinterlacing, back-step, resume position, frame-time term).
+Findings and links: `reports/landscape-refresh-2026-10-16.md`.
