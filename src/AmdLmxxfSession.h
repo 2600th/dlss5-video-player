@@ -57,10 +57,17 @@ public:
     // the real story in LastError().
     int32_t LastStatus() const noexcept { return lastStatus_; }
 
-    bool PrepareFrame(const LmxxfNrFrameInfo& info)
+    bool PrepareFrame(LmxxfNrFrameInfo info)
     {
         if (!CanPrepare()) return Refuse("PrepareFrame is out of order");
+        // struct_size is part of the contract and it moved between the revisions
+        // the host serves (ABI 6: frame 168, job 32; ABI 3: 160, 24). This
+        // session is the one object that knows which revision it was built
+        // against, so the stamp happens here once instead of at every caller -
+        // a caller cannot forget it and cannot disagree with the runtime.
+        StampFrameInfoForAbi(info, api_.abi_version);
         job_ = MakeJob();
+        StampJobForAbi(job_, api_.abi_version);
         const int32_t status = api_.PrepareFrame(context_, &info, &job_);
         if (status != static_cast<int32_t>(LMXXF_NR_OK)) return Fail(status, "PrepareFrame");
         if (job_.handle == nullptr) return Refuse("PrepareFrame returned a null job");

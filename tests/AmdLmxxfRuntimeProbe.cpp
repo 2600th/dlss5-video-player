@@ -706,9 +706,11 @@ int main(int argc, char** argv)
         if (SUCCEEDED(comResult)) ::CoUninitialize();
         return kExitFailed;
     }
-    const uint32_t probeVersions[] = {1u, 2u, 3u, 4u};
+    const uint32_t probeVersions[] = {1u, 2u, 3u, 4u, 5u, 6u};
     // V1 (upstream a9b7a521), V2 (V1 + GetTimings), V3 (V2 + the four recording
     // functions, and the size this header compiles to), plus 160 as a control.
+    // V4..V6 are swept because the 2026-10 pack raised the integer without
+    // changing the table: the host negotiates 6, then 3 (AmdLmxxfApi.h).
     const uint32_t probeSizes[] = {LMXXF_NR_API_V1_SIZE, LMXXF_NR_API_V2_SIZE, 160u,
                                    LMXXF_NR_API_V3_SIZE};
     uint32_t negotiatedVersion = 0;
@@ -746,7 +748,7 @@ int main(int argc, char** argv)
         if (SUCCEEDED(comResult)) ::CoUninitialize();
         return kExitFailed;
     }
-    if (negotiatedVersion != LMXXF_NR_ABI_VERSION) {
+    if (!amd_lmxxf::IsAcceptedAbiVersion(negotiatedVersion)) {
         Line("");
         Line("STALE HEADER: this binary speaks abi_version " + std::to_string(negotiatedVersion) +
              " with a " + std::to_string(negotiatedSize) + "-byte table;");
@@ -762,7 +764,10 @@ int main(int argc, char** argv)
         return kExitFailed;
     }
     Line("  negotiated: abi_version " + std::to_string(negotiatedVersion) + ", struct_size " +
-         std::to_string(negotiatedSize) + " - the vendored header is current");
+         std::to_string(negotiatedSize) +
+         (negotiatedVersion == LMXXF_NR_ABI_VERSION
+              ? " - the vendored header is current"
+              : " - served by the same table layout, host negotiates it in AmdLmxxfApi.h"));
 
     // Step 1-2 again, through the wrapper the player will actually use.
     Step("step 1-2  src/AmdLmxxfRuntime.h Load");
@@ -942,6 +947,7 @@ int main(int argc, char** argv)
     const LmxxfNrApi& api = runtime.Api();
     void* context = runtime.Context();
     LmxxfNrJob job = amd_lmxxf::MakeJob();
+    amd_lmxxf::StampJobForAbi(job, api.abi_version);
     bool proceed = true;
 
     if (FAILED(frames.allocator->Reset()) ||
@@ -952,10 +958,11 @@ int main(int argc, char** argv)
     }
 
     if (proceed) {
-        const LmxxfNrFrameInfo frameInfo =
+        LmxxfNrFrameInfo frameInfo =
             amd_lmxxf::MakeFrameInfo(frames.color.Get(), kWidth, kHeight,
                                      static_cast<uint32_t>(kColorState), frames.list.Get(), 1, 1, 1,
                                      1.0f, 1.0f, 1.0f);
+        amd_lmxxf::StampFrameInfoForAbi(frameInfo, api.abi_version);
         proceed = Report("PrepareFrame", api.PrepareFrame(context, &frameInfo, &job),
                          RuntimeLastError(api));
         if (proceed)

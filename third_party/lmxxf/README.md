@@ -33,6 +33,37 @@ LmxxfNrGetApi(3, 176) -> 0  OK
 `TheAutomatic/dlss-5-amd-project` 正是发布那个包的项目，其 `v1.10.4.1` /
 `v1.10.5-alpha` tag 的头文件实测就是 ABI 3 / 176 字节 / 21 函数，与 DLL 逐项吻合。
 
+## ABI 6 的 runtime（2026-10-17 实测，表没动、两个结构体长了）
+
+更新的包把版本整数从 3 抬到了 **6**。对一个 ABI 6 的 `LmxxfNrRuntime.dll`
+（2026-10 包，1,653,536 字节）逐轴扫描的结果：
+
+```text
+LmxxfNrGetApi(3, 176) -> 1  UNSUPPORTED_ABI
+LmxxfNrGetApi(6, 176) -> 0  OK, 返回 abi_version 6, 21 个非空函数指针
+QueryCapabilities(struct_size 32) -> 0  OK, 回写 struct_size 32 / abi 6
+Create(struct_size 40)            -> 0  OK（assets 目录必须是 lmxxf-modules）
+PrepareFrame(frame 168, job 32)   -> 3  "call PrepareSession with a live queue first"
+PrepareFrame(其余任何 frame/job 组合) -> 2  "PrepareFrame: struct_size mismatch"
+```
+
+即：调用顺序、函数表（176 字节）和 `Capabilities`(32)/`CreateInfo`(40) 都没变，
+但 **`LmxxfNrFrameInfo` 从 160 涨到 168、`LmxxfNrJob` 从 24 涨到 32**（各自在尾部
+追加 8 字节，前缀字段偏移不变）。ABI 3 的 DLL 只接受 160/24。
+
+因此主机侧不再钉死单一版本：`src/AmdLmxxfApi.h` 的 `kAcceptedAbiVersions = {6, 3}`
+**从新到旧协商**，再由 `FrameInfoSizeForAbi` / `JobSizeForAbi` 按协商结果
+（`StampFrameInfoForAbi` / `StampJobForAbi`，落地在 `Session::PrepareFrame`）
+把 struct_size 盖成运行时自己那一版的尺寸。头文件里两个结构体按大的一版声明
+（168 / 32），ABI 3 时只报 160 / 24，尾部 8 字节永不外露、保持零。
+
+**验证（2026-10-17）**：同一个 `DLSSVideoPlayer.exe` 分别跑 ABI 6 与 ABI 3 的
+runtime，同一段 8 帧 `deadpool-s0.mkv` 的 `--render --stages nr` 输出
+**PSNR = inf（逐比特一致）**。这同时说明 ABI 6 追加字段留零就是正确的中性默认值——
+如果它们在被读作“未设置”时有别的含义，两版输出不可能相同。
+
+未实测过的版本（4 / 5 / 7 …）仍按未知布局拒绝：版本号是唯一无法从尺寸反推的东西。
+
 ## 使用约束
 
 - 运行 DLL 必须由播放器的 AMD runtime lock 校验 SHA-256。
@@ -43,6 +74,10 @@ LmxxfNrGetApi(3, 176) -> 0  OK
 - 更新固定提交时必须重新核对 ABI、结构体大小、模块数量和运行锁。
 - **换回 ABI 1 的 runtime（例如 AMDNR v0.3.5.x）需要同时把本目录的头换回
   `a9b7a521` 版本，否则 `LmxxfNrGetApi` 会在协商阶段被拒。**
+- **换第三方改版 runtime 时先跑 `tests/AmdLmxxfRuntimeProbe`（ABI 协商那一步会列出
+  每个 abi_version × struct_size 的返回码）。播放器日志的
+  `did not come up ... get-api-failed` 只说明协商失败，不会告诉你新版要的是什么尺寸；
+  而 `PrepareFrame: struct_size mismatch` 说明版本对了、结构体尺寸不对。**
 
 ## 播放器侧的接入（2026-10-11 起）
 

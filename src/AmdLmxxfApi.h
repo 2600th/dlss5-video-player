@@ -73,6 +73,59 @@ inline bool HasRequiredFunctions(const LmxxfNrApi& api) noexcept
            api.GetLastError != nullptr;
 }
 
+// Which abi_version integers this host can serve, newest first. The table is
+// still 176 bytes at ABI 6 and the runtime validates each struct it is handed
+// by size, so what changed between the revisions is where the sizes live, not
+// the call order. Measured against the ABI 6 runtime that ships with the
+// 2026-10 packs:
+//   LmxxfNrGetApi(6, 176)          -> OK, abi_version 6, 21 non-null entries
+//   QueryCapabilities(32)          -> OK, struct_size 32, abi_version 6
+//   Create(struct_size 40)         -> accepted (fails later on device, not size)
+//   PrepareFrame(frame, job)       -> only 168/32 accepted; 160/24 is ABI 3's pair
+// ABI 3 - the version this header was written for - answers 160/24 on the older
+// DLL, so one binary serves both packs by stamping the pair it negotiated (see
+// FrameInfoSizeForAbi / JobSizeForAbi below). Anything else is still refused: an
+// unmeasured version is the one case where the layout genuinely may differ.
+inline constexpr uint32_t kAcceptedAbiVersions[] = {6u, LMXXF_NR_ABI_VERSION};
+
+inline constexpr bool IsAcceptedAbiVersion(uint32_t abiVersion) noexcept
+{
+    for (const uint32_t accepted : kAcceptedAbiVersions) {
+        if (accepted == abiVersion) return true;
+    }
+    return false;
+}
+
+// The two structs where the revisions the host serves differ. ABI 6 appended a
+// tail to each: LmxxfNrFrameInfo 160 -> 168, LmxxfNrJob 24 -> 32. Measured, not
+// guessed - with a live D3D12 context, PrepareFrame answers "struct_size
+// mismatch" for every frame/job size pair except 168/32, and ABI 3 accepts only
+// 160/24. Everything before the tail sits at the same offset in both, so the
+// header declares the larger struct once and the host stamps the size of the
+// version it negotiated. Getting this wrong is not cosmetic: a mismatched
+// struct_size is the whole of the "neural render will not open" failure.
+inline constexpr uint32_t FrameInfoSizeForAbi(uint32_t abiVersion) noexcept
+{
+    return abiVersion >= 6u ? 168u : 160u;
+}
+
+inline constexpr uint32_t JobSizeForAbi(uint32_t abiVersion) noexcept
+{
+    return abiVersion >= 6u ? 32u : 24u;
+}
+
+// Restamp the contract sizes onto a freshly built struct. Called with the
+// version Runtime::Load negotiated, right before the call that consumes it.
+inline void StampFrameInfoForAbi(LmxxfNrFrameInfo& info, uint32_t abiVersion) noexcept
+{
+    info.struct_size = FrameInfoSizeForAbi(abiVersion);
+}
+
+inline void StampJobForAbi(LmxxfNrJob& job, uint32_t abiVersion) noexcept
+{
+    job.struct_size = JobSizeForAbi(abiVersion);
+}
+
 inline ApiProblem ValidateApiTable(const LmxxfNrApi& api) noexcept
 {
     // Size is exact, not a floor: the runtime hands back one specific table for
@@ -81,7 +134,7 @@ inline ApiProblem ValidateApiTable(const LmxxfNrApi& api) noexcept
     // with GetTimings pointing at whatever follows it in memory.
     if (api.struct_size != sizeof(LmxxfNrApi))
         return ApiProblem::StructSizeMismatch;
-    if (api.abi_version != LMXXF_NR_ABI_VERSION)
+    if (!IsAcceptedAbiVersion(api.abi_version))
         return ApiProblem::AbiMismatch;
     if (!HasRequiredFunctions(api))
         return ApiProblem::MissingFunction;
@@ -91,7 +144,7 @@ inline ApiProblem ValidateApiTable(const LmxxfNrApi& api) noexcept
 inline ApiProblem ValidateCapabilities(const LmxxfNrCapabilities& capabilities) noexcept
 {
     if (capabilities.struct_size != sizeof(LmxxfNrCapabilities) ||
-        capabilities.abi_version != LMXXF_NR_ABI_VERSION ||
+        !IsAcceptedAbiVersion(capabilities.abi_version) ||
         capabilities.max_input_width == 0 ||
         capabilities.max_input_height == 0)
         return ApiProblem::InvalidCapabilities;

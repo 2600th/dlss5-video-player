@@ -117,7 +117,8 @@ typedef struct LmxxfNrCreateInfo
 #define LMXXF_NR_TEMPORAL_MV_JITTERED (1u << 3)
 #define LMXXF_NR_TEMPORAL_DEPTH_INVERTED (1u << 4)
 
-/* 160 bytes in ABI 3. The ABI 1 frame info stopped at model_scale (80 bytes); the
+/* 160 bytes in ABI 3, 168 in ABI 6 (which appended the two-word tail at the end
+ * of this struct). The ABI 1 frame info stopped at model_scale (80 bytes); the
  * exposure block grew the struct to 104 and everything from paper_white on is new. */
 typedef struct LmxxfNrFrameInfo
 {
@@ -149,9 +150,19 @@ typedef struct LmxxfNrFrameInfo
     void *motion, *depth;
     uint32_t motion_state, depth_state, motion_width, motion_height;
     float motion_scale_x, motion_scale_y, jitter_x, jitter_y;
+    /* ABI 6 tail. This struct is 168 bytes there and 160 in ABI 3, and the
+     * runtime validates struct_size, so the host stamps the size that matches
+     * the version it negotiated (FrameInfoSizeForAbi in src/AmdLmxxfApi.h)
+     * rather than sizeof(). Everything above this line sits at the same offset
+     * in both revisions, which is what makes one struct serve both; an ABI 3
+     * runtime is told 160 and never reads these eight bytes. Zero is the
+     * unset value for every optional field in this ABI - what a host with no
+     * extra input says - so a field the runtime grew here stays unset. */
+    uint32_t abi6_reserved[2];
 } LmxxfNrFrameInfo;
 
-/* struct_size must be sizeof(LmxxfNrJob) or PrepareFrame rejects the call.
+/* struct_size must be the size the runtime was built with - 32 here, 24 at ABI 3
+ * (stamp it with JobSizeForAbi) - or PrepareFrame rejects the call.
  *
  * The job argument changes meaning after PrepareFrame, and the header cannot
  * express it - it is the one behavioural difference that survives a clean ABI
@@ -170,6 +181,10 @@ typedef struct LmxxfNrJob
     uint32_t struct_size;
     void *handle;
     void *private_output; /* ID3D12Resource* for SR; null until PrepareFrame succeeds */
+    /* ABI 6 tail: 32 bytes there, 24 in ABI 3, same rule as LmxxfNrFrameInfo's
+     * tail - the host stamps JobSizeForAbi and the runtime reads only what it
+     * declared. Zero, like every unset field. */
+    uint64_t abi6_reserved;
 } LmxxfNrJob;
 
 /* Upstream fe4d1d73 timing payload. Non-blocking, latest completed frame.
@@ -225,6 +240,9 @@ typedef struct LmxxfNrApi
 static_assert(sizeof(LmxxfNrApi) == LMXXF_NR_API_V3_SIZE,
               "ABI 3 table must be 8 + 21*8 = 176 bytes; the runtime rejects any other size");
 static_assert(sizeof(LmxxfNrCapabilities) == 32u, "ABI 3 capabilities struct is 8 uint32 fields");
+/* The two structs that moved between the revisions the host serves. */
+static_assert(sizeof(LmxxfNrFrameInfo) == 168u, "160 bytes at ABI 3, 168 at ABI 6");
+static_assert(sizeof(LmxxfNrJob) == 32u, "24 bytes at ABI 3, 32 at ABI 6");
 #endif
 
 #ifdef _WIN32

@@ -2,6 +2,7 @@
 
 #include "PlatformPaths.h"
 
+#include <iterator>
 #include <system_error>
 #include <utility>
 
@@ -161,39 +162,65 @@ bool Runtime::Load(const std::filesystem::path& runtimeDirectory, std::wstring* 
         return false;
     }
 
-    // One call, one contract. The table this header declares is the table the
-    // runtime must hand back: the size is part of the ABI, and the runtime
-    // rejects anything else rather than truncating. Retrying with a shorter
-    // legacy table is not a downgrade path - the runtime answers
-    // INVALID_ARGUMENT, and the tail it never wrote would be indistinguishable
-    // from a populated one.
-    api_.struct_size = sizeof(api_);
+    // One call, one contract, per version. The table this header declares is the
+    // table the runtime must hand back: the size is part of the ABI, and the
+    // runtime rejects anything else rather than truncating. What varies between
+    // packs is the version integer - the 2026-10 pack ships an ABI 6 runtime
+    // that refuses 3 outright (UNSUPPORTED_ABI) while keeping the same 176-byte
+    // table and the same struct sizes - so the version is negotiated, newest
+    // first, and the table is judged after the call rather than before it.
+    // Retrying with a shorter legacy table is still not a downgrade path: the
+    // runtime answers INVALID_ARGUMENT, and the tail it never wrote would be
+    // indistinguishable from a populated one.
     const auto getApiFn = reinterpret_cast<int32_t (*)(uint32_t, LmxxfNrApi*)>(getApi);
-    const int32_t result = getApiFn(LMXXF_NR_ABI_VERSION, &api_);
-    if (result != static_cast<int32_t>(LMXXF_NR_OK)) {
-        if (error) {
-            std::wstring detail = L"status=" + std::to_wstring(result);
-            detail += L" (" + WideAscii(LmxxfNrStatusName(result)) + L")";
-            detail += L"; this build pins abi_version ";
-            detail += std::to_wstring(LMXXF_NR_ABI_VERSION);
-            detail += L" with a ";
+    int32_t lastStatus = static_cast<int32_t>(LMXXF_NR_OK);
+    uint32_t lastRejectedVersion = 0;
+    ApiProblem tableProblem = ApiProblem::None;
+    uint32_t tableProblemVersion = 0;
+    for (const uint32_t version : kAcceptedAbiVersions) {
+        api_ = {};
+        api_.struct_size = sizeof(api_);
+        const int32_t result = getApiFn(version, &api_);
+        if (result != static_cast<int32_t>(LMXXF_NR_OK)) {
+            if (lastRejectedVersion == 0) {
+                lastRejectedVersion = version;
+                lastStatus = result;
+            }
+            continue;
+        }
+        const ApiProblem problem = ValidateApiTable(api_);
+        if (problem != ApiProblem::None) {
+            if (tableProblemVersion == 0) {
+                tableProblemVersion = version;
+                tableProblem = problem;
+            }
+            api_ = {};
+            continue;
+        }
+        return true;
+    }
+    if (error) {
+        std::wstring detail;
+        if (tableProblemVersion != 0) {
+            detail = L"abi_version " + std::to_wstring(tableProblemVersion) +
+                     L" was accepted but its table is " + WideAscii(ApiProblemName(tableProblem));
+            *error = FailureText(RuntimeFailure::InvalidApiTable, detail);
+        } else {
+            detail = L"status=" + std::to_wstring(lastStatus);
+            detail += L" (" + WideAscii(LmxxfNrStatusName(lastStatus)) + L")";
+            detail += L" for every abi_version this build speaks (";
+            for (size_t i = 0; i < std::size(kAcceptedAbiVersions); ++i) {
+                if (i != 0) detail += L", ";
+                detail += std::to_wstring(kAcceptedAbiVersions[i]);
+            }
+            detail += L"); it wants a ";
             detail += std::to_wstring(sizeof(LmxxfNrApi));
             detail += L"-byte table";
             *error = FailureText(RuntimeFailure::GetApiFailed, detail);
         }
-        Unload();
-        return false;
     }
-
-    if (const ApiProblem problem = ValidateApiTable(api_); problem != ApiProblem::None) {
-        if (error) {
-            *error = FailureText(RuntimeFailure::InvalidApiTable,
-                                 WideAscii(ApiProblemName(problem)));
-        }
-        Unload();
-        return false;
-    }
-    return true;
+    Unload();
+    return false;
 }
 
 bool Runtime::QueryCapabilities(std::wstring* error)

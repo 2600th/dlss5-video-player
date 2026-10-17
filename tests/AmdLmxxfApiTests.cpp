@@ -105,6 +105,17 @@ void malformed_table_is_rejected_before_use_test()
     api.abi_version = 2;
     CHECK_EQ(amd_lmxxf::ApiProblem::AbiMismatch, amd_lmxxf::ValidateApiTable(api));
 
+    // The 2026-10 pack raises the version integer to 6 without moving the table,
+    // so the host serves it; a version nobody has measured is still refused.
+    api = CompleteApi();
+    api.abi_version = 6;
+    CHECK_EQ(amd_lmxxf::ApiProblem::None, amd_lmxxf::ValidateApiTable(api));
+    for (const uint32_t unmeasured : {4u, 5u, 7u, 8u}) {
+        api = CompleteApi();
+        api.abi_version = unmeasured;
+        CHECK_EQ(amd_lmxxf::ApiProblem::AbiMismatch, amd_lmxxf::ValidateApiTable(api));
+    }
+
     api = CompleteApi();
     api.RecordOutputs = nullptr;
     CHECK_EQ(amd_lmxxf::ApiProblem::MissingFunction, amd_lmxxf::ValidateApiTable(api));
@@ -182,20 +193,41 @@ void frame_builder_sets_the_sizes_the_runtime_negotiates_test()
     CHECK_EQ(1.0f, frame.model_scale);
     CHECK_EQ(1.0f, frame.pre_exposure);
     CHECK_EQ(1.0f, frame.exposure_scale);
-    // ABI 3 grew the frame info from 80 to 160 bytes, and paper_white is
-    // required by the codec Record path rather than optional.
-    CHECK_EQ(uint32_t{160}, uint32_t{sizeof(LmxxfNrFrameInfo)});
+    // The frame info grew twice: ABI 1 stopped at 80 bytes, ABI 3 at 160, and
+    // ABI 6 appended a two-word tail for 168. paper_white is required by the
+    // codec Record path rather than optional.
+    CHECK_EQ(uint32_t{168}, uint32_t{sizeof(LmxxfNrFrameInfo)});
+    CHECK_EQ(uint32_t{160}, amd_lmxxf::FrameInfoSizeForAbi(3));
+    CHECK_EQ(uint32_t{168}, amd_lmxxf::FrameInfoSizeForAbi(6));
     CHECK_EQ(1.0f, frame.paper_white);
     CHECK_EQ(uint32_t{0}, frame.reserved_after_exposure);
     CHECK_EQ(uint32_t{0}, frame.temporal_flags);
     CHECK(frame.exposure == nullptr);
     CHECK(frame.motion == nullptr);
     CHECK(frame.depth == nullptr);
+    // The ABI 6 tail rides along unset: zero is "no extra input" everywhere.
+    CHECK_EQ(uint32_t{0}, frame.abi6_reserved[0]);
+    CHECK_EQ(uint32_t{0}, frame.abi6_reserved[1]);
 
-    const LmxxfNrJob job = amd_lmxxf::MakeJob();
+    LmxxfNrJob job = amd_lmxxf::MakeJob();
     CHECK_EQ(uint32_t{sizeof(LmxxfNrJob)}, job.struct_size);
     CHECK(job.handle == nullptr);
     CHECK(job.private_output == nullptr);
+    // Same story for the job: 24 bytes at ABI 3, 32 at ABI 6.
+    CHECK_EQ(uint32_t{32}, uint32_t{sizeof(LmxxfNrJob)});
+    CHECK_EQ(uint32_t{24}, amd_lmxxf::JobSizeForAbi(3));
+    CHECK_EQ(uint32_t{32}, amd_lmxxf::JobSizeForAbi(6));
+
+    // Stamping is what the runtime validates, so it has to be exactly the pair.
+    LmxxfNrFrameInfo stamped = amd_lmxxf::MakeFrameInfo(&color, 640, 360, 4u, &list, 1u, 1u, 1u);
+    amd_lmxxf::StampFrameInfoForAbi(stamped, 3);
+    CHECK_EQ(uint32_t{160}, stamped.struct_size);
+    amd_lmxxf::StampFrameInfoForAbi(stamped, 6);
+    CHECK_EQ(uint32_t{168}, stamped.struct_size);
+    amd_lmxxf::StampJobForAbi(job, 3);
+    CHECK_EQ(uint32_t{24}, job.struct_size);
+    amd_lmxxf::StampJobForAbi(job, 6);
+    CHECK_EQ(uint32_t{32}, job.struct_size);
 
     const LmxxfNrTimings timings = amd_lmxxf::MakeTimings();
     CHECK_EQ(uint32_t{sizeof(LmxxfNrTimings)}, timings.struct_size);
