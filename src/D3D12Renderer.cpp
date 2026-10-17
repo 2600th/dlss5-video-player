@@ -1777,6 +1777,10 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     // history and no generated frame was ever presented.
     const bool resetFg = playback_frame_gen::ResetHistory(
         m_fgFrameId, temporalReset, m_fgResetPending);
+    // Reset each frame: only the cadence branch below sets it true. Without this,
+    // a true from a prior cadence frame would leak into the debug/reset present
+    // path and sample a stale m_fgUpscaleSharp.
+    m_fgUpscaledReady = false;
     const bool fgWanted=m_playbackFrameGen||m_debugView==DebugView::FrameGenerated;
     const bool islandWanted=m_fgFfxIsland&&!m_fgFfxFailed&&m_psoFgConvert&&m_fgFfxInput&&m_fgFfxOutput;
     if(islandWanted&&fgWanted){
@@ -1816,6 +1820,12 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         // The clamp records on this same list, before the present draws on it;
         // its result decides which texture the generated present samples.
         m_fgClampRan=showGenerated&&RecordFrameGenClamp(cmd);
+        // Upscale the generated frame through FSR 4 (context #2) so it matches
+        // the source frame's sharpness. Records on this same list, before the
+        // present draws on it. On any failure m_fgUpscaledReady stays false and
+        // the present falls back to the compositor stretch, as before.
+        m_fgUpscaledReady = m_playbackFrameGen && showGenerated && !m_fgUpscaleFailed &&
+                            RecordFrameGenUpscale(cmd);
         if(m_playbackFrameGen&&showGenerated&&!m_fgCadenceReported){
             // Once: the health line counts rendered source frames, not swapchain
             // presents, so this is the only place the doubled cadence is visible
@@ -1955,6 +1965,7 @@ bool D3D12Renderer::CreateUpscalePresentResources()
         // if one was built for the larger rung, is sized to that rung and has
         // to go with it.
         m_fsrUpscale.reset();
+        m_fsrUpscaleGenerated.reset();
         m_fsrUpscaleActive = false;
         m_easuActive = false;
         m_upscaleOffered = false;
@@ -2169,6 +2180,31 @@ bool D3D12Renderer::CreateUpscalePresentResources()
             }
         }
     }
+    // ---- Second FSR 4 context, for the generated (interpolated) frame -------
+    //
+    // The interpolated frame is fed through its OWN FSR 4 context so it takes
+    // the same upscaler, and therefore the same sharpness, as the source frame.
+    // A single shared context would interleave source/generated history and
+    // ghost; two contexts keep their temporal histories isolated (and this one
+    // is always reset, because the generated frame has no real temporal
+    // continuity). It is built eagerly here - same lifecycle as context #1, and
+    // the island's runtime-creation hazard (F13) only ever applied to a context
+    // created mid-stream, not at Initialize. Guarded by m_fsrUpscaleActive so it
+    // only exists where FSR 4 is actually serving; the upscale resources it
+    // targets are created alongside the frame-gen resources when it does.
+    if (m_fsrUpscaleActive) {
+        auto generated = std::make_unique<FsrUpscaleBackend>();
+        if (!generated->Initialize(m_device.Get(), m_renderW, m_renderH, m_outputW, m_outputH,
+                                   DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                   DXGI_FORMAT_R16G16B16A16_FLOAT)) {
+            LOG("Playback frame generation: the generated-frame FSR 4 context would not "
+                "start (" << utf8_text::FromWide(generated->LastDetail())
+                << "); generated frames keep the compositor stretch.");
+        } else {
+            m_fsrUpscaleGenerated = std::move(generated);
+        }
+    }
+
     // One decisive line for the log and the self-test: which tier actually
     // serves the SR switch. FSR 4 first; FSR1 EASU next (a pure shader, so it
     // is available whenever its PSO compiled); the Catmull-Rom stretch only if
@@ -2709,6 +2745,216 @@ bool D3D12Renderer::CreateFrameGenResources()
         if (m_fgFfxClamped)
             m_device->CreateShaderResourceView(m_fgFfxClamped.Get(), &view,
                                                SRVCPU(GeneratedFrameClampedSRV));
+
+        // Generated-frame FSR 4 upscale resources, built only when the second
+        // FSR 4 context (change 4) actually came up. They hold the linearize
+        // output, the FSR 4 #2 output, and the CAS-sharpened present target.
+        if (m_fsrUpscaleGenerated) {
+            // render-res FP16: the linearized generated frame (FSR 4 #2 input).
+            D3D12_RESOURCE_DESC linDesc{};
+            linDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            linDesc.Width = m_renderW;
+            linDesc.Height = m_renderH;
+            linDesc.DepthOrArraySize = 1;
+            linDesc.MipLevels = 1;
+            linDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            linDesc.SampleDesc.Count = 1;
+            linDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            if (FAILED(m_device->CreateCommittedResource(
+                    &defaultHeap, D3D12_HEAP_FLAG_NONE, &linDesc,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                    IID_PPV_ARGS(m_fgLinearColor.GetAddressOf())))) {
+                m_fgUpscaleFailed = true;
+            } else {
+                m_fgLinearColor->SetName(L"FrameGen_Linearized_FP16");
+                m_fgLinearColorState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+                // output-res FP16: FSR 4 #2 output and the CAS-sharpened present
+                // target (same rung/format as the source upscale's pair).
+                D3D12_RESOURCE_DESC upDesc = linDesc;
+                upDesc.Width = m_outputW;
+                upDesc.Height = m_outputH;
+                upDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+                if (FAILED(m_device->CreateCommittedResource(
+                        &defaultHeap, D3D12_HEAP_FLAG_NONE, &upDesc,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                        IID_PPV_ARGS(m_fgUpscaleStretch.GetAddressOf()))) ||
+                    FAILED(m_device->CreateCommittedResource(
+                        &defaultHeap, D3D12_HEAP_FLAG_NONE, &upDesc,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                        IID_PPV_ARGS(m_fgUpscaleSharp.GetAddressOf())))) {
+                    m_fgUpscaleFailed = true;
+                } else {
+                    m_fgUpscaleStretch->SetName(L"FrameGen_Upscaled_FP16");
+                    m_fgUpscaleSharp->SetName(L"FrameGen_UpscaledSharp_FP16");
+                    m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+                    // The linearize compute pass: sRGB-encoded BGRA8 -> FP16 linear.
+                    ComPtr<ID3DBlob> linear, linearError;
+                    const HRESULT linHr = D3DCompile(frame_gen_linearize::kHlsl,
+                                                     std::strlen(frame_gen_linearize::kHlsl),
+                                                     "framegen-linearize", nullptr, nullptr, "main",
+                                                     "cs_5_1", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                                                     linear.GetAddressOf(), linearError.GetAddressOf());
+                    if (FAILED(linHr)) {
+                        if (linearError) LOG((char*)linearError->GetBufferPointer());
+                        LOG("Playback frame generation: the linearize shader did not compile hr="
+                            << HexText(linHr) << "; generated frames keep the compositor stretch.");
+                        m_fgUpscaleFailed = true;
+                    } else {
+                        D3D12_ROOT_PARAMETER1 linParams[2]{};
+                        D3D12_DESCRIPTOR_RANGE1 linRanges[2]{};
+                        linRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+                        linRanges[0].NumDescriptors = 1;
+                        linRanges[0].BaseShaderRegister = 0;
+                        linRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+                        linRanges[1].NumDescriptors = 1;
+                        linRanges[1].BaseShaderRegister = 0;
+                        linRanges[1].OffsetInDescriptorsFromTableStart = 1;
+                        linParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                        linParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+                        linParams[0].DescriptorTable.NumDescriptorRanges = 2;
+                        linParams[0].DescriptorTable.pDescriptorRanges = linRanges;
+                        linParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+                        linParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+                        linParams[1].Constants.Num32BitValues = 2;
+                        linParams[1].Constants.ShaderRegister = 0;
+                        D3D12_VERSIONED_ROOT_SIGNATURE_DESC linSig{};
+                        linSig.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+                        linSig.Desc_1_1.NumParameters = 2;
+                        linSig.Desc_1_1.pParameters = linParams;
+                        ComPtr<ID3DBlob> linSerialized, linSigError;
+                        const HRESULT linSigHr = D3D12SerializeVersionedRootSignature(
+                            &linSig, &linSerialized, &linSigError);
+                        const HRESULT linRootHr = SUCCEEDED(linSigHr)
+                            ? m_device->CreateRootSignature(
+                                0, linSerialized->GetBufferPointer(), linSerialized->GetBufferSize(),
+                                IID_PPV_ARGS(m_fgLinearRootSig.GetAddressOf()))
+                            : linSigHr;
+                        if (FAILED(linRootHr)) {
+                            if (linSigError) LOG((char*)linSigError->GetBufferPointer());
+                            LOG("Playback frame generation: the linearize root signature did not build hr="
+                                << HexText(linRootHr) << "; generated frames keep the compositor stretch.");
+                            m_fgUpscaleFailed = true;
+                        } else {
+                            D3D12_COMPUTE_PIPELINE_STATE_DESC linCpsd{};
+                            linCpsd.pRootSignature = m_fgLinearRootSig.Get();
+                            linCpsd.CS = {linear->GetBufferPointer(), linear->GetBufferSize()};
+                            const HRESULT linPsoHr = m_device->CreateComputePipelineState(
+                                &linCpsd, IID_PPV_ARGS(m_psoFgLinear.GetAddressOf()));
+                            if (FAILED(linPsoHr)) {
+                                LOG("Playback frame generation: the linearize pipeline state did not build hr="
+                                    << HexText(linPsoHr) << "; generated frames keep the compositor stretch.");
+                                m_fgUpscaleFailed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!m_fgUpscaleFailed) {
+                // Linearize heap: [clamped SRV, linear UAV, raw SRV, linear UAV].
+                // The UAV is duplicated so the contiguous [SRV][UAV] descriptor
+                // table can start at whichever source slot this frame used.
+                D3D12_DESCRIPTOR_HEAP_DESC linHeapDesc{};
+                linHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+                linHeapDesc.NumDescriptors = 4;
+                linHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+                if (FAILED(m_device->CreateDescriptorHeap(&linHeapDesc,
+                        IID_PPV_ARGS(m_fgLinearHeap.GetAddressOf())))) {
+                    LOG("Playback frame generation: the linearize descriptor heap did not build; "
+                        "generated frames keep the compositor stretch.");
+                    m_fgUpscaleFailed = true;
+                } else {
+                    m_fgLinearInc = m_device->GetDescriptorHandleIncrementSize(
+                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                    D3D12_SHADER_RESOURCE_VIEW_DESC linSrv{};
+                    linSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    linSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    linSrv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;   // plain: Load returns raw sRGB-encoded bytes
+                    linSrv.Texture2D.MipLevels = 1;
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC linUav{};
+                    linUav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                    linUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                    auto linSlot = [&](uint32_t index) {
+                        D3D12_CPU_DESCRIPTOR_HANDLE h =
+                            m_fgLinearHeap->GetCPUDescriptorHandleForHeapStart();
+                        h.ptr += index * m_fgLinearInc;
+                        return h;
+                    };
+                    m_device->CreateShaderResourceView(m_fgFfxClamped.Get(), &linSrv, linSlot(0));
+                    m_device->CreateUnorderedAccessView(m_fgLinearColor.Get(), nullptr, &linUav, linSlot(1));
+                    m_device->CreateShaderResourceView(m_fgFfxOutput.Get(), &linSrv, linSlot(2));
+                    m_device->CreateUnorderedAccessView(m_fgLinearColor.Get(), nullptr, &linUav, linSlot(3));
+
+                    // CAS heap: one SRV sampling m_fgUpscaleStretch. Reuses
+                    // m_upscaleRootSig + m_psoUpscaleSharp, whose t0 is pinned
+                    // to their own heap (the source upscale's), so this path
+                    // needs its own.
+                    D3D12_DESCRIPTOR_HEAP_DESC casHeapDesc{};
+                    casHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+                    casHeapDesc.NumDescriptors = 1;
+                    casHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+                    if (FAILED(m_device->CreateDescriptorHeap(&casHeapDesc,
+                            IID_PPV_ARGS(m_fgUpscaleHeap.GetAddressOf())))) {
+                        LOG("Playback frame generation: the generated CAS SRV heap did not build; "
+                            "generated frames keep the compositor stretch.");
+                        m_fgUpscaleFailed = true;
+                    } else {
+                        D3D12_SHADER_RESOURCE_VIEW_DESC casSrv{};
+                        casSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                        casSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                        casSrv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                        casSrv.Texture2D.MipLevels = 1;
+                        m_device->CreateShaderResourceView(m_fgUpscaleStretch.Get(), &casSrv,
+                            m_fgUpscaleHeap->GetCPUDescriptorHandleForHeapStart());
+
+                        // CAS RTV heap: one RTV for m_fgUpscaleSharp.
+                        D3D12_DESCRIPTOR_HEAP_DESC casRtvDesc{};
+                        casRtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+                        casRtvDesc.NumDescriptors = 1;
+                        if (FAILED(m_device->CreateDescriptorHeap(&casRtvDesc,
+                                IID_PPV_ARGS(m_fgUpscaleRtvHeap.GetAddressOf())))) {
+                            LOG("Playback frame generation: the generated CAS RTV heap did not build; "
+                                "generated frames keep the compositor stretch.");
+                            m_fgUpscaleFailed = true;
+                        } else {
+                            m_device->CreateRenderTargetView(m_fgUpscaleSharp.Get(), nullptr,
+                                m_fgUpscaleRtvHeap->GetCPUDescriptorHandleForHeapStart());
+
+                            // The present samples the sharpened frame through the
+                            // present chain's own heap, in the slot the backbuffer
+                            // pass binds instead of the raw generated frame.
+                            D3D12_SHADER_RESOURCE_VIEW_DESC upSrv{};
+                            upSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                            upSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                            upSrv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                            upSrv.Texture2D.MipLevels = 1;
+                            m_device->CreateShaderResourceView(m_fgUpscaleSharp.Get(), &upSrv,
+                                                              SRVCPU(GeneratedUpscaledSRV));
+                        }
+                    }
+                }
+            }
+            if (m_fgUpscaleFailed) {
+                // A failure above makes the second context unusable; drop it so
+                // the guard at the top of RecordFrameGenUpscale falls back
+                // cleanly to the compositor stretch.
+                m_fsrUpscaleGenerated.reset();
+                m_fgLinearColor.Reset();
+                m_fgUpscaleStretch.Reset();
+                m_fgUpscaleSharp.Reset();
+                m_fgLinearRootSig.Reset();
+                m_psoFgLinear.Reset();
+                m_fgLinearHeap.Reset();
+                m_fgUpscaleHeap.Reset();
+                m_fgUpscaleRtvHeap.Reset();
+                LOG("Playback frame generation: the generated-frame FSR 4 path could not be built; "
+                    "generated frames keep the compositor stretch.");
+            }
+        }
+
         return true;
     }
     view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -2835,6 +3081,115 @@ bool D3D12Renderer::RecordFrameGenClamp(ID3D12GraphicsCommandList* cmd)
     return true;
 }
 
+bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
+{
+    // Guard: a previous failure latches this path off for good, and without the
+    // second FSR 4 context (or its resources) there is nothing to do - the caller
+    // falls back to the compositor stretch, exactly as before this feature.
+    if (!cmd || m_fgUpscaleFailed || !m_fsrUpscaleGenerated || !m_fgLinearColor ||
+        !m_fgUpscaleStretch || !m_fgUpscaleSharp || !m_psoFgLinear ||
+        !m_fgLinearHeap || !m_fgUpscaleHeap || !m_fgUpscaleRtvHeap ||
+        !m_upscaleRootSig || !m_psoUpscaleSharp)
+        return false;
+
+    // 1. Linearize: the sRGB-encoded BGRA8 generated frame -> FP16 linear light
+    //    (m_fgLinearColor), the format FSR 4 receives. Pick the clamped copy when
+    //    the clamp ran, else the raw island output. See frame_gen_linearize.
+    const bool useClamped = m_fgClampRan && m_fgFfxClamped;
+    ID3D12Resource* srcTex = useClamped ? m_fgFfxClamped.Get() : m_fgFfxOutput.Get();
+    D3D12_RESOURCE_STATES& srcState = useClamped ? m_fgFfxClampedState : m_fgFfxOutputState;
+    const D3D12_RESOURCE_STATES srcBefore = srcState;
+    Barrier(cmd, srcTex, srcBefore, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    srcState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    Barrier(cmd, m_fgLinearColor.Get(), m_fgLinearColorState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_fgLinearColorState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    const uint32_t linTableSlot = useClamped ? 0u : 2u;   // SRV at slot 0/2, UAV at slot 1/3
+    D3D12_GPU_DESCRIPTOR_HANDLE linTable = m_fgLinearHeap->GetGPUDescriptorHandleForHeapStart();
+    linTable.ptr += linTableSlot * m_fgLinearInc;
+
+    ID3D12DescriptorHeap* linHeaps[] = {m_fgLinearHeap.Get()};
+    cmd->SetDescriptorHeaps(1, linHeaps);
+    cmd->SetComputeRootSignature(m_fgLinearRootSig.Get());
+    cmd->SetPipelineState(m_psoFgLinear.Get());
+    cmd->SetComputeRootDescriptorTable(0, linTable);
+    const uint32_t linConstants[2] = {m_renderW, m_renderH};
+    cmd->SetComputeRoot32BitConstants(1, 2, linConstants, 0);
+    cmd->Dispatch((m_renderW + frame_gen_linearize::kThreadGroup - 1) / frame_gen_linearize::kThreadGroup,
+                  (m_renderH + frame_gen_linearize::kThreadGroup - 1) / frame_gen_linearize::kThreadGroup, 1);
+    // The linearize pass only reads the source; hand it back in the state the
+    // next consumer expects (the clamp/present paths re-barrier from these).
+    Barrier(cmd, srcTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, srcBefore);
+    srcState = srcBefore;
+    // Real transition UAV -> NON_PIXEL so FSR 4 reads m_fgLinearColor in the
+    // state its API asks for; FSR does not move the input for the caller.
+    Barrier(cmd, m_fgLinearColor.Get(), m_fgLinearColorState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_fgLinearColorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    // 2. FSR 4 context #2: m_fgLinearColor (render res FP16) -> m_fgUpscaleStretch
+    //    (output res FP16). Always reset: the generated frame is an interpolation
+    //    with no real temporal continuity, so accumulated history is meaningless.
+    Barrier(cmd, m_fgUpscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    const bool dispatched = m_fsrUpscaleGenerated->Dispatch(
+        cmd, m_fgLinearColor.Get(), m_fgUpscaleStretch.Get(), /*reset=*/true, m_fgFrameTimeMs);
+    Barrier(cmd, m_fgUpscaleStretch.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if (!dispatched) {
+        m_fgUpscaleFailed = true;
+        LOG("Playback frame generation: the generated-frame FSR 4 dispatch failed ("
+            << utf8_text::FromWide(m_fsrUpscaleGenerated->LastDetail())
+            << "); generated frames keep the compositor stretch.");
+        ID3D12DescriptorHeap* srvHeaps[] = {m_srvHeap.Get()};
+        cmd->SetDescriptorHeaps(1, srvHeaps);
+        return false;
+    }
+
+    // 3. CAS sharpen over m_fgUpscaleStretch -> m_fgUpscaleSharp, reusing the
+    //    source upscale's PSO/root signature (same 8 constants: render/output
+    //    sizes + sharpness). Identical to the source frame's sharpen, so the two
+    //    cadence frames keep the same look.
+    Barrier(cmd, m_fgUpscaleSharp.Get(), m_fgUpscaleSharpState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+    const float constants[8] = {static_cast<float>(m_renderW), static_cast<float>(m_renderH),
+                                static_cast<float>(m_outputW), static_cast<float>(m_outputH),
+                                m_upscaleSharpness, 0.0f, 0.0f, 0.0f};
+    D3D12_GPU_DESCRIPTOR_HANDLE ownSrv = m_fgUpscaleHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvBase = m_fgUpscaleRtvHeap->GetCPUDescriptorHandleForHeapStart();
+
+    ID3D12DescriptorHeap* casHeaps[] = {m_fgUpscaleHeap.Get()};
+    cmd->SetDescriptorHeaps(1, casHeaps);
+    cmd->SetGraphicsRootSignature(m_upscaleRootSig.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(m_outputW),
+                            static_cast<float>(m_outputH), 0.0f, 1.0f};
+    D3D12_RECT scissor{0, 0, static_cast<LONG>(m_outputW), static_cast<LONG>(m_outputH)};
+    cmd->RSSetViewports(1, &viewport);
+    cmd->RSSetScissorRects(1, &scissor);
+    cmd->OMSetRenderTargets(1, &rtvBase, FALSE, nullptr);
+    cmd->SetPipelineState(m_psoUpscaleSharp.Get());
+    cmd->SetGraphicsRootDescriptorTable(0, ownSrv);
+    cmd->SetGraphicsRoot32BitConstants(1, 8, constants, 0);
+    cmd->DrawInstanced(3, 1, 0, 0);
+    Barrier(cmd, m_fgUpscaleSharp.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    // 4. First-success log (V2/V3 evidence that context #2 is actually running).
+    if (!m_fgUpscaledReported) {
+        m_fgUpscaledReported = true;
+        LOG("Playback frame generation: generated frames are upscaled by FSR 4 ("
+            << m_renderW << "x" << m_renderH << " -> " << m_outputW << "x" << m_outputH << ").");
+    }
+
+    // 6. Heap hygiene: leave m_srvHeap current so the present draw and the
+    //    backbuffer pass bind out of it, as every other pass expects.
+    ID3D12DescriptorHeap* srvHeaps[] = {m_srvHeap.Get()};
+    cmd->SetDescriptorHeaps(1, srvHeaps);
+    return true;
+}
+
 bool D3D12Renderer::RecordFrameGenPresentDraw(ID3D12GraphicsCommandList* cmd, uint32_t slot,
                                               bool generated)
 {
@@ -2862,7 +3217,19 @@ bool D3D12Renderer::RecordFrameGenPresentDraw(ID3D12GraphicsCommandList* cmd, ui
     ID3D12PipelineState* presentPso = BackbufferProgram(target.scaled, m_hdrOutput);
     cmd->SetPipelineState(presentPso);
     if (generated) {
-        if (m_fgFfx && m_fgFfxOutput && m_fgFfxIsland && !m_fgFfxFailed) {
+        // Top priority: the generated frame upscaled by FSR 4 (context #2), so it
+        // matches the source frame's sharpness. Falls through to the existing
+        // branches when the upscale did not run this frame.
+        if (m_fgUpscaledReady && m_fgUpscaleSharp) {
+            Barrier(cmd, m_fgUpscaleSharp.Get(), m_fgUpscaleSharpState,
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            cmd->SetGraphicsRootDescriptorTable(RootView, SRVGPU(GeneratedUpscaledSRV));
+            cmd->DrawInstanced(3, 1, 0, 0);
+            Barrier(cmd, m_fgUpscaleSharp.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    m_fgUpscaleSharpState);
+            m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        } else if (m_fgFfx && m_fgFfxOutput && m_fgFfxIsland && !m_fgFfxFailed) {
             if (m_fgClampRan && m_fgFfxClamped) {
                 // The clamped copy, written by the clamp dispatch earlier on
                 // this same list. Same barrier discipline as the raw output
@@ -2983,6 +3350,24 @@ void D3D12Renderer::ReleaseFrameGenBridge()
     m_fgFfxPrevInputState = D3D12_RESOURCE_STATE_COPY_DEST;
     m_fgFfxClampedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     m_fgClampRan = false;
+    // Generated-frame FSR 4 upscale resources ride the same lifecycle: they only
+    // exist because the island produced a frame for them to upscale. The second
+    // FSR 4 context itself is released with the upscale resources (it is not
+    // frame-gen-private), but its targets must go here so a re-entry rebuilds
+    // cleanly.
+    m_fgLinearColor.Reset();
+    m_fgUpscaleStretch.Reset();
+    m_fgUpscaleSharp.Reset();
+    m_fgLinearRootSig.Reset();
+    m_psoFgLinear.Reset();
+    m_fgLinearHeap.Reset();
+    m_fgUpscaleHeap.Reset();
+    m_fgUpscaleRtvHeap.Reset();
+    m_fgLinearColorState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    m_fgUpscaleFailed = false;
+    m_fgUpscaledReady = false;
+    m_fgUpscaledReported = false;
 }
 
 void D3D12Renderer::RecordPlaybackFrameGen(ID3D12GraphicsCommandList* cmd, float t, bool reset)

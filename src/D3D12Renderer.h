@@ -907,7 +907,11 @@ private:
     // present samples when the clamp ran; the raw output at t8 stays the
     // fallback and the debug-pixel probe.
     static constexpr uint32_t GeneratedFrameClampedSRV = GeneratedFrameSRV + 1;
-    static constexpr uint32_t SRVCount = GeneratedFrameClampedSRV + 1;
+    // The generated frame after it has been upscaled by the second FSR 4 context
+    // (FP16 linear, like UpscaleSRV): what the present samples when that path
+    // succeeded, so the generated and source frames take the same upscaler.
+    static constexpr uint32_t GeneratedUpscaledSRV = GeneratedFrameClampedSRV + 1;
+    static constexpr uint32_t SRVCount = GeneratedUpscaledSRV + 1;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
     // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two
@@ -984,6 +988,12 @@ private:
     // has retired, writing m_fgFfxClamped. False when the clamp resources are
     // missing - the caller presents the raw output, as before the clamp.
     bool RecordFrameGenClamp(ID3D12GraphicsCommandList* cmd);
+    // Upscales the just-clamped/interpolated generated frame through the second
+    // FSR 4 context so it matches the source frame's sharpness. Returns true
+    // (and sets nothing) on success; on the first failure latches m_fgUpscaleFailed
+    // and the caller falls back to the compositor stretch, exactly as before.
+    // Guarded at the top by m_fgUpscaleFailed and m_fsrUpscaleGenerated.
+    bool RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd);
     // One present draw into the current backbuffer. `generated` selects the
     // island's (or the matcher's) interpolated frame; otherwise the normal
     // chain output is drawn, exactly as the non-generation present does.
@@ -1444,6 +1454,39 @@ private:
     // FSR1 EASU, the middle tier (see PresentUpscaleEngineName). True when its
     // PSO compiled; it then serves every frame FSR 4 does not.
     bool m_easuActive = false;
+
+    // Generated-frame FSR 4 upscale. Makes the interpolated frame take the SAME
+    // upscaler as the source frame via a second, independent FSR 4 context, so
+    // the two cadence frames no longer jump in sharpness. See
+    // RecordFrameGenUpscale and docs/PLAN-generated-frame-fsr4-upscale.md.
+    // Built only when the island (BGRA8) path exists and FSR 4 is available.
+    std::unique_ptr<FsrUpscaleBackend> m_fsrUpscaleGenerated;
+    bool m_fgUpscaleFailed = false;   // permanent latch, mirrors m_fgFfxFailed
+    bool m_fgUpscaledReady = false;   // per-frame: did this frame's generated upscale succeed
+    bool m_fgUpscaledReported = false;// once-only first-success log
+
+    // Generated-frame upscale textures, same rung/format as the source upscale.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgLinearColor;   // render res FP16, FSR4 #2 input
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgUpscaleStretch;// output res FP16, FSR4 #2 output
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgUpscaleSharp;  // output res FP16, CAS output (present)
+    D3D12_RESOURCE_STATES m_fgLinearColorState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    // Linearize pass (sRGB-encoded BGRA8 -> FP16 linear) resources. Mirrors the
+    // convert pipeline's root sig / PSO / heap shape.
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_fgLinearRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoFgLinear;
+    // 4 slots: [clamped SRV, linear UAV, raw SRV, linear UAV] - the UAV is
+    // duplicated so the contiguous [SRV][UAV] descriptor table can start at the
+    // slot of whichever source (clamped or raw) this frame sampled.
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgLinearHeap;
+    uint32_t m_fgLinearInc = 0;
+    // CAS over the generated upscale reuses m_upscaleRootSig + m_psoUpscaleSharp,
+    // but needs its own heaps: it samples m_fgUpscaleStretch and writes
+    // m_fgUpscaleSharp, which the source upscale's heaps are pinned to the
+    // source's own textures.
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgUpscaleHeap;  // 1 slot SRV
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgUpscaleRtvHeap;// 1 slot RTV
     // EASU's four constant vectors (con0, con1) as float, computed from the
     // render and output sizes in CreateUpscalePresentResources.
     float m_easuCon[8] = {};

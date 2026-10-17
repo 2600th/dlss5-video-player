@@ -70,3 +70,50 @@ void main(uint3 id : SV_DispatchThreadID)
 constexpr uint32_t kThreadGroup = 8;
 
 } // namespace frame_gen_convert
+
+// frame_gen_linearize: the inverse of frame_gen_convert, run on the generated
+// frame so it can be fed to a SECOND FSR 4 context at the source's render size.
+//
+// The convert pass stores sRGB-ENCODED BGRA8 (LinearToSrgb applied on the way
+// in) into m_fgFfxOutput / m_fgFfxClamped - the domain FidelityFX is validated
+// in. FSR 4 takes linear-light FP16 (exactly what context #1 receives via
+// m_dlssColor), so the generated frame must be decoded back to linear before it
+// is handed over. This pass writes that FP16 linear light.
+//
+// CRITICAL - why this pass decodes manually instead of relying on an _SRGB view:
+// it uses Texture2D::operator[] (a Load), NOT Sample. A Load bypasses the
+// sampler entirely and returns the raw stored texel, so an _SRGB view would NOT
+// perform the gamma decode - binding _SRGB here would give the encoded value
+// with no decode at all, and the present pass would then re-encode it, doubling
+// the brightness on every other frame (the white-flash class of bug). Binding a
+// plain _UNORM view and decoding once, in the shader, is the single correct
+// path: exactly one decode, matching what the backbuffer pass' sampler does when
+// it samples GeneratedFrameClampedSRV. See docs/PLAN-generated-frame-fsr4-upscale.md (R5).
+namespace frame_gen_linearize {
+
+constexpr char kHlsl[] = R"hlsl(
+Texture2D<float4> Src : register(t0);   // B8G8R8A8_UNORM: sRGB-encoded bytes (Load, no sampler decode)
+RWTexture2D<float4> Dst : register(u0);  // R16G16B16A16_FLOAT: linear light at render resolution
+cbuffer Params : register(b0) { uint gW; uint gH; };
+
+float3 SrgbToLinear(float3 c)
+{
+    // Exact inverse of LinearToSrgb in frame_gen_convert: two-branch sRGB
+    // transfer. The threshold 0.04045 == 0.0031308 * 12.92.
+    float3 lo = c / 12.92f;
+    float3 hi = pow(max(c - 0.055f, 0.0f) / 1.055f, 2.4f);
+    return c <= 0.04045f ? lo : hi;
+}
+
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= gW || id.y >= gH) return;
+    float3 srgb = saturate(Src[int2(id.xy)].rgb);
+    Dst[int2(id.xy)] = float4(SrgbToLinear(srgb), 1.0f);
+}
+)hlsl";
+
+constexpr uint32_t kThreadGroup = 8;
+
+} // namespace frame_gen_linearize
