@@ -3156,12 +3156,17 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
     // The generated half runs the SAME engine as the source frames, by the same
     // cascade: Auto and Fsr4 enter at FSR 4 (context #2), Fsr1 at EASU, Cas at
     // the stretch-and-sharpen floor. One set for the whole chain, so the two
-    // halves of a doubled cadence can never be two different engines. Known
-    // property of the FSR 4 tier here: context #2 measured every generated
-    // frame darker than the source frame (0.686 resetting per dispatch, 0.663
-    // accumulating, both against the fallback path's 1.0, 2026-10-17) - a
-    // brightness strobe at the cadence rate. Fsr1 and Cas are the
-    // measured-matched choices.
+    // halves of a doubled cadence can never be two different engines. The FSR 4
+    // tier used to measure every generated frame darker than the source frame
+    // (0.686 resetting per dispatch, 0.663 accumulating, both against the
+    // fallback path's 1.0, 2026-10-17) - a brightness strobe at the cadence
+    // rate. That was NOT FSR 4 context #2's own behaviour: the generated frame
+    // is the only input that reaches this pass through frame_gen_linearize, and
+    // that shader's SrgbToLinear had its sRGB decode offset subtracted instead
+    // of added, halving the midtones. The sign is fixed (see
+    // FrameGenColorConvertShader.h); the draw tiers below decode through the
+    // sampler's sRGB view and were never affected, which is why the fallback
+    // always measured 1.0. Fsr1 and Cas remain the measured-matched choices.
     const bool fsrAllowed = m_upscaleEngineMode == UpscaleEngineMode::Auto ||
                             m_upscaleEngineMode == UpscaleEngineMode::Fsr4;
     const bool easuAllowed = m_upscaleEngineMode == UpscaleEngineMode::Auto ||
@@ -3234,15 +3239,16 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
         // FSR 4 context #2: m_fgLinearColor (render res FP16) -> m_fgUpscaleStretch
         // (output res FP16) - the same engine, in its own context, that the
         // source frames run through context #1, so the two halves of the cadence
-        // match. Known property: with the source's own reset policy it measured
-        // every generated frame at a 0.663 sRGB-mean ratio to the source, and
-        // resetting on every dispatch 0.686 - both against the fallback path's
-        // 1.0 (2026-10-17) - a brightness strobe at the cadence rate, from this
-        // context's own behaviour rather than its reset flag. The reset itself
-        // follows the source context's policy exactly - m_upsResetPending: the
-        // generated midpoints are their own temporally adjacent sequence (one
-        // per source frame, half a source frame apart), so the history this
-        // context accumulates is as valid as the source's.
+        // match. This tier used to measure every generated frame at a 0.663
+        // sRGB-mean ratio to the source (0.686 when resetting every dispatch),
+        // against the fallback path's 1.0. The cause was upstream of the
+        // dispatch, in frame_gen_linearize's sRGB decode (offset subtracted
+        // instead of added); fixed there, this context should now measure the
+        // same as context #1. The reset policy is unchanged and still follows
+        // the source context exactly - m_upsResetPending: the generated
+        // midpoints are their own temporally adjacent sequence (one per source
+        // frame, half a source frame apart), so the history this context
+        // accumulates is as valid as the source's.
         Barrier(cmd, m_fgUpscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         stretched = m_fsrUpscaleGenerated->Dispatch(

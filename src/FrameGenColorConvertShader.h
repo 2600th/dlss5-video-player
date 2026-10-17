@@ -100,8 +100,19 @@ float3 SrgbToLinear(float3 c)
 {
     // Exact inverse of LinearToSrgb in frame_gen_convert: two-branch sRGB
     // transfer. The threshold 0.04045 == 0.0031308 * 12.92.
+    //
+    // The offset is ADDED, not subtracted: encode is S = 1.055*L^(1/2.4) -
+    // 0.055, so its inverse is L = ((S + 0.055)/1.055)^2.4. A minus here is
+    // not a rounding difference - it maps the midtones to roughly half their
+    // value, which is exactly the 0.663-0.686 generated-frame darkening this
+    // pass used to cause (the only reader of this shader is FSR 4 context #2,
+    // so the EASU/Catmull-Rom tiers, which decode through the sampler's sRGB
+    // view, were never affected and always measured 1.0). Every other sRGB
+    // decode in the tree - AmdTemporalAccumulationShader.h, TemporalStability-
+    // Shader.h, the compositor in D3D12Renderer.cpp, ExposurePolicy.h - uses
+    // the plus and is the reference this line must match.
     float3 lo = c / 12.92f;
-    float3 hi = pow(max(c - 0.055f, 0.0f) / 1.055f, 2.4f);
+    float3 hi = pow(max(c + 0.055f, 0.0f) / 1.055f, 2.4f);
     return c <= 0.04045f ? lo : hi;
 }
 
