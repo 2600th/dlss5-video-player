@@ -3153,7 +3153,20 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
     ID3D12Resource* srcTex = useClamped ? m_fgFfxClamped.Get() : m_fgFfxOutput.Get();
     if (!srcTex) return false;
     D3D12_RESOURCE_STATES& srcState = useClamped ? m_fgFfxClampedState : m_fgFfxOutputState;
-    const bool useFsr4 = m_fgGenUpscaleFsr4 && m_fsrUpscaleActive && m_fsrUpscaleGenerated;
+    // The generated half runs the SAME engine as the source frames, by the same
+    // cascade: Auto and Fsr4 enter at FSR 4 (context #2), Fsr1 at EASU, Cas at
+    // the stretch-and-sharpen floor. One set for the whole chain, so the two
+    // halves of a doubled cadence can never be two different engines. Known
+    // property of the FSR 4 tier here: context #2 measured every generated
+    // frame darker than the source frame (0.686 resetting per dispatch, 0.663
+    // accumulating, both against the fallback path's 1.0, 2026-10-17) - a
+    // brightness strobe at the cadence rate. Fsr1 and Cas are the
+    // measured-matched choices.
+    const bool fsrAllowed = m_upscaleEngineMode == UpscaleEngineMode::Auto ||
+                            m_upscaleEngineMode == UpscaleEngineMode::Fsr4;
+    const bool easuAllowed = m_upscaleEngineMode == UpscaleEngineMode::Auto ||
+                             m_upscaleEngineMode == UpscaleEngineMode::Fsr1;
+    const bool useFsr4 = fsrAllowed && m_fsrUpscaleActive && m_fsrUpscaleGenerated;
     if (!cmd || m_fgUpscaleFailed ||
         !m_fgUpscaleStretch || !m_fgUpscaleSharp ||
         !m_fgUpscaleHeap || !m_fgUpscaleRtvHeap ||
@@ -3213,18 +3226,23 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
 
     bool stretched = false;
     const char* engine = "Catmull-Rom";
+    // The same cascade the source chain runs: an engine that was tried and
+    // failed hands the frame to the next tier down whatever the chosen mode
+    // was, so a forced Fsr4 that dies mid-stream still lands on EASU.
+    bool fsrFailed = false;
     if (useFsr4) {
         // FSR 4 context #2: m_fgLinearColor (render res FP16) -> m_fgUpscaleStretch
-        // (output res FP16). Opt-in only (DLSS5_FG_GEN_UPSCALE_FSR4=1): with the
-        // source's own reset policy it measured every generated frame at a 0.663
-        // sRGB-mean ratio to the source, and resetting on every dispatch 0.686 -
-        // both against the fallback path's 1.0 (2026-10-17) - so the darkening
-        // is this context's own behaviour, not its reset flag, and the draw
-        // tiers over the island output's sRGB view serve until it is understood.
-        // The reset itself follows the source context's policy exactly -
-        // m_upsResetPending: the generated midpoints are their own temporally
-        // adjacent sequence (one per source frame, half a source frame apart),
-        // so the history this context accumulates is as valid as the source's.
+        // (output res FP16) - the same engine, in its own context, that the
+        // source frames run through context #1, so the two halves of the cadence
+        // match. Known property: with the source's own reset policy it measured
+        // every generated frame at a 0.663 sRGB-mean ratio to the source, and
+        // resetting on every dispatch 0.686 - both against the fallback path's
+        // 1.0 (2026-10-17) - a brightness strobe at the cadence rate, from this
+        // context's own behaviour rather than its reset flag. The reset itself
+        // follows the source context's policy exactly - m_upsResetPending: the
+        // generated midpoints are their own temporally adjacent sequence (one
+        // per source frame, half a source frame apart), so the history this
+        // context accumulates is as valid as the source's.
         Barrier(cmd, m_fgUpscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         stretched = m_fsrUpscaleGenerated->Dispatch(
@@ -3236,26 +3254,43 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
         if (stretched) {
             engine = "FSR 4";
         } else {
-            m_fgUpscaleFailed = true;
+            // A failed dispatch drops FSR 4 for the WHOLE chain, not just this
+            // half: the two halves share one set, so the source's context goes
+            // too and every frame from here runs the next tier down - the
+            // source chain's own rule, applied uniformly. This frame still has
+            // to be stretched, so the draw tiers below serve it.
+            fsrFailed = true;
             LOG("Playback frame generation: the generated-frame FSR 4 dispatch failed ("
                 << utf8_text::FromWide(m_fsrUpscaleGenerated->LastDetail())
-                << "); generated frames keep the compositor stretch.");
-            ID3D12DescriptorHeap* srvHeaps[] = {m_srvHeap.Get()};
-            cmd->SetDescriptorHeaps(1, srvHeaps);
-            return false;
+                << "); FSR 4 is dropped for the whole chain and every frame runs "
+                   "the next tier down from this one on.");
+            m_fsrUpscaleGenerated->Shutdown();
+            m_fsrUpscaleGenerated.reset();
+            if (m_fsrUpscale) {
+                m_fsrUpscale->Shutdown();
+                m_fsrUpscale.reset();
+            }
+            m_fsrUpscaleActive = false;
+            // The linearize above handed the island output back in the state it
+            // arrived in; the pixel-shader draws below need it as PIXEL, which
+            // the barrier just after this block makes once for both entry paths.
         }
-    } else {
-        // The draw tiers read the island output's own _UNORM_SRGB view (slot
-        // 2/3): the sampler's hardware decode delivers the same linear light the
-        // linearize pass computes by hand, through the mechanism the compositor
-        // fallback presents faithfully. Barrier the source into a pixel-shader
-        // resource for the draws and back to the state the next consumer (the
-        // clamp, the convert pass) expects.
+    }
+    // The draw tiers run whenever FSR 4 did not serve this frame - because it
+    // was not the chosen engine, or because it failed. They read the island
+    // output's own _UNORM_SRGB view (slot 2/3): the sampler's hardware decode
+    // delivers the same linear light the linearize pass computes by hand,
+    // through the mechanism the compositor fallback presents faithfully.
+    if (!stretched) {
         const D3D12_RESOURCE_STATES drawBefore = srcState;
         Barrier(cmd, srcTex, drawBefore, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         srcState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-        if (m_easuActive) {
+        // FSR1 EASU unless Cas was asked for by name. An EASU whose PSO never
+        // compiled still falls through to the stretch below, so an explicit Cas
+        // choice and a missing EASU both land correctly; an FSR 4 that failed
+        // this frame lands here too, whatever the chosen mode was.
+        if (m_easuActive && (easuAllowed || fsrFailed)) {
             // FSR1 EASU: the same pure shader the source chain uses when FSR 4 is
             // not serving. Reads the sRGB view of the island output at render
             // res, writes the output rung.
@@ -3332,14 +3367,16 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-    // 4. First-success log (V2/V3/V4 evidence that the generated path ran for
-    //    the tier the source actually selected, and by which input).
+    // 4. First-success log (evidence that the generated path ran, and on which
+    //    engine the unified choice put it).
     if (!m_fgUpscaledReported) {
         m_fgUpscaledReported = true;
         LOG("Playback frame generation: generated frames are upscaled by " << engine
             << " (" << m_renderW << "x" << m_renderH << " -> " << m_outputW << "x" << m_outputH
-            << (useFsr4 ? " through the second FSR 4 context"
-                        : ", reading the island output's own sRGB view") << ").");
+            << (useFsr4 ? " through the second FSR 4 context, the same engine the "
+                          "source frames run"
+                        : ", the same engine the source frames run, reading the "
+                          "island output's own sRGB view") << ").");
     }
 
     // 5. Heap hygiene: leave m_srvHeap current so the present draw and the
@@ -3622,12 +3659,20 @@ void D3D12Renderer::ReadFrameGenDiagnostics()
         LOG("Playback frame generation: DLSS5_FG_GEN_UPSCALE=0 - the generated-frame "
             "upscale is forced off; generated frames keep the compositor stretch.");
     }
-    if (readFlag(L"DLSS5_FG_GEN_UPSCALE_FSR4") == 1) m_fgGenUpscaleFsr4 = true;
-    if (m_fgGenUpscaleFsr4) {
-        LOG("Playback frame generation: DLSS5_FG_GEN_UPSCALE_FSR4=1 - the generated "
-            "frame is upscaled by the second FSR 4 context, the path that measured "
-            "darker than the source frame (2026-10-17); the default is the EASU / "
-            "Catmull-Rom draw tiers over the island output's own sRGB view.");
+    // The engine choice, 0..3 (Auto / FSR 4 / FSR1 / CAS). The environment
+    // outranks the persisted ini choice, so an A/B run is never overridden.
+    const int engine = readFlag(L"DLSS5_UPSCALE_ENGINE");
+    if (engine >= 0 && engine <= 3) {
+        m_upscaleEngineMode = static_cast<UpscaleEngineMode>(engine);
+        m_upscaleEngineEnvSet = true;
+    }
+    if (m_upscaleEngineMode != UpscaleEngineMode::Auto) {
+        LOG("Playback upscale: the engine is forced to "
+            << UpscaleEngineModeName(m_upscaleEngineMode)
+            << " (DLSS5_UPSCALE_ENGINE); Auto would run the Fsr4 -> Fsr1 -> Cas "
+               "cascade. The source frames and the generated half of the playback "
+               "cadence both run this engine - there is no separate set for frame "
+               "generation.");
     }
     if (m_fgProbeMode) {
         LOG("Playback frame generation: the black-frame probe is "
@@ -4168,7 +4213,16 @@ void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)
     // it in exactly that state (NON_PIXEL_SHADER_RESOURCE is what the vendor
     // asks for on DX12), so only the filter's own draws move it to a pixel
     // shader resource.
-    const bool useFsr = m_fsrUpscaleActive && m_fsrUpscale && m_fsrUpscale->Available();
+    // The chosen engine is the cascade's entry point (UpscaleEngineMode): Auto
+    // and Fsr4 enter at FSR 4, Fsr1 at EASU, Cas at the stretch-and-sharpen
+    // floor. A forced engine that fails still lands on the floor below it,
+    // logged, exactly as the auto chain always has - the floor is the floor.
+    const bool fsrAllowed = m_upscaleEngineMode == UpscaleEngineMode::Auto ||
+                            m_upscaleEngineMode == UpscaleEngineMode::Fsr4;
+    const bool easuAllowed = m_upscaleEngineMode == UpscaleEngineMode::Auto ||
+                             m_upscaleEngineMode == UpscaleEngineMode::Fsr1;
+    const bool useFsr = fsrAllowed && m_fsrUpscaleActive && m_fsrUpscale &&
+                        m_fsrUpscale->Available();
     if (!useFsr && !m_colorInRT) Barrier(cmd, m_dlssColor.Get(), GuideReadState,
                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     // The stretch reads the frame at the render size - what the conversion
@@ -4205,6 +4259,10 @@ void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)
     // UAV from the same frame. The filter stays as the fallback, and a dispatch
     // that fails drops FSR for good rather than alternating between the two.
     bool stretched = false;
+    // An engine that was tried and failed hands the frame to the next tier down
+    // whatever the chosen mode was - the floor is the floor - so a forced FSR 4
+    // that dies mid-stream still lands on EASU rather than dropping two tiers.
+    bool fsrFailed = false;
     if (useFsr) {
         Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -4215,6 +4273,7 @@ void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)
         if (stretched) {
             m_upsResetPending = false;
         } else {
+            fsrFailed = true;
             LOG("Playback upscale: FSR 4 failed to dispatch ("
                 << utf8_text::FromWide(m_fsrUpscale->LastDetail())
                 << "); falling back to the stretch-and-sharpen from this frame on.");
@@ -4240,7 +4299,7 @@ void D3D12Renderer::RecordUpscalePresent(ID3D12GraphicsCommandList* cmd)
     // false) skips it and the Catmull-Rom below serves instead. The draw is
     // inlined rather than through the `draw` lambda because that lambda bakes
     // in the Catmull-Rom constants (SrcW/SrcH/...); EASU needs its own.
-    if (!stretched && m_easuActive) {
+    if (!stretched && m_easuActive && (easuAllowed || fsrFailed)) {
         Barrier(cmd, m_upscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_RENDER_TARGET);
         cmd->SetDescriptorHeaps(1, heaps);

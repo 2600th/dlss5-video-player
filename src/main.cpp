@@ -2386,12 +2386,18 @@ static bool ReadSavedAmdMultiPassSkip(const std::filesystem::path& settingsPath)
 // user chose. Every renderer creation site calls it, so a rebuild (the
 // hardware-decoder fallback among them) cannot silently lose the setting. The
 // choice itself lives on the player (m_playbackFrameGenRequested) and is
-// persisted to [Playback] FrameGenerationPlayback by SaveVideoSettings.
-static void ConfigurePlaybackFrameGeneration(D3D12Renderer* renderer, bool on)
+// persisted to [Playback] FrameGenerationPlayback by SaveVideoSettings. The
+// second argument is the unified upscale engine (m_upscaleEngineMode,
+// [Playback] UpscaleEngine), which serves the source frames and the generated
+// half of the cadence alike.
+static void ConfigurePlaybackFrameGeneration(D3D12Renderer* renderer, bool on,
+                                             D3D12Renderer::UpscaleEngineMode engine)
 {
     if (renderer) {
         renderer->SetPlaybackFrameGeneration(on);
-        LOG("Playback frame generation setting: " << (on ? "on" : "off") << ".");
+        renderer->SetUpscaleEngineMode(engine);
+        LOG("Playback frame generation setting: " << (on ? "on" : "off")
+            << ", upscaled by " << D3D12Renderer::UpscaleEngineModeName(engine) << ".");
     }
 }
 
@@ -5212,6 +5218,15 @@ private:
         // means off, so a fresh install or a cleared ini never turns it on
         // without the user asking.
         m_playbackFrameGenRequested=ReadIniFloat(L"Playback",L"FrameGenerationPlayback",0.0f)!=0.0f;
+        // Which upscaler serves the chain. Absence means Auto, so an existing
+        // ini keeps the cascade the player has always run; only an explicit
+        // 1/2/3 forces FSR 4 / FSR1 / CAS.
+        {
+            const float saved=ReadIniFloat(L"Playback",L"UpscaleEngine",-1.0f);
+            if(saved>=0.0f&&saved<=3.0f)
+                m_upscaleEngineMode=static_cast<D3D12Renderer::UpscaleEngineMode>(
+                    static_cast<int>(saved));
+        }
         m_playbackVsr=ReadIniFloat(L"Playback",L"RtxVsr",vsr_policy::kPlaybackDefault?1.0f:0.0f)!=0.0f;
         // Auto and the rung are separate keys on purpose. Every earlier version
         // persisted UpscaleHeight on every save, so a stored 1440 is the old
@@ -5381,6 +5396,8 @@ private:
         WriteIniFloat(L"Playback",L"NeuralView",m_neuralRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"SuperResolution",m_upscalingRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"FrameGenerationPlayback",m_playbackFrameGenRequested?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"UpscaleEngine",
+                      static_cast<float>(static_cast<int>(m_upscaleEngineMode)));
         WriteIniFloat(L"Playback",L"RtxVsr",m_playbackVsr?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleAuto",m_upscaleAuto?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
@@ -6097,6 +6114,29 @@ private:
             CheckMenuRadioItem(menu,IDM_UPSCALE_HISTORY_TEMPORAL,IDM_UPSCALE_HISTORY_PER_FRAME,
                                m_upscalingHistory==UpscalingHistory::PerFrame?IDM_UPSCALE_HISTORY_PER_FRAME:IDM_UPSCALE_HISTORY_TEMPORAL,
                                MF_BYCOMMAND);
+            // Which upscaler serves the chain, both halves of the cadence alike.
+            // The whole block is greyed while the upscale cannot serve at all;
+            // inside it each forced engine is greyed when that engine cannot
+            // start (no FSR 4 runtime, an EASU PSO that failed to compile), so a
+            // choice is never offered that would silently land somewhere else.
+            // A greyed choice can still be the checked one - a setting saved
+            // from an earlier session - and Auto is never greyed: it is the
+            // cascade, and the cascade always has a floor.
+            const bool engineLive=UpscalingAvailable();
+            using Engine=D3D12Renderer::UpscaleEngineMode;
+            const UINT engineChecked=m_upscaleEngineMode==Engine::Fsr4?IDM_UPSCALE_ENGINE_FSR4
+                :(m_upscaleEngineMode==Engine::Fsr1?IDM_UPSCALE_ENGINE_FSR1
+                 :(m_upscaleEngineMode==Engine::Cas?IDM_UPSCALE_ENGINE_CAS:IDM_UPSCALE_ENGINE_AUTO));
+            for(const UINT command:{IDM_UPSCALE_ENGINE_AUTO,IDM_UPSCALE_ENGINE_FSR4,
+                                    IDM_UPSCALE_ENGINE_FSR1,IDM_UPSCALE_ENGINE_CAS}){
+                const Engine mode=command==IDM_UPSCALE_ENGINE_FSR4?Engine::Fsr4
+                    :(command==IDM_UPSCALE_ENGINE_FSR1?Engine::Fsr1
+                     :(command==IDM_UPSCALE_ENGINE_CAS?Engine::Cas:Engine::Auto));
+                const bool available=engineLive&&(!m_renderer||m_renderer->UpscaleEngineAvailable(mode));
+                EnableMenuItem(menu,command,MF_BYCOMMAND|(available?MF_ENABLED:MF_GRAYED));
+            }
+            CheckMenuRadioItem(menu,IDM_UPSCALE_ENGINE_AUTO,IDM_UPSCALE_ENGINE_CAS,
+                               engineChecked,MF_BYCOMMAND);
             // Live only while an HDR source is on an HDR display: anywhere else there
             // is no HDR original to compare at SDR.
             const bool hdrCompare=m_loaded&&m_renderer&&m_renderer->HdrOutputActive()&&
@@ -7562,7 +7602,7 @@ private:
         ConfigureRendererSource();
         if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),ow,oh,guideW,guideH,m_activeQuality)||!RendererTookSourceLayout()){std::wstring e=T(L"error.renderer"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);m_renderer.reset();m_decoder.Close();ShowWindow(m_viewport,SW_HIDE);return false;}
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());
-        ConfigurePlaybackFrameGeneration(m_renderer.get(),m_playbackFrameGenRequested);
+        ConfigurePlaybackFrameGeneration(m_renderer.get(),m_playbackFrameGenRequested,m_upscaleEngineMode);
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
         m_haveNext=m_decoder.ReadNext(m_next);if(!m_decoder.IsStillImage())Audio().Start(source,m_currentSec);Audio().SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_cachedSourceFile=localPayload;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
@@ -7736,7 +7776,7 @@ private:
                 // answer the switch, which is what UpscalingPresentAvailable asks.
                 candidate->renderer->UpscalingPresentAvailable()){
                 candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
-                ConfigurePlaybackFrameGeneration(candidate->renderer.get(),m_playbackFrameGenRequested);
+                ConfigurePlaybackFrameGeneration(candidate->renderer.get(),m_playbackFrameGenRequested,m_upscaleEngineMode);
                 GuideFrame guide;
                 candidate->guides.SetControls(m_guides.Controls());
                 candidate->guides.SetSceneCutSensitivity(m_guides.SceneCutSensitivity());
@@ -7814,6 +7854,20 @@ private:
         if(m_renderer)m_renderer->SetPlaybackFrameGeneration(m_playbackFrameGenRequested);
         SaveVideoSettings();
         LOG("Playback frame generation "<<(m_playbackFrameGenRequested?"on":"off")<<" (persisted to [Playback] FrameGenerationPlayback).");
+        UpdateCachedStatus();InvalidateControls();
+    }
+    // Which upscaler serves the chain, both halves of the cadence alike. A
+    // preference set from the menu's radio block, effective on the next frame;
+    // the choice persists like the frame-generation toggle's. The renderer keeps
+    // the DLSS5_UPSCALE_ENGINE environment variable ahead of this, so an A/B run
+    // is never overridden.
+    void SetUpscaleEngine(D3D12Renderer::UpscaleEngineMode mode){
+        if(m_upscaleEngineMode==mode)return;
+        m_upscaleEngineMode=mode;
+        if(m_renderer)m_renderer->SetUpscaleEngineMode(mode);
+        SaveVideoSettings();
+        LOG("Upscaled by "<<D3D12Renderer::UpscaleEngineModeName(mode)
+            <<" (persisted to [Playback] UpscaleEngine).");
         UpdateCachedStatus();InvalidateControls();
     }
     bool PlaybackFrameGenerationSupported()const{
@@ -7998,7 +8052,7 @@ private:
                 ConfigureRendererSource();
                 const bool rebuilt=m_renderer->Initialize(window,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,m_activeQuality)&&
                     RendererTookSourceLayout();
-                if(rebuilt)ConfigurePlaybackFrameGeneration(m_renderer.get(),m_playbackFrameGenRequested);
+                if(rebuilt)ConfigurePlaybackFrameGeneration(m_renderer.get(),m_playbackFrameGenRequested,m_upscaleEngineMode);
                 return rebuilt;
             });
         m_renderWnd=rebuild.window;
@@ -11560,7 +11614,7 @@ private:
         ConfigureRendererSource();
         if(!m_renderer||!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,DefaultNeuralCarrierQuality())||!RendererTookSourceLayout()){Unload();return false;}
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());m_activeQuality=DefaultNeuralCarrierQuality();
-        ConfigurePlaybackFrameGeneration(m_renderer.get(),m_playbackFrameGenRequested);
+        ConfigurePlaybackFrameGeneration(m_renderer.get(),m_playbackFrameGenRequested,m_upscaleEngineMode);
         const ComparisonView desiredView=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;
         // Decoder start-up (and any hardware-decode fallback) is asynchronous:
         // wait for the first pair within the same bound the seek path uses.
@@ -11828,7 +11882,7 @@ private:
             return{};
         }
         candidate->renderer->SetDLSS(false);candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
-        ConfigurePlaybackFrameGeneration(candidate->renderer.get(),m_playbackFrameGenRequested);
+        ConfigurePlaybackFrameGeneration(candidate->renderer.get(),m_playbackFrameGenRequested,m_upscaleEngineMode);
         if(m_renderer)candidate->renderer->SetDebugView(m_renderer->GetDebugView());
         candidate->configuration.inputWidth=candidate->renderer->DLSSInputW();candidate->configuration.inputHeight=candidate->renderer->DLSSInputH();
         return candidate;
@@ -12636,6 +12690,10 @@ private:
         case IDM_FRAMEGEN_MAX:SetFrameGenerationPreference(0);break;
         case IDM_FRAMEGEN_EVEN_ONLY:SetEvenCadenceOnly(!m_evenCadenceOnly);break;
         case IDM_FRAMEGEN_HOLD_DUPLICATES:SetHoldDuplicateFrames(!m_frameGenHoldDuplicates);break;
+        case IDM_UPSCALE_ENGINE_AUTO:SetUpscaleEngine(D3D12Renderer::UpscaleEngineMode::Auto);break;
+        case IDM_UPSCALE_ENGINE_FSR4:SetUpscaleEngine(D3D12Renderer::UpscaleEngineMode::Fsr4);break;
+        case IDM_UPSCALE_ENGINE_FSR1:SetUpscaleEngine(D3D12Renderer::UpscaleEngineMode::Fsr1);break;
+        case IDM_UPSCALE_ENGINE_CAS:SetUpscaleEngine(D3D12Renderer::UpscaleEngineMode::Cas);break;
         case IDM_AUDIO_PASSTHROUGH:SetAudioPassthrough(!m_audioPassthrough);break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
         case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIEW_FRAME_GENERATED:SetDebug(D3D12Renderer::DebugView::FrameGenerated);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:SetAspect(false,false);break;case IDM_ASPECT_FILL:SetAspect(true,false);break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
@@ -12884,6 +12942,14 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // renderer creation. Distinct from the offline conversion the Frame
     // Generation menu starts.
     bool m_playbackFrameGenRequested=false;
+    // Which upscaler serves the picture - one setting for the whole chain, the
+    // source frames and the generated half of the playback cadence alike. Auto
+    // is the Fsr4 -> Fsr1 -> Cas cascade (with the generated half deliberately
+    // off the Fsr4 tier, which measured darker than the source frame and
+    // strobed at the cadence rate, 2026-10-17); the rest force an entry point.
+    // Persisted to [Playback] UpscaleEngine (0..3); the DLSS5_UPSCALE_ENGINE
+    // environment variable outranks it for an A/B run.
+    D3D12Renderer::UpscaleEngineMode m_upscaleEngineMode = D3D12Renderer::UpscaleEngineMode::Auto;
     bool m_playbackFrameGenMenuAvailable=false;
     bool m_playbackFrameGenMenuActive=false;
     // The playback upscale's CAS strength, hundredths in the INI. Kept beside the

@@ -104,6 +104,18 @@ inline constexpr UINT IDM_FRAMEGEN_EVEN_ONLY = 345;
 // Hold a repeated frame instead of generating between two copies of it
 // (FrameGenerationRequest::holdDuplicates). A toggle beside Even cadence only.
 inline constexpr UINT IDM_FRAMEGEN_HOLD_DUPLICATES = 346;
+// Which upscaler serves the picture - one setting for the whole chain, the
+// source frames and the generated half of the playback cadence alike, so the
+// two halves of a doubled cadence are never two different engines. Its own
+// contiguous radio block, because CheckMenuRadioItem clears every command in
+// the range it is given. Auto is the Fsr4 -> Fsr1 -> Cas cascade the chain has
+// always run; the other three force an entry point into that same cascade, and
+// an engine that fails still hands the whole chain to the next tier down.
+// Meaningful while the DLSS Upscaling switch can serve.
+inline constexpr UINT IDM_UPSCALE_ENGINE_AUTO = 347;
+inline constexpr UINT IDM_UPSCALE_ENGINE_FSR4 = 348;
+inline constexpr UINT IDM_UPSCALE_ENGINE_FSR1 = 349;
+inline constexpr UINT IDM_UPSCALE_ENGINE_CAS = 350;
 inline constexpr UINT IDM_ASPECT_FIT = 400;
 inline constexpr UINT IDM_ASPECT_FILL = 401;
 inline constexpr UINT IDM_ASPECT_ONE_TO_ONE = 404;

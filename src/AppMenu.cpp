@@ -244,6 +244,24 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(dlss, IDM_RTX_VSR_UPSCALING, L"menu.rtx_vsr_upscaling");
     // --- DLSS Super Resolution: the toggle and the size it targets. --------
     add(dlss, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
+    // Which upscaler serves it. ONE setting for the whole chain: the source
+    // frames and the generated half of the playback cadence alike, so the two
+    // halves of a doubled cadence are never two different engines by accident.
+    // Auto is the cascade (FSR 4 where it starts, else FSR1, else CAS); the
+    // rest force an entry point into the same cascade, and an engine that fails
+    // hands the whole chain to the next tier down. Sits directly under the
+    // switch it serves. The FSR 4 row carries its known property: on the
+    // generated half the second context measured darker than the source frame,
+    // a brightness strobe at the cadence rate (2026-10-17).
+    HMENU upscaleEngine=CreatePopupMenu();
+    add(upscaleEngine, IDM_UPSCALE_ENGINE_AUTO, L"menu.upscale_engine_auto");
+    add(upscaleEngine, IDM_UPSCALE_ENGINE_FSR4, L"menu.upscale_engine_fsr4");
+    add(upscaleEngine, IDM_UPSCALE_ENGINE_FSR1, L"menu.upscale_engine_fsr1");
+    add(upscaleEngine, IDM_UPSCALE_ENGINE_CAS, L"menu.upscale_engine_cas");
+    CheckMenuRadioItem(upscaleEngine,IDM_UPSCALE_ENGINE_AUTO,IDM_UPSCALE_ENGINE_CAS,
+                       IDM_UPSCALE_ENGINE_AUTO,MF_BYCOMMAND);
+    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleEngine),
+                localizer.Get(L"menu.upscale_engine").c_str());
     HMENU upscaleOutput=CreatePopupMenu();
     add(upscaleOutput, IDM_UPSCALE_AUTO, L"menu.upscale_auto");
     add(upscaleOutput, IDM_UPSCALE_1080, L"menu.upscale_1080");

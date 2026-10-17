@@ -298,6 +298,40 @@ class D3D12Renderer {
 public:
     D3D12Renderer()=default;
     enum class DebugView { Final, Input, MotionVectors, Depth, FrameGenerated };
+    // Which upscaler serves the picture - ONE setting for the whole chain, the
+    // source frames and the generated half of the playback cadence alike. At
+    // every moment the two halves of a doubled cadence run the same engine:
+    // there is no separate tier for frame generation, so the halves cannot
+    // drift apart by accident. Three genuinely different filters, not three
+    // names for one thing:
+    //   Fsr4  - the FidelityFX upscaler runtime's context (tier 1: the ML,
+    //           temporal upscaler). Status pill: FSR4.
+    //   Fsr1  - FSR 1's EASU pass, its upscaling half; the sharpen after it is
+    //           CAS, exactly as the chain has always paired them (tier 2).
+    //           Status pill: FSR1.
+    //   Cas   - the Catmull-Rom stretch-and-sharpen, the floor of every chain
+    //           (tier 3). Status pill: CAS.
+    //   Auto  - the cascade: Fsr4 where it can start, else Fsr1, else Cas.
+    // A forced engine is the cascade's ENTRY POINT, not a dead end: an engine
+    // that fails hands the frame - and, because the two halves share one set,
+    // the session - to the next tier down, logged as it always was.
+    // Known property of the Fsr4 tier on the generated half: the SECOND Fsr4
+    // context measured every generated frame darker than the source frame
+    // (0.686 resetting per dispatch, 0.663 accumulating, both against the
+    // fallback path's 1.0, 2026-10-17) - a brightness strobe at the cadence
+    // rate. It is kept because uniformity is the rule; Fsr1 and Cas are the
+    // measured-matched choices, and the cause inside the runtime is still open.
+    enum class UpscaleEngineMode { Auto = 0, Fsr4 = 1, Fsr1 = 2, Cas = 3 };
+    // The mode's name for logs and the status line: the words the menu uses.
+    static const char* UpscaleEngineModeName(UpscaleEngineMode mode)
+    {
+        switch (mode) {
+        case UpscaleEngineMode::Fsr4: return "FSR 4";
+        case UpscaleEngineMode::Fsr1: return "FSR1";
+        case UpscaleEngineMode::Cas:  return "CAS";
+        default:                       return "Auto";
+        }
+    }
 
     struct ColorSettings {
         float brightness = 0.0f;   // exposure-like brightness, in stops (-2..+2)
@@ -642,16 +676,19 @@ public:
     bool UpscalingPresentAvailable() const { return m_dlss.Available() || m_upscaleOwnEngine; }
     // Which amplifier is drawing the picture right now, for the status line:
     // the FSR 4 backend (tier 1), the FSR1 EASU shader that takes the stretch
-    // half over when FSR 4 cannot start (tier 2: no runtime, a GPU it refuses,
-    // a ratio past 3.0x, or a dispatch that failed), or the stretch-and-
-    // sharpen CATMULL-ROM filter that serves only when even EASU's PSO failed
-    // to compile (tier 3). Only meaningful while UpscalePresentActive() holds
-    // - with DLSS up, DLSS is the engine and the question has no answer.
+    // half over when FSR 4 cannot start or is not the chosen engine (tier 2), or
+    // the stretch-and-sharpen CATMULL-ROM filter that is the floor of every
+    // chain (tier 3). Only meaningful while UpscalePresentActive() holds -
+    // with DLSS up, DLSS is the engine and the question has no answer. The
+    // chosen mode gates it exactly as the dispatch does, so a forced engine
+    // never reports a tier it is not using.
     const wchar_t* PresentUpscaleEngineName() const
     {
-        if (m_fsrUpscaleActive && m_fsrUpscale && m_fsrUpscale->Available())
+        if (m_upscaleEngineMode != UpscaleEngineMode::Fsr1 &&
+            m_upscaleEngineMode != UpscaleEngineMode::Cas &&
+            m_fsrUpscaleActive && m_fsrUpscale && m_fsrUpscale->Available())
             return L"FSR4";
-        if (m_easuActive)
+        if (m_upscaleEngineMode != UpscaleEngineMode::Cas && m_easuActive)
             return L"FSR1";
         return L"CAS";
     }
@@ -682,6 +719,39 @@ public:
         m_playbackFrameGen = on;
     }
     bool PlaybackFrameGeneration() const { return m_playbackFrameGen; }
+    // Which upscaler serves the picture, both halves of the cadence alike (see
+    // UpscaleEngineMode). Auto is the default: the Fsr4 -> Fsr1 -> Cas cascade
+    // the chain has always run, with the generated half deliberately off the
+    // Fsr4 tier until the second context's darkening is understood. A change
+    // is a discontinuity for the context being left. Safe to call at any time;
+    // the next frame records on the new engine.
+    void SetUpscaleEngineMode(UpscaleEngineMode mode)
+    {
+        if (m_upscaleEngineEnvSet) return;   // the environment outranks the ini
+        if (m_upscaleEngineMode != mode) {
+            m_upscaleEngineMode = mode;
+            m_upsResetPending = true;
+            m_fgUpsResetPending = true;
+        }
+    }
+    UpscaleEngineMode GetUpscaleEngineMode() const { return m_upscaleEngineMode; }
+    // Whether a given engine can actually serve right now, so the menu can grey
+    // the ones that cannot instead of offering a choice that silently lands
+    // somewhere else. Fsr4 needs its context alive; Fsr1 and Cas need their PSOs
+    // to have compiled. The renderer must be initialized for an honest answer.
+    bool UpscaleEngineAvailable(UpscaleEngineMode mode) const
+    {
+        switch (mode) {
+        case UpscaleEngineMode::Fsr4:
+            return m_fsrUpscaleActive && m_fsrUpscale && m_fsrUpscale->Available();
+        case UpscaleEngineMode::Fsr1:
+            return m_easuActive;
+        case UpscaleEngineMode::Cas:
+            return m_psoUpscaleStretch && m_psoUpscaleSharp;
+        default:
+            return true;
+        }
+    }
     bool PlaybackFrameGenerationSupported() const
     {
         return playback_frame_gen::RuntimeAvailable({m_playbackFrameGen, m_fgFfxIsland,
@@ -1495,15 +1565,16 @@ private:
     bool m_fgUpscaleFailed = false;   // permanent latch, mirrors m_fgFfxFailed
     bool m_fgUpscaledReady = false;   // per-frame: did this frame's generated upscale succeed
     bool m_fgUpscaledReported = false;// once-only first-success log
-    // Which engine upscales the generated frame. Default false: the draw tiers
-    // (EASU / Catmull-Rom) read the island output through a _UNORM_SRGB view,
-    // the hardware decode, exactly the mechanism the compositor fallback uses -
-    // no linearize pass and no second FSR 4 context in the path. FSR 4 context
-    // #2 measured darker than the source frame on every policy tried for its
-    // reset flag (0.686 resetting every dispatch, 0.663 accumulating; both
-    // against the fallback path's 1.0, 2026-10-17), so it is opt-in through
-    // DLSS5_FG_GEN_UPSCALE_FSR4=1 until that is understood.
-    bool m_fgGenUpscaleFsr4 = false;
+    // Which engine upscales the picture, both halves of the cadence alike.
+    // Default Auto: the Fsr4 -> Fsr1 -> Cas cascade. The generated half of the
+    // cadence stays off the Fsr4 tier inside Auto (see UpscaleEngineMode), so
+    // this is also where the flicker-free default lives. The
+    // DLSS5_UPSCALE_ENGINE environment variable (0..3) sets this and latches
+    // m_upscaleEngineEnvSet, which outranks the persisted ini choice.
+    UpscaleEngineMode m_upscaleEngineMode = UpscaleEngineMode::Auto;
+    // Set when DLSS5_UPSCALE_ENGINE was read from the environment: an A/B run
+    // is then not silently overridden by the persisted ini choice.
+    bool m_upscaleEngineEnvSet = false;
     // The second context's reset latch, mirroring m_upsResetPending exactly:
     // true on the first dispatch after the context is built and on every
     // discontinuity, false while the generated frames run continuously. The
