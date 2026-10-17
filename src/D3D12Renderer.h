@@ -1485,8 +1485,8 @@ private:
     // but needs its own heaps: it samples m_fgUpscaleStretch and writes
     // m_fgUpscaleSharp, which the source upscale's heaps are pinned to the
     // source's own textures.
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgUpscaleHeap;  // 1 slot SRV
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgUpscaleRtvHeap;// 1 slot RTV
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgUpscaleHeap;  // 2-slot SRV: [0]=linColor [1]=upStretch
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgUpscaleRtvHeap;// 2-slot RTV: [0]=upStretch [1]=upSharp
     // EASU's four constant vectors (con0, con1) as float, computed from the
     // render and output sizes in CreateUpscalePresentResources.
     float m_easuCon[8] = {};
