@@ -2376,6 +2376,22 @@ static bool ReadSavedAmdMultiPassSkip(const std::filesystem::path& settingsPath)
     return GetPrivateProfileIntW(L"AmdMultiPass",L"LaterPassSkip",1,settingsPath.c_str())!=0;
 }
 
+// The AMD runtime's style (DLSS5_STYLE) as this machine has saved it, 0..2.
+//
+// 1 unless saved otherwise, because 1 is what the runtime does when the key is
+// absent and what every render before the menu existed produced. The value is
+// not the panel's Style: that is the NVIDIA add-on's NRStyle, which this backend
+// never reads (BackendReadsNeuralSettings), so it is stored under its own
+// section rather than beside the add-on's keys. Anything unreadable or out of
+// range falls back to 1 - the runtime's own answer for a value that is not
+// exactly 0, 1 or 2.
+static uint32_t ReadSavedAmdStyle(const std::filesystem::path& settingsPath)
+{
+    return amd_lmxxf::NormalizedAmdStyle(static_cast<uint32_t>(
+        GetPrivateProfileIntW(L"AmdNeural",L"Style",int(amd_lmxxf::kAmdStyleDefault),
+                              settingsPath.c_str())));
+}
+
 // Playback frame generation as this machine has saved it. Off unless saved on:
 // the shipped product path for a doubled cadence is the offline conversion
 // (progress, a file, then play), because presentation pacing is entangled with
@@ -2433,6 +2449,10 @@ struct NeuralJobInputs {
     bool amdSkinProtect{false};
     bool amdMultiPassPredict{true};
     bool amdMultiPassSkip{false};
+    // The runtime's own style (DLSS5_STYLE, 0..2), same road again: the menu
+    // writes it, a moved value restarts the live session, and the job carries
+    // the value it was started under (RenderSettings::amdStyle).
+    uint32_t amdStyle{1};
     HANDLE pauseEvent{};
     bool prepareOnly{};
     // The background acquisition of this very source, when one is in flight.
@@ -2663,7 +2683,7 @@ private:
         // named mutex derived from the directory, so it costs the tree nothing.
         lease_.emplace(runtimeDirectory_);
         if(!lease_->Held()){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("AMD neural runtime is in use by another render; refusing to share it.");return false;}
-        settingsSnapshot_=AmdNeuralSettingsDocument(in_.temporal.stability,in_.amdPasses,in_.amdSkinProtect,in_.amdMultiPassPredict,in_.amdMultiPassSkip);
+        settingsSnapshot_=AmdNeuralSettingsDocument(in_.temporal.stability,in_.amdPasses,in_.amdSkinProtect,in_.amdMultiPassPredict,in_.amdMultiPassSkip,in_.amdStyle);
         settingsDigest_=Sha256Bytes(*settingsSnapshot_);
         if(!settingsDigest_){completion_->result.detail=L"The neural settings digest could not be computed.";return false;}
         return true;
@@ -2853,7 +2873,7 @@ private:
         staging_=cache_.BeginRenderStaging(renderKey_);if(!staging_){completion_->result.detail=in_.cacheFailureText.Describe(cache_);return false;}
         {std::ofstream settingsFile(*staging_/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot_->data(),static_cast<std::streamsize>(settingsSnapshot_->size()));if(!settingsFile){cache_.MarkInvalid(*staging_);completion_->result.detail=L"The neural settings snapshot could not be staged.";return false;}}
         const auto& range=in_.range;
-        NeuralRenderRequest request{nullptr,sourcePath_,liveIndex?liveDirectory/L"neural.mkv":*staging_/L"neural.mkv",width_,height_,fps_,duration_};request.jobId=in_.generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps_);request.guides=in_.guides;request.temporal=in_.temporal;request.amdPasses=in_.amdPasses;request.amdSkinProtect=in_.amdSkinProtect;request.amdMultiPassPredict=in_.amdMultiPassPredict;request.amdMultiPassSkip=in_.amdMultiPassSkip;request.pauseEvent=in_.pauseEvent;request.segmentFrames=liveIndex?in_.segmentFrames:0u;request.firstSegmentFrames=liveIndex?in_.firstSegmentFrames:0u;request.gpuColorConversion=in_.gpuColorConversion;request.nvencPreset=in_.nvencPreset;request.gpuSourceConversion=in_.gpuSourceConversion;request.processingScale=in_.processingScale;request.captureDither=in_.captureDither;request.quality=in_.cacheQuality;request.sourceDeband=in_.sourceDeband;request.suppliedExposure=in_.suppliedExposure;
+        NeuralRenderRequest request{nullptr,sourcePath_,liveIndex?liveDirectory/L"neural.mkv":*staging_/L"neural.mkv",width_,height_,fps_,duration_};request.jobId=in_.generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps_);request.guides=in_.guides;request.temporal=in_.temporal;request.amdPasses=in_.amdPasses;request.amdSkinProtect=in_.amdSkinProtect;request.amdMultiPassPredict=in_.amdMultiPassPredict;request.amdMultiPassSkip=in_.amdMultiPassSkip;request.amdStyle=in_.amdStyle;request.pauseEvent=in_.pauseEvent;request.segmentFrames=liveIndex?in_.segmentFrames:0u;request.firstSegmentFrames=liveIndex?in_.firstSegmentFrames:0u;request.gpuColorConversion=in_.gpuColorConversion;request.nvencPreset=in_.nvencPreset;request.gpuSourceConversion=in_.gpuSourceConversion;request.processingScale=in_.processingScale;request.captureDither=in_.captureDither;request.quality=in_.cacheQuality;request.sourceDeband=in_.sourceDeband;request.suppliedExposure=in_.suppliedExposure;
         // Which backend runs the pass, and - on the AMD one - the tree it loads
         // its module from. The worker executable is not on this line for the
         // reason the export gives: one binary serves both backends and always
@@ -5277,6 +5297,7 @@ private:
             static_cast<int>(kDefaultUpscaleSharpness*100.0f+0.5f),SettingsPath().c_str())/100.0f,0.0f,1.0f);
         m_amdMultiPassPredict=ReadSavedAmdMultiPassPredict(SettingsPath());
         m_amdMultiPassSkip=ReadSavedAmdMultiPassSkip(SettingsPath());
+        m_amdStyle=ReadSavedAmdStyle(SettingsPath());
         }
         m_gpuColorConversion=GetPrivateProfileIntW(L"Encoding",L"GpuColorConversion",0,SettingsPath().c_str())!=0;
         m_gpuSourceConversion=GetPrivateProfileIntW(L"Encoding",L"GpuSourceConversion",0,SettingsPath().c_str())!=0;
@@ -5430,6 +5451,11 @@ private:
         wchar_t sharpness[16];std::swprintf(sharpness,16,L"%d",static_cast<int>(m_upscaleSharpness*100.0f+0.5f));
         WritePrivateProfileStringW(L"Comparison",L"AmdUpscaleSharpness",sharpness,SettingsPath().c_str());
         WritePrivateProfileStringW(L"AmdMultiPass",L"LaterPassSkip",m_amdMultiPassSkip?L"1":L"0",SettingsPath().c_str());
+        // The runtime's style, in a section of its own because it is not a
+        // multi-pass switch and must not be mistaken for the add-on's NRStyle
+        // (which LoadNeuralSettings reads from [NeuralSettings] Style).
+        WritePrivateProfileStringW(L"AmdNeural",L"Style",
+            std::to_wstring(amd_lmxxf::NormalizedAmdStyle(m_amdStyle)).c_str(),SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuSourceConversion",m_gpuSourceConversion?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"NvencPreset",std::to_wstring(m_nvencPreset).c_str(),SettingsPath().c_str());
@@ -6109,6 +6135,20 @@ private:
                                    ?IDM_NEURAL_PRESET_CUSTOM
                                    :UINT(IDM_NEURAL_PRESET_FIRST+presetIndex),
                                MF_BYCOMMAND);
+            // The AMD style, the presets' neighbour in the same submenu and its
+            // own radio block. Greyed on NVIDIA: DLSS5_STYLE is the AMD
+            // runtime's key and nothing on the other backend reads it, so a
+            // clickable row there would be a control that renders nothing.
+            if(const HMENU owner=app_menu::FindMenuContainingCommand(menu,IDM_NEURAL_AMD_STYLE_FIRST)){
+                CheckMenuRadioItem(owner,IDM_NEURAL_AMD_STYLE_FIRST,
+                                   IDM_NEURAL_AMD_STYLE_FIRST+IDM_NEURAL_AMD_STYLE_COUNT-1,
+                                   UINT(IDM_NEURAL_AMD_STYLE_FIRST+amd_lmxxf::NormalizedAmdStyle(m_amdStyle)),
+                                   MF_BYCOMMAND);
+                const UINT styleState=MF_BYCOMMAND|
+                    (m_opt.neuralBackend==NeuralBackend::Amd?MF_ENABLED:MF_GRAYED);
+                for(UINT style=0;style<IDM_NEURAL_AMD_STYLE_COUNT;++style)
+                    EnableMenuItem(owner,IDM_NEURAL_AMD_STYLE_FIRST+style,styleState);
+            }
             CheckMenuRadioItem(menu,IDM_PROCESSING_SCALE_FIRST,IDM_PROCESSING_SCALE_LAST,
                                app_menu::CommandForProcessingScale(m_processingScale),MF_BYCOMMAND);
             CheckMenuRadioItem(menu,IDM_UPSCALE_HISTORY_TEMPORAL,IDM_UPSCALE_HISTORY_PER_FRAME,
@@ -7013,6 +7053,37 @@ private:
         SyncFeatureMenuState();
     }
 
+    // The AMD runtime's own style (DLSS5_STYLE), from the Neural presets menu.
+    //
+    // Applied the way a render setting is, not the way a viewing one is: a live
+    // session is restarted at the playhead, because the frame that is already
+    // rendered was rendered at the old style and nothing on disk changes by
+    // relabelling it. The restart is what makes it live - the job's settings
+    // digest now carries the style, so the resident helper is relaunched and the
+    // runtime, which reads its configuration once per process, reads the line
+    // the writer has just put there before it builds the network. A paused frame
+    // re-previews for the same reason; a conversion already running keeps the
+    // style it started with, like every other neural setting.
+    void SetAmdStyle(uint32_t style){
+        style=amd_lmxxf::NormalizedAmdStyle(style);
+        if(style==m_amdStyle){SyncFeatureMenuState();return;}
+        m_amdStyle=style;
+        LOG("AMD neural style set to "<<style<<" (DLSS5_STYLE; 1 is the runtime's own default).");
+        SaveVideoSettings();
+        if(m_liveSession){
+            const double at=Position();const bool wasPlaying=m_playing||m_liveResumePlaying;
+            LOG("AMD style applied; restarting the active session at "<<at<<" s (playing="<<wasPlaying<<").");
+            DetachLivePlayback();
+            StopLiveNeuralSession(false);
+            PerformSeek(at,false);
+            StartLiveNeuralSession();
+            m_liveResumePlaying=wasPlaying;
+        }else{
+            SchedulePausedSettingsPreview();
+        }
+        SyncFeatureMenuState();
+    }
+
     void ShowNeuralSettings(){
         if(m_neuralWnd&&IsWindow(m_neuralWnd)){ShowWindow(m_neuralWnd,SW_SHOWNORMAL);SetForegroundWindow(m_neuralWnd);return;}
         static constexpr const wchar_t* kClassName=L"DLSSVideoNeuralSettingsClassV14";
@@ -7039,9 +7110,16 @@ private:
         // Whether later passes skip the heavy block group; only means anything
         // above one pass.
         bool amdMultiPassSkip{false};
+        // The AMD runtime's own style (DLSS5_STYLE, 0..2). Not in NeuralSettings
+        // for the same reason as the switches above - the runtime owns the key,
+        // and the dialog's Style is the add-on's NRStyle, a different control
+        // this backend never reads - and it is a render setting, not a viewing
+        // one: a moved style is a different picture at the same cost, so it
+        // restarts a live session and writes a new cache key.
+        uint32_t amdStyle{1};
         friend bool operator==(const RenderSettings&,const RenderSettings&)=default;
     };
-    RenderSettings CurrentRenderSettings()const{return {m_neuralSettings,m_renderGuides,m_temporalSettings,m_amdSkinProtect,m_amdMultiPassPredict,m_amdMultiPassSkip};}
+    RenderSettings CurrentRenderSettings()const{return {m_neuralSettings,m_renderGuides,m_temporalSettings,m_amdSkinProtect,m_amdMultiPassPredict,m_amdMultiPassSkip,m_amdStyle};}
 
     // The render the picture came from is not what the dialog now holds. Only the
     // export path noticed this before, so a settings change made during playback
@@ -7106,7 +7184,8 @@ private:
                                m_neuralSettings.passes!=m_liveRenderSettings.neural.passes||
                                m_amdSkinProtect!=m_liveRenderSettings.amdSkinProtect||
                                m_amdMultiPassPredict!=m_liveRenderSettings.amdMultiPassPredict||
-                               m_amdMultiPassSkip!=m_liveRenderSettings.amdMultiPassSkip;
+                               m_amdMultiPassSkip!=m_liveRenderSettings.amdMultiPassSkip||
+                               m_amdStyle!=m_liveRenderSettings.amdStyle;
             if(!restart){
                 LOG("Neural settings applied at "<<Position()<<" s; this backend's render reads the accumulation rung and the pass count and nothing else in the dialog, and neither moved, so the active session is left running.");
                 return;
@@ -10592,7 +10671,7 @@ private:
     // takes the rung from the temporal term instead - hashing the panel there
     // would retire coverage a restart would have rendered identically.
     std::string RetentionKeyFor(const RenderSettings& render)const{
-        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettingsForBackend(m_opt.neuralBackend,render.neural,render.amdSkinProtect,render.amdMultiPassPredict,render.amdMultiPassSkip)+"|"+CanonicalGuideControls(render.guides)+
+        return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettingsForBackend(m_opt.neuralBackend,render.neural,render.amdSkinProtect,render.amdMultiPassPredict,render.amdMultiPassSkip,render.amdStyle)+"|"+CanonicalGuideControls(render.guides)+
                "|"+CanonicalTemporalSettings(render.temporal);
     }
     std::string LiveRetentionKey()const{return RetentionKeyFor(CurrentRenderSettings());}
@@ -11535,7 +11614,7 @@ private:
             // reports from the request.
             job.backend=m_opt.neuralBackend;job.amdRuntimeDirectory=m_opt.amdRuntimeDirectory;
             const RenderSettings render=JobRenderSettings(kind);
-            job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.amdPasses=std::clamp(render.neural.passes,1,4);job.amdSkinProtect=render.amdSkinProtect;job.amdMultiPassPredict=render.amdMultiPassPredict;job.amdMultiPassSkip=render.amdMultiPassSkip;job.pauseEvent=m_neuralPauseEvent;
+            job.guides=render.guides;job.temporal=render.temporal;job.settings=render.neural;job.amdPasses=std::clamp(render.neural.passes,1,4);job.amdSkinProtect=render.amdSkinProtect;job.amdMultiPassPredict=render.amdMultiPassPredict;job.amdMultiPassSkip=render.amdMultiPassSkip;job.amdStyle=render.amdStyle;job.pauseEvent=m_neuralPauseEvent;
             job.gpuColorConversion=m_gpuColorConversion;job.gpuSourceConversion=m_gpuSourceConversion;job.nvencPreset=m_nvencPreset;job.processingScale=m_processingScale;job.captureDither=m_captureDither;job.cacheQuality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
             job.reuseSourceKey=reuseSourceKey;job.expectedDurationSeconds=expectedDurationSeconds;job.range=range;job.prepareOnly=prepareOnly;
             // The background acquisition of this very source, when one is in
@@ -12656,6 +12735,8 @@ private:
         if(id>=IDM_RECENT_VIDEO_FIRST&&id<IDM_RECENT_VIDEO_FIRST+5){OpenRecent(id-IDM_RECENT_VIDEO_FIRST);return;}
         if(id>=IDM_NEURAL_PRESET_FIRST&&id<IDM_NEURAL_PRESET_FIRST+neural_presets::kPresetCount){
             ApplyNeuralPreset(size_t(id-IDM_NEURAL_PRESET_FIRST));return;}
+        if(id>=IDM_NEURAL_AMD_STYLE_FIRST&&id<IDM_NEURAL_AMD_STYLE_FIRST+IDM_NEURAL_AMD_STYLE_COUNT){
+            SetAmdStyle(uint32_t(id-IDM_NEURAL_AMD_STYLE_FIRST));return;}
         if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::NativeMenu,id)){Rehook();return;}
         if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::NativeMenu,id,false)){ActivateYouTube();return;}
         if(const ExampleVideo* example=app_menu::ExampleVideoForCommand(id)){ActivateExampleVideo(*example);return;}
@@ -13207,6 +13288,10 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // this backend's pass count defaults to three and the skip is what keeps
     // three passes inside the frame budget and at a single pass's ghosting.
     bool m_amdMultiPassSkip{true};
+    // The AMD runtime's style, DLSS5_STYLE, 0..2. 1 by default - the runtime's
+    // own built-in answer and what this backend rendered before the menu existed
+    // - so a machine that never opens the menu keeps its picture.
+    uint32_t m_amdStyle{1};
     // The preset the Look settings were last taken from, so Custom can say
     // which one it departed from. kPresetCount when none is known yet.
     size_t m_lastNeuralPreset=neural_presets::kPresetCount;
@@ -13596,6 +13681,10 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         job.amdSkinProtect=ReadSavedAmdSkinProtect(settings);
         job.amdMultiPassPredict=ReadSavedAmdMultiPassPredict(settings);
         job.amdMultiPassSkip=ReadSavedAmdMultiPassSkip(settings);
+        // The runtime's style, saved the same way; there is no command-line key
+        // for it (the menu is the surface), so a scripted --render uses this
+        // machine's value.
+        job.amdStyle=ReadSavedAmdStyle(settings);
 
         say(StageExportPlanSummary(plan,width,height,fps));
         // What the render will look like and how it is encoded, whichever of

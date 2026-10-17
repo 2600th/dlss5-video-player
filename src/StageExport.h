@@ -116,6 +116,9 @@ struct StageExportJob {
     // Whether later passes skip the heavy block group; see
     // RenderSettings::amdMultiPassSkip in the player.
     bool amdMultiPassSkip{false};
+    // The AMD runtime's own style (DLSS5_STYLE, 0..2); see
+    // RenderSettings::amdStyle in the player.
+    uint32_t amdStyle{1};
     // The CAS strength on an upscaled capture (AmdUpscaleShader.h). Only the
     // command line names it today; the dialog's export leaves the default.
     float upscaleSharpness{0.6f};

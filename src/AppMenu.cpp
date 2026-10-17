@@ -1,4 +1,5 @@
 #include "AppMenu.h"
+#include "AmdLmxxfPolicy.h"
 #include "NeuralPresets.h"
 #include "UpscalingPolicy.h"
 
@@ -216,6 +217,25 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     CheckMenuRadioItem(presets, IDM_NEURAL_PRESET_FIRST, IDM_NEURAL_PRESET_CUSTOM,
                        IDM_NEURAL_PRESET_FIRST + UINT(neural_presets::kDefaultPresetIndex),
                        MF_BYCOMMAND);
+    // The AMD runtime's own style (DLSS5_STYLE), in this submenu because it is
+    // the same question the presets answer - what look the model is asked for -
+    // and because the dialog's Style row is the NVIDIA add-on's NRStyle, which
+    // the AMD backend never reads. Its own radio block: the preset block above
+    // reports one of five states, this one reports one of three, and
+    // CheckMenuRadioItem would otherwise clear both. Greyed on NVIDIA (see
+    // main.cpp SyncFeatureMenuState), where no key reads it.
+    AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(presets, MF_STRING | MF_GRAYED, 0,
+                localizer.Get(L"menu.amd_style_header").c_str());
+    for (UINT style = 0; style < IDM_NEURAL_AMD_STYLE_COUNT; ++style) {
+        const wchar_t* key = style == 0 ? L"menu.amd_style_0"
+                             : style == 1 ? L"menu.amd_style_1" : L"menu.amd_style_2";
+        AppendMenuW(presets, MF_STRING, IDM_NEURAL_AMD_STYLE_FIRST + style,
+                    localizer.Get(key).c_str());
+    }
+    CheckMenuRadioItem(presets, IDM_NEURAL_AMD_STYLE_FIRST,
+                       IDM_NEURAL_AMD_STYLE_FIRST + IDM_NEURAL_AMD_STYLE_COUNT - 1,
+                       IDM_NEURAL_AMD_STYLE_FIRST + amd_lmxxf::kAmdStyleDefault, MF_BYCOMMAND);
     const std::wstring presetsName = localizer.Get(L"menu.neural_presets");
     AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(presets), presetsName.c_str());
     add(dlss, IDM_NEURAL_SETTINGS, L"menu.neural_settings");

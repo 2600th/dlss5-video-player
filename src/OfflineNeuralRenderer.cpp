@@ -2906,12 +2906,21 @@ struct AmdLmxxfEvaluatorAdapter {
     bool broughtUpSkinProtect{false};
     bool broughtUpPredict{true};
     bool broughtUpSkip{false};
+    // The style the bring-up was made under. It is the RUNTIME's too - the
+    // network is compiled with it as preprocess feature 6 from the file the
+    // writer above left - so a moved style is the same kind of question as a
+    // moved count: nothing short of a fresh load of the DLL re-reads the file.
+    // This is what makes the menu live inside a resident helper: the job asks
+    // for another style, the evaluator is rebuilt, the module reloads and the
+    // file is read again before the network is built.
+    uint32_t broughtUpStyle{1};
     uint32_t broughtUpOutputW{},broughtUpOutputH{};
     uint32_t jobOutputW{},jobOutputH{};
     uint32_t jobPasses{1};
     bool jobSkinProtect{false};
     bool jobPredict{true};
     bool jobSkip{false};
+    uint32_t jobStyle{1};
     bool reused=false;
     // Why the last bring-up failed, kept because a failed Initialize drops the
     // evaluator and LastFailure() would then have nothing left to ask.
@@ -2932,18 +2941,23 @@ struct AmdLmxxfEvaluatorAdapter {
     void SetMultiPassPredict(bool predict){jobPredict=predict&&jobPasses==3u;}
     // The skip is a later-pass question, so it counts only above one pass.
     void SetMultiPassSkip(bool skip){jobSkip=skip&&jobPasses>1u;}
+    // The style is always a bring-up question, at any pass count: it is baked
+    // into the preprocess feature the C32/prefix modules read, not into a pass.
+    // Normalised here as the writer normalises it, so the reuse question and the
+    // file say the same thing.
+    void SetStyle(uint32_t style){jobStyle=amd_lmxxf::NormalizedAmdStyle(style);}
     bool Initialize(HWND,uint32_t w,uint32_t h,uint32_t ow,uint32_t oh,double fps,
                     const GuideControls& guides,PixelLayout,const SourceColorDescription&){
         if(!ow||!oh){ow=w;oh=h;}
         jobOutputW=ow;jobOutputH=oh;
         // The guides are per-frame inputs on this path rather than bring-up
         // state, so the size, the capture size, the job model, the accumulation
-        // rung and the pass count are the whole inheritance question and a
-        // match on all of them means there is nothing to rebuild.
+        // rung, the pass count and the style are the whole inheritance question
+        // and a match on all of them means there is nothing to rebuild.
         reused=evaluator&&width==w&&height==h&&broughtUpTemporal==config.temporalHistory&&
                broughtUpStability==config.stability&&broughtUpPasses==jobPasses&&
                broughtUpSkinProtect==jobSkinProtect&&broughtUpPredict==jobPredict&&
-               broughtUpSkip==jobSkip&&broughtUpOutputW==jobOutputW&&
+               broughtUpSkip==jobSkip&&broughtUpStyle==jobStyle&&broughtUpOutputW==jobOutputW&&
                broughtUpOutputH==jobOutputH;
         if(reused)return true;
         captured.clear();
@@ -2954,6 +2968,7 @@ struct AmdLmxxfEvaluatorAdapter {
         broughtUpSkinProtect=jobSkinProtect;
         broughtUpPredict=jobPredict;
         broughtUpSkip=jobSkip;
+        broughtUpStyle=jobStyle;
         broughtUpOutputW=jobOutputW;
         broughtUpOutputH=jobOutputH;
         if(evaluator->Initialize(nullptr,w,h,ow,oh,fps,guides))return true;
@@ -3715,17 +3730,20 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // the player's own job setup - a write there left the command-line render
     // running under whatever the file last said. A file that cannot be written
     // fails the job: the panel would otherwise show a count nothing renders.
+    // The style travels the same road for the same reason: it is the runtime's
+    // key, read from the same file at the same moment.
     {
         std::string passesError;
-        if (!amd_lmxxf::WriteAmdMultiPassConfig(state.amdEvaluator.config.runtimeDirectory,
-                                                std::clamp(request.amdPasses, 1u, 4u),
-                                                request.amdSkinProtect, request.amdMultiPassPredict,
-                                                request.amdMultiPassSkip, passesError)) {
+        if (!amd_lmxxf::WriteAmdRuntimeConfig(state.amdEvaluator.config.runtimeDirectory,
+                                              std::clamp(request.amdPasses, 1u, 4u),
+                                              request.amdSkinProtect, request.amdMultiPassPredict,
+                                              request.amdMultiPassSkip, request.amdStyle,
+                                              passesError)) {
             NeuralRenderResult refused;
             refused.jobId = request.jobId;
             refused.failure = NeuralRenderFailure::Preflight;
             refused.detail = utf8_text::ToWide(passesError) +
-                             L" - the neural pass count cannot be handed to the AMD runtime.";
+                             L" - the neural settings cannot be handed to the AMD runtime.";
             LOG("Refusing the AMD job: " << passesError);
             return refused;
         }
@@ -3777,6 +3795,11 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
     // The skip list changes what the later passes compute, so it is a moved
     // bring-up for the same reason the others are.
     state.amdEvaluator.SetMultiPassSkip(request.amdMultiPassSkip);
+    // The style is compiled into the preprocess feature, so a moved one is a
+    // moved bring-up like the count: the reload is what makes the writer's new
+    // line real, and it is what lets a menu switch reach a session already
+    // running in this helper.
+    state.amdEvaluator.SetStyle(request.amdStyle);
     // What this backend cannot be asked for. Each is a benchmark switch that
     // exists to change what the NVIDIA path renders, and here it would change
     // nothing at all - a run that reported the flag's arm while rendering the
@@ -3812,6 +3835,7 @@ NeuralRenderResult OfflineNeuralRenderer::RunAmdJob(const NeuralRenderRequest& r
             :"off, this backend has no guide estimator and this job brought no guide files")
         <<" accumulation="<<TemporalStabilityName(state.amdEvaluator.config.stability)
         <<" passes="<<request.amdPasses<<" (the runtime stacks the network itself; the count was handed to it before the network was built)"
+        <<" style="<<amd_lmxxf::NormalizedAmdStyle(request.amdStyle)<<" (DLSS5_STYLE, handed over with the count)"
         <<" skin-protect="<<(request.amdSkinProtect?"on":"off")
         <<" mp-predict="<<(request.amdMultiPassPredict?"on":"off")
         <<" mp-skip="<<(request.amdMultiPassSkip?"on":"off")

@@ -476,6 +476,24 @@ void amd_accumulation_rung_is_on_by_default_and_off_keeps_the_old_key_test()
         CHECK(both.find("accumulation=low\n") != std::string::npos);
         CHECK(both.find(line) != std::string::npos);
     }
+
+    // The style keys the same way and for the same reason: its default 1 writes
+    // nothing - that is the runtime's built-in answer and what every render
+    // before the menu existed produced - and 0 and 2 are each their own line,
+    // because they are different pictures at the same cost.
+    CHECK_EQ(before, AmdNeuralSettingsDocument(TemporalStability::Off, 1, false, true, false, 1));
+    for (const uint32_t style : {0u, 2u}) {
+        const std::string document =
+            AmdNeuralSettingsDocument(TemporalStability::Off, 1, false, true, false, style);
+        const std::string line = "style=" + std::to_string(style) + "\n";
+        CHECK_EQ(before.size() + line.size(), document.size());
+        CHECK(document.compare(before.size(), line.size(), line) == 0);
+        // Composes with the count rather than replacing it.
+        const std::string stacked =
+            AmdNeuralSettingsDocument(TemporalStability::Off, 3, false, true, false, style);
+        CHECK(stacked.find("passes=3\n") != std::string::npos);
+        CHECK(stacked.find(line) != std::string::npos);
+    }
 }
 
 // Which key a rung is remembered under, and what a machine takes when its key
@@ -533,42 +551,65 @@ void amd_pass_count_reaches_the_runtime_through_its_own_config_file_test()
     };
 
     // The reader counts a line that starts with DLSS5_ and holds '='; only the
-    // exact key is ours to write.
+    // exact key is ours to write. The style is a key of its own now, so the
+    // foreign key this test leaves in a hand-written file is a different one
+    // (DLSS5_FAST_NUMERIC), and the style line is expected to be rewritten.
     CHECK(amd_lmxxf::IsAmdPassesConfigLine("DLSS5_MULTI_PASS=2"));
     CHECK(!amd_lmxxf::IsAmdPassesConfigLine("DLSS5_MULTI_PASS_SKIN_PROTECT=1"));
     CHECK(!amd_lmxxf::IsAmdPassesConfigLine("DLSS5_MULTI_PASS_PREDICT=1"));
     CHECK(!amd_lmxxf::IsAmdPassesConfigLine("DLSS5_MULTI_PASS_SKIP_BLOCKS=31,32"));
     CHECK(!amd_lmxxf::IsAmdPassesConfigLine("#DLSS5_MULTI_PASS=2"));
     CHECK(!amd_lmxxf::IsAmdPassesConfigLine("DLSS5_STYLE=3"));
+    CHECK(amd_lmxxf::IsAmdStyleConfigLine("DLSS5_STYLE=2"));
+    CHECK(!amd_lmxxf::IsAmdStyleConfigLine("DLSS5_STYLE_EXTRA=2"));
+    CHECK(!amd_lmxxf::IsAmdStyleConfigLine("DLSS5_MULTI_PASS=2"));
+    CHECK(!amd_lmxxf::IsAmdStyleConfigLine("#DLSS5_STYLE=0"));
     CHECK_EQ(std::string("DLSS5_MULTI_PASS=1"), amd_lmxxf::AmdPassesConfigLine(0));
     CHECK_EQ(std::string("DLSS5_MULTI_PASS=4"), amd_lmxxf::AmdPassesConfigLine(9));
+    // A value that is not exactly 0, 1 or 2 is normalised rather than handed
+    // over: the runtime would read it as 1 anyway, and the file should say what
+    // the render is.
+    CHECK_EQ(std::string("DLSS5_STYLE=0"), amd_lmxxf::AmdStyleConfigLine(0));
+    CHECK_EQ(std::string("DLSS5_STYLE=1"), amd_lmxxf::AmdStyleConfigLine(1));
+    CHECK_EQ(std::string("DLSS5_STYLE=2"), amd_lmxxf::AmdStyleConfigLine(2));
+    CHECK_EQ(std::string("DLSS5_STYLE=1"), amd_lmxxf::AmdStyleConfigLine(3));
 
-    // A file that does not exist yet: the folder is made and the key written.
     std::string error;
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 2, false, true, false, error));
+    const auto write = [&](uint32_t passes, bool skin, bool predict, bool skip, uint32_t style) {
+        return amd_lmxxf::WriteAmdRuntimeConfig(root, passes, skin, predict, skip, style, error);
+    };
+
+    // A file that does not exist yet: the folder is made and every key written,
+    // the style included, at the runtime's own default (1).
+    CHECK(write(2, false, true, false, 1));
     CHECK(fs::is_regular_file(file, ec) && !ec);
-    CHECK(read() == "DLSS5_MULTI_PASS=2\nDLSS5_MULTI_PASS_SKIN_PROTECT=0\nDLSS5_MULTI_PASS_PREDICT=1\nDLSS5_MULTI_PASS_SKIP_BLOCKS=\n");
+    CHECK(read() == "DLSS5_MULTI_PASS=2\n"
+                    "DLSS5_MULTI_PASS_SKIN_PROTECT=0\n"
+                    "DLSS5_MULTI_PASS_PREDICT=1\n"
+                    "DLSS5_MULTI_PASS_SKIP_BLOCKS=\n"
+                    "DLSS5_STYLE=1\n");
 
     // A hand-written file: its comments, its other keys and a repeated key of
     // ours survive, the last occurrence is the one rewritten, and no earlier one
-    // is left behind for the reader to disagree with.
+    // is left behind for the reader to disagree with. The style is rewritten in
+    // place, because the menu is the authority over a hand edit - the same rule
+    // the skin switch follows - while a key that is not ours passes through.
     {
         std::ofstream out(file, std::ios::binary | std::ios::trunc);
         out << "# hand written\n"
                "DLSS5_MULTI_PASS_SKIN_PROTECT=1\n"
-               "DLSS5_STYLE=3\n"
+               "DLSS5_STYLE=2\n"
+               "DLSS5_FAST_NUMERIC=1\n"
                "DLSS5_MULTI_PASS=2\n"
                "\n"
                "DLSS5_MULTI_PASS=3\n";
     }
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 4, false, true, false, error));
+    CHECK(write(4, false, true, false, 0));
     const std::string rewritten = read();
-    // The hand-written skin switch is the panel's to set too: the panel's value
-    // is what this job renders, and a value a hand edit left behind is not the
-    // authority for a switch the panel shows.
     CHECK(rewritten == "# hand written\n"
                        "DLSS5_MULTI_PASS_SKIN_PROTECT=0\n"
-                       "DLSS5_STYLE=3\n"
+                       "DLSS5_STYLE=0\n"
+                       "DLSS5_FAST_NUMERIC=1\n"
                        "\n"
                        "DLSS5_MULTI_PASS=4\n"
                        "DLSS5_MULTI_PASS_PREDICT=1\n"
@@ -576,47 +617,51 @@ void amd_pass_count_reaches_the_runtime_through_its_own_config_file_test()
     CHECK(rewritten.find("DLSS5_MULTI_PASS=2") == std::string::npos);
     CHECK(rewritten.find("DLSS5_MULTI_PASS=3") == std::string::npos);
 
-    // Idempotent: writing the same count again changes nothing, which is what
-    // lets every job state the count without churning the file.
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 4, false, true, false, error));
+    // Idempotent: writing the same settings again changes nothing, which is what
+    // lets every job state them without churning the file.
+    CHECK(write(4, false, true, false, 0));
     CHECK(read() == rewritten);
 
-    // The skin switch is written whether or not it is on - a panel that has
+    // The skin switch is written whether or not it is on - a menu that has
     // released the switch has to be able to switch off one a hand edit turned
     // on, and the runtime reads its configuration only once per process. Its own
-    // key survives as the panel's value, not as the value that was there.
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 3, true, true, false, error));
+    // key survives as the menu's value, not as the value that was there.
+    CHECK(write(3, true, true, false, 0));
     CHECK(read() == "# hand written\n"
                    "DLSS5_MULTI_PASS_SKIN_PROTECT=1\n"
-                   "DLSS5_STYLE=3\n"
+                   "DLSS5_STYLE=0\n"
+                   "DLSS5_FAST_NUMERIC=1\n"
                    "\n"
                    "DLSS5_MULTI_PASS=3\n"
                    "DLSS5_MULTI_PASS_PREDICT=1\n"
                    "DLSS5_MULTI_PASS_SKIP_BLOCKS=\n");
     // The prediction turns off a file that had it on - the same authority rule
     // the skin switch follows.
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 3, true, false, false, error));
+    CHECK(write(3, true, false, false, 0));
     CHECK(read() == "# hand written\n"
                    "DLSS5_MULTI_PASS_SKIN_PROTECT=1\n"
-                   "DLSS5_STYLE=3\n"
+                   "DLSS5_STYLE=0\n"
+                   "DLSS5_FAST_NUMERIC=1\n"
                    "\n"
                    "DLSS5_MULTI_PASS=3\n"
                    "DLSS5_MULTI_PASS_PREDICT=0\n"
                    "DLSS5_MULTI_PASS_SKIP_BLOCKS=\n");
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 3, true, true, false, error));
+    CHECK(write(3, true, true, false, 0));
     CHECK(read() == "# hand written\n"
                    "DLSS5_MULTI_PASS_SKIN_PROTECT=1\n"
-                   "DLSS5_STYLE=3\n"
+                   "DLSS5_STYLE=0\n"
+                   "DLSS5_FAST_NUMERIC=1\n"
                    "\n"
                    "DLSS5_MULTI_PASS=3\n"
                    "DLSS5_MULTI_PASS_PREDICT=1\n"
                    "DLSS5_MULTI_PASS_SKIP_BLOCKS=\n");
-    // And the two keys are independent: the count moves without the switch, and
-    // the switch turns off a file that had it on.
-    CHECK(amd_lmxxf::WriteAmdMultiPassConfig(root, 4, false, true, false, error));
+    // And the style alone moves the picture: the line is rewritten in place,
+    // every other key stays exactly where it was.
+    CHECK(write(4, false, true, false, 2));
     CHECK(read() == "# hand written\n"
                    "DLSS5_MULTI_PASS_SKIN_PROTECT=0\n"
-                   "DLSS5_STYLE=3\n"
+                   "DLSS5_STYLE=2\n"
+                   "DLSS5_FAST_NUMERIC=1\n"
                    "\n"
                    "DLSS5_MULTI_PASS=4\n"
                    "DLSS5_MULTI_PASS_PREDICT=1\n"

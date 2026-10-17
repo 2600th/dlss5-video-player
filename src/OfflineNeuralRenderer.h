@@ -182,6 +182,12 @@ struct NeuralRenderRequest {
     // of a lighter, lower-contrast look in the later passes. Means something
     // only above one pass, so the key and the reuse decision say nothing there.
     bool amdMultiPassSkip{false};
+    // The model's own style (DLSS5_STYLE, 0..2), the runtime's NGX style feature.
+    // 1 is the runtime's built-in answer and what every job before the menu
+    // existed rendered, so 1 keys and reloads exactly like an absent value. It is
+    // NOT the add-on's NRStyle, which the AMD backend never reads. Clamped to
+    // 0..2 by ValidRequest and normalised again by the config writer.
+    uint32_t amdStyle{1};
     // The CAS strength on an upscaled capture, 0..1 (AmdUpscaleShader.h). It
     // means nothing at source size, where no stretch runs, and is forwarded
     // only because the capture is made in the helper.

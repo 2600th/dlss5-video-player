@@ -879,6 +879,15 @@ void the_retained_settings_term_reads_only_what_the_backend_reads()
           std::string::npos);
     CHECK(CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, stacked4, true).find("skin-protect=1") !=
           std::string::npos);
+    // The style is the runtime's too (DLSS5_STYLE, not the panel's NRStyle), and
+    // keys only off its default: at 1 the term is what it was before the menu
+    // existed, at 0 or 2 it is another picture and so another coverage.
+    CHECK_EQ(std::string("passes=1"),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, single, false, true, false, 1));
+    CHECK_EQ(std::string("passes=1 style=0"),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, single, false, true, false, 0));
+    CHECK_EQ(std::string("passes=4 style=2"),
+             CanonicalNeuralSettingsForBackend(NeuralBackend::Amd, stacked4, false, true, false, 2));
 }
 
 void removing_one_owned_entry_preserves_other_entries_and_outside_files()

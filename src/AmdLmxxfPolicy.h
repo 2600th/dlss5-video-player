@@ -169,15 +169,46 @@ inline bool IsAmdPassesConfigLine(std::string_view line) noexcept
     return IsAmdConfigLine(line, "DLSS5_MULTI_PASS");
 }
 
-// What the player owns inside the runtime's configuration file: the pass count
-// and, on this runtime, whether later passes keep skin-coloured pixels pinned to
-// the first pass (DLSS5_MULTI_PASS_SKIN_PROTECT). Both are written on every AMD
-// job, the skin switch included when it is off - a key the panel has released has
-// to be able to switch off one a hand edit turned on, and a runtime that reads
-// its configuration once cannot be told again.
-inline bool WriteAmdMultiPassConfig(const std::filesystem::path& runtimeDirectory, uint32_t passes,
-                                    bool skinProtect, bool multiPassPredict, bool laterPassSkip,
-                                    std::string& error)
+// The model's own style feature (NGX "Style", preprocess feature 6 = Style/128),
+// which this runtime reads from `DLSS5_STYLE` as 0, 1 or 2. It is not one of the
+// add-on's NR* keys: the player's neural settings panel carries the add-on's
+// NRStyle, which this backend never reads and which is a different control with
+// a different meaning, so the two are kept apart here by name and by value.
+//
+// The runtime's built-in answer is 1 (the style the original runtime used in
+// Stellar Blade, .0078125f compiled into the C32/prefix modules). 0 is NVIDIA's
+// default and the setting its reference images use; 2 is the third style. A
+// value that is not exactly 0, 1 or 2 is read by the runtime as 1, so the
+// writer normalises instead of handing over something the reader would quietly
+// reinterpret.
+inline constexpr uint32_t kAmdStyleDefault = 1;
+inline constexpr uint32_t kAmdStyleCount = 3;
+
+inline uint32_t NormalizedAmdStyle(uint32_t style) noexcept
+{
+    return style < kAmdStyleCount ? style : kAmdStyleDefault;
+}
+
+inline std::string AmdStyleConfigLine(uint32_t style)
+{
+    return "DLSS5_STYLE=" + std::to_string(NormalizedAmdStyle(style));
+}
+
+inline bool IsAmdStyleConfigLine(std::string_view line) noexcept
+{
+    return IsAmdConfigLine(line, "DLSS5_STYLE");
+}
+
+// What the player owns inside the runtime's configuration file: the pass count,
+// whether later passes keep skin-coloured pixels pinned to the first pass
+// (DLSS5_MULTI_PASS_SKIN_PROTECT), the third-pass forecast, the later-pass block
+// list, and the style (DLSS5_STYLE). All of them are written on every AMD job -
+// a key the menu has released has to be able to switch off one a hand edit
+// turned on, and a runtime that reads its configuration once cannot be told
+// again.
+inline bool WriteAmdRuntimeConfig(const std::filesystem::path& runtimeDirectory, uint32_t passes,
+                                  bool skinProtect, bool multiPassPredict, bool laterPassSkip,
+                                  uint32_t style, std::string& error)
 {
     namespace fs = std::filesystem;
     const fs::path directory = runtimeDirectory / L"DLSS5-AMD";
@@ -188,10 +219,10 @@ inline bool WriteAmdMultiPassConfig(const std::filesystem::path& runtimeDirector
         return false;
     }
     const fs::path path = directory / L"custom-config.txt";
-    // Passes first, then the skin switch: the order they are written in is the
-    // order they appear in when neither was in the file.
-    std::string keys[4];
-    std::string values[4];
+    // Passes first, then the style: the order they are written in is the order
+    // they appear in when neither was in the file.
+    std::string keys[5];
+    std::string values[5];
     keys[0] = "DLSS5_MULTI_PASS";
     values[0] = AmdPassesConfigLine(passes).substr(keys[0].size() + 1);
     keys[1] = "DLSS5_MULTI_PASS_SKIN_PROTECT";
@@ -206,9 +237,18 @@ inline bool WriteAmdMultiPassConfig(const std::filesystem::path& runtimeDirector
     // comes from.
     keys[3] = "DLSS5_MULTI_PASS_SKIP_BLOCKS";
     values[3] = laterPassSkip ? "31,32,33,34,35,36,37,38,40,41,42,43,44,45,46,47" : "";
-    constexpr size_t kKeyCount = 4;
-    // Where each key's last line sits, or npos when the file has none yet.
-    size_t keepAt[kKeyCount] = {std::string::npos, std::string::npos, std::string::npos, std::string::npos};
+    // Written even at 1, the runtime's own default: that is what makes the menu
+    // the authority over a hand-edited line, and 1 renders what an absent line
+    // renders, so a machine that never opens the menu sees no change.
+    keys[4] = "DLSS5_STYLE";
+    values[4] = std::to_string(NormalizedAmdStyle(style));
+    constexpr size_t kKeyCount = 5;
+    // Where each key's last line sits, or npos when the file has none yet. Every
+    // slot is spelled out: a brace list shorter than the array value-initialises
+    // the rest to 0, which reads as "the key is on the first line" and silently
+    // drops that key from a file that did not have it.
+    size_t keepAt[kKeyCount] = {std::string::npos, std::string::npos, std::string::npos,
+                                std::string::npos, std::string::npos};
     std::vector<std::string> lines;
     {
         std::ifstream input(path, std::ios::binary);

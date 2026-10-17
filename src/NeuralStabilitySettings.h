@@ -62,7 +62,7 @@ inline constexpr uint32_t PassesSettingsDefault(NeuralBackend backend) noexcept
 
 inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uint32_t passes = 1,
                                              bool skinProtect = false, bool multiPassPredict = true,
-                                             bool laterPassSkip = false)
+                                             bool laterPassSkip = false, uint32_t style = 1)
 {
     std::string document = "backend=amd-lmxxf\n"
                            "temporal=off\n"
@@ -72,6 +72,13 @@ inline std::string AmdNeuralSettingsDocument(TemporalStability accumulation, uin
         document += "accumulation=" + std::string(TemporalStabilityName(accumulation)) + "\n";
     if (passes != 1)
         document += "passes=" + std::to_string(passes) + "\n";
+    // The style, off its default 1 - the runtime's own built-in answer and the
+    // picture this backend keyed before the switch existed. Unlike the pass
+    // count it belongs to the request rather than to a bring-up alone: a moved
+    // style is a different picture at the same cost, so it is a key term and a
+    // reuse term (the helper relaunches on it because the digest moves).
+    if (style != 1)
+        document += "style=" + std::to_string(style) + "\n";
     // Only with a count: the runtime blends the skin mask in only when later
     // passes exist, so at one pass this switch renders exactly what an off
     // switch renders, and a key term that claims otherwise would retire
@@ -128,13 +135,14 @@ inline TemporalStability SavedStability(NeuralBackend backend, std::string_view 
 // spell it on the backend where all of it is read.
 //
 // On NVIDIA this is the whole canonical string, because every value on the panel
-// reaches a pixel there (BackendReadsNeuralSettings). On AMD exactly one value
-// does - the pass count, stacked by the evaluator over its own output - so this
-// is that one value and nothing else. The rung travels in the temporal term of
-// the same key (CanonicalTemporalSettings); the panel's other values are still
-// unreachable here, and hashing them would retire coverage a restart would have
-// rendered identically - the exact waste the settings document's comment already
-// ruled out for the render key, one key over.
+// reaches a pixel there (BackendReadsNeuralSettings). On AMD the run-time switches
+// do - the pass count and the style (both the runtime's keys, passed in beside
+// the panel's settings because the add-on does not own them) plus the switches
+// that go with the count - and nothing else off the panel. The rung travels in
+// the temporal term of the same key (CanonicalTemporalSettings); the panel's
+// other values are still unreachable here, and hashing them would retire
+// coverage a restart would have rendered identically - the exact waste the
+// settings document's comment already ruled out for the render key, one key over.
 //
 // Keep this in lockstep with what RunAmdJob actually copies into the evaluator's
 // config. A value added here before it reaches a pixel is a key term that lies;
@@ -144,7 +152,8 @@ inline std::string CanonicalNeuralSettingsForBackend(NeuralBackend backend,
                                                      const NeuralSettings& settings,
                                                      bool amdSkinProtect = false,
                                                      bool amdMultiPassPredict = true,
-                                                     bool amdMultiPassSkip = false)
+                                                     bool amdMultiPassSkip = false,
+                                                     uint32_t amdStyle = 1)
 {
     if (backend == NeuralBackend::Amd) {
         const uint32_t passes = std::clamp(settings.passes, 1, 4);
@@ -152,11 +161,14 @@ inline std::string CanonicalNeuralSettingsForBackend(NeuralBackend backend,
         // rather than in NeuralSettings - it is the runtime's, not the add-on's
         // - so it arrives as its own argument, and it counts only above one pass,
         // which is the same rule AmdNeuralSettingsDocument applies to it. In step
-        // or coverage from one arm is served to the other.
+        // or coverage from one arm is served to the other. The style travels the
+        // same road for the same reason: DLSS5_STYLE is the runtime's key, not
+        // the add-on's NRStyle that NeuralSettings carries.
         std::string term = "passes=" + std::to_string(passes);
         if (amdSkinProtect && passes > 1) term += " skin-protect=1";
         if (passes == 3 && !amdMultiPassPredict) term += " mp-predict=0";
         if (passes > 1 && amdMultiPassSkip) term += " mp-skip=1";
+        if (amdStyle != 1) term += " style=" + std::to_string(amdStyle);
         return term;
     }
     return CanonicalNeuralSettings(settings);

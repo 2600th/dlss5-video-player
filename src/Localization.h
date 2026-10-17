@@ -291,6 +291,16 @@ private:
             {L"export.tip.framegen", L"Generates frames between the rendered ones. Always last, because DLSS-G consumes the finished picture."},
             {L"menu.neural_presets", L"Neural presets"},
             {L"menu.neural_preset_custom", L"Custom (a control was changed)"},
+            // The AMD runtime's DLSS5_STYLE, the model's own style feature. 0 is
+            // NVIDIA's default and the setting its reference images use; 1 is
+            // the style the original runtime ran in Stellar Blade and the value
+            // every package before the switch existed had built in; 2 is the
+            // third style. Each costs no render time - it changes what the
+            // network is asked for, not how much of it runs.
+            {L"menu.amd_style_header", L"AMD style: what the model is asked for"},
+            {L"menu.amd_style_0", L"Style 0 \u00b7 NVIDIA default (closest to reference)"},
+            {L"menu.amd_style_1", L"Style 1 \u00b7 Stellar Blade (runtime default)"},
+            {L"menu.amd_style_2", L"Style 2 \u00b7 third style"},
             {L"menu.neural_settings", L"Neural settings\tCtrl+N"},
             // The measured rates are whole 8 s 3840x2160 renders on an RTX 4080
             // SUPER, helper start included, median of three; see UpscalingPolicy.h.

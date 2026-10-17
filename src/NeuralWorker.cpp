@@ -1,4 +1,5 @@
 #include "NeuralWorker.h"
+#include "AmdLmxxfPolicy.h"
 #include "NarrowText.h"
 #include "PlatformPaths.h"
 #include "NeuralWorkerProtocol.h"
@@ -1378,6 +1379,14 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(request.amdMultiPassPredict ? L"1" : L"0");
         arguments.emplace_back(L"--amd-mp-skip");
         arguments.emplace_back(request.amdMultiPassSkip ? L"1" : L"0");
+        // The style (DLSS5_STYLE), sent only off its default 1: 1 is the
+        // runtime's own built-in answer and the picture every job before the
+        // menu existed rendered, so a job that never opened it keeps its old
+        // command line.
+        if (request.amdStyle != 1) {
+            arguments.emplace_back(L"--amd-style");
+            arguments.emplace_back(std::to_wstring(request.amdStyle));
+        }
         arguments.emplace_back(L"--upscale-sharpness");
         arguments.emplace_back(WideFromFloat(request.upscaleSharpness));
     }
@@ -1521,6 +1530,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
                CaptureDither, CacheQuality, Deband, SuppliedExposure, EncoderPathKey, NeuralBackendKey,
                AmdRuntimeDirectoryKey, AmdPassesKey, AmdSkinProtectKey, AmdPredictKey, AmdLaterPassSkipKey,
+               AmdStyleKey,
     UpscaleSharpnessKey, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
@@ -1565,6 +1575,10 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // command line so a hand-edited list cannot outlive the panel saying
         // off - the empty value the writer would put is not a number.
         L"--amd-mp-skip",
+        // The style (DLSS5_STYLE), sent only off the runtime's default 1, like
+        // the pass count: 1 is what an absent value means, so an older helper
+        // and a newer player still agree on every job that never moved it.
+        L"--amd-style",
         // The capture's CAS strength, forwarded whenever the caller named it.
         L"--upscale-sharpness"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
@@ -1718,6 +1732,12 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         uint64_t on = 0;
         if (!ParseUnsigned(*values[AmdLaterPassSkipKey], on) || on > 1) return std::nullopt;
         request.amdMultiPassSkip = on != 0;
+    }
+    if (values[AmdStyleKey]) {
+        uint64_t style = 0;
+        if (!ParseUnsigned(*values[AmdStyleKey], style) ||
+            style >= amd_lmxxf::kAmdStyleCount) return std::nullopt;
+        request.amdStyle = static_cast<uint32_t>(style);
     }
     if (values[UpscaleSharpnessKey]) {
         float sharpness = 0.0f;

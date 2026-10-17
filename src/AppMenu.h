@@ -186,6 +186,14 @@ inline constexpr UINT IDM_CHECK_FOR_UPDATES = 460;
 // selectable; it reports that a control has been moved off every preset.
 inline constexpr UINT IDM_NEURAL_PRESET_FIRST = 470;
 inline constexpr UINT IDM_NEURAL_PRESET_CUSTOM = 479;
+// The AMD runtime's style (DLSS5_STYLE, 0..2), a second contiguous radio block
+// inside the same Neural presets submenu. It lives beside the presets rather
+// than in the settings dialog because it answers the same question they do -
+// what look the model is asked for - and because the dialog's Style control is
+// the NVIDIA add-on's NRStyle, which this backend never reads. Greyed on NVIDIA,
+// where nothing reads this value.
+inline constexpr UINT IDM_NEURAL_AMD_STYLE_FIRST = 495;
+inline constexpr UINT IDM_NEURAL_AMD_STYLE_COUNT = 3;
 // The processing-scale rungs, one contiguous radio block in the order of
 // kProcessingScaleRungs (UpscalingPolicy.h): Source 100% first, then 75, 50.
 inline constexpr UINT IDM_PROCESSING_SCALE_FIRST = 480;
