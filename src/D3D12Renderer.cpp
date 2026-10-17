@@ -179,6 +179,7 @@ D3D12Renderer::~D3D12Renderer() {
     m_dlss.Shutdown();
     LOG("Renderer teardown: NGX released");
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
+    if (m_probeEvent) CloseHandle(m_probeEvent);
 }
 
 // TEMPORARY DIAGNOSTIC (device-removal bisect): logs the device-removed reason at
@@ -1481,7 +1482,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     // continuous with the last one. The reset is latched rather than passed,
     // because the upscale is recorded several passes later.
     m_upsFrameTimeMs=frameTimeMs;
-    if(temporalReset)m_upsResetPending=true;
+    if(temporalReset){m_upsResetPending=true;m_fgUpsResetPending=true;}
     FollowWindowSize();
     if(m_gpuUnusable)return false;
     const bool nv12Source=m_sourceLayout==PixelLayout::Nv12;
@@ -1825,7 +1826,7 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         // present draws on it. On any failure m_fgUpscaledReady stays false and
         // the present falls back to the compositor stretch, as before.
         m_fgUpscaledReady = m_playbackFrameGen && showGenerated && !m_fgUpscaleFailed &&
-                            RecordFrameGenUpscale(cmd);
+                            m_fgGenUpscaleAllowed && RecordFrameGenUpscale(cmd);
         if(m_playbackFrameGen&&showGenerated&&!m_fgCadenceReported){
             // Once: the health line counts rendered source frames, not swapchain
             // presents, so this is the only place the doubled cadence is visible
@@ -1841,9 +1842,16 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
             // recorded - the second pair's allocator was reset at frame start,
             // covered by the frame fence the previous frame signalled after
             // both of its presents.
+            const bool probeDue=FrameGenProbeDue();
             if(!RecordFrameGenPresentDraw(cmd,slot,true)) return false;
             if(!DeviceHR(cmd->Close(),"Close generated-frame present list")) return false;
             {ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);}
+            // Both hooks run between the generated list and its Present: the
+            // backbuffer still holds the generated frame and has not been
+            // presented, and the queue order makes the probe's copy see the
+            // list's writes without waiting on the frame's own fence.
+            TraceCadencePresent(true);
+            if(probeDue)ProbeGeneratedPresent();
             if(!PresentSwapchain("Present generated frame")) return false;
             auto* present=m_presentCmds[slot].Get();
             if(!DeviceHR(present->Reset(m_presentAllocators[slot].Get(),nullptr),"Reset source present list")) return false;
@@ -1851,6 +1859,8 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
             if(!RecordFrameGenPresentDraw(present,slot,false)) return false;
             if(!DeviceHR(present->Close(),"Close source present list")) return false;
             {ID3D12CommandList*ls[]={present};m_queue->ExecuteCommandLists(1,ls);}
+            TraceCadencePresent(false);
+            if(probeDue)ProbeSourcePresent();
             const bool presented=PresentSwapchain("Present source frame");
             m_fgDoublingActive=m_playbackFrameGen&&showGenerated&&presented;
             return presented;
@@ -2202,6 +2212,8 @@ bool D3D12Renderer::CreateUpscalePresentResources()
                 << "); generated frames keep the compositor stretch.");
         } else {
             m_fsrUpscaleGenerated = std::move(generated);
+            // The fresh context starts on a reset, exactly like the source's.
+            m_fgUpsResetPending = true;
         }
     }
 
@@ -2254,6 +2266,10 @@ bool D3D12Renderer::CreateFrameGenResources()
     // nothing about how they are used on the creating device.
     ReleaseFrameGenBridge();
     m_fgFfx = std::make_unique<FsrFrameGenBackend>();
+
+    // The interpolate-on black-flicker diagnostic, read once here (before any
+    // frame can reach the doubling cadence the probe hooks into).
+    ReadFrameGenDiagnostics();
 
     D3D12_HEAP_PROPERTIES sharedHeap{};
     sharedHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2892,14 +2908,17 @@ bool D3D12Renderer::CreateFrameGenResources()
                     m_device->CreateShaderResourceView(m_fgFfxOutput.Get(), &linSrv, linSlot(2));
                     m_device->CreateUnorderedAccessView(m_fgLinearColor.Get(), nullptr, &linUav, linSlot(3));
 
-                    // Generated upscale SRV heap: slot0 = m_fgLinearColor (stretch
-                    // input, render-res FP16), slot1 = m_fgUpscaleStretch (CAS
-                    // input, output-res FP16). Reuses m_upscaleRootSig + the
-                    // source upscale's PSOs, whose t0 is pinned to their own heap,
-                    // so this path needs its own self-contained one.
+                    // Generated upscale SRV heap: slot0 = m_fgLinearColor (FSR 4
+                    // #2 input, render-res FP16), slot1 = m_fgUpscaleStretch (CAS
+                    // input, output-res FP16), slot2/3 = the clamped / raw island
+                    // output as _UNORM_SRGB (the draw tiers' input: the hardware
+                    // sRGB decode, the same mechanism the compositor fallback
+                    // presents through). Reuses m_upscaleRootSig + the source
+                    // upscale's PSOs, whose t0 is pinned to their own heap, so
+                    // this path needs its own self-contained one.
                     D3D12_DESCRIPTOR_HEAP_DESC casHeapDesc{};
                     casHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-                    casHeapDesc.NumDescriptors = 2;
+                    casHeapDesc.NumDescriptors = 4;
                     casHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
                     if (FAILED(m_device->CreateDescriptorHeap(&casHeapDesc,
                             IID_PPV_ARGS(m_fgUpscaleHeap.GetAddressOf())))) {
@@ -2920,6 +2939,22 @@ bool D3D12Renderer::CreateFrameGenResources()
                         };
                         m_device->CreateShaderResourceView(m_fgLinearColor.Get(), &fgSrv, fgSlot(0));
                         m_device->CreateShaderResourceView(m_fgUpscaleStretch.Get(), &fgSrv, fgSlot(1));
+                        // The draw tiers' input, as _UNORM_SRGB: the sampler's
+                        // hardware decode delivers the same linear light the
+                        // linearize pass computes by hand, through the path the
+                        // compositor fallback already presents faithfully
+                        // (generated/source mean ratio 1.0, 2026-10-17). Slot 2
+                        // takes the clamped copy when the clamp ran, slot 3 the
+                        // raw output, mirroring the linearize's 0/2 choice.
+                        D3D12_SHADER_RESOURCE_VIEW_DESC fgSrgbSrv{};
+                        fgSrgbSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                        fgSrgbSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                        fgSrgbSrv.Format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+                        fgSrgbSrv.Texture2D.MipLevels = 1;
+                        if (m_fgFfxClamped)
+                            m_device->CreateShaderResourceView(m_fgFfxClamped.Get(), &fgSrgbSrv, fgSlot(2));
+                        if (m_fgFfxOutput)
+                            m_device->CreateShaderResourceView(m_fgFfxOutput.Get(), &fgSrgbSrv, fgSlot(3));
 
                         // Generated upscale RTV heap: slot0 = m_fgUpscaleStretch
                         // (stretch output), slot1 = m_fgUpscaleSharp (CAS output).
@@ -3111,18 +3146,25 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
     // gated on the source upscale existing (m_upscaleOffered); FSR 4 / FSR1 EASU
     // / Catmull-Rom each reuse the source upscale's PSOs, so any tier that is
     // unavailable simply falls through to the next, mirroring the source chain.
-    if (!cmd || m_fgUpscaleFailed || !m_fgLinearColor ||
-        !m_fgUpscaleStretch || !m_fgUpscaleSharp || !m_psoFgLinear ||
-        !m_fgLinearHeap || !m_fgUpscaleHeap || !m_fgUpscaleRtvHeap ||
-        !m_upscaleRootSig || !m_psoUpscaleSharp || !m_psoUpscaleStretch)
-        return false;
-
-    // 1. Linearize: the sRGB-encoded BGRA8 generated frame -> FP16 linear light
-    //    (m_fgLinearColor), the format the source upscale tiers receive. Pick
-    //    the clamped copy when the clamp ran, else the raw island output.
+    // The FSR 4 tier alone needs the linearize pass and its heap; the draw
+    // tiers read the island output's own sRGB view instead (step 2).
+    // Pick the clamped copy when the clamp ran, else the raw island output.
     const bool useClamped = m_fgClampRan && m_fgFfxClamped;
     ID3D12Resource* srcTex = useClamped ? m_fgFfxClamped.Get() : m_fgFfxOutput.Get();
+    if (!srcTex) return false;
     D3D12_RESOURCE_STATES& srcState = useClamped ? m_fgFfxClampedState : m_fgFfxOutputState;
+    const bool useFsr4 = m_fgGenUpscaleFsr4 && m_fsrUpscaleActive && m_fsrUpscaleGenerated;
+    if (!cmd || m_fgUpscaleFailed ||
+        !m_fgUpscaleStretch || !m_fgUpscaleSharp ||
+        !m_fgUpscaleHeap || !m_fgUpscaleRtvHeap ||
+        !m_upscaleRootSig || !m_psoUpscaleSharp || !m_psoUpscaleStretch)
+        return false;
+    if (useFsr4 && (!m_fgLinearColor || !m_psoFgLinear || !m_fgLinearHeap))
+        return false;
+
+    // 1. FSR 4 tier only: linearize the sRGB-encoded BGRA8 generated frame into
+    //    FP16 linear light (m_fgLinearColor), the format that context reads.
+    if (useFsr4) {
     const D3D12_RESOURCE_STATES srcBefore = srcState;
     Barrier(cmd, srcTex, srcBefore, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     srcState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -3147,32 +3189,48 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
     Barrier(cmd, srcTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, srcBefore);
     srcState = srcBefore;
     // Real transition UAV -> NON_PIXEL so the FSR 4 tier (a compute dispatch)
-    // reads m_fgLinearColor in the state its API asks for; the EASU /
-    // Catmull-Rom tiers (pixel draws) re-barrier it to PIXEL just below.
+    // reads m_fgLinearColor in the state its API asks for.
     Barrier(cmd, m_fgLinearColor.Get(), m_fgLinearColorState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     m_fgLinearColorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    } // end FSR 4 tier's linearize
 
     // 2. Per-tier stretch, mirroring the source upscale's tier selection. Every
-    //    tier reads m_fgLinearColor (render-res FP16 linear) and writes
-    //    m_fgUpscaleStretch (output-res FP16). The present draw samples the
-    //    CAS-sharpened m_fgUpscaleSharp, identical to the source chain's look.
+    //    tier writes m_fgUpscaleStretch (output-res FP16). The present draw
+    //    samples the CAS-sharpened m_fgUpscaleSharp, identical to the source
+    //    chain's look. The FSR 4 tier reads the linearized m_fgLinearColor
+    //    through the runtime; the draw tiers read the island output's own
+    //    _UNORM_SRGB view (slot 2/3), where the sampler's hardware decode
+    //    delivers the same linear light - the mechanism the compositor
+    //    fallback presents faithfully, with no second context and no manual
+    //    decode in the path.
     D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(m_outputW),
                             static_cast<float>(m_outputH), 0.0f, 1.0f};
     D3D12_RECT scissor{0, 0, static_cast<LONG>(m_outputW), static_cast<LONG>(m_outputH)};
     D3D12_GPU_DESCRIPTOR_HANDLE stretchSrv = m_fgUpscaleHeap->GetGPUDescriptorHandleForHeapStart();
+    stretchSrv.ptr += (useClamped ? 2u : 3u) * m_fgLinearInc;   // the sRGB view of the source above
     D3D12_CPU_DESCRIPTOR_HANDLE stretchRtv = m_fgUpscaleRtvHeap->GetCPUDescriptorHandleForHeapStart();
     ID3D12DescriptorHeap* fgHeaps[] = {m_fgUpscaleHeap.Get()};
 
     bool stretched = false;
     const char* engine = "Catmull-Rom";
-    if (m_fsrUpscaleActive && m_fsrUpscaleGenerated) {
+    if (useFsr4) {
         // FSR 4 context #2: m_fgLinearColor (render res FP16) -> m_fgUpscaleStretch
-        // (output res FP16). Always reset: the generated frame is an interpolation
-        // with no real temporal continuity, so accumulated history is meaningless.
+        // (output res FP16). Opt-in only (DLSS5_FG_GEN_UPSCALE_FSR4=1): with the
+        // source's own reset policy it measured every generated frame at a 0.663
+        // sRGB-mean ratio to the source, and resetting on every dispatch 0.686 -
+        // both against the fallback path's 1.0 (2026-10-17) - so the darkening
+        // is this context's own behaviour, not its reset flag, and the draw
+        // tiers over the island output's sRGB view serve until it is understood.
+        // The reset itself follows the source context's policy exactly -
+        // m_upsResetPending: the generated midpoints are their own temporally
+        // adjacent sequence (one per source frame, half a source frame apart),
+        // so the history this context accumulates is as valid as the source's.
         Barrier(cmd, m_fgUpscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         stretched = m_fsrUpscaleGenerated->Dispatch(
-            cmd, m_fgLinearColor.Get(), m_fgUpscaleStretch.Get(), /*reset=*/true, m_fgFrameTimeMs);
+            cmd, m_fgLinearColor.Get(), m_fgUpscaleStretch.Get(),
+            m_fgUpsResetPending, m_fgFrameTimeMs);
+        if (stretched) m_fgUpsResetPending = false;
         Barrier(cmd, m_fgUpscaleStretch.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         if (stretched) {
@@ -3187,14 +3245,20 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
             return false;
         }
     } else {
-        // The draw tiers read m_fgLinearColor as a pixel-shader resource.
-        Barrier(cmd, m_fgLinearColor.Get(), m_fgLinearColorState,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        m_fgLinearColorState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        // The draw tiers read the island output's own _UNORM_SRGB view (slot
+        // 2/3): the sampler's hardware decode delivers the same linear light the
+        // linearize pass computes by hand, through the mechanism the compositor
+        // fallback presents faithfully. Barrier the source into a pixel-shader
+        // resource for the draws and back to the state the next consumer (the
+        // clamp, the convert pass) expects.
+        const D3D12_RESOURCE_STATES drawBefore = srcState;
+        Barrier(cmd, srcTex, drawBefore, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        srcState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
         if (m_easuActive) {
             // FSR1 EASU: the same pure shader the source chain uses when FSR 4 is
-            // not serving. Reads render-res FP16, writes the output rung.
+            // not serving. Reads the sRGB view of the island output at render
+            // res, writes the output rung.
             Barrier(cmd, m_fgUpscaleStretch.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_RENDER_TARGET);
             cmd->SetDescriptorHeaps(1, fgHeaps);
@@ -3233,13 +3297,16 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
             Barrier(cmd, m_fgUpscaleStretch.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
+        // The draws are done: hand the source back in the state it arrived in.
+        Barrier(cmd, srcTex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, drawBefore);
+        srcState = drawBefore;
     }
 
     // 3. CAS sharpen over m_fgUpscaleStretch -> m_fgUpscaleSharp, reusing the
     //    source upscale's PSO/root signature (same 8 constants: render/output
     //    sizes + sharpness). Identical to the source frame's sharpen, so the two
     //    cadence frames keep the same look. Slot 1 of each heap holds the CAS
-    //    input/RTV so the stretch tier can own slot 0.
+    //    input/RTV so the stretch tier can own the sRGB view slots.
     Barrier(cmd, m_fgUpscaleSharp.Get(), m_fgUpscaleSharpState, D3D12_RESOURCE_STATE_RENDER_TARGET);
     m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_RENDER_TARGET;
 
@@ -3266,11 +3333,13 @@ bool D3D12Renderer::RecordFrameGenUpscale(ID3D12GraphicsCommandList* cmd)
     m_fgUpscaleSharpState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
     // 4. First-success log (V2/V3/V4 evidence that the generated path ran for
-    //    the tier the source actually selected).
+    //    the tier the source actually selected, and by which input).
     if (!m_fgUpscaledReported) {
         m_fgUpscaledReported = true;
         LOG("Playback frame generation: generated frames are upscaled by " << engine
-            << " (" << m_renderW << "x" << m_renderH << " -> " << m_outputW << "x" << m_outputH << ").");
+            << " (" << m_renderW << "x" << m_renderH << " -> " << m_outputW << "x" << m_outputH
+            << (useFsr4 ? " through the second FSR 4 context"
+                        : ", reading the island output's own sRGB view") << ").");
     }
 
     // 5. Heap hygiene: leave m_srvHeap current so the present draw and the
@@ -3382,6 +3451,493 @@ bool D3D12Renderer::WaitFgFenceValue(uint64_t value)
     if (!m_fenceEvent) return false;
     if (FAILED(m_fgFfxFence->SetEventOnCompletion(value, m_fenceEvent))) return false;
     return WaitForSingleObject(m_fenceEvent, 10000) == WAIT_OBJECT_0;
+}
+
+// ---- Interpolate-on black-flicker localization (diagnostic) -----------------
+//
+// With playback frame generation on, every source frame is presented twice:
+// the generated midpoint first, the source frame second. A black midpoint
+// strobes against the source frame and reads as the reported flicker. The
+// white-flash A/B (WHITE_FLASH_FIX_TEST_REPORT.md) was measured with
+// FrameGenerationPlayback=0 and the single-present debug view, so the doubling
+// cadence's generated present - and the generated-frame upscale built on top of
+// it - has never been pixel-verified with the switch on. That is the gap this
+// probe closes.
+//
+// It answers, with pixels read back from the GPU rather than an eyeball, which
+// stage of the generated frame is black:
+//
+//   island output (m_fgFfxOutput)
+//     -> linearize (m_fgLinearColor)
+//     -> FSR 4 context #2 (m_fgUpscaleStretch)
+//     -> CAS (m_fgUpscaleSharp)
+//     -> the generated present's backbuffer.
+//
+// On the generated present a tile of the backbuffer, of the upscale output and
+// of the island output is copied into readback buffers on a command list of the
+// probe's own, waited on the probe's own fence, and stashed; on the source
+// present the same backbuffer tile is the control, and the verdict is printed
+// there with both halves of the pair in hand. Nothing here touches the
+// frame-slot allocators, fences or uploads, and a failed submission or wait
+// latches the probe off rather than risk resetting a list the GPU may still be
+// executing.
+
+static constexpr uint32_t kFgProbeInterval = 30;      // generated frames between samples (mode 1)
+// One center tile per texture, each covering the same fraction of the picture:
+// the backbuffer tile is the reference and the upscale/island tiles scale by
+// their texture's share of the window. Reading a 64px tile out of the 2560-wide
+// upscale against a 128px tile out of the 2121-wide backbuffer compared
+// different picture regions, which made a bright frame read as "black" in the
+// first field run.
+static constexpr uint32_t kProbeBackbufferTile = 192; // px, backbuffer format
+static constexpr uint32_t kProbeSharpCapacity = 256;  // readback buffer side, FP16
+static constexpr uint32_t kProbeIslandCapacity = 256; // readback buffer side, BGRA8
+static constexpr uint32_t kProbePresentTrace = 8;     // doubling presents whose index is traced
+
+namespace {
+
+struct ProbeTileStats {
+    float max = 0.0f;
+    float mean = 0.0f;
+};
+
+// Half -> float, bit-exact (no DirectXMath dependency needed for one tile).
+float ProbeHalfToFloat(uint16_t half)
+{
+    const uint32_t sign = uint32_t(half >> 15) << 31;
+    int32_t exponent = int32_t((half >> 10) & 0x1Fu);
+    uint32_t mantissa = half & 0x3FFu;
+    uint32_t bits = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;   // signed zero
+        } else {
+            // Subnormal half (m * 2^-24): renormalize into the float's field.
+            while (!(mantissa & 0x400u)) { mantissa <<= 1; --exponent; }
+            ++exponent;
+            mantissa &= ~0x400u;
+            bits = sign | (uint32_t(exponent + 112) << 23) | (mantissa << 13);
+        }
+    } else if (exponent == 31) {
+        bits = sign | (0xFFu << 23) | (mantissa << 13);
+    } else {
+        bits = sign | (uint32_t(exponent + 112) << 23) | (mantissa << 13);
+    }
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+// Max/mean of the tile's RGB. bpp 4 selects the 8/10-bit formats (byte or
+// packed uint32), 8 selects FP16 halves.
+ProbeTileStats ProbeReadTileStats(const uint8_t* base, uint64_t rowPitch, uint32_t side,
+                                  uint32_t bpp, DXGI_FORMAT format)
+{
+    ProbeTileStats stats{};
+    if (!base || !side) return stats;
+    double sum = 0.0;
+    float peak = 0.0f;
+    const uint64_t pixels = uint64_t{side} * side;
+    for (uint32_t y = 0; y < side; ++y) {
+        const uint8_t* row = base + rowPitch * y;
+        for (uint32_t x = 0; x < side; ++x) {
+            const uint8_t* px = row + uint64_t{x} * bpp;
+            float r = 0.0f, g = 0.0f, b = 0.0f;
+            if (bpp == 8) {
+                uint16_t packed[3] = {0, 0, 0};
+                std::memcpy(packed, px, sizeof(packed));
+                r = ProbeHalfToFloat(packed[0]);
+                g = ProbeHalfToFloat(packed[1]);
+                b = ProbeHalfToFloat(packed[2]);
+            } else if (format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+                uint32_t value = 0;
+                std::memcpy(&value, px, sizeof(value));
+                r = float(value & 0x3FFu) / 1023.0f;
+                g = float((value >> 10) & 0x3FFu) / 1023.0f;
+                b = float((value >> 20) & 0x3FFu) / 1023.0f;
+            } else if (format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+                r = float(px[2]) / 255.0f;
+                g = float(px[1]) / 255.0f;
+                b = float(px[0]) / 255.0f;
+            } else {   // R8G8B8A8_UNORM
+                r = float(px[0]) / 255.0f;
+                g = float(px[1]) / 255.0f;
+                b = float(px[2]) / 255.0f;
+            }
+            const float brightest = r > g ? (r > b ? r : b) : (g > b ? g : b);
+            if (brightest > peak) peak = brightest;
+            sum += double(brightest);
+        }
+    }
+    stats.max = peak;
+    stats.mean = float(sum / double(pixels));
+    return stats;
+}
+
+// The generated-frame upscale leaves FP16 linear light, while the backbuffer and
+// the island output are sRGB-encoded; the upscale's numbers have to be carried
+// across before they can be set beside the others.
+float ProbeSrgbFromLinear(float linear)
+{
+    if (!(linear > 0.0f)) return 0.0f;
+    if (linear <= 0.0031308f) return linear * 12.92f;
+    return 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+}
+
+// Maps a tile readback (after the probe's fence wait) and computes its stats.
+ProbeTileStats ProbeMapReadback(ID3D12Resource* buffer, uint32_t side, uint32_t bpp,
+                                DXGI_FORMAT format)
+{
+    ProbeTileStats stats{};
+    if (!buffer || !side) return stats;
+    const uint64_t rowPitch = (uint64_t{side} * bpp + 255u) & ~255u;
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(rowPitch * side)};
+    uint8_t* mapped = nullptr;
+    if (FAILED(buffer->Map(0, &range, reinterpret_cast<void**>(&mapped)))) return stats;
+    stats = ProbeReadTileStats(mapped, rowPitch, side, bpp, format);
+    const D3D12_RANGE written{0, 0};
+    buffer->Unmap(0, &written);
+    return stats;
+}
+
+} // namespace
+
+void D3D12Renderer::ReadFrameGenDiagnostics()
+{
+    if (m_fgDiagRead) return;
+    m_fgDiagRead = true;
+    wchar_t text[32] = {};
+    auto readFlag = [&text](const wchar_t* name) -> int {
+        const DWORD length = GetEnvironmentVariableW(name, text, 32);
+        if (!length || length >= 32) return -1;
+        int value = 0;
+        for (const wchar_t* p = text; *p >= L'0' && *p <= L'9'; ++p)
+            value = value * 10 + int(*p - L'0');
+        return value;
+    };
+    const int probe = readFlag(L"DLSS5_FG_BLACK_PROBE");
+    if (probe >= 0) m_fgProbeMode = probe > 2 ? 2 : probe;
+    if (readFlag(L"DLSS5_FG_GEN_UPSCALE") == 0) m_fgGenUpscaleAllowed = false;
+    if (!m_fgGenUpscaleAllowed) {
+        LOG("Playback frame generation: DLSS5_FG_GEN_UPSCALE=0 - the generated-frame "
+            "upscale is forced off; generated frames keep the compositor stretch.");
+    }
+    if (readFlag(L"DLSS5_FG_GEN_UPSCALE_FSR4") == 1) m_fgGenUpscaleFsr4 = true;
+    if (m_fgGenUpscaleFsr4) {
+        LOG("Playback frame generation: DLSS5_FG_GEN_UPSCALE_FSR4=1 - the generated "
+            "frame is upscaled by the second FSR 4 context, the path that measured "
+            "darker than the source frame (2026-10-17); the default is the EASU / "
+            "Catmull-Rom draw tiers over the island output's own sRGB view.");
+    }
+    if (m_fgProbeMode) {
+        LOG("Playback frame generation: the black-frame probe is "
+            << (m_fgProbeMode == 2 ? "sampling every generated frame"
+                                   : "sampling every 30th generated frame")
+            << " (DLSS5_FG_BLACK_PROBE=" << m_fgProbeMode
+            << "; DLSS5_FG_GEN_UPSCALE=0 forces the fallback for an A/B).");
+    }
+}
+
+bool D3D12Renderer::FrameGenProbeDue()
+{
+    if (!m_fgProbeMode) return false;
+    ++m_fgProbeFrames;
+    if (m_fgProbeMode == 2) return true;
+    return m_fgProbeFrames == 1 || (m_fgProbeFrames % kFgProbeInterval) == 0;
+}
+
+void D3D12Renderer::TraceCadencePresent(bool generated)
+{
+    if (!m_fgProbeMode || m_fgPresentTrace >= kProbePresentTrace) return;
+    ++m_fgPresentTrace;
+    if (m_fgPresentTrace == 1) {
+        LOG("BLACK-PROBE: the swapchain holds " << SwapchainBuffers
+            << " buffers; tracing the doubling cadence's backbuffer indices "
+               "(each present must take its own):");
+    }
+    LOG("BLACK-PROBE: cadence present #" << m_fgPresentTrace << " ("
+        << (generated ? "generated" : "source") << ") -> backbuffer "
+        << m_swapchain->GetCurrentBackBufferIndex() << ".");
+}
+
+bool D3D12Renderer::EnsureFrameGenProbeResources()
+{
+    if (m_probeList) return true;
+    if (!m_device) return false;
+    if (FAILED(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(m_probeAllocator.GetAddressOf())))) return false;
+    if (FAILED(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+            m_probeAllocator.Get(), nullptr, IID_PPV_ARGS(m_probeList.GetAddressOf())))) return false;
+    m_probeList->Close();   // created open; Reset before every use
+    if (FAILED(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+            IID_PPV_ARGS(m_probeFence.GetAddressOf())))) return false;
+    m_probeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!m_probeEvent) return false;
+    const auto readbackHeap = HeapProps(D3D12_HEAP_TYPE_READBACK);
+    auto makeReadback = [&](ComPtr<ID3D12Resource>& slot, uint32_t tile, uint32_t bpp,
+                            const wchar_t* name) {
+        const uint64_t rowPitch = (uint64_t{tile} * bpp + 255u) & ~255u;
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = rowPitch * tile;
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.SampleDesc = {1, 0};
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(m_device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE,
+                &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                IID_PPV_ARGS(slot.GetAddressOf())))) return false;
+        slot->SetName(name);
+        return true;
+    };
+    if (!makeReadback(m_probeBackbuffer, kProbeBackbufferTile, 4, L"FrameGen_Probe_Backbuffer")) return false;
+    if (!makeReadback(m_probeSharp, kProbeSharpCapacity, 8, L"FrameGen_Probe_UpscaleSharp")) return false;
+    if (!makeReadback(m_probeIsland, kProbeIslandCapacity, 4, L"FrameGen_Probe_IslandOutput")) return false;
+    return true;
+}
+
+bool D3D12Renderer::RecordProbeTile(ID3D12GraphicsCommandList* cmd, ID3D12Resource* texture,
+                                    D3D12_RESOURCE_STATES& state, ID3D12Resource* readback,
+                                    DXGI_FORMAT format, uint32_t tile, uint32_t texW, uint32_t texH,
+                                    uint32_t* sideUsed)
+{
+    if (!cmd || !texture || !readback || !texW || !texH) return false;
+    uint32_t side = tile;
+    if (side > texW) side = texW;
+    if (side > texH) side = texH;
+    uint32_t bpp = 4;
+    if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) bpp = 8;
+    const uint64_t rowPitch = (uint64_t{side} * bpp + 255u) & ~255u;
+    const D3D12_RESOURCE_STATES before = state;
+    Barrier(cmd, texture, before, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource = texture;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource = readback;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Offset = 0;
+    dst.PlacedFootprint.Footprint.Format = format;
+    dst.PlacedFootprint.Footprint.Width = side;
+    dst.PlacedFootprint.Footprint.Height = side;
+    dst.PlacedFootprint.Footprint.Depth = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(rowPitch);
+    const uint32_t left = (texW - side) / 2;
+    const uint32_t top = (texH - side) / 2;
+    D3D12_BOX box{};
+    box.left = left;
+    box.top = top;
+    box.front = 0;
+    box.right = left + side;
+    box.bottom = top + side;
+    box.back = 1;
+    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+    Barrier(cmd, texture, D3D12_RESOURCE_STATE_COPY_SOURCE, before);
+    state = before;
+    if (sideUsed) *sideUsed = side;
+    return true;
+}
+
+bool D3D12Renderer::SubmitProbeAndWait()
+{
+    if (FAILED(m_probeList->Close())) return false;
+    ID3D12CommandList* lists[] = {m_probeList.Get()};
+    m_queue->ExecuteCommandLists(1, lists);
+    const uint64_t value = ++m_probeFenceValue;
+    if (FAILED(m_queue->Signal(m_probeFence.Get(), value))) return false;
+    if (m_probeFence->GetCompletedValue() < value) {
+        if (FAILED(m_probeFence->SetEventOnCompletion(value, m_probeEvent))) return false;
+        if (WaitForSingleObject(m_probeEvent, 4000) != WAIT_OBJECT_0) return false;
+    }
+    return true;
+}
+
+void D3D12Renderer::ProbeGeneratedPresent()
+{
+    if (!m_fgProbeMode || m_gpuUnusable) return;
+    if (!EnsureFrameGenProbeResources()) {
+        LOG("BLACK-PROBE: the probe resources could not be built; the probe is off.");
+        m_fgProbeMode = 0;
+        return;
+    }
+    if (FAILED(m_probeList->Reset(m_probeAllocator.Get(), nullptr))) return;
+    const uint32_t bi = m_swapchain->GetCurrentBackBufferIndex();
+    ID3D12Resource* backbuffer = m_backbuffers[bi].Get();
+    if (!backbuffer) return;
+    const D3D12_RESOURCE_DESC backbufferDesc = backbuffer->GetDesc();
+    // The generated present draw left the backbuffer in PRESENT; the probe hands
+    // it back exactly there, so the Present that follows sees the state it
+    // expects. The texture probes barrier from - and back to - the states the
+    // frame's own passes tracked.
+    D3D12_RESOURCE_STATES backbufferState = D3D12_RESOURCE_STATE_PRESENT;
+    uint32_t sideBackbuffer = 0, sideSharp = 0, sideIsland = 0;
+    const bool wantBackbuffer = RecordProbeTile(
+        m_probeList.Get(), backbuffer, backbufferState, m_probeBackbuffer.Get(),
+        backbufferDesc.Format, kProbeBackbufferTile,
+        static_cast<uint32_t>(backbufferDesc.Width), static_cast<uint32_t>(backbufferDesc.Height),
+        &sideBackbuffer);
+    // The same picture region out of every texture: the backbuffer tile is the
+    // reference, and each other tile scales by its texture's share of the
+    // window, so the three maxima can be set beside one another.
+    const uint32_t backbufferW = static_cast<uint32_t>(backbufferDesc.Width);
+    auto regionSide = [backbufferW](uint32_t texW, uint32_t capacity) -> uint32_t {
+        if (!backbufferW || !texW) return 0;
+        const uint64_t side = (uint64_t{kProbeBackbufferTile} * texW + backbufferW / 2) / backbufferW;
+        return static_cast<uint32_t>(side < capacity ? side : capacity);
+    };
+    const bool wantSharp = m_fgUpscaledReady && m_fgUpscaleSharp && RecordProbeTile(
+        m_probeList.Get(), m_fgUpscaleSharp.Get(), m_fgUpscaleSharpState,
+        m_probeSharp.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT,
+        regionSide(m_outputW, kProbeSharpCapacity), m_outputW, m_outputH, &sideSharp);
+    const bool wantIsland = m_fgFfxOutput && RecordProbeTile(
+        m_probeList.Get(), m_fgFfxOutput.Get(), m_fgFfxOutputState,
+        m_probeIsland.Get(), DXGI_FORMAT_B8G8R8A8_UNORM,
+        regionSide(m_renderW, kProbeIslandCapacity), m_renderW, m_renderH, &sideIsland);
+    if (!wantBackbuffer && !wantSharp && !wantIsland) return;
+    if (!SubmitProbeAndWait()) {
+        LOG("BLACK-PROBE: the probe submission or its wait failed; the probe is off "
+            "(the flicker itself is unaffected).");
+        m_fgProbeMode = 0;
+        return;
+    }
+    const ProbeTileStats backbufferStats = ProbeMapReadback(
+        m_probeBackbuffer.Get(), sideBackbuffer, 4, backbufferDesc.Format);
+    const ProbeTileStats sharpStats = ProbeMapReadback(
+        m_probeSharp.Get(), sideSharp, 8, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const ProbeTileStats islandStats = ProbeMapReadback(
+        m_probeIsland.Get(), sideIsland, 4, DXGI_FORMAT_B8G8R8A8_UNORM);
+    // Stash the generated half; the verdict needs the source half too and is
+    // printed by ProbeSourcePresent.
+    m_probeGenSampled = wantBackbuffer;
+    m_probeGenMax = backbufferStats.max;
+    m_probeGenMean = backbufferStats.mean;
+    m_probeSharpSampled = wantSharp;
+    m_probeSharpMaxLinear = sharpStats.max;
+    m_probeIslandMax = islandStats.max;
+    m_probeIslandMean = islandStats.mean;
+    const float sharpSrgb = ProbeSrgbFromLinear(sharpStats.max);
+    LOG("BLACK-PROBE #" << m_fgProbeFrames << ": generated present tile max="
+        << backbufferStats.max << " mean=" << backbufferStats.mean
+        << (backbufferStats.max < (1.5f / 255.0f) ? " (BLACK)" : " (visible)")
+        << " | generated upscale+CAS tile "
+        << (wantSharp ? "linear max=" + std::to_string(sharpStats.max) + " (sRGB "
+                            + std::to_string(sharpSrgb) + ")"
+                      : std::string("not sampled (fallback present)"))
+        << " | island output tile max=" << islandStats.max
+        << " mean=" << islandStats.mean
+        << (islandStats.max < (1.5f / 255.0f) ? " (BLACK)" : " (visible)") << ".");
+}
+
+void D3D12Renderer::ProbeSourcePresent()
+{
+    if (!m_fgProbeMode || m_gpuUnusable) return;
+    if (!m_probeList || !m_probeAllocator) return;   // the generated probe built them
+    if (FAILED(m_probeList->Reset(m_probeAllocator.Get(), nullptr))) return;
+    const uint32_t bi = m_swapchain->GetCurrentBackBufferIndex();
+    ID3D12Resource* backbuffer = m_backbuffers[bi].Get();
+    if (!backbuffer) return;
+    const D3D12_RESOURCE_DESC backbufferDesc = backbuffer->GetDesc();
+    D3D12_RESOURCE_STATES backbufferState = D3D12_RESOURCE_STATE_PRESENT;
+    uint32_t sideBackbuffer = 0;
+    const bool wanted = RecordProbeTile(
+        m_probeList.Get(), backbuffer, backbufferState, m_probeBackbuffer.Get(),
+        backbufferDesc.Format, kProbeBackbufferTile,
+        static_cast<uint32_t>(backbufferDesc.Width), static_cast<uint32_t>(backbufferDesc.Height),
+        &sideBackbuffer);
+    if (!wanted) return;
+    if (!SubmitProbeAndWait()) {
+        LOG("BLACK-PROBE: the probe submission or its wait failed; the probe is off "
+            "(the flicker itself is unaffected).");
+        m_fgProbeMode = 0;
+        return;
+    }
+    const ProbeTileStats stats = ProbeMapReadback(
+        m_probeBackbuffer.Get(), sideBackbuffer, 4, backbufferDesc.Format);
+    const bool sourceBlack = stats.max < (1.5f / 255.0f);
+    LOG("BLACK-PROBE #" << m_fgProbeFrames << ": source present tile max=" << stats.max
+        << " mean=" << stats.mean << (sourceBlack ? " (BLACK)" : " (visible)")
+        << " - the control half of the cadence.");
+    if (!m_probeGenSampled) return;
+    const bool generatedBlack = m_probeGenMax < (1.5f / 255.0f);
+    if (!generatedBlack) {
+        // Not black - but a generated frame systematically darker than the
+        // source frame it alternates with strobes just as visibly, and that is
+        // what the 2026-10-17 field run actually measured: every generated
+        // frame at a 0.686 sRGB-mean ratio to its source, a 24 Hz brightness
+        // strobe no max-based black check can see. Compare the two halves'
+        // means (same picture region, same backbuffer format) and name the
+        // stage with the island output as the witness.
+        const float sourceMean = stats.mean;
+        const float visible = 2.0f / 255.0f;
+        if (sourceMean > visible && m_probeIslandMean > visible) {
+            const float genRatio = m_probeGenMean / sourceMean;
+            const float islandRatio = m_probeIslandMean / sourceMean;
+            if (genRatio < 0.90f) {
+                const char* stage = islandRatio >= 0.90f
+                    ? "the island output matches the source, so the darkening is "
+                      "inside the generated-frame upscale (its stretch tier, or "
+                      "the CAS over it)"
+                    : "the island output is itself darker than the source, so the "
+                      "darkening is upstream of the upscale, in the generated "
+                      "frame or its clamp";
+                LOG("BLACK-PROBE #" << m_fgProbeFrames << " VERDICT: BRIGHTNESS "
+                    "MISMATCH - the generated frame's mean is " << genRatio
+                    << "x the source frame's (mean " << m_probeGenMean << " vs "
+                    << sourceMean << "; island output " << islandRatio
+                    << "x the source) - " << stage
+                    << ". The two halves of the doubling cadence differ in "
+                       "brightness, which strobes at the cadence rate.");
+                return;
+            }
+            LOG("BLACK-PROBE #" << m_fgProbeFrames << " VERDICT: the generated "
+                "frame is visible on this probe frame - no cadence black "
+                "(generated/source mean ratio " << genRatio << ").");
+            return;
+        }
+        // A near-black frame: the max-based check still applies, because the
+        // means of two black frames carry no ratio.
+        if (m_probeIslandMax > (4.0f / 255.0f) &&
+            m_probeGenMax < 0.45f * m_probeIslandMax) {
+            LOG("BLACK-PROBE #" << m_fgProbeFrames << " VERDICT: the generated present is "
+                "much darker than the island output it presents (max=" << m_probeGenMax
+                << " vs island max=" << m_probeIslandMax << ") - the upscale or the "
+                "present draw darkens the frame rather than blackening it.");
+            return;
+        }
+        LOG("BLACK-PROBE #" << m_fgProbeFrames << " VERDICT: the generated frame is visible "
+            "on this probe frame - no cadence black.");
+        return;
+    }
+    if (sourceBlack) {
+        // Both halves of the pair are dark: the picture itself is (a dark scene,
+        // a fade, or the startup/seek warmup), which is not the per-frame
+        // cadence artifact the flicker report describes.
+        LOG("BLACK-PROBE #" << m_fgProbeFrames << " VERDICT: both halves of the cadence "
+            "are black - the whole frame is dark (video content, or a startup/seek "
+            "warmup), not a per-frame cadence artifact.");
+        return;
+    }
+    if (m_probeIslandMax < (1.5f / 255.0f)) {
+        LOG("BLACK-PROBE #" << m_fgProbeFrames << " VERDICT: the ISLAND OUTPUT is black - "
+            "the interpolator itself produced a black frame, before any upscale, while "
+            "the source frame is visible.");
+        return;
+    }
+    if (m_probeSharpSampled &&
+        ProbeSrgbFromLinear(m_probeSharpMaxLinear) < (1.5f / 255.0f)) {
+        LOG("BLACK-PROBE #" << m_fgProbeFrames << " VERDICT: the island output is visible "
+            "but the generated-frame UPSCALE output is black - the generated-frame "
+            "upscale (the stretch tier over the island output's sRGB view, then "
+            "CAS) is the black source; "
+            "DLSS5_FG_GEN_UPSCALE=0 confirms by elimination.");
+        return;
+    }
+    LOG("BLACK-PROBE #" << m_fgProbeFrames << " VERDICT: the textures are visible but the "
+        "presented generated frame is black - the black is introduced by the generated "
+        "PRESENT DRAW (SRV binding or resource state), not by the textures.");
 }
 
 bool D3D12Renderer::EngageFrameGenIsland()

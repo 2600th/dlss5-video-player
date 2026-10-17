@@ -1001,6 +1001,37 @@ private:
     // Bounded wait for a shared-fence value, for the case where the island
     // failed before its own completion wait could vouch for the frame list.
     bool WaitFgFenceValue(uint64_t value);
+    // ---- Interpolate-on black-flicker localization (diagnostic) -------------
+    // Reads the diagnostic environment once: DLSS5_FG_BLACK_PROBE (0 off,
+    // 1 sampled, 2 every generated frame) and DLSS5_FG_GEN_UPSCALE (0 forces
+    // the generated-frame upscale off, restoring the pre-rework fallback).
+    void ReadFrameGenDiagnostics();
+    // True when this generated frame owes a probe sample.
+    bool FrameGenProbeDue();
+    // Logs the doubling cadence's backbuffer index for the first few presents,
+    // so a swap-chain race is visible without a debugger.
+    void TraceCadencePresent(bool generated);
+    // Lazily builds the probe's allocator/list/fence/event and tile readbacks.
+    bool EnsureFrameGenProbeResources();
+    // Records one center-tile copy (texture -> readback), barriering `state`
+    // (updated in place) out to COPY_SOURCE and back exactly as found.
+    bool RecordProbeTile(ID3D12GraphicsCommandList* cmd, ID3D12Resource* texture,
+                         D3D12_RESOURCE_STATES& state, ID3D12Resource* readback,
+                         DXGI_FORMAT format, uint32_t tile, uint32_t texW, uint32_t texH,
+                         uint32_t* sideUsed = nullptr);
+    // The probe on the generated present: a tile of the just-drawn backbuffer,
+    // of the upscale output and of the island output, each covering the same
+    // picture region, read back and stashed. The verdict is printed by the
+    // source probe, which is the only place both halves of the cadence pair
+    // are known - a dark scene blacks both halves and is not the bug. No-op
+    // unless due.
+    void ProbeGeneratedPresent();
+    // The control probe on the source present: the same backbuffer tile, then
+    // the combined verdict for the pair.
+    void ProbeSourcePresent();
+    // Closes, submits and waits on the recorded probe list (the probe's own
+    // fence, bounded). A failure or timeout latches the probe off.
+    bool SubmitProbeAndWait();
     // What fraction along the pair the debug view shows, so the intermediate can
     // be walked by hand without a UI slider.
     void SetFrameGenPreviewT(float t) { m_fgPreviewT = t; }
@@ -1464,6 +1495,25 @@ private:
     bool m_fgUpscaleFailed = false;   // permanent latch, mirrors m_fgFfxFailed
     bool m_fgUpscaledReady = false;   // per-frame: did this frame's generated upscale succeed
     bool m_fgUpscaledReported = false;// once-only first-success log
+    // Which engine upscales the generated frame. Default false: the draw tiers
+    // (EASU / Catmull-Rom) read the island output through a _UNORM_SRGB view,
+    // the hardware decode, exactly the mechanism the compositor fallback uses -
+    // no linearize pass and no second FSR 4 context in the path. FSR 4 context
+    // #2 measured darker than the source frame on every policy tried for its
+    // reset flag (0.686 resetting every dispatch, 0.663 accumulating; both
+    // against the fallback path's 1.0, 2026-10-17), so it is opt-in through
+    // DLSS5_FG_GEN_UPSCALE_FSR4=1 until that is understood.
+    bool m_fgGenUpscaleFsr4 = false;
+    // The second context's reset latch, mirroring m_upsResetPending exactly:
+    // true on the first dispatch after the context is built and on every
+    // discontinuity, false while the generated frames run continuously. The
+    // generated midpoints are their own temporally adjacent sequence (one per
+    // source frame, half a frame apart), so history is as meaningful for this
+    // context as it is for the source's - which matters because a context that
+    // resets on every dispatch never accumulates, and FSR 4's output without
+    // accumulated history does not match the source frame's brightness (see
+    // RecordFrameGenUpscale).
+    bool m_fgUpsResetPending = true;
 
     // Generated-frame upscale textures, same rung/format as the source upscale.
     Microsoft::WRL::ComPtr<ID3D12Resource> m_fgLinearColor;   // render res FP16, FSR4 #2 input
@@ -1487,6 +1537,43 @@ private:
     // source's own textures.
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgUpscaleHeap;  // 2-slot SRV: [0]=linColor [1]=upStretch
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_fgUpscaleRtvHeap;// 2-slot RTV: [0]=upStretch [1]=upSharp
+
+    // Interpolate-on black-flicker localization. With playback frame generation
+    // on, each source frame is presented twice (generated midpoint, then the
+    // source). A black midpoint strobes against the source and reads as the
+    // reported flicker. This probe reads a tile of each stage of the generated
+    // frame back to the CPU - island output, the upscale output (FSR 4 context
+    // #2 + CAS) and the presented backbuffer - and logs which one is black, so
+    // the root cause is machine-confirmed instead of eyeballed. Gated by
+    // DLSS5_FG_BLACK_PROBE (0 off / 1 every 30th generated frame / 2 every
+    // generated frame, the default: the 30th-frame sampler aliases past any
+    // flicker whose period divides it, which is how the first field run came
+    // back empty); DLSS5_FG_GEN_UPSCALE=0 forces the fallback for an instant
+    // A/B. The cost is one small copy plus one bounded wait, per sampled
+    // frame, on a command list of its own that touches no frame-slot
+    // bookkeeping.
+    int m_fgProbeMode = 2;
+    bool m_fgGenUpscaleAllowed = true;
+    bool m_fgDiagRead = false;
+    uint32_t m_fgProbeFrames = 0;    // generated frames seen by the probe gate
+    uint32_t m_fgPresentTrace = 0;   // doubling presents whose index was traced
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_probeAllocator;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_probeList;
+    Microsoft::WRL::ComPtr<ID3D12Fence> m_probeFence;
+    uint64_t m_probeFenceValue = 0;
+    HANDLE m_probeEvent = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_probeBackbuffer;  // tile, backbuffer format
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_probeSharp;       // tile, R16G16B16A16_FLOAT
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_probeIsland;      // tile, B8G8R8A8_UNORM
+    // The generated half of the probed cadence pair, stashed for the verdict
+    // the source probe prints once both halves are known.
+    float m_probeGenMax = 0.0f;
+    float m_probeGenMean = 0.0f;
+    float m_probeSharpMaxLinear = 0.0f;   // the upscale leaves FP16 linear light
+    float m_probeIslandMax = 0.0f;        // the island output is sRGB-encoded
+    float m_probeIslandMean = 0.0f;       // ditto, mean: the luminance comparison
+    bool m_probeGenSampled = false;
+    bool m_probeSharpSampled = false;
     // EASU's four constant vectors (con0, con1) as float, computed from the
     // render and output sizes in CreateUpscalePresentResources.
     float m_easuCon[8] = {};
