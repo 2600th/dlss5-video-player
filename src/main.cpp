@@ -9256,11 +9256,22 @@ private:
         // The unavailable arm carries the reason, not the verdict: a pill that
         // says only "Unavailable" sends a viewer looking for a broken toggle
         // when the answer is usually that their source already fills the panel.
-        case ToolbarAction::ToggleUpscaling:return{UiIcon::Upscaling,
-            UpscalingAvailable()?(UpscalingActive()?std::wstring(L"DLSS Upscaling \u00b7 On")
-                                                   :std::wstring(L"DLSS Upscaling \u00b7 Off"))
-                                :std::wstring(L"DLSS Upscaling \u00b7 ")+UpscalingUnavailableReason(),
-            enabled,UpscalingActive()};
+        case ToolbarAction::ToggleUpscaling:{
+            const bool active=UpscalingActive();
+            std::wstring label;
+            if(!UpscalingAvailable()) label=std::wstring(L"DLSS Upscaling \u00b7 ")+UpscalingUnavailableReason();
+            else if(!active) label=L"DLSS Upscaling \u00b7 Off";
+            else {
+                label=L"DLSS Upscaling \u00b7 On";
+                // Name the amplifier actually drawing the picture - mirror the
+                // status line (UpscalingStatus, main.cpp:7680). Only meaningful
+                // while the present chain serves the filter; with the neural
+                // route up, DLSS is the engine and the question has no answer.
+                if(m_renderer&&m_renderer->UpscalePresentActive())
+                    label+=std::wstring(L" \u00b7 ")+m_renderer->PresentUpscaleEngineName();
+            }
+            return{UiIcon::Upscaling,label,enabled,active};
+        }
         // An action, not a toggle: it starts a conversion, and while one runs
         // the pill is the way to stop it rather than an inert label. Every arm
         // comes from the one state machine, so the pill, the menu item and the
