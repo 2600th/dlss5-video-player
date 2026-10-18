@@ -1,11 +1,18 @@
 # Player demonstration
 
+> Everything above [AMD captures](#amd-captures) documents the **NVIDIA backend**,
+> which this fork does not support: the demo, the preview, the social cuts and the
+> comparison stills were all captured on RTX cards. They are kept because they are
+> upstream's and show the same player; the AMD backend's own captures are at the
+> bottom of this page.
+
 _Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
 [Watch the MP4](neural-comparison-demo.mp4) ·
 [Looping preview](neural-comparison-preview.webp) ·
 [Poster](neural-comparison-poster.jpg) ·
 [Comparison stills](#comparison-stills) ·
+[AMD captures](#amd-captures) ·
 [How to rebuild it](../../tools/demo-video/README.md)
 
 [![Player demonstration poster](neural-comparison-poster.jpg)](neural-comparison-demo.mp4)
@@ -145,12 +152,52 @@ with motion.
 Renders: RTX 4080 SUPER, driver 610.47 (`32.0.16.1047`), runtime lock
 `310.8.SF-v2`, the player at `dced888` (0.25.0 plus the unreleased work since).
 
+## AMD captures
+
+Six files in [`amd/`](amd/), all of the **AMD backend**, on an RX 9070 XT
+through `LmxxfNrRuntime` — not the NVIDIA path everything above documents. They
+are window captures of the player, cropped to the picture: the status row and
+the compare bar are left out. All six are frames of *Bumblebee* (2018), a film
+rather than one of the game trailers the rest of this page uses — film grain, a
+shallow depth of field, and faces lit for a camera instead of for a renderer.
+
+| File | What it is |
+| --- | --- |
+| [`amd-split-view.png`](amd/amd-split-view.png) | 2121x1190, **Split**: the film in playback, source left of a hard divider, the render right |
+| [`amd-2x2.png`](amd/amd-2x2.png) | 2122x1195, **2 x 2**: original, DLSS 5, Difference (4x, luma) and DLSS 5 at Mix 50% |
+| [`amd-live-wipe.mp4`](amd/amd-live-wipe.mp4) | The same film in **Wipe**, 6.0 s, 2118x1046, 30 fps, H.264 High, 9.3 Mb/s, AAC stereo 48 kHz. The divider sweeps across the face while the video plays; audio is the source clip's |
+| [`amd-live-wipe-preview.webp`](amd/amd-live-wipe-preview.webp) | The animation the README shows: the same cut at 1100x544, 10 fps, 60 frames, looping, lossy WebP, 718 KB, silent. GitHub strips `<video>` tags from Markdown, so the page carries this instead and links it to the MP4 |
+| [`amd-face-source.png`](amd/amd-face-source.png) | A face crop from the film, the source frame, 1319x1047 |
+| [`amd-face-render.png`](amd/amd-face-render.png) | The same crop of the render, 1321x1048: taken from a frame of the film rather than cut from one pair |
+
+The two halves of Split and Wipe are the same frame: a compare view pairs the
+render with the source frame it was made from, so the divider only chooses which
+side of that frame you see. That makes the clip usable as evidence without a
+frame-by-frame match — whatever is left of the divider is the source and whatever
+is right of it is the render, at the same instant.
+
+The 2 x 2 crop shows the panes this backend has. Its fourth pane is the second
+Mix rather than RTX VSR, which cannot run here — see [the README's AMD
+section](../../README.md#on-an-amd-card).
+
+Nothing was retouched, sharpened or colour-corrected, and the clip is not
+slowed, looped or frozen. The preview is the clip resampled and nothing else:
+60 frames kept out of 180, Lanczos down to 1100 px, WebP lossy at quality 88 —
+38 dB against the same frame decoded from the MP4, so the animation stands in
+for the clip rather than replacing its evidence:
+
+```bat
+ffmpeg -i amd-live-wipe.mp4 -vf "fps=10,scale=1100:-2:flags=lanczos" ^
+    -c:v libwebp_anim -lossless 0 -q:v 88 -loop 0 -an amd-live-wipe-preview.webp
+```
+
 ## Rights
 
 This is an unofficial RenoDX/ReShade experiment, not an NVIDIA product. *Grand
 Theft Auto VI* footage is © Rockstar Games,
-*007 First Light* © IO Interactive, *Resident Evil Requiem* © Capcom and
-*Assassin's Creed Shadows* © Ubisoft. They're used to document the software,
-and the source-code licence doesn't relicense them. Only the finished video,
+*007 First Light* © IO Interactive, *Resident Evil Requiem* © Capcom,
+*Assassin's Creed Shadows* © Ubisoft, and the *Bumblebee* frames in
+[`amd/`](amd/) © Paramount Pictures. They're used to document the software, and
+the source-code licence doesn't relicense them. Only the finished video,
 preview, poster, stills and edit source are in Git. The sources and renders are
 not.

@@ -358,6 +358,45 @@ attests the published zip after checking it against that `.sha256`. A publish
 that failed can be re-run for the same tag from the Actions tab
 (`workflow_dispatch` with the tag as input).
 
+### The AMD backend's package
+
+The assembler above is the NVIDIA release: it stages single DLLs, so it knows
+nothing about `amd-neural-runtime/`, the several-hundred-megabyte
+`LmxxfNrRuntime` pack the AMD backend loads. That pack has its own assembler,
+and it is the only one of the two that runs on a local AMD build (no tagged
+tree, no hardware JUnit report, no locked NVIDIA inputs):
+
+```powershell
+./tools/package_amd_release.ps1                 # dist/DLSSVideoPlayer-v<version>-amd-win64/ + .zip
+./package_amd_release.bat -IncludeFfmpeg        # same, plus ffmpeg.exe and ffprobe.exe
+```
+
+It refuses a runtime pack whose `lmxxf-modules/gfx1200|gfx1201` do not match
+their `SHA256SUMS` (80 entries, 40 per architecture - the count `Create`
+insists on), copies the tree to `amd-neural-runtime/` beside the executable
+where `ResolveRuntimeDirectory()` looks for it, drops
+`shaders/shader-cache/` (compiled output, regenerated on first use) and writes
+`PACKAGE_MANIFEST.txt` plus `AMD_RUNTIME_NOTICE.txt`. The player verifies the
+packed tree itself at startup, against the same `SHA256SUMS`.
+
+Three more files ride beside the executable for the upscaling and frame
+generation stages: FidelityFX's `amd_fidelityfx_loader_dx12.dll` together with
+`amd_fidelityfx_framegeneration_dx12.dll` and
+`amd_fidelityfx_upscaler_dx12.dll`. The script takes the loader and the frame
+generation pair as required and the upscaler as optional - without it the
+upscale falls to FSR 1's EASU and then to Catmull-Rom, both the player's own
+shaders, so a pack built without it still upscales. For a local build, copy the
+three beside the executable, or point `FFX_SDK_ROOT` at the SDK: the loaders
+also read `Kits/FidelityFX/signedbin` from there.
+
+`-IncludeFfmpeg` stages `ffmpeg.exe` and `ffprobe.exe` with the three notices
+they are conveyed under (`THIRD_PARTY_LICENSES/ffmpeg.txt`, `ffmpeg-GPL-3.0.txt`,
+`ffmpeg-bundled-notices.txt`), each held to `packaging/tool-lock.json` by size
+and SHA-256 first. It is worth the 330 MB: the player links no libav*, so the
+pair is the decoder, the probe and the encoder - a package without them starts
+but opens nothing.
+
+
 The documentation stamps (`_Verified against <version> ...`) have to name the
 release's major.minor: a minor or major release re-reads and re-stamps every
 guide `tools/release_notes.ps1` lists, and a patch release needs none.

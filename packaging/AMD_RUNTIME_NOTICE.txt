@@ -1,0 +1,92 @@
+DLSS 5 Video Player - AMD 包说明（自带 lmxxf 神经渲染 runtime）
+================================================================
+
+本包带上了 amd-neural-runtime/ 整棵树。它必须在 DLSSVideoPlayer.exe 的
+同级目录里，目录名不能改 —— 播放器按下面这个顺序找它：
+
+  1. 显式目录（命令行/内部调用传入）
+  2. 环境变量 DLSS5_AMD_RUNTIME_DIR
+  3. 模块目录、其父目录、祖父目录下的 amd-neural-runtime
+     （neural-runtime\NeuralWorker.exe 多一层，也认）
+
+目录与各部分的用途
+------------------
+  LmxxfNrRuntime.dll          HIP 神经渲染 runtime 本体（ABI 6 / 3 自适配）
+  lmxxf-modules\              gfx1200\ 与 gfx1201\，每架构 40 个 .hsaco +
+                              SHA256SUMS。Create 只认这个 40-per-arch 布局；
+                              native-game-tiled-assets\HIP 是旧的 24 条子集，
+                              会被拒绝（"SHA256SUMS incomplete"）。
+  native-game-tiled-assets\   模型权重与网络 shader。播放器通过
+                              LMXXF_WEIGHTS_DIR 把它传给 runtime。
+  shaders\                    runtime 自己的 .hlsl 源码；首次建网时在
+                              shaders\shader-cache\ 生成 .dxbc（可写目录）。
+  DLSS5-AMD\custom-config.txt 用户配置。播放器每个 AMD job 只重写
+                              DLSS5_MULTI_PASS / _SKIN_PROTECT / _PREDICT /
+                              _SKIP_BLOCKS / STYLE 五行，手写的其它键
+                              （如 DLSS5_NETWORK_FREE_RES）会保留。
+
+启动时的一致性校验
+------------------
+播放器启动时会用 runtime 包自带的 SHA256SUMS 逐条重算 lmxxf-modules 下的
+模块（80 条），LmxxfNrRuntime.dll 只做存在性检查（它没有已发布的摘要）。
+启动界面显示 "matches the pack's own SHA256SUMS" 即表示这棵树没有被改动。
+换 runtime 包请整棵替换，不要只替换 DLL 或单个 hsaco。
+
+硬件要求
+--------
+  - RDNA4 独显：RX 9060（gfx1200）、RX 9070 / Radeon AI PRO R9700（gfx1201）
+  - 系统里有 AMD 驱动的 amdhip64_7.dll（runtime 日志会打印它的来源与版本）
+  - Windows 10/11 x64
+
+关于超分与插帧的运行时（FidelityFX）
+------------------------------------
+超分与插帧不经过 lmxxf，走 AMD 官方的 FidelityFX，本包带上三个文件，
+都必须与 DLSSVideoPlayer.exe 同级：
+
+  amd_fidelityfx_loader_dx12.dll           官方加载器，两种效果共用
+  amd_fidelityfx_upscaler_dx12.dll         FSR 4 超分（可选：缺失时超分
+                                           自动回退 FSR1 EASU，再回退
+                                           Catmull-Rom + CAS，均为播放器
+                                           自带着色器，超分仍然可用）
+  amd_fidelityfx_framegeneration_dx12.dll  帧生成：播放时插帧（Ctrl+Alt+G、
+                                           "Interpolate"）与离线 Generate
+                                           frames 都用它
+
+引擎与倍率：DLSS ▸ Upscaled by 选 Auto / FSR 4 / FSR1 / CAS（Auto 为
+FSR4 → FSR1 → CAS 降级链），状态栏的 "DLSS Upscaling · On · FSR1" 显示
+当前实际在用的档；播放时插帧固定 2 倍，离线 Generate frames 为 2x–5x。
+离线转换缺 framegeneration DLL 时回退到播放器自带的块匹配器（运动搜索
+单尺度，快速运动有拖影）；播放时插帧没有这个回退，缺 DLL 即不可用。
+
+许可：FidelityFX SDK 许可，允许二进制再分发，声明见 docs/THIRD-PARTY-NOTICES.md。
+
+关于 ffmpeg.exe / ffprobe.exe
+-----------------------------
+播放器没有静态链接 libav*：它是把这两个程序当子进程跑的（CreateProcessW），
+所以它们决定了两件事：
+
+  ffmpeg.exe   解封装 + 解码（逐帧喂 BGRA 给播放器，导出与音频解码也走它）
+  ffprobe.exe  探测流信息（时长、codec、像素格式、色彩空间/范围/HDR 传递、
+               旋转矩阵、音轨 disposition），时间轴、轨道菜单、字幕识别、
+               竖拍方向都靠它
+
+缺了它们，包能启动但打不开任何视频（日志里 "ffmpeg.exe not found"）。
+
+本包是否附带取决于打包参数：
+  - 带了：两个 exe 就在 DLSSVideoPlayer.exe 同级，许可文本在
+    THIRD_PARTY_LICENSES/（ffmpeg.txt 说明来源与构建，
+    ffmpeg-GPL-3.0.txt 是 GPLv3 全文，ffmpeg-bundled-notices.txt 是静态
+    链接进去的 BSD/MIT/zlib/Apache-2.0 库的声明）。这是 BtbN 的
+    n9.0.2-14-gebafaee10a win64 GPL 静态构建，未作修改，来源与 SHA-256
+    写在 packaging/tool-lock.json 与 ffmpeg.txt 里。
+  - 没带：把同版本的 ffmpeg.exe 与 ffprobe.exe 放到 DLSSVideoPlayer.exe
+    同级目录即可（也可以在 exe 旁建 ffmpeg\bin\ 放进去，查找顺序：
+    <exe目录>\name → <exe目录>\ffmpeg\name → <exe目录>\ffmpeg\bin\name
+    → <父目录>\ffmpeg\bin\name → PATH）。
+
+许可证
+------
+本仓库自己的代码是 MIT（见 LICENSE）。LmxxfNrRuntime.dll、模型权重与
+third-party 二进制不属于本仓库的许可范围：上游为 OptiScaler /
+TheAutomatic dlss-5-amd-project 系（GPL-3.0 谱系）与第三方分发的运行时包。
+自用/研究不受影响；公开分发前请自行确认这些二进制的许可条件。

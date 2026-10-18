@@ -6,8 +6,9 @@ distribution, as its terms require.
 
 ## AMD FidelityFX (optional, loaded at run time)
 
-- Component: `amd_fidelityfx_framegeneration_dx12.dll`, and the
-  `amd_fidelityfx_loader_dx12.dll` it loads beside itself.
+- Component: `amd_fidelityfx_framegeneration_dx12.dll` and
+  `amd_fidelityfx_upscaler_dx12.dll`, and the `amd_fidelityfx_loader_dx12.dll`
+  that loads either effect beside itself.
 - Source: <https://github.com/GPUOpen-Libraries-AndSDKs/FidelityFX-SDK>
   (`Kits/FidelityFX/signedbin`).
 - Copyright (C) Advanced Micro Devices, Inc.
@@ -29,10 +30,15 @@ distribution, as its terms require.
   source is vendored into this repository, which is why the ABI is declared
   locally rather than included from the SDK.
 
-- Used for: AMD FidelityFX Frame Generation, the AMD GPU frame-generation
-  backend (`src/FsrFrameGenBackend.cpp`). Absent, the player falls back to its
-  own optical-flow backend (`src/AmdFrameGenBackend.cpp`), which needs no
-  runtime; every other feature is unaffected either way.
+- Used for: two effects, each optional on its own. AMD FidelityFX Frame
+  Generation, the AMD GPU frame-generation backend
+  (`src/FsrFrameGenBackend.cpp`); absent, the player falls back to its own
+  optical-flow backend (`src/AmdFrameGenBackend.cpp`), which needs no runtime.
+  And FSR 4, the top tier of the playback upscaler
+  (`src/FsrUpscaleBackend.cpp`); absent, the upscale falls to FSR 1's EASU and
+  then to Catmull-Rom with CAS, both the player's own shaders
+  (`src/AmdUpscaleShader.h`), so upscaling and every other feature work without
+  the runtime either way.
 
 - FSR, FidelityFX and AMD are trademarks of Advanced Micro Devices, Inc.
 
