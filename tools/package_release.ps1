@@ -331,11 +331,14 @@ $sources += @(
 # The translations (src/TranslationFile.h): every lang\<tag>.lang the tree has,
 # in both variants, copied as committed (UTF-8, LF, pinned in .gitattributes).
 # PolicyTests' shipped_translations_are_complete_test is what lets one in.
+# Simplified Chinese ships in every package (P2.63), so the allowlist in
+# verify_package.ps1 requires it and a tree without it stops here.
 $languageRoot = Join-Path $repositoryRoot 'lang'
-if (Test-Path -LiteralPath $languageRoot -PathType Container) {
-    foreach ($language in @(Get-ChildItem -LiteralPath $languageRoot -Filter '*.lang' -File | Sort-Object Name)) {
-        $sources += ,@("lang/$($language.Name)", $language.FullName)
-    }
+if (-not (Test-Path -LiteralPath (Join-Path $languageRoot 'zh-Hans.lang') -PathType Leaf)) {
+    throw "Missing translation: $(Join-Path $languageRoot 'zh-Hans.lang')"
+}
+foreach ($language in @(Get-ChildItem -LiteralPath $languageRoot -Filter '*.lang' -File | Sort-Object Name)) {
+    $sources += ,@("lang/$($language.Name)", $language.FullName)
 }
 
 # RTX Video Super Resolution's feature DLL is optional: CMake stages it beside the

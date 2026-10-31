@@ -446,6 +446,21 @@ add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
         "${CMAKE_SOURCE_DIR}/LICENSE"
         "$<TARGET_FILE_DIR:DLSSVideoPlayer>/LICENSE"
 )
+# The translations (src/TranslationFile.h) beside the player, as the package has
+# them: lang\<tag>.lang. A target of its own rather than a POST_BUILD step, so an
+# edited .lang is copied without relinking the player; it runs after the player
+# because it names the player's output folder.
+file(GLOB DLSS_VIDEO_PLAYER_TRANSLATIONS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/lang/*.lang")
+if(NOT DLSS_VIDEO_PLAYER_TRANSLATIONS)
+    message(FATAL_ERROR "No translations under ${CMAKE_SOURCE_DIR}/lang: lang/zh-Hans.lang ships with the player.")
+endif()
+add_custom_target(dlss_video_player_translations ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:DLSSVideoPlayer>/lang"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLSS_VIDEO_PLAYER_TRANSLATIONS} "$<TARGET_FILE_DIR:DLSSVideoPlayer>/lang"
+    DEPENDS ${DLSS_VIDEO_PLAYER_TRANSLATIONS}
+    COMMENT "Copying lang/*.lang beside DLSSVideoPlayer.exe"
+    VERBATIM)
+add_dependencies(dlss_video_player_translations DLSSVideoPlayer)
 # The release feature DLL only, in every configuration: the SDK's dev build draws a
 # watermark over the picture (RTX Video SDK Programming Guide 1.1.0, chapter 4).
 if(RTX_VSR_FOUND)
@@ -616,7 +631,9 @@ if(BUILD_TESTING)
     # desktop's scale, and the layouts these tests pin are measured at 96 dpi.
     list(REMOVE_ITEM player_ui_sources src/main.cpp src/DLSSVideoPlayer.manifest)
     dlss_video_player_test(PlayerUiRegressionTests tests/PlayerUiRegressionTests.cpp ${player_ui_sources})
-    target_compile_definitions(PlayerUiRegressionTests PRIVATE PLAYER_APP_TESTING)
+    # DLSS_TEST_LANG_DIR: the layout cases draw the shipped translations.
+    target_compile_definitions(PlayerUiRegressionTests PRIVATE PLAYER_APP_TESTING
+        "DLSS_TEST_LANG_DIR=L\"${CMAKE_SOURCE_DIR}/lang\"")
     # The player persists settings beside its executable; isolate test settings.
     set_target_properties(PlayerUiRegressionTests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ui-regressions/$<CONFIG>")

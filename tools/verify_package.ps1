@@ -83,7 +83,8 @@ function Get-ExpectedPackageFiles {
             'verify_package.ps1'
         )
     }
-    return @($files + @('docs/USAGE.md', 'docs/EXAMPLE_VIDEOS.md'))
+    # The shipped translation (src/TranslationFile.h), in both variants.
+    return @($files + @('docs/USAGE.md', 'docs/EXAMPLE_VIDEOS.md', 'lang/zh-Hans.lang'))
 }
 
 # Package mode has neither VERSION nor a -PublicCore the user would have to
@@ -209,15 +210,16 @@ function Assert-NoSensitiveText {
     }
 }
 
-# .gitattributes pins packaged Markdown to LF and every other packaged text
-# file to CRLF, none with a BOM, and package_release.ps1 normalises the text it
-# takes from outside the repository to the same shape. Anything else means the
-# manifest hash would not match another machine's.
+# .gitattributes pins packaged Markdown and translations (*.lang) to LF and
+# every other packaged text file to CRLF, none with a BOM, and
+# package_release.ps1 normalises the text it takes from outside the repository
+# to the same shape. Anything else means the manifest hash would not match
+# another machine's.
 function Assert-PinnedLineEndings {
     param([string]$RelativePath, [string]$Text)
     if ($Text.Length -gt 0 -and $Text[0] -eq [char]0xFEFF) { throw "UTF-8 BOM is forbidden in packaged text: $RelativePath" }
-    if ($RelativePath.EndsWith('.md', [StringComparison]::OrdinalIgnoreCase)) {
-        if ($Text.Contains("`r")) { throw "Packaged Markdown must use LF line endings: $RelativePath" }
+    if ($RelativePath -match '(?i)\.(md|lang)$') {
+        if ($Text.Contains("`r")) { throw "Packaged Markdown and translations must use LF line endings: $RelativePath" }
     }
     elseif ($Text -cmatch '(?<!\r)\n|\r(?!\n)') { throw "Packaged text must use CRLF line endings: $RelativePath" }
 }
@@ -369,8 +371,9 @@ function Assert-Stage {
     $allowed = @($expected)
     if ($actual -ccontains $optionalVsrRuntime) { $allowed += $optionalVsrRuntime }
     # A translation is lang\<language tag>.lang (src/TranslationFile.h); the
-    # packager ships whichever the tree has, so each is allowed and none required.
-    $allowed += @($actual | Where-Object { $_ -cmatch '^lang/[a-z]{2,3}(-[A-Za-z0-9]{2,8})*\.lang$' })
+    # packager ships whichever the tree has: Simplified Chinese is required
+    # (Get-ExpectedPackageFiles), and any other well-named one is allowed.
+    $allowed += @($actual | Where-Object { $_ -cmatch '^lang/[a-z]{2,3}(-[A-Za-z0-9]{2,8})*\.lang$' -and $_ -cnotin $expected })
     $expectedSorted = @(Sort-PackagePathsOrdinal -Paths $allowed)
     if ([string]::Join("`n", $actual) -cne [string]::Join("`n", $expectedSorted)) {
         $missing = @($expectedSorted | Where-Object { $_ -cnotin $actual })
@@ -421,7 +424,7 @@ function Assert-Stage {
             throw "Portuguese/language artifact is forbidden: $relative"
         }
         $path = Join-Path $resolvedRoot $relative
-        if ($relative -match '(?i)(\.md|\.txt|\.ini)$' -or $relative -ceq 'LICENSE') {
+        if ($relative -match '(?i)(\.md|\.txt|\.ini|\.lang)$' -or $relative -ceq 'LICENSE') {
             $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($path))
             Assert-PinnedLineEndings -RelativePath $relative -Text $text
             if ($text -match '(?i)\bpt-br\b|portugu[eê]s') {
