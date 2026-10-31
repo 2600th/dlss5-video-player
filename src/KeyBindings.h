@@ -87,6 +87,7 @@ inline constexpr Command kCommands[] = {
     {L"compare-hdr-at-sdr", app_menu::IDM_COMPARE_HDR_AT_SDR},
     // Enhance
     {L"dlss5", app_menu::IDM_NEURAL_RENDERING}, {L"picture", app_menu::IDM_NEURAL_SETTINGS},
+    {L"picture-revert", app_menu::IDM_PICTURE_REVERT},
     {L"pause-render", app_menu::IDM_PAUSE_NEURAL_RENDER}, {L"preview-frame", app_menu::IDM_PREVIEW_FRAME},
     {L"preview-clip", app_menu::IDM_PREVIEW_CLIP}, {L"rerender", app_menu::IDM_RERENDER_HERE},
     {L"render-range", app_menu::IDM_RENDER_RANGE}, {L"render-whole", app_menu::IDM_RENDER_WHOLE},
@@ -123,6 +124,9 @@ inline constexpr DefaultBinding kDefaults[] = {
     // P is new with the Enhance menu: Space was printed on this row and on
     // Play / Pause, and only one row can own a key.
     {L"D", L"dlss5"}, {L"Ctrl+N", L"picture"}, {L"P", L"pause-render"},
+    // New with the Picture panel (UI proposal 3.5): its Revert, which acts only
+    // while the panel is open.
+    {L"Ctrl+Z", L"picture-revert"},
     {L"F", L"preview-frame"}, {L"Shift+F", L"preview-clip"}, {L"Ctrl+R", L"render-range"},
     {L"F6", L"rehook"}, {L"?", L"shortcuts"}, {L"F1", L"shortcuts"},
 };

@@ -1753,6 +1753,37 @@ struct PlayerAppTestAccess {
                 }
             }
             ReleaseDC(dialog, dc);
+            // Each row's modified dot is there for the longer strings too: in the
+            // gutter left of its name, on the page its row is on.
+            for (const int id : app.PictureRowIds()) {
+                const HWND dot = GetDlgItem(dialog, id + kPictureDotIdOffset);
+                REQUIRE(dot != nullptr);
+                const HWND row = GetDlgItem(dialog, id);
+                CHECK((IsWindowVisible(dot) != FALSE) == (IsWindowVisible(row) != FALSE));
+                const HWND label = GetDlgItem(dialog, id + kPictureLabelIdOffset);
+                RECT d{}, anchor{};
+                GetWindowRect(dot, &d);
+                GetWindowRect(label ? label : row, &anchor);
+                CHECK(d.right <= anchor.left);
+                CHECK(d.left >= 0);
+            }
+            // A combo's open list holds its longest row whole, translated or not.
+            for (const int id : {IDC_NS_STYLE, IDC_NS_PASSES, IDC_NS_SCENE_CUTS, IDC_NS_STABILITY}) {
+                const HWND combo = GetDlgItem(dialog, id);
+                if (!combo || !IsWindowVisible(combo)) continue;
+                HDC measure = GetDC(combo);
+                const HGDIOBJ oldFont = SelectObject(measure, reinterpret_cast<HFONT>(SendMessageW(combo, WM_GETFONT, 0, 0)));
+                const int dropped = int(SendMessageW(combo, CB_GETDROPPEDWIDTH, 0, 0));
+                for (LRESULT index = 0; index < SendMessageW(combo, CB_GETCOUNT, 0, 0); ++index) {
+                    std::wstring text(size_t(SendMessageW(combo, CB_GETLBTEXTLEN, WPARAM(index), 0)), L'\0');
+                    SendMessageW(combo, CB_GETLBTEXT, WPARAM(index), reinterpret_cast<LPARAM>(text.data()));
+                    SIZE extent{};
+                    GetTextExtentPoint32W(measure, text.c_str(), int(text.size()), &extent);
+                    CHECK(extent.cx < dropped);
+                }
+                SelectObject(measure, oldFont);
+                ReleaseDC(combo, measure);
+            }
             for (size_t a = 0; a < children.size(); ++a) {
                 for (size_t b = a + 1; b < children.size(); ++b) {
                     RECT overlap{};
@@ -1766,6 +1797,149 @@ struct PlayerAppTestAccess {
             CHECK(app.m_neuralWnd == nullptr);
         }
         app.m_loc = english;
+        app.m_picturePipelinePage = false;
+    }
+
+    // The Picture panel's per-control state (UI proposal 4.2 and 3.5): a dot on
+    // each row whose value is off its default, a double-click on the row's name,
+    // read-out or dot putting that one control back, and Ctrl+Z - a key of the
+    // key table - running Revert from wherever the keyboard is in the panel.
+    static void picture_panel_marks_resets_and_reverts_each_control_test()
+    {
+        PlayerApp& app = fixture->app;
+        const NeuralSettings settings = app.m_neuralSettings;
+        const auto color = app.m_colorSettings;
+        const float strength = app.m_comparison.strength;
+        const bool live = app.m_liveSession, cached = app.m_cachedPlayback, loaded = app.m_loaded;
+        int chosen = 0;
+        PlayerApp::PictureRenderRow row{L"neural.settings.passes", nullptr,
+            [] { return std::vector<std::wstring>{L"A", L"B", L"C"}; },
+            [&chosen] { return chosen; }, [&chosen](int index) { chosen = index; }};
+        row.defaultChoice = 0;
+        app.m_pictureRenderRows.push_back(row);
+        app.m_neuralSettings = {};
+        app.m_colorSettings = {};
+        app.m_comparison.strength = 1.0f;
+        app.m_picturePipelinePage = false;
+        app.ShowNeuralSettings();
+        const HWND dialog = app.m_neuralWnd;
+        REQUIRE(dialog != nullptr);
+        const auto dot = [&](int id) { return GetDlgItem(dialog, id + kPictureDotIdOffset); };
+        const auto marked = [&](int id) { const HWND d = dot(id); return d && GetWindowTextLengthW(d) > 0; };
+        const auto doubleClick = [&](int child) {
+            const HWND from = GetDlgItem(dialog, child);
+            REQUIRE(from != nullptr);
+            app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(child, STN_DBLCLK), reinterpret_cast<LPARAM>(from));
+        };
+        // Every row has its dot, left of its name, and none is lit at the defaults.
+        for (const int id : app.PictureRowIds()) {
+            REQUIRE(dot(id) != nullptr);
+            CHECK(!marked(id));
+            RECT d{}, anchor{};
+            GetWindowRect(dot(id), &d);
+            const HWND label = GetDlgItem(dialog, id + kPictureLabelIdOffset);
+            GetWindowRect(label ? label : GetDlgItem(dialog, id), &anchor);
+            CHECK(d.right <= anchor.left);
+        }
+        // A slider moved off its default lights its dot; a double-click on its name
+        // puts it back, slider and value, and the dot goes out.
+        const HWND tone = GetDlgItem(dialog, IDC_NS_TONE);
+        SendMessageW(tone, TBM_SETPOS, TRUE, 140);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, reinterpret_cast<LPARAM>(tone));
+        CHECK_EQ(app.m_neuralSettings.localTone, 1.4f);
+        CHECK(marked(IDC_NS_TONE));
+        CHECK(!marked(IDC_NS_STRUCTURE));
+        doubleClick(IDC_NS_TONE + kPictureLabelIdOffset);
+        CHECK_EQ(app.m_neuralSettings.localTone, NeuralSettings{}.localTone);
+        CHECK_EQ(int(SendMessageW(tone, TBM_GETPOS, 0, 0)), 100);
+        CHECK(!marked(IDC_NS_TONE));
+        // The read-out works too, and a viewing row resets as instantly as it moves.
+        const HWND mix = GetDlgItem(dialog, IDC_ADJ_NEURAL_STRENGTH);
+        SendMessageW(mix, TBM_SETPOS, TRUE, 50);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, reinterpret_cast<LPARAM>(mix));
+        CHECK_EQ(app.m_comparison.strength, 0.5f);
+        CHECK(marked(IDC_ADJ_NEURAL_STRENGTH));
+        doubleClick(IDC_ADJ_NEURAL_STRENGTH + 100);
+        CHECK_EQ(app.m_comparison.strength, 1.0f);
+        CHECK(!marked(IDC_ADJ_NEURAL_STRENGTH));
+        // A checkbox is its own name, so its dot is what a double-click resets.
+        const HWND mask = GetDlgItem(dialog, IDC_NS_AUTOMASK);
+        SendMessageW(mask, BM_SETCHECK, BST_UNCHECKED, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_AUTOMASK, BN_CLICKED), reinterpret_cast<LPARAM>(mask));
+        CHECK(!app.m_neuralSettings.autoMask);
+        CHECK(marked(IDC_NS_AUTOMASK));
+        doubleClick(IDC_NS_AUTOMASK + kPictureDotIdOffset);
+        CHECK(app.m_neuralSettings.autoMask);
+        CHECK_EQ(int(SendMessageW(mask, BM_GETCHECK, 0, 0)), BST_CHECKED);
+        // The Style row: a combo, its measured distances in its rows, its name a target.
+        const HWND style = GetDlgItem(dialog, IDC_NS_STYLE);
+        std::wstring natural(size_t(SendMessageW(style, CB_GETLBTEXTLEN, 1, 0)), L'\0');
+        SendMessageW(style, CB_GETLBTEXT, 1, reinterpret_cast<LPARAM>(natural.data()));
+        CHECK(natural.find(L"+68 %") != std::wstring::npos);
+        SendMessageW(style, CB_SETCURSEL, 2, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STYLE, CBN_SELCHANGE), reinterpret_cast<LPARAM>(style));
+        CHECK_EQ(app.m_neuralSettings.style, 2);
+        CHECK(marked(IDC_NS_STYLE));
+        doubleClick(IDC_NS_STYLE + kPictureLabelIdOffset);
+        CHECK_EQ(app.m_neuralSettings.style, 0);
+        CHECK_EQ(int(SendMessageW(style, CB_GETCURSEL, 0, 0)), 0);
+        // A combo's CBN_SELCHANGE has STN_DBLCLK's number; it is not a reset.
+        SendMessageW(style, CB_SETCURSEL, 1, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STYLE, CBN_SELCHANGE), reinterpret_cast<LPARAM>(style));
+        CHECK_EQ(app.m_neuralSettings.style, 1);
+        app.m_neuralSettings.style = 0; app.SyncNeuralSettingControls(dialog);
+        // A table-driven row with a default is marked and reset like the rest.
+        app.ShowPicturePage(dialog, true);
+        const HWND extra = GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST);
+        SendMessageW(extra, CB_SETCURSEL, 2, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST, CBN_SELCHANGE), reinterpret_cast<LPARAM>(extra));
+        CHECK_EQ(chosen, 2);
+        CHECK(marked(IDC_PIC_RENDER_ROW_FIRST));
+        CHECK(IsWindowVisible(dot(IDC_PIC_RENDER_ROW_FIRST)) != FALSE);
+        CHECK(IsWindowVisible(dot(IDC_NS_TONE)) == FALSE);
+        doubleClick(IDC_PIC_RENDER_ROW_FIRST + kPictureLabelIdOffset);
+        CHECK_EQ(chosen, 0);
+        CHECK(!marked(IDC_PIC_RENDER_ROW_FIRST));
+        app.ShowPicturePage(dialog, false);
+        CHECK(IsWindowVisible(dot(IDC_NS_TONE)) != FALSE);
+        // Ctrl+Z is Revert: a key of the table, in its menu row, from the control
+        // the keyboard is on, and live only while the panel differs from the render.
+        CHECK(app.m_keys.KeysFor(IDM_PICTURE_REVERT) == L"Ctrl+Z");
+        app.m_loaded = true; app.m_liveSession = false; app.m_cachedPlayback = true;
+        app.m_cachedSettings = {}; app.m_cachedSettings.localTone = 1.4f;
+        app.m_cachedGuides = app.m_renderGuides; app.m_cachedTemporal = app.m_temporalSettings;
+        app.RefreshNeuralApplyState(dialog);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_PICTURE_REVERT, MF_BYCOMMAND) & MF_GRAYED) == 0);
+        BYTE keys[256]{};
+        GetKeyboardState(keys);
+        const BYTE control = keys[VK_CONTROL];
+        keys[VK_CONTROL] = 0x80;
+        SetKeyboardState(keys);
+        SetFocus(tone);
+        SendMessageW(tone, WM_KEYDOWN, 'Z', 0);
+        keys[VK_CONTROL] = control;
+        SetKeyboardState(keys);
+        CHECK_EQ(app.m_neuralSettings.localTone, 1.4f);
+        CHECK_EQ(int(SendMessageW(tone, TBM_GETPOS, 0, 0)), 140);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_PICTURE_REVERT, MF_BYCOMMAND) & MF_GRAYED) != 0);
+        // Without Ctrl, Z is the trackbar's and nothing reverts.
+        app.m_neuralSettings.localTone = 0.5f;
+        SendMessageW(tone, WM_KEYDOWN, 'Z', 0);
+        CHECK_EQ(app.m_neuralSettings.localTone, 0.5f);
+        // The menu row and the main window's key run the same Revert while the panel is open.
+        app.HandleCommand(IDM_PICTURE_REVERT);
+        CHECK_EQ(app.m_neuralSettings.localTone, 1.4f);
+        app.m_liveSession = live; app.m_cachedPlayback = cached; app.m_loaded = loaded;
+        app.m_neuralSettings = settings; app.m_colorSettings = color; app.m_comparison.strength = strength;
+        app.SaveVideoSettings();
+        DestroyWindow(dialog);
+        CHECK(app.m_neuralWnd == nullptr);
+        // With the panel closed there is nothing to revert in front of you.
+        app.m_neuralSettings.localTone = 0.7f;
+        app.HandleCommand(IDM_PICTURE_REVERT);
+        CHECK_EQ(app.m_neuralSettings.localTone, 0.7f);
+        app.m_neuralSettings = settings;
+        app.m_pictureRenderRows.clear();
         app.m_picturePipelinePage = false;
     }
 
@@ -3099,6 +3273,7 @@ struct PlayerAppTestAccess {
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(picture_panel_zones_pages_revert_and_rows_test),
         UI_CASE(picture_panel_layout_survives_longer_strings_test),
+        UI_CASE(picture_panel_marks_resets_and_reverts_each_control_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
         UI_CASE(dark_menu_bar_test),
         UI_CASE(media_controls_and_thumbnail_buttons_test),

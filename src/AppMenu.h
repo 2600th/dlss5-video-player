@@ -82,6 +82,10 @@ inline constexpr UINT IDM_ENCODER_SETTINGS = 315;
 // Enhance > Re-render from here: Apply's restart at the playhead with the
 // settings as they are now, offered where the render is.
 inline constexpr UINT IDM_RERENDER_HERE = 316;
+// Enhance > Revert Picture changes: the Picture panel's Revert, Ctrl+Z by
+// default. Live only while the panel is open and differs from what rendered
+// the picture, as the button is.
+inline constexpr UINT IDM_PICTURE_REVERT = 317;
 // One contiguous block: CheckMenuRadioItem clears every command in the range it
 // is given, so a rung outside it would keep a stale check.
 inline constexpr UINT IDM_UPSCALE_AUTO = 334;

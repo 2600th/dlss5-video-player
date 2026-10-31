@@ -408,6 +408,11 @@ static constexpr int IDC_PIC_DEBAND = 7348;
 static constexpr int IDC_PIC_EXPOSURE = 7349;
 static constexpr int IDC_PIC_RENDER_ROW_FIRST = 7360;
 static constexpr int IDC_PIC_RENDER_ROW_COUNT = 10;
+// A row's label is its control's id plus this, and its "modified" dot plus the
+// second: a double-click on either names the control to reset. Clear of every
+// IDC_ADJ_ and IDC_NS_/IDC_PIC_ id and of each other (8101-8369, 9101-9369).
+static constexpr int kPictureLabelIdOffset = 1000;
+static constexpr int kPictureDotIdOffset = 2000;
 static constexpr int IDC_NS_RESET = 7320;
 static constexpr int IDC_NS_APPLY = 7321;
 static constexpr int IDC_NS_CLOSE = 7322;
@@ -5861,6 +5866,7 @@ private:
             // Re-render from here restarts what the render is doing with the settings
             // as they are, so it needs a source and DLSS 5 on.
             EnableMenuItem(menu,IDM_RERENDER_HERE,MF_BYCOMMAND|(m_loaded&&neuralActive&&!ActivityBusy()?MF_ENABLED:MF_GRAYED));
+            EnableMenuItem(menu,IDM_PICTURE_REVERT,MF_BYCOMMAND|(m_neuralWnd&&PictureRevertAvailable()?MF_ENABLED:MF_GRAYED));
             // Outside the radio range above, which CheckMenuRadioItem clears:
             // this is a constraint on the multiple, not one of the choices.
             CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
@@ -5934,6 +5940,8 @@ private:
         SetAdjustmentValue(h,IDC_ADJ_TINT,SignedValue(m_colorSettings.tint));
         // A percentage, as the compare bar's Mix reads, so the two name one value one way.
         SetAdjustmentValue(h,IDC_ADJ_NEURAL_STRENGTH,std::to_wstring(int(std::lround(m_comparison.strength*100.0f)))+L"%");
+        // The Mix also moves from the compare bar and [ ], so its dot follows here.
+        RefreshPictureDots(h);
     }
 
     void SyncAdjustmentControls(HWND h){
@@ -6118,9 +6126,13 @@ private:
     }
     void AddTip(HWND dialog,HWND control,const wchar_t* tipKey){
         if(!tipKey||!control)return;
+        AddTipText(dialog,control,T(tipKey));
+    }
+    void AddTipText(HWND dialog,HWND control,std::wstring tip){
+        if(!control||tip.empty())return;
         HWND host=EnsureTipHost(dialog);if(!host)return;
         auto& text=m_tipText[dialog];
-        text.push_back(std::make_unique<std::wstring>(T(tipKey)));
+        text.push_back(std::make_unique<std::wstring>(std::move(tip)));
         // V2 is the size both comctl32 v5 and v6 accept; the v6 size would be
         // refused by a binary that runs without the manifest.
         TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_IDISHWND|TTF_SUBCLASS;info.hwnd=dialog;
@@ -6169,9 +6181,11 @@ private:
         const bool column=columned||x!=0;
         // m_dialogLabelExtra: the label column grown for a longer translation.
         const int grow=m_dialogLabelExtra;
-        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116+grow,20);
+        // SS_NOTIFY on the label and the read-out: the Picture panel resets a row on
+        // a double-click on either (STN_DBLCLK).
+        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT|SS_NOTIFY,16+x,y,116+grow,20,id+kPictureLabelIdOffset);
         HWND track=DialogControl(h,TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS,132+x+grow,y-6,(column?218:236)-grow,30,id,column?DialogAnchor::Fixed:DialogAnchor::StretchTrack);
-        HWND value=DialogControl(h,L"STATIC",L"",SS_RIGHT,(column?352:370)+x,y,64,20,id+100,column?DialogAnchor::Fixed:DialogAnchor::RightValue);
+        HWND value=DialogControl(h,L"STATIC",L"",SS_RIGHT|SS_NOTIFY,(column?352:370)+x,y,64,20,id+100,column?DialogAnchor::Fixed:DialogAnchor::RightValue);
         if(track&&origin>=0)SetPropW(track,kSliderOriginProperty,reinterpret_cast<HANDLE>(static_cast<INT_PTR>(origin+1)));
         AddTip(h,label,tipKey);AddTip(h,track,tipKey);AddTip(h,value,tipKey);
     }
@@ -6318,6 +6332,9 @@ private:
         std::function<std::vector<std::wstring>()> choices;
         std::function<int()> selected;
         std::function<void(int)> choose;
+        // The choice that is the default, which the row's modified dot measures
+        // against and a double-click on its name returns to; -1 for neither.
+        int defaultChoice=-1;
     };
     std::vector<PictureRenderRow> m_pictureRenderRows;
 
@@ -6495,12 +6512,31 @@ private:
 
     void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr,int x=0,int width=160){
         const int grow=m_dialogLabelExtra;
-        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116+grow,20);
+        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT|SS_NOTIFY,16+x,y,116+grow,20,id+kPictureLabelIdOffset);
         // A grown label column narrows the combo rather than pushing it past
         // its column's edge (16 + 416).
         HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132+x+grow,y-3,grow?std::min(width,300-grow):width,200,id);
         for(const wchar_t* item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item));
         AddTip(h,label,tipKey);AddTip(h,combo,tipKey);
+        FitComboDropWidth(combo);
+    }
+    // The open list is as wide as its longest row, so a measured Style row or a
+    // translation is read whole there even where the closed combo cuts it.
+    void FitComboDropWidth(HWND combo){
+        if(!combo)return;
+        HDC dc=GetDC(combo);if(!dc)return;
+        const HGDIOBJ previous=SelectObject(dc,reinterpret_cast<HFONT>(SendMessageW(combo,WM_GETFONT,0,0)));
+        int widest=0;const int count=int(SendMessageW(combo,CB_GETCOUNT,0,0));
+        for(int index=0;index<count;++index){
+            const LRESULT length=SendMessageW(combo,CB_GETLBTEXTLEN,WPARAM(index),0);if(length==CB_ERR)continue;
+            std::wstring text(size_t(length)+1,L'\0');SendMessageW(combo,CB_GETLBTEXT,WPARAM(index),reinterpret_cast<LPARAM>(text.data()));text.resize(size_t(length));
+            SIZE size{};if(GetTextExtentPoint32W(dc,text.c_str(),int(text.size()),&size))widest=std::max(widest,int(size.cx));
+        }
+        SelectObject(dc,previous);ReleaseDC(combo,dc);
+        RECT bounds{};GetWindowRect(combo,&bounds);
+        // The list's own frame and a scroll bar's worth of room, past the text.
+        const int needed=widest+Sd(combo,12)+GetSystemMetrics(SM_CXVSCROLL);
+        if(needed>bounds.right-bounds.left)SendMessageW(combo,CB_SETDROPPEDWIDTH,WPARAM(needed),0);
     }
 
     HWND CreateNeuralCheck(HWND h,int id,const wchar_t* labelKey,int x,int y,int width,const wchar_t* tipKey=nullptr){
@@ -6622,7 +6658,15 @@ private:
         // do something of their own.
         // NVIDIA's names, with what each measurably does beside it: Natural
         // moves the picture furthest from the source.
-        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",top+30,{L"Default",L"Natural · strongest change",L"Cinematic · strong change"},L"neural.tip.style",0,230);
+        {
+            // The measured distance from the source beside each name: six clips,
+            // docs/measurements/knobs-upper-20261003 (Natural 168 %, 117-229; Cinematic
+            // 134 %, 100-175; Default 100). The tip carries the ranges.
+            const std::wstring styles[]={T(L"neural.style.0"),T(L"neural.style.1")+L" \u00b7 "+T(L"neural.style.1.measured"),
+                                         T(L"neural.style.2")+L" \u00b7 "+T(L"neural.style.2.measured")};
+            // 260 wide, so the longest row reads whole in the closed box at 100 %.
+            CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",top+30,{styles[0].c_str(),styles[1].c_str(),styles[2].c_str()},L"neural.tip.style",0,260);
+        }
         CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",top+68,L"neural.tip.tone",100,0,true);
         CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",top+110,L"neural.tip.structure",100,0,true);
         CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",top+152,L"neural.tip.color",100,0,true);
@@ -6667,7 +6711,10 @@ private:
             const PictureRenderRow& row=m_pictureRenderRows[index];
             const int id=IDC_PIC_RENDER_ROW_FIRST+int(index);
             CreateNeuralCombo(h,id,row.labelKey,top+318+int(index)*kPictureRowStep,{},row.tipKey,0,230);
-            if(HWND combo=GetDlgItem(h,id))for(const std::wstring& choice:row.choices())SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(choice.c_str()));
+            if(HWND combo=GetDlgItem(h,id)){
+                for(const std::wstring& choice:row.choices())SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(choice.c_str()));
+                FitComboDropWidth(combo);
+            }
         }
         m_picturePipelineControls=ChildrenSince(h,beforePipeline);
         BuildViewingZone(h,viewing,top);
@@ -6677,14 +6724,177 @@ private:
         DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,16,kPictureFooterTop,908,20,IDC_NS_STATE,DialogAnchor::StretchNote);
         DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,kPictureFooterTop+24,908,38,0,DialogAnchor::StretchNote);
         HWND revert=DialogButton(h,L"picture.revert",IDC_PIC_REVERT,504,kPictureFooterTop+76,96,30);
+        // Revert's key comes from the key table, as the toolbar's do.
+        AddTipText(h,revert,toolbar_tips::WithKeys(T(L"picture.tip.revert"),m_keys.KeysFor(IDM_PICTURE_REVERT)));
         HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,610,kPictureFooterTop+76,86,30);
         HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,706,kPictureFooterTop+76,122,30,true);
         DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,838,kPictureFooterTop+76,86,30);
-        AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");AddTip(h,revert,L"picture.tip.revert");
+        AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
+        CreatePictureDots(h);
+        // Ctrl+Z, from wherever the keyboard is in the panel.
+        for(HWND child:DialogChildren(h))SetWindowSubclass(child,PictureKeyProc,kPictureKeySubclassId,reinterpret_cast<DWORD_PTR>(this));
         m_dialogLabelExtra=0;
         SyncNeuralSettingControls(h);
         ShowPicturePage(h,m_picturePipelinePage);
         CaptureSettingsDesignLayout(h);
+    }
+
+    // ---- Per-control state: the modified dot, reset by double-click, Ctrl+Z ----
+    //
+    // Each row of the panel whose value can differ from its default, by the
+    // id of the control that holds it. The Guides pair is one row, under Motion
+    // vectors.
+    std::vector<int> PictureRowIds()const{
+        std::vector<int> ids{IDC_NS_STYLE,IDC_NS_TONE,IDC_NS_STRUCTURE,IDC_NS_COLOR,IDC_NS_INTENSITY,IDC_NS_SKIN,IDC_NS_AUTOMASK,
+                             IDC_NS_PASSES,IDC_NS_CHAINED,IDC_NS_GUIDE_MV,IDC_NS_SCENE_CUTS,IDC_NS_STABILITY,IDC_PIC_DEBAND,IDC_PIC_EXPOSURE,
+                             IDC_ADJ_NEURAL_STRENGTH,IDC_ADJ_BRIGHTNESS,IDC_ADJ_CONTRAST,IDC_ADJ_SATURATION,IDC_ADJ_GAMMA,IDC_ADJ_TEMPERATURE,IDC_ADJ_TINT};
+        for(size_t index=0;index<m_pictureRenderRows.size()&&index<size_t(IDC_PIC_RENDER_ROW_COUNT);++index)
+            if(m_pictureRenderRows[index].defaultChoice>=0)ids.push_back(IDC_PIC_RENDER_ROW_FIRST+int(index));
+        return ids;
+    }
+    // Whether a row's value is off its default. Sliders compare at the hundredth
+    // the panel shows, so a value that reads as its default is not marked.
+    bool PictureRowModified(int id)const{
+        const NeuralSettings neural{};const GuideControls guides{};const TemporalSettings temporal{};const decltype(m_colorSettings) color{};
+        const auto hundredths=[](float a,float b){return std::lround(a*100.0f)!=std::lround(b*100.0f);};
+        switch(id){
+        case IDC_NS_STYLE:return m_neuralSettings.style!=neural.style;
+        case IDC_NS_TONE:return hundredths(m_neuralSettings.localTone,neural.localTone);
+        case IDC_NS_STRUCTURE:return hundredths(m_neuralSettings.localStructure,neural.localStructure);
+        case IDC_NS_COLOR:return hundredths(m_neuralSettings.colorStrength,neural.colorStrength);
+        case IDC_NS_INTENSITY:return hundredths(m_neuralSettings.intensity,neural.intensity);
+        case IDC_NS_SKIN:return skin_structure::SliderPosition(m_neuralSettings.skinStructure)!=skin_structure::SliderPosition(neural.skinStructure);
+        case IDC_NS_AUTOMASK:return m_neuralSettings.autoMask!=neural.autoMask;
+        case IDC_NS_PASSES:return m_neuralSettings.passes!=neural.passes;
+        case IDC_NS_CHAINED:return m_neuralSettings.chainedHistory!=neural.chainedHistory;
+        case IDC_NS_GUIDE_MV:return m_renderGuides!=guides;
+        case IDC_NS_SCENE_CUTS:return m_temporalSettings.sceneCuts!=temporal.sceneCuts;
+        case IDC_NS_STABILITY:return m_temporalSettings.stability!=temporal.stability;
+        case IDC_PIC_DEBAND:return m_sourceDeband;
+        case IDC_PIC_EXPOSURE:return m_suppliedExposure;
+        case IDC_ADJ_NEURAL_STRENGTH:return hundredths(m_comparison.strength,1.0f);
+        case IDC_ADJ_BRIGHTNESS:return hundredths(m_colorSettings.brightness,color.brightness);
+        case IDC_ADJ_CONTRAST:return hundredths(m_colorSettings.contrast,color.contrast);
+        case IDC_ADJ_SATURATION:return hundredths(m_colorSettings.saturation,color.saturation);
+        case IDC_ADJ_GAMMA:return hundredths(m_colorSettings.gamma,color.gamma);
+        case IDC_ADJ_TEMPERATURE:return hundredths(m_colorSettings.temperature,color.temperature);
+        case IDC_ADJ_TINT:return hundredths(m_colorSettings.tint,color.tint);
+        default:
+            if(id>=IDC_PIC_RENDER_ROW_FIRST&&id<IDC_PIC_RENDER_ROW_FIRST+IDC_PIC_RENDER_ROW_COUNT){
+                const size_t index=size_t(id-IDC_PIC_RENDER_ROW_FIRST);
+                return index<m_pictureRenderRows.size()&&m_pictureRenderRows[index].defaultChoice>=0&&
+                       m_pictureRenderRows[index].selected()!=m_pictureRenderRows[index].defaultChoice;
+            }
+            return false;
+        }
+    }
+    // One dot per row, in the gutter left of its label (or of a checkbox, which is
+    // its own label), 8 dip wide so it never reaches the control it marks. It is
+    // a page's control like the row's, so it shows and hides with the page.
+    void CreatePictureDots(HWND h){
+        for(const int id:PictureRowIds()){
+            HWND anchor=GetDlgItem(h,id+kPictureLabelIdOffset);
+            if(!anchor)anchor=GetDlgItem(h,id);
+            if(!anchor)continue;
+            RECT r{};GetWindowRect(anchor,&r);MapWindowPoints(nullptr,h,reinterpret_cast<POINT*>(&r),2);
+            HWND dot=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_OWNERDRAW|SS_NOTIFY,r.left-Sd(h,11),r.top,Sd(h,8),r.bottom-r.top,h,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(id+kPictureDotIdOffset)),nullptr,nullptr);
+            if(!dot)continue;
+            AddTip(h,dot,L"picture.tip.modified");
+            HWND control=GetDlgItem(h,id);
+            for(auto* page:{&m_pictureLookControls,&m_picturePipelineControls})
+                if(std::find(page->begin(),page->end(),control)!=page->end())page->push_back(dot);
+        }
+    }
+    // Each dot's state follows its row; its text is the state, for a screen reader.
+    void RefreshPictureDots(HWND h){
+        if(!h)return;
+        const std::wstring modified=T(L"picture.modified");
+        for(const int id:PictureRowIds()){
+            HWND dot=GetDlgItem(h,id+kPictureDotIdOffset);if(!dot)continue;
+            const bool on=PictureRowModified(id);
+            if((GetWindowTextLengthW(dot)>0)!=on){SetWindowTextW(dot,on?modified.c_str():L"");InvalidateRect(dot,nullptr,TRUE);}
+        }
+    }
+    bool IsPictureDot(const DRAWITEMSTRUCT& item)const{
+        const int id=int(item.CtlID)-kPictureDotIdOffset;
+        return item.CtlType==ODT_STATIC&&id>=IDC_ADJ_BRIGHTNESS&&id<IDC_PIC_RENDER_ROW_FIRST+IDC_PIC_RENDER_ROW_COUNT;
+    }
+    void DrawPictureDot(const DRAWITEMSTRUCT& item){
+        FillRect(item.hDC,&item.rcItem,DarkDialogBrush());
+        if(GetWindowTextLengthW(item.hwndItem)==0)return;
+        const HWND dialog=GetParent(item.hwndItem);
+        const int size=std::max(4,Sd(dialog,6)),cx=(item.rcItem.left+item.rcItem.right)/2,cy=(item.rcItem.top+item.rcItem.bottom)/2;
+        HBRUSH fill=CreateSolidBrush(ui_palette::PrimaryBlue);HPEN edge=CreatePen(PS_SOLID,1,ui_palette::PrimaryBlue);
+        const HGDIOBJ oldBrush=SelectObject(item.hDC,fill),oldPen=SelectObject(item.hDC,edge);
+        Ellipse(item.hDC,cx-size/2,cy-size/2,cx-size/2+size,cy-size/2+size);
+        SelectObject(item.hDC,oldBrush);SelectObject(item.hDC,oldPen);DeleteObject(fill);DeleteObject(edge);
+    }
+    // A double-click on a row's name, read-out or dot puts that one control back
+    // to its default, by the path the control itself takes: a render control
+    // previews on a paused frame like a drag would, a viewing one is instant.
+    // Returns whether `id` named a row.
+    bool ResetPictureRow(HWND h,int id){
+        const NeuralSettings neural{};const GuideControls guides{};const TemporalSettings temporal{};const decltype(m_colorSettings) color{};
+        bool render=true,guide=false;
+        switch(id){
+        case IDC_NS_STYLE:m_neuralSettings.style=neural.style;break;
+        case IDC_NS_TONE:m_neuralSettings.localTone=neural.localTone;break;
+        case IDC_NS_STRUCTURE:m_neuralSettings.localStructure=neural.localStructure;break;
+        case IDC_NS_COLOR:m_neuralSettings.colorStrength=neural.colorStrength;break;
+        case IDC_NS_INTENSITY:m_neuralSettings.intensity=neural.intensity;break;
+        case IDC_NS_SKIN:m_neuralSettings.skinStructure=neural.skinStructure;break;
+        case IDC_NS_AUTOMASK:m_neuralSettings.autoMask=neural.autoMask;break;
+        case IDC_NS_PASSES:m_neuralSettings.passes=neural.passes;break;
+        case IDC_NS_CHAINED:m_neuralSettings.chainedHistory=neural.chainedHistory;break;
+        case IDC_NS_GUIDE_MV:m_renderGuides=guides;guide=true;break;
+        case IDC_NS_SCENE_CUTS:m_temporalSettings.sceneCuts=temporal.sceneCuts;guide=true;break;
+        case IDC_NS_STABILITY:m_temporalSettings.stability=temporal.stability;guide=true;break;
+        case IDC_PIC_DEBAND:m_sourceDeband=false;break;
+        case IDC_PIC_EXPOSURE:m_suppliedExposure=false;break;
+        case IDC_ADJ_NEURAL_STRENGTH:m_comparison.strength=1.0f;render=false;break;
+        case IDC_ADJ_BRIGHTNESS:m_colorSettings.brightness=color.brightness;render=false;break;
+        case IDC_ADJ_CONTRAST:m_colorSettings.contrast=color.contrast;render=false;break;
+        case IDC_ADJ_SATURATION:m_colorSettings.saturation=color.saturation;render=false;break;
+        case IDC_ADJ_GAMMA:m_colorSettings.gamma=color.gamma;render=false;break;
+        case IDC_ADJ_TEMPERATURE:m_colorSettings.temperature=color.temperature;render=false;break;
+        case IDC_ADJ_TINT:m_colorSettings.tint=color.tint;render=false;break;
+        default:{
+            const size_t index=size_t(id-IDC_PIC_RENDER_ROW_FIRST);
+            if(id<IDC_PIC_RENDER_ROW_FIRST||index>=m_pictureRenderRows.size()||index>=size_t(IDC_PIC_RENDER_ROW_COUNT)||m_pictureRenderRows[index].defaultChoice<0)return false;
+            m_pictureRenderRows[index].choose(m_pictureRenderRows[index].defaultChoice);
+            break;}
+        }
+        if(render){
+            if(guide)ApplyLiveGuideControls();
+            SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();RefreshPictureRevert(h);
+        }else{
+            SyncAdjustmentControls(h);ApplyVideoAdjustments(false);ApplyComparison(true);SaveVideoSettings();
+        }
+        RefreshPictureDots(h);
+        return true;
+    }
+    // The panel's keys: the command the key table binds to the chord, and only
+    // the one that belongs to the panel - Revert (Ctrl+Z by default). Everything
+    // else keeps going to the control the keyboard is on.
+    static constexpr UINT_PTR kPictureKeySubclassId=0x5049;  // 'PI'
+    bool PictureKeyDown(HWND panel,WPARAM key){
+        if(GetKeyState(VK_MENU)&0x8000)return false;
+        const auto command=m_keys.LookupKey(UINT(key),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0);
+        if(command!=IDM_PICTURE_REVERT)return false;
+        RevertPicture(panel);
+        return true;
+    }
+    bool m_pictureSwallowChar=false;
+    static LRESULT CALLBACK PictureKeyProc(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR id,DWORD_PTR data){
+        auto* app=reinterpret_cast<PlayerApp*>(data);
+        switch(m){
+        case WM_KEYDOWN:if(app&&app->PictureKeyDown(GetParent(h),w)){app->m_pictureSwallowChar=true;return 0;}break;
+        // The control character Ctrl+Z also types: a combo would search for it.
+        case WM_CHAR:if(app&&app->m_pictureSwallowChar){app->m_pictureSwallowChar=false;if(w<0x20)return 0;}break;
+        case WM_NCDESTROY:RemoveWindowSubclass(h,PictureKeyProc,id);break;
+        }
+        return DefSubclassProc(h,m,w,l);
     }
 
     // The panel's geometry, in design units. The render zone is the left
@@ -6716,7 +6926,7 @@ private:
         const int choice=combo?int(SendMessageW(combo,CB_GETCURSEL,0,0)):CB_ERR;
         if(index>=m_pictureRenderRows.size()||choice==CB_ERR)return;
         m_pictureRenderRows[index].choose(choice);
-        SaveVideoSettings();SchedulePausedSettingsPreview();RefreshNeuralApplyState(h);
+        SaveVideoSettings();SchedulePausedSettingsPreview();RefreshNeuralApplyState(h);RefreshPictureDots(h);
     }
 
     // Playback takes it on the next frame (the renderer reads it per frame, and a
@@ -6804,11 +7014,18 @@ private:
     }
     // Revert is live exactly while the panel holds something other than what
     // rendered the picture: Reset goes to the defaults, Revert to what you see.
-    void RefreshPictureRevert(HWND h){
-        HWND revert=h?GetDlgItem(h,IDC_PIC_REVERT):nullptr;if(!revert)return;
+    // Every change to the panel's values comes through here, so the dots follow.
+    bool PictureRevertAvailable()const{
         const auto applied=AppliedRenderSettings();
-        const bool live=applied&&*applied!=CurrentRenderSettings();
+        return applied&&*applied!=CurrentRenderSettings();
+    }
+    void RefreshPictureRevert(HWND h){
+        RefreshPictureDots(h);
+        HWND revert=h?GetDlgItem(h,IDC_PIC_REVERT):nullptr;if(!revert)return;
+        const bool live=PictureRevertAvailable();
         if((IsWindowEnabled(revert)!=FALSE)!=live)EnableWindow(revert,live);
+        // Enhance > Revert Picture changes is the same command, live while the button is.
+        if(HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr)EnableMenuItem(menu,IDM_PICTURE_REVERT,MF_BYCOMMAND|(live?MF_ENABLED:MF_GRAYED));
     }
     void RevertPicture(HWND h){
         const auto applied=AppliedRenderSettings();
@@ -6879,9 +7096,12 @@ private:
     }
 
     LRESULT NeuralWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(m==WM_DRAWITEM&&l&&IsPictureDot(*reinterpret_cast<const DRAWITEMSTRUCT*>(l))){DrawPictureDot(*reinterpret_cast<const DRAWITEMSTRUCT*>(l));return TRUE;}
         if(LRESULT result=0;SettingsDialogChrome(h,m,w,l,result))return result;
         switch(m){
         case WM_CREATE:ApplyDarkTitleBar(h);BuildNeuralSettingControls(h);return 0;
+        // The panel itself has the keyboard when no control does.
+        case WM_KEYDOWN:if(PictureKeyDown(h,w))return 0;break;
         // Two zones, one message: a viewing slider is instant, a render slider
         // waits for the drag to settle and previews.
         case WM_HSCROLL:{
@@ -6899,9 +7119,16 @@ private:
             const int id=LOWORD(w);const int code=HIWORD(w);
             if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};m_sourceDeband=false;m_suppliedExposure=false;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();RefreshPictureRevert(h);return 0;}
             if(id==IDC_PIC_REVERT&&code==BN_CLICKED){RevertPicture(h);return 0;}
+            // A row's name, read-out or dot, double-clicked: that control to its default.
+            // STN_DBLCLK is CBN_SELCHANGE's number, so the sender has to be a static.
+            if(code==STN_DBLCLK&&l){
+                wchar_t kind[16]{};GetClassNameW(reinterpret_cast<HWND>(l),kind,int(std::size(kind)));
+                const int row=id>=kPictureDotIdOffset+IDC_ADJ_BRIGHTNESS?id-kPictureDotIdOffset:id>=kPictureLabelIdOffset+IDC_ADJ_BRIGHTNESS?id-kPictureLabelIdOffset:id-100;
+                if(_wcsicmp(kind,L"Static")==0&&ResetPictureRow(h,row))return 0;
+            }
             if(id==IDC_PIC_PAGE&&code==BN_CLICKED){ShowPicturePage(h,!m_picturePipelinePage);return 0;}
-            if(id==IDC_ADJ_RESET&&code==BN_CLICKED){m_colorSettings={};m_comparison.strength=1.0f;SyncAdjustmentControls(h);ApplyVideoAdjustments(false);ApplyComparison(true);SaveVideoSettings();return 0;}
-            if((id==IDC_PIC_DEBAND||id==IDC_PIC_EXPOSURE)&&code==BN_CLICKED){ReadPictureSourceControls(h);return 0;}
+            if(id==IDC_ADJ_RESET&&code==BN_CLICKED){m_colorSettings={};m_comparison.strength=1.0f;SyncAdjustmentControls(h);ApplyVideoAdjustments(false);ApplyComparison(true);SaveVideoSettings();RefreshPictureDots(h);return 0;}
+            if((id==IDC_PIC_DEBAND||id==IDC_PIC_EXPOSURE)&&code==BN_CLICKED){ReadPictureSourceControls(h);RefreshPictureDots(h);return 0;}
             if(id>=IDC_PIC_RENDER_ROW_FIRST&&id<IDC_PIC_RENDER_ROW_FIRST+IDC_PIC_RENDER_ROW_COUNT&&code==CBN_SELCHANGE){ChoosePictureRenderRow(h,id);return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
@@ -12394,6 +12621,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         // Apply's path: a running session restarts at the playhead with the
         // settings as they are; paused, the frame under it is rendered again.
         case IDM_RERENDER_HERE:if(m_loaded&&m_neuralRequested)ApplyNeuralSettings();break;
+        // The Picture panel's Revert, from its key or the Enhance row: the panel is
+        // where the change being undone is shown, so it acts only while it is open.
+        case IDM_PICTURE_REVERT:if(m_neuralWnd&&IsWindow(m_neuralWnd))RevertPicture(m_neuralWnd);break;
         case IDM_SUBTITLE_OFF:SelectSubtitlesOff(true);break;case IDM_SUBTITLE_FILE:SelectSubtitleFile(true);break;
         case IDM_SUBTITLE_LOAD:LoadSubtitleFromDialog();break;case IDM_SUBTITLE_NEXT:NextSubtitles();break;
         case IDM_SUBTITLE_EARLIER:StepSubtitleDelay(-1);break;case IDM_SUBTITLE_LATER:StepSubtitleDelay(+1);break;

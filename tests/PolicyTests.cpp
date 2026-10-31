@@ -3592,8 +3592,11 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(CommandForPlayerKey('L', true, false) == app_menu::IDM_OPEN_YOUTUBE);
     for (const UINT key : {UINT('G'), UINT('N')})
         CHECK(!CommandForPlayerKey(key, false, false).has_value());
-    for (const UINT key : {'I', 'F', 'Z'})
+    for (const UINT key : {'I', 'F', 'K'})
         CHECK(!CommandForPlayerKey(key, true, false).has_value());
+    // Ctrl+Z is the Picture panel's Revert (new in 0.30.0); Z alone still zooms.
+    CHECK(CommandForPlayerKey('Z', true, false) == app_menu::IDM_PICTURE_REVERT);
+    CHECK(CommandForPlayerKey('Z', false, false) == app_menu::IDM_COMPARE_ZOOM);
     CHECK(!CommandForPlayerKey('G', true, true).has_value());
     // Modifiers match exactly: Shift+S is not S.
     CHECK(!CommandForPlayerKey('S', false, true).has_value());

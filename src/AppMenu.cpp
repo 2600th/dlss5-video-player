@@ -299,6 +299,8 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key
     // DLSS 5: the toggle, the panel, the look, and the render's own pace.
     add(enhance, IDM_NEURAL_RENDERING, L"menu.neural_rendering");
     add(enhance, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+    // The panel's Revert, so its key is in the key column and on the sheet.
+    add(enhance, IDM_PICTURE_REVERT, L"menu.picture_revert", MF_GRAYED);
     // Every preset is one neural evaluation at the same resolution, so this is a
     // choice of look, not a speed trade, and the menu says so where the choice is
     // made. Disabled, because it is a statement and not a choice. The numbers and

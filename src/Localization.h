@@ -438,7 +438,15 @@ private:
             {L"picture.page.pipeline", L"Render pipeline \u203a"}, {L"picture.page.look", L"\u2039 Look"},
             {L"picture.tip.page", L"The render's pipeline: passes, guides, history across cuts and what the model is given. All of it re-renders."},
             {L"picture.revert", L"Revert"},
-            {L"picture.tip.revert", L"Back to the settings the picture on screen was rendered with. Reset goes back to the defaults."},
+            {L"picture.tip.revert", L"Back to the settings the picture on screen was rendered with\nReset goes back to the defaults."},
+            // A row's dot when its value is off the default; its text is what a screen reader says.
+            {L"picture.modified", L"Changed from the default"},
+            {L"picture.tip.modified", L"Changed from the default. Double-click the setting's name to put it back."},
+            {L"menu.picture_revert", L"Revert Picture changes"},
+            // Style's three looks, and how far each moved six clips from the source
+            // (docs/measurements/knobs-upper-20261003): the combo shows "name · distance".
+            {L"neural.style.0", L"Default"}, {L"neural.style.1", L"Natural"}, {L"neural.style.2", L"Cinematic"},
+            {L"neural.style.1.measured", L"furthest from the source (+68 %)"}, {L"neural.style.2.measured", L"+34 %"},
             {L"neural.settings.group_source", L"What the model is given"},
             {L"encoder.settings.gpu_convert", L"GPU color conversion"},
             {L"encoder.settings.gpu_source", L"GPU source conversion"},
