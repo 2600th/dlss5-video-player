@@ -4425,13 +4425,8 @@ private:
     // Empty unless this machine's driver is below the neural floor. Built here
     // so the render thread never touches the localizer.
     std::wstring NeuralDriverNoticeText()const{
-        if(ClassifyNeuralDriver(m_opt.detectedGpu.driverVersion)!=NeuralDriverSupport::BelowFloor)return {};
-        std::wstring detected=m_opt.detectedGpu.driverVersion;
-        if(const auto parsed=ParseNvidiaDriverVersion(m_opt.detectedGpu.driverVersion))detected=FormatNvidiaDriverVersion(*parsed);
-        return T(L"driver.below_floor")+L"\n\n"+T(L"driver.detected")+detected+L"\n"+
-               T(L"driver.minimum")+FormatNvidiaDriverVersion(kNeuralDriverFloor)+L"\n"+
-               T(L"driver.verified")+FormatNvidiaDriverVersion(kNeuralDriverRecommended)+
-               (RunningOnWindows10()?L"\n\n"+std::wstring(kWindows10DriverNote):std::wstring());
+        const std::wstring belowFloor=T(L"driver.below_floor"),detected=T(L"driver.detected"),minimum=T(L"driver.minimum"),verified=T(L"driver.verified");
+        return NeuralDriverNotice(m_opt.detectedGpu.driverVersion,RunningOnWindows10(),{belowFloor,detected,minimum,verified});
     }
     // Built on this thread for the same reason as the driver notice above.
     NeuralCacheFailureText CacheFailureText()const{

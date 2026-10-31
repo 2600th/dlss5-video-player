@@ -15792,6 +15792,32 @@ void nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test()
     CHECK(!std::filesystem::exists(path));
 }
 
+// P1.47: the Windows 10 check is a pure build-number test now, and the driver
+// notice is built by a pure function, so both answers are pinned without a
+// Windows 10 machine.
+void windows10_check_and_driver_notice_read_the_build_and_the_flag_test()
+{
+    CHECK(IsWindows10Build(10, 19045));    // 22H2, the last Windows 10
+    CHECK(IsWindows10Build(10, 10240));
+    CHECK(!IsWindows10Build(10, 22000));   // the first Windows 11
+    CHECK(!IsWindows10Build(10, 26300));
+    CHECK(!IsWindows10Build(6, 19045));
+    const Localizer localizer;
+    const std::wstring belowFloor = localizer.Get(L"driver.below_floor"), detected = localizer.Get(L"driver.detected"),
+                       minimum = localizer.Get(L"driver.minimum"), verified = localizer.Get(L"driver.verified");
+    const NeuralDriverNoticeParts parts{belowFloor, detected, minimum, verified};
+    const std::wstring windows10 = NeuralDriverNotice(L"32.0.15.6614", true, parts);   // 566.14
+    const std::wstring windows11 = NeuralDriverNotice(L"32.0.15.6614", false, parts);
+    CHECK(windows11 == belowFloor + L"\n\n" + detected + L"566.14\n" + minimum + L"610.47\n" + verified + L"616.64");
+    CHECK(windows10 == windows11 + L"\n\n" + std::wstring(kWindows10DriverNote));
+    CHECK(windows10.find(L"Windows 11") != std::wstring::npos);
+    CHECK(windows11.find(L"Windows 11") == std::wstring::npos);
+    // At or above the floor, or unreadable, there is no notice to refuse with.
+    CHECK(NeuralDriverNotice(L"32.0.16.1047", true, parts).empty());
+    CHECK(NeuralDriverNotice(L"", true, parts).empty());
+    CHECK(NeuralDriverNotice(L"not a version", true, parts).empty());
+}
+
 // P1.46 and 0.4.1: the add-on's ini as each build writes it, read back from
 // disk the way LoadBeside reads it.
 void framegen_addon_reads_each_builds_settings_from_its_ini_test()
@@ -16002,6 +16028,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(framegen_addon_download_is_offered_only_on_rtx20_and_rtx30_without_it_test),
     TEST_CASE(framegen_addon_install_verifies_every_pin_before_writing_test),
     TEST_CASE(framegen_addon_reads_each_builds_settings_from_its_ini_test),
+    TEST_CASE(windows10_check_and_driver_notice_read_the_build_and_the_flag_test),
     TEST_CASE(keep_awake_holds_a_system_request_for_its_scope_and_guards_are_independent_test),
     TEST_CASE(start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),

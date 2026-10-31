@@ -659,6 +659,27 @@ void neural_preflight_diagnosis_blames_the_actionable_cause_test()
     CHECK(Contains(NgxNeuralCapabilityJson(wantsUpdate), "\"dlssnrMinimumDriver\":\"618.20\""));
     CHECK(Contains(NgxNeuralCapabilityJson({}), "\"dlssnrAvailable\":null"));
 
+    // P1.47: what 617.14 and 621.01 report on a working setup - Available=0,
+    // NeedsUpdatedDriver=0, no minimum - is not reported, never unavailable.
+    NgxNeuralCapability silent;
+    silent.available = false;
+    silent.needsUpdatedDriver = false;
+    const NgxNeuralCapability reported = ReportedNgxNeuralCapability(silent);
+    CHECK(!reported.available);
+    CHECK(reported.needsUpdatedDriver == false);
+    CHECK_EQ(std::string("{\"dlssnrAvailable\":null,\"dlssnrNeedsUpdatedDriver\":false,\"dlssnrMinimumDriver\":null}"),
+             NgxNeuralCapabilityJson(reported));
+    CHECK_EQ(NeuralPreflightCause::None, DiagnoseNeuralPreflight(blackwell, {}, true, true, {}, reported).cause);
+    // Beside a minimum, a 0 is the core's own answer and is kept, as is a 1.
+    NgxNeuralCapability floored = silent;
+    floored.minimumDriver = NvidiaDriverVersion{618, 20};
+    CHECK(ReportedNgxNeuralCapability(floored).available == false);
+    CHECK(Contains(NgxNeuralCapabilityJson(ReportedNgxNeuralCapability(floored)), "\"dlssnrAvailable\":false"));
+    NgxNeuralCapability present;
+    present.available = true;
+    CHECK(ReportedNgxNeuralCapability(present).available == true);
+    CHECK(!ReportedNgxNeuralCapability({}).available);
+
     // Architecture and memory refusals are the runtime's answer whatever the
     // driver is, so the driver floor never masks them.
     const auto architecture = CollectFeature18Observations(

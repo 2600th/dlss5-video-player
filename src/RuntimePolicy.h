@@ -125,15 +125,47 @@ struct NgxNeuralCapability {
     std::optional<NvidiaDriverVersion> minimumDriver;
 };
 
+// What the core's answer means for this runtime (P1.47). On 617.14 and 621.01
+// it reads Available=0 with no minimum on machines where the community
+// runtime renders: the block describes NVIDIA's own DLSS-NR path, whose
+// snippet is not installed, not the feature RenoDX creates. So Available=0 is
+// believed only beside a minimum, and is otherwise not reported - the receipt
+// writes null and a working setup never reads as unavailable.
+inline NgxNeuralCapability ReportedNgxNeuralCapability(NgxNeuralCapability read)
+{
+    if (read.available == false && !read.minimumDriver) read.available.reset();
+    return read;
+}
+
 // NVIDIA's Game Ready and Studio drivers for Windows 10 end with October
 // 2026's; later ones need Windows 11. Shown wherever the player asks for a
 // newer driver on Windows 10, because there that advice can run out.
 inline constexpr std::wstring_view kWindows10DriverNote =
     L"On Windows 10, NVIDIA drivers released after October 2026 need Windows 11.";
 
-// True on Windows 10 (build below 22000). RtlGetVersion, because
+// Windows 11 kept major version 10 and starts at build 22000.
+inline bool IsWindows10Build(uint32_t major, uint32_t build) { return major == 10 && build < 22000; }
+
+// True on Windows 10: IsWindows10Build on RtlGetVersion's answer, because
 // GetVersionEx answers what the manifest declares rather than what runs.
 bool RunningOnWindows10();
+
+// The message box a render below the neural floor stops at, from its four
+// localized parts; empty unless `dxgiVersion` is below the floor. Pure, so the
+// Windows 10 line is tested with the flag set and clear (P1.47).
+struct NeuralDriverNoticeParts {
+    std::wstring_view belowFloor, detected, minimum, verified;
+};
+
+inline std::wstring NeuralDriverNotice(std::wstring_view dxgiVersion, bool windows10, const NeuralDriverNoticeParts& text)
+{
+    const std::optional<NvidiaDriverVersion> version = ParseNvidiaDriverVersion(dxgiVersion);
+    if (!version || !(*version < kNeuralDriverFloor)) return {};
+    return std::wstring(text.belowFloor) + L"\n\n" + std::wstring(text.detected) + FormatNvidiaDriverVersion(*version) + L"\n" +
+           std::wstring(text.minimum) + FormatNvidiaDriverVersion(kNeuralDriverFloor) + L"\n" +
+           std::wstring(text.verified) + FormatNvidiaDriverVersion(kNeuralDriverRecommended) +
+           (windows10 ? L"\n\n" + std::wstring(kWindows10DriverNote) : std::wstring());
+}
 
 enum class NeuralDriverSupport { Unknown, BelowFloor, Supported };
 
