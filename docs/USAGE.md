@@ -42,7 +42,16 @@ Pictures already cached still show. **Clear Neural Cache** removes them with
 the rest of the cache.
 
 Open a local photo, GIF or video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
-select a trailer under **File > Game trailers**. Opening media never starts a
+select a trailer under **File > Game trailers**.
+
+**File > Open from clipboard** (`Ctrl+V`) opens what you copied. Files copied
+in Explorer come first, as if you had dropped them. Then text: a YouTube video
+link, or a file path such as Explorer's **Copy as path** gives. Then a picture,
+which opens as a photo. A pasted picture is saved as a PNG under `pasted\` in
+the cache folder, and the newest 20 are kept. A link to another site is refused,
+and the message says why.
+
+Opening media never starts a
 whole-video render. A YouTube URL plays from its stream as soon as it resolves;
 a local file is identified against the cache first, and a validated entry opens
 straight away as synchronized neural playback. Otherwise the **original starts
@@ -70,6 +79,32 @@ it was playing; mouse-wheel volume works anywhere in the window (`Ctrl`+wheel ov
 the picture zooms instead). An incomplete
 render is never reused.
 
+### Pick up where you left off
+
+A video you stop part way through opens where you left it. Once the first
+frame is up, the player seeks there and says so: `Resumed at 12:34 · Playback >
+Stop goes back to the start`. YouTube videos resume too, by video id. For a
+stream the resume is an ordinary seek, so it takes the second or two any stream
+seek takes.
+
+- The first 10 seconds are not kept, and neither is the end. The end is the
+  last 5 % of the video, and never less than the last 10 seconds. Stop there and
+  the video counts as watched, so it opens at the start next time.
+- A file whose length changed by more than 1 second or 1 % counts as a
+  different file and starts at the beginning. Photos never resume.
+- **Playback > Resume where you left off** turns it off (`[Playback]
+  ResumePosition=0`). Positions are kept in `[Resume]` in `DLSSVideoPlayer.ini`
+  for the 200 most recent sources, beside the subtitle choice and the mask.
+  They are written when you open something else or close the player, never
+  while a video plays.
+
+**Playback > Next file in folder** (`PgDn`) and **Previous file in folder**
+(`PgUp`) open the next or previous media file in the same folder. The order is
+Explorer's: by name, with numbers compared as numbers, so `Part 2` comes before
+`Part 10`. Subtitle and text files are passed over. There is no wrap-around: at
+the end, a message says it is the last file. Both are grey for a YouTube video.
+Nothing moves on to the next file by itself when a video ends.
+
 ### The menus, the toolbar and the picture menu
 
 The menus are named for jobs: **File** (what comes in and goes out),
@@ -96,7 +131,7 @@ Frame generation and the debug views are not on the toolbar: they are
 **Right-click the picture** (or press `Shift+F10` or the menu key) for what you
 can do to it: Play / Pause, DLSS 5, the compare modes, the look presets, the
 upscaler, Picture, Viewing adjustments, Re-render from here, Save comparison
-image, Fit, Fill and Fullscreen. Every row is a menu bar row, so it shows the
+image, Copy comparison image, Fit, Fill and Fullscreen. Every row is a menu bar row, so it shows the
 same key.
 
 ### Preview first: markers, timecodes and ranges
@@ -322,6 +357,11 @@ window's resolution, with a footer that records the player version, the video,
 the timecode and frame number, the view settings, a digest of the render's
 neural settings, the neural runtime's version and when it was saved. It is
 meant as evidence you can share: the footer travels with the pixels.
+
+**File > Copy comparison image** (`Ctrl+Shift+C`), also on the picture's
+right-click menu, puts the same image and footer on the clipboard. It goes on
+both as a bitmap and as a PNG, so image editors, Office and browsers can all
+paste it.
 
 Pause and step with `.` to judge a single frame; `D` still switches the whole
 view between original and neural. The mode, Mix, split position, swap, zoom step, difference settings,
@@ -890,7 +930,15 @@ Blu-ray, VobSub from a DVD) are scaled with the picture.
   and anything else that is not valid UTF-8 is read in the system's ANSI code
   page (Windows-1252 on a Western European install). A file saved in some other
   legacy code page shows the wrong accents - convert it to UTF-8.
-- `V` steps through Off, each stream and the loaded file. `H` shows subtitles
+- **YouTube captions.** A YouTube video lists its own caption tracks after
+  any the stream carries, such as `English - YouTube`. You get the interface
+  language and English, eight tracks at most: written ones first, then
+  auto-generated ones, then YouTube's auto-translations. Captions start off,
+  as they do on YouTube. Picking a track fetches it from YouTube once and keeps
+  it under `captions\` in the cache folder. Auto-generated captions come from
+  speech recognition and can get names and terms wrong, so their label says
+  auto-generated.
+- `V` steps through Off and every entry in the list. `H` shows subtitles
   0.1 s earlier and `J` 0.1 s later; **Reset subtitle delay** shows the current
   delay and puts it back to zero.
 - Your choice for a source - the stream or file, Off, and the delay - is
