@@ -15792,6 +15792,43 @@ void nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test()
     CHECK(!std::filesystem::exists(path));
 }
 
+// P1.49: 621.01 is named on an RTX 50 and nowhere else, as information. The
+// freeze is in presentation, so the line never fails and never offers safe
+// mode, and nothing about it reaches the refusal a render stops at.
+void start_screen_names_driver_62101_on_rtx50_and_never_refuses_for_it_test()
+{
+    using namespace start_screen;
+    CHECK(KnownFreezingDriver(GpuGeneration::Rtx50Blackwell, L"32.0.16.2101"));    // 621.01
+    CHECK(!KnownFreezingDriver(GpuGeneration::Rtx50Blackwell, L"32.0.16.2112"));   // 621.12, the hotfix
+    CHECK(!KnownFreezingDriver(GpuGeneration::Rtx50Blackwell, L"32.0.16.1742"));   // 617.42
+    CHECK(!KnownFreezingDriver(GpuGeneration::Rtx40Ada, L"32.0.16.2101"));
+    CHECK(!KnownFreezingDriver(GpuGeneration::Rtx30Ampere, L"32.0.16.2101"));
+    CHECK(!KnownFreezingDriver(GpuGeneration::OtherRtx, L"32.0.16.2101"));
+    CHECK(!KnownFreezingDriver(GpuGeneration::Rtx50Blackwell, L""));
+    Facts facts{};
+    facts.gpu = L"NVIDIA GeForce RTX 5090";
+    facts.generation = GpuGeneration::Rtx50Blackwell;
+    facts.driverVersion = L"32.0.16.2101";
+    facts.runtime = RuntimeState::Verified;
+    auto lines = CapabilityLines(facts);
+    REQUIRE(lines.size() >= 2);
+    CHECK(lines[1].label == L"Driver");
+    CHECK(lines[1].mark == Mark::Info);
+    CHECK(lines[1].value.starts_with(L"621.01 · "));
+    CHECK(lines[1].value.find(L"6979343") != std::wstring::npos);
+    CHECK(lines[1].value.find(L"621.12") != std::wstring::npos);
+    CHECK(lines[1].value.find(L"617.42") != std::wstring::npos);
+    CHECK(!OfferSafeMode(lines, false));
+    facts.driverVersion = L"32.0.16.2112";
+    CHECK(CapabilityLines(facts)[1].value == L"621.12 · meets the 610.47 minimum");
+    CHECK(CapabilityLines(facts)[1].mark == Mark::Pass);
+    facts.generation = GpuGeneration::Rtx40Ada;
+    facts.driverVersion = L"32.0.16.2101";
+    CHECK(CapabilityLines(facts)[1].value == L"621.01 · meets the 610.47 minimum");
+    // The notice a render is refused with stays empty: 621.01 is above the floor.
+    CHECK(NeuralDriverNotice(L"32.0.16.2101", false, {L"a", L"b", L"c", L"d"}).empty());
+}
+
 // P1.47: the Windows 10 check is a pure build-number test now, and the driver
 // notice is built by a pure function, so both answers are pinned without a
 // Windows 10 machine.
@@ -16028,6 +16065,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(framegen_addon_download_is_offered_only_on_rtx20_and_rtx30_without_it_test),
     TEST_CASE(framegen_addon_install_verifies_every_pin_before_writing_test),
     TEST_CASE(framegen_addon_reads_each_builds_settings_from_its_ini_test),
+    TEST_CASE(start_screen_names_driver_62101_on_rtx50_and_never_refuses_for_it_test),
     TEST_CASE(windows10_check_and_driver_notice_read_the_build_and_the_flag_test),
     TEST_CASE(keep_awake_holds_a_system_request_for_its_scope_and_guards_are_independent_test),
     TEST_CASE(start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test),

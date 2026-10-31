@@ -46,6 +46,21 @@ One failing probe is remembered per GPU, driver and runtime, so a doomed
 preflight is not re-run on every play and seek. Updating the driver or the
 runtime clears it.
 
+## Video freezes or goes black for seconds on driver 621.01
+
+Game Ready driver 621.01 (2026-10-21) freezes video playback and shows black
+screens for seconds at a time on some RTX 50 cards. NVIDIA tracks it as bug
+6979343, and on that driver a frozen picture looks exactly like a player bug.
+Hotfix [621.12](https://nvidia.custhelp.com/app/answers/detail/a_id/5938/)
+(2026-10-27) is meant to fix it; users in NVIDIA's feedback thread report that
+it does not fix every machine (unverified). If the freeze persists on 621.12,
+go back to 617.42.
+
+On an RTX 50 with exactly 621.01, the start screen's **Driver** line says so
+and the log carries `NVIDIA driver 621.01 freezes video on some RTX 50 cards`.
+Nothing is refused for it: the freeze is in presentation, not in the model, so
+renders, exports and frame generation run as usual.
+
 ## The render ran on the wrong GPU on a hybrid laptop
 
 A laptop with both an integrated GPU and a discrete NVIDIA one lets the display

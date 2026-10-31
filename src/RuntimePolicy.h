@@ -111,6 +111,23 @@ inline std::wstring FormatNvidiaDriverVersion(NvidiaDriverVersion version)
 inline constexpr NvidiaDriverVersion kNeuralDriverFloor{610, 47};
 inline constexpr NvidiaDriverVersion kNeuralDriverRecommended{616, 64};
 
+// Game Ready 621.01 (2026-10-21) freezes video playback, with black screens
+// for seconds at a time, on some RTX 50 cards: NVIDIA bug 6979343. Hotfix
+// 621.12 (2026-10-27) is meant to fix it; 617.42 is the way back if the freeze
+// persists. On 621.01 a frozen picture looks exactly like a player bug, so the
+// start screen and the log say so (P1.49). The freeze is in presentation, not
+// in the model: this explains, and never refuses a render. Remove it once a
+// later driver supersedes both.
+inline constexpr NvidiaDriverVersion kFreezingDriver{621, 1};
+inline constexpr std::wstring_view kFreezingDriverNote =
+    L"freezes video on some RTX 50 cards (NVIDIA bug 6979343) · install 621.12, or 617.42 if it persists";
+
+inline bool KnownFreezingDriver(GpuGeneration generation, std::wstring_view dxgiVersion)
+{
+    const std::optional<NvidiaDriverVersion> version = ParseNvidiaDriverVersion(dxgiVersion);
+    return generation == GpuGeneration::Rtx50Blackwell && version && *version == kFreezingDriver;
+}
+
 // What the driver's NGX core reports for DLSS-NR, read from the capability
 // parameters `DLSSNR.Available`, `DLSSNR.NeedsUpdatedDriver` and
 // `DLSSNR.MinDriverVersionMajor/Minor` (names from the driver's _nvngx.dll;

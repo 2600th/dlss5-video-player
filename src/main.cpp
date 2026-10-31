@@ -1361,6 +1361,11 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
     if(!CurrentExecutablePath(executable,pathError)) return FailBootstrap(pathError);
 
     options.detectedGpu=DetectHighPerformanceGpu();
+    // Before the runtime checks, so a player without the runtime says it too:
+    // on 621.01 a frozen picture is the first thing a report will describe.
+    if(KnownFreezingDriver(options.detectedGpu.generation,options.detectedGpu.driverVersion))
+        LOG("NVIDIA driver "<<WideToUtf8(FormatNvidiaDriverVersion(kFreezingDriver))<<" "<<WideToUtf8(kFreezingDriverNote)
+            <<". A frozen or black picture on this driver is the driver's; nothing is refused for it.");
     if(std::filesystem::exists(executable.parent_path()/L"dxgi.dll"))
         return FailBootstrap(L"Old runtime layout: extract the new build to a separate folder; dxgi.dll must only be inside neural-runtime.");
     const std::filesystem::path runtimeDirectory=executable.parent_path()/L"neural-runtime";
