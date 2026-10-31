@@ -8,9 +8,11 @@ licenses; the project's MIT license does not relicense them, and this notice
 grants no rights beyond those terms. No permission from those owners to
 redistribute the modified runtime set is claimed. See THIRD_PARTY.md.
 
-This package includes a community-modified NVIDIA neural-rendering DLL
-(ShortFuse's universal 310.8.SF-v2 build). The modification removed its
-embedded Authenticode signature, so the file is unsigned. The ReShade proxy
+This package includes two community-modified NVIDIA neural-rendering DLLs:
+DLSS-NR 310.9.16 with added community kernels (used on RTX 50), and
+ShortFuse's universal 310.8.SF-v2 build (used on RTX 20-40, and on RTX 50 as
+the previous runtime). The modifications removed their embedded Authenticode
+signatures, so both files are unsigned. The ReShade proxy
 and RenoDX add-on are unsigned. These facts are separate from malware
 detection; a matching hash is not a malware scan or proof of legitimacy.
 

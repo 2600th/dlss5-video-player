@@ -29,10 +29,14 @@ states are disclosed separately from malware-scan results. The exact release
 inputs are pinned by size and SHA-256 and the package verifier rejects drift or
 unexpected files.
 
-The neural DLL's embedded NVIDIA signature is invalidated by the community
-modification that extends it to every RTX generation (the universal SF-v2
-build that `packaging/runtime-lock.json` locks). Do not describe it as
-legitimately signed. A hash
+Both neural DLLs' embedded NVIDIA signatures are removed by the community
+modifications that extend them to every RTX generation (310.9.16 with added
+Turing, Ampere and Ada kernels, and the universal 310.8.SF-v2 build, both
+locked in `packaging/runtime-lock.json`). Do not describe either as
+legitimately signed. RenoDX 10.8.0 falls back to an NR DLL beside itself and
+then to `%LOCALAPPDATA%\DLSS5-NR\runtime\nvngx_dlssnr.dll` when the one it is
+told to load fails; the player refuses a render whose preflight names any
+file other than the selected, locked one. A hash
 match proves reproducibility only; scan and isolate untrusted binaries before
 execution.
 

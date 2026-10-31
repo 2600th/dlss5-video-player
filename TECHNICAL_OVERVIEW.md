@@ -106,8 +106,8 @@ every RTX GPU.
 
 ## Runtime notices
 
-The optional neural DLL is a community modification with its NVIDIA signature
-removed; ReShade/RenoDX components are unsigned. Runtime locks verify expected
+The optional neural DLLs are community modifications with their NVIDIA
+signatures removed; ReShade/RenoDX components are unsigned. Runtime locks verify expected
 bytes and signature
 states, not trust or redistribution permission. Keep the full notices supplied
 with a package and review [security](SECURITY.md) and

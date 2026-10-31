@@ -1150,7 +1150,7 @@ so the separately supplied experimental RenoDX/ReShade DLSS 5 add-on can
 intercept real feature creation and evaluation calls. Successful native NGX
 evaluation therefore does not prove that the neural add-on loaded or evaluated.
 
-RenoDX 6.5.3 can create and evaluate feature 18 inline after observing the
+RenoDX 10.8.0 can create and evaluate feature 18 inline after observing the
 player's DLSS/DLAA contract. Bootstrap explicitly enables its hooks and neural
 uplift while holding the neural working resolution at the source's own
 (`NRFollowInputRes=0`, `NRResolutionScale=1`). The player does not also instantiate
@@ -1316,9 +1316,11 @@ build named; the full entries are in `CHANGELOG.md` at tag
   not a percentage (a written `100` came back from the add-on as `1`). A
   leftover `NREnableUpscaling` is left alone, because writing it makes 6.x
   re-run a pre-v4 migration that backs up `ReShade.ini` each time. A section
-  the player creates, or one holding only keys it writes, gets the add-on's
-  own `ConfigVersion=6`; without it 6.5.3 migrates the section as schema v0 on
-  its first load and adopts its own `NRChainedHistory` for that launch. The
+  the player creates, or one holding only keys it writes (0.28's, stamped 6,
+  included), gets the add-on's own `ConfigVersion=10` and `ConfigRevision=1`
+  (0.30.0); without them 10.8.0 migrates the section on its first load, backs
+  it up as `ReShade.ini.v10-backup` and fills in about 200 keys, which would
+  make the first render's settings snapshot differ from every later one's. The
   parenthesised `NR skipped (after-upscale): ... incomplete` line is a startup
   notice on a healthy run; the bare `NR skipped:` form is still a failure.
 - **The normalization governor is pinned to slew** (`NRNormGovernor=1`, W4).
@@ -1331,9 +1333,28 @@ build named; the full entries are in `CHANGELOG.md` at tag
   the NR-processed captures all three render the same bytes. The key rides in
   `NeuralAddonOverridesFor`, so the settings snapshot keys it.
   `docs/measurements/governor-20260924/REPORT.md`.
-- **Streamline stays at 2.13.0.0** (0.25.0). 2.14.1.0 drops `sl.dlss_nr.dll`
-  and buys nothing back: at `EnableHooks=2` Streamline is never patched and no
-  `sl.*` module appears in a render log.
+- **Two NR runtimes, chosen by the GPU** (0.30.0, `NeuralRuntimeChoice.h`).
+  `neural-runtime/nvngx_dlssnr.dll` is DLSS-NR 310.9.16 and
+  `neural-runtime/310.8.SF-v2/nvngx_dlssnr.dll` the 0.28 runtime, in its own
+  folder so the add-on keeps loading a file of that name and the top-level
+  module check never sees two. RenoDX 10.8.0 loads the one `NRRuntimePath`
+  names. RTX 50 gets 310.9.16 unless **Previous runtime** is chosen; every other
+  generation gets 310.8.SF-v2, since no RTX 20-40 card has run 310.9.16 here.
+  `NRPreset` is the network, forwarded as `DLSSNR.Hint.Render.Preset`: on
+  310.9.16, 1 renders byte-identical to 310.8.SF-v2 (network A) and 0, 2 and 3
+  identical to each other (network B), so 0 is the runtime's default - which
+  moved from A to B - and is never sent. A is the default; B is the opt-in rung,
+  about 36 % less model time and a milder picture, nearer the source. The runtime digest covers
+  both DLLs; `NRRuntimePath` and `NRPreset` reach the cache key through the
+  settings snapshot, the preflight key names the selected runtime, and a
+  preflight whose add-on loaded another file is refused, because 10.8.0 falls
+  back beside itself and to `%LOCALAPPDATA%\DLSS5-NR` when the named file fails.
+  `docs/measurements/runtime-310916-20261031`.
+- **Streamline is 2.14.16.0 except `sl.dlss_nr.dll`** (0.30.0). No 2.14
+  release ships that plugin, so it stays 2.13.0.0. At `EnableHooks=2`
+  Streamline is never patched, no `sl.*` module appears in a render log, and
+  renders with 2.14.16 and DLSS SR 310.9.16 are byte-identical to renders
+  without them.
 - **A neural render must cost real GPU time** (0.21.0). A DLAA-only run
   satisfied every other check (`frames=900/900 verified=900`) at 0.46 ms of
   neural GPU time per frame against a healthy 5.7 ms.
