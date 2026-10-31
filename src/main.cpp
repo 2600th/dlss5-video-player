@@ -1308,7 +1308,8 @@ static void LoadFrameGenAddon(bool safeMode) {
                         <<" sha256="<<addon.sha256<<(addon.pinned?" (the pinned 0.3.5 build)":" (not the build the player installs)")
                         <<" layout="<<(addon.settings.directoryLayout?"0.4":"0.3")
                         <<" Optimized="<<(addon.settings.optimized?std::to_string(*addon.settings.optimized):std::string("unset"))
-                        <<" Preset="<<(addon.settings.preset.empty()?std::string("unset"):WideToUtf8(addon.settings.preset)));
+                        <<" Preset="<<(addon.settings.preset.empty()?std::string("unset"):WideToUtf8(addon.settings.preset))
+                        <<" Engine="<<(addon.settings.engine.empty()?std::string("unset"):WideToUtf8(addon.settings.engine)));
     else LOG("dlssg_sm86 add-on found but its "<<WideToUtf8(addon.proxy)<<" did not load: error "<<addon.error);
 }
 

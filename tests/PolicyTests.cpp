@@ -15792,6 +15792,137 @@ void nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test()
     CHECK(!std::filesystem::exists(path));
 }
 
+// P1.46 and 0.4.1: the add-on's ini as each build writes it, read back from
+// disk the way LoadBeside reads it.
+void framegen_addon_reads_each_builds_settings_from_its_ini_test()
+{
+    using framegen_addon::LossyNote;
+    using framegen_addon::ReadSettings;
+    std::error_code error;
+    const auto directory = test_support::FixtureTempRoot() / (L"PolicyTests-framegen-settings-" + std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::remove_all(directory, error);
+    REQUIRE(std::filesystem::create_directories(directory, error));
+    const auto ini = [&](const std::string& text) {
+        std::ofstream(directory / L"dlssg_sm86.ini", std::ios::binary | std::ios::trunc) << text;
+        return ReadSettings(directory);
+    };
+    const auto layout = [&](bool present) {
+        if (present) std::filesystem::create_directory(directory / L"dlssg_sm86", error);
+        else std::filesystem::remove_all(directory / L"dlssg_sm86", error);
+    };
+
+    // No ini at all: nothing is set and nothing is said.
+    auto settings = ReadSettings(directory);
+    CHECK(!settings.directoryLayout);
+    CHECK(!settings.optimized);
+    CHECK(settings.preset.empty());
+    CHECK(settings.engine.empty());
+    CHECK(LossyNote(settings).empty());
+    // The directory decides the layout; a file of that name is not one.
+    { std::ofstream(directory / L"dlssg_sm86") << "not a directory"; }
+    CHECK(!ReadSettings(directory).directoryLayout);
+    std::filesystem::remove(directory / L"dlssg_sm86", error);
+    layout(true);
+    CHECK(ReadSettings(directory).directoryLayout);
+    layout(false);
+
+    // 0.3.5 as it ships: [FrameGeneration] Optimized=1, [Compatibility] Preset=Auto.
+    settings = ini("[General]\r\nEnabled=1\r\n\r\n[FrameGeneration]\r\nOptimized=1\r\nMaxGeneratedFrames=3\r\n\r\n"
+                   "[Compatibility]\r\nPreset=Auto\r\n");
+    CHECK(!settings.directoryLayout);
+    CHECK(settings.optimized == 1);
+    CHECK(settings.preset.empty());   // 0.3.x has no FG Lite and never read [DLSSG]
+    CHECK(LossyNote(settings).empty());
+    // The older place still counts for the build that reads it.
+    settings = ini("[FrameGeneration]\r\nOptimized=2\r\n");
+    CHECK(settings.optimized == 2);
+    CHECK(LossyNote(settings) == L"Optimized=2 uses lossy kernels (1 matches NVIDIA's output)");
+    // A C under [Compatibility] is not 0.3.x's to obey.
+    CHECK(ini("[Compatibility]\r\nPreset=C\r\n").preset.empty());
+
+    // 0.4.0 as it ships: the directory, [DLSSG] Optimized=2, Preset=Auto, an XeSSFG section.
+    layout(true);
+    const std::string factory040 =
+        "[General]\r\nEnabled=1\r\n\r\n[FrameGeneration]\r\nEngine=DLSS\r\nMaxGeneratedFrames=3\r\n\r\n"
+        "[DLSSG]\r\nOptimized=2\r\nPreset=Auto\r\n\r\n[XeSSFG]\r\nModel=15\r\nFlowResolution=Middle\r\nUseHudless=1\r\n";
+    settings = ini(factory040);
+    CHECK(settings.directoryLayout);
+    CHECK(settings.optimized == 2);
+    CHECK(settings.preset == L"Auto");
+    CHECK(settings.engine == L"DLSS");
+    CHECK(LossyNote(settings) == L"Optimized=2 uses lossy kernels (1 matches NVIDIA's output)");
+    // 0.4.1 as it ships: Optimized=1, Preset=A, and [XeSSFG] without Model.
+    const std::string factory041 =
+        "[General]\r\nEnabled=1\r\n\r\n[FrameGeneration]\r\nEngine=DLSS\r\nMaxGeneratedFrames=3\r\n\r\n"
+        "[DLSSG]\r\nOptimized=1\r\nPreset=A\r\n\r\n[XeSSFG]\r\nFlowResolution=Middle\r\nUseHudless=Auto\r\n";
+    settings = ini(factory041);
+    CHECK(settings.optimized == 1);
+    CHECK(settings.preset == L"A");
+    CHECK(LossyNote(settings).empty());
+    // The dropped Model key changes nothing the player reads.
+    std::string withModel = factory041;
+    withModel.insert(withModel.find("FlowResolution"), "Model=15\r\n");
+    const auto again = ini(withModel);
+    CHECK(again.optimized == settings.optimized);
+    CHECK(again.preset == settings.preset);
+    CHECK(again.engine == settings.engine);
+
+    // Optimized: under [DLSSG], under the older [FrameGeneration], absent,
+    // padded, and at 0, 1 and 2. [DLSSG] wins over the older place.
+    for (const int level : {0, 1, 2}) {
+        settings = ini("[DLSSG]\r\nOptimized=" + std::to_string(level) + "\r\n");
+        CHECK(settings.optimized == level);
+        CHECK(LossyNote(settings).empty() == (level < 2));
+    }
+    CHECK(ini("[FrameGeneration]\r\nOptimized=2\r\n").optimized == 2);   // 0.4.0 still reads it there
+    CHECK(ini("[DLSSG]\r\nOptimized=1\r\n[FrameGeneration]\r\nOptimized=2\r\n").optimized == 1);
+    CHECK(!ini("[DLSSG]\r\nPreset=A\r\n").optimized);
+    CHECK(ini("[DLSSG]\r\n  Optimized  =   2   ; lossy\r\n").optimized == 2);
+    CHECK(ini("[DLSSG]\r\nOptimized=\t1 # comment\r\n").optimized == 1);
+    CHECK(!ini("[DLSSG]\r\nOptimized=two\r\n").optimized);
+    CHECK(!ini("[DLSSG]\r\nOptimized=12\r\n").optimized);
+
+    // Preset=C is FG Lite, in either case; the old [Compatibility] place is
+    // still 0.4.0's, and [DLSSG] wins over it.
+    settings = ini("[DLSSG]\r\nPreset=C\r\n");
+    CHECK(settings.preset == L"C");
+    CHECK(LossyNote(settings) == L"Preset C (FG Lite) trades quality for speed");
+    CHECK(LossyNote(ini("[DLSSG]\r\nPreset=c\r\n")) == L"Preset C (FG Lite) trades quality for speed");
+    CHECK(ini("[Compatibility]\r\nPreset=C\r\n").preset == L"C");
+    CHECK(ini("[DLSSG]\r\nPreset=A\r\n[Compatibility]\r\nPreset=C\r\n").preset == L"A");
+    CHECK(LossyNote(ini("[DLSSG]\r\nOptimized=3\r\nPreset=C\r\n")) ==
+          L"Optimized=3 uses lossy kernels (1 matches NVIDIA's output) · Preset C (FG Lite) trades quality for speed");
+
+    // Engine=XeSS is Intel's model: every [DLSSG] key is ignored, and the note
+    // says the frames are not NVIDIA's at all.
+    settings = ini("[FrameGeneration]\r\nEngine=XeSS\r\n\r\n[DLSSG]\r\nOptimized=2\r\nPreset=C\r\n");
+    CHECK(settings.engine == L"XeSS");
+    CHECK(!settings.optimized);
+    CHECK(settings.preset.empty());
+    CHECK(LossyNote(settings) == L"Engine=XeSS generates frames with Intel's XeSS-FG model, not NVIDIA's");
+    CHECK(!LossyNote(ini("[FrameGeneration]\r\nEngine=xess\r\n")).empty());
+    // The 0.3 layout has no engine to choose.
+    layout(false);
+    settings = ini("[FrameGeneration]\r\nEngine=XeSS\r\nOptimized=1\r\n");
+    CHECK(settings.engine.empty());
+    CHECK(settings.optimized == 1);
+
+    // What the start screen shows for it.
+    layout(true);
+    start_screen::Facts facts{};
+    facts.gpu = L"NVIDIA GeForce RTX 3080";
+    facts.generation = GpuGeneration::Rtx30Ampere;
+    facts.frameGenAddon = L"version.dll";
+    facts.frameGenAddonPinned = false;
+    facts.frameGenAddonLossy = LossyNote(ini(factory040));
+    const auto lines = start_screen::CapabilityLines(facts);
+    const auto addon = std::find_if(lines.begin(), lines.end(), [](const start_screen::Line& line) { return line.label == L"Frame Generation"; });
+    REQUIRE(addon != lines.end());
+    CHECK(addon->value.ends_with(L" · Optimized=2 uses lossy kernels (1 matches NVIDIA's output)"));
+    CHECK(addon->mark == start_screen::Mark::Info);
+    std::filesystem::remove_all(directory, error);
+}
+
 // P1.45: the guard holds a system-required power request for exactly its
 // scope, and two guards are two requests. SystemExecutionState is what the
 // power manager enforces across the machine, read unelevated (`powercfg
@@ -15870,6 +16001,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(framegen_addon_loads_its_proxy_as_a_second_module_beside_system32_test),
     TEST_CASE(framegen_addon_download_is_offered_only_on_rtx20_and_rtx30_without_it_test),
     TEST_CASE(framegen_addon_install_verifies_every_pin_before_writing_test),
+    TEST_CASE(framegen_addon_reads_each_builds_settings_from_its_ini_test),
     TEST_CASE(keep_awake_holds_a_system_request_for_its_scope_and_guards_are_independent_test),
     TEST_CASE(start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
