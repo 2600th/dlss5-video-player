@@ -68,7 +68,7 @@ private:
             {L"menu.youtube_quality", L"YouTube source quality"}, {L"menu.youtube_quality_auto", L"Auto (up to 1440p, highest bitrate)"},
             {L"menu.youtube_quality_2160", L"2160p"}, {L"menu.youtube_quality_1440", L"1440p"}, {L"menu.youtube_quality_1080", L"1080p"},
             {L"menu.adjustments", L"Viewing adjustments…"}, {L"menu.adjustments_overlay", L"(Overlay: Ctrl+Alt+C)"}, {L"menu.view", L"View"}, {L"menu.debug_view", L"Debug view"},
-            {L"menu.compare", L"Compare"}, {L"menu.compare_neural", L"DLSS 5"}, {L"menu.compare_original", L"Original"}, {L"menu.compare_split", L"Split"}, {L"menu.compare_wipe", L"Wipe"}, {L"menu.compare_difference", L"Difference"}, {L"menu.compare_side_by_side", L"Side by side"}, {L"menu.compare_quad", L"2 \u00d7 2"},
+            {L"menu.compare", L"Compare"}, {L"menu.picture_upscaler", L"Upscaler"}, {L"menu.compare_neural", L"DLSS 5"}, {L"menu.compare_original", L"Original"}, {L"menu.compare_split", L"Split"}, {L"menu.compare_wipe", L"Wipe"}, {L"menu.compare_difference", L"Difference"}, {L"menu.compare_side_by_side", L"Side by side"}, {L"menu.compare_quad", L"2 \u00d7 2"},
             {L"menu.compare_second_mix", L"2 \u00d7 2 fourth pane Mix"}, {L"menu.compare_second_mix_0", L"25%"}, {L"menu.compare_second_mix_1", L"50%"},
             {L"menu.compare_second_mix_2", L"75%"}, {L"menu.compare_second_mix_3", L"150%"}, {L"menu.compare_second_mix_4", L"200%"},
             {L"menu.compare_difference_less", L"Less difference gain"}, {L"menu.compare_difference_more", L"More difference gain"}, {L"menu.compare_difference_luma", L"Difference as brightness only"},

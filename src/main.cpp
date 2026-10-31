@@ -7066,6 +7066,9 @@ private:
 
     void ShowExportStages(){
         if(m_exportStagesWnd&&IsWindow(m_exportStagesWnd)){ShowWindow(m_exportStagesWnd,SW_SHOWNORMAL);SetForegroundWindow(m_exportStagesWnd);return;}
+        // A fresh dialog opens on what is being watched (ExportPipeline.h); one
+        // already open keeps what the viewer has ticked in it.
+        m_exportSelection=ExportSelectionForWatching(m_exportSelection,WatchedNow());
         static constexpr const wchar_t* kClassName=L"DLSSVideoExportStagesClassV1";
         WNDCLASSW n{};n.lpfnWndProc=ExportStagesWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=DarkDialogBrush();
         if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
@@ -7076,6 +7079,15 @@ private:
         m_exportStagesWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"export.stages.title").c_str(),
             style,int(pr.left)+std::max(0,(pw-w)/2),int(pr.top)+std::max(0,(ph-h)/2),w,h,
             m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
+    }
+
+    WatchedPicture WatchedNow()const{
+        WatchedPicture watched{};
+        watched.neuralOnScreen=m_neuralRequested||(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural);
+        watched.upscaler=upscaler_choice::Shown(UpscalingActive(),m_playbackVsr);
+        watched.sourceHeight=m_loaded?uint32_t(m_decoder.Height()):0u;
+        watched.outputHeight=EffectiveUpscaleHeight();
+        return watched;
     }
 
     void BuildExportStageControls(HWND h){
@@ -7293,6 +7305,10 @@ private:
             if(m==WM_MOUSELEAVE){a->RenderMouseLeft();return 0;}
             if(m==WM_CAPTURECHANGED){a->RenderCaptureLost();return 0;}
             if(m==WM_LBUTTONDBLCLK){a->ToggleFullscreen();return 0;}
+            // Right-click on the picture: what you can do to it (AppMenu.cpp
+            // ToolbarMenu::Picture). WM_CONTEXTMENU rather than the button, so the
+            // menu opens on release as every Windows context menu does.
+            if(m==WM_CONTEXTMENU){a->ShowPictureMenu(POINT{GET_X_LPARAM(l),GET_Y_LPARAM(l)});return 0;}
             // The picture never keeps the keyboard. Keys that reached it anyway went to the
             // main window as WM_KEYDOWN, but the WM_CHAR TranslateMessage makes from them
             // stayed here, so ? (a character, not a key) did nothing while F1 worked.
@@ -11944,6 +11960,19 @@ private:
         DestroyMenu(menu);if(command)HandleCommand(command);
     }
 
+    // The picture's context menu at `screen`, or - from the keyboard (Shift+F10,
+    // the menu key), where Windows sends -1,-1 - at the picture's centre.
+    void ShowPictureMenu(POINT screen){
+        if(screen.x==-1&&screen.y==-1){
+            RECT picture{};const HWND over=m_renderWnd&&IsWindowVisible(m_renderWnd)?m_renderWnd:m_hwnd;
+            GetClientRect(over,&picture);screen=POINT{(picture.left+picture.right)/2,(picture.top+picture.bottom)/2};ClientToScreen(over,&screen);
+        }
+        SyncFeatureMenuState();
+        HMENU menu=app_menu::CreateToolbarMenu(app_menu::ToolbarMenu::Picture,GetMenu(m_hwnd),m_loc,m_keys);if(!menu)return;
+        const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RIGHTBUTTON,screen.x,screen.y,0,m_hwnd,nullptr);
+        DestroyMenu(menu);if(command)HandleCommand(command);
+    }
+
     void ActivateToolbarAction(ToolbarAction action,const RECT& anchor){
         if(!ToolbarActionEnabled(action))return;
         switch(action){
@@ -12229,6 +12258,9 @@ private:
         case WM_NOTIFY:if(const auto* header=reinterpret_cast<const NMHDR*>(l);header&&header->code==TTN_GETDISPINFOW)return TipNotify(*header);break;
         case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);SetCompareHover({});if(!m_dragSeek)ClearTimelineHover();SyncSliderHover();return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
+        // Shift+F10 and the menu key open the picture's menu from the keyboard,
+        // as a right-click on the picture does; a right-click on the chrome does not.
+        case WM_CONTEXTMENU:if(GET_X_LPARAM(l)==-1&&GET_Y_LPARAM(l)==-1&&m_loaded){ShowPictureMenu(POINT{-1,-1});return 0;}break;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();UpdateTimelineHover(m_mouseX,m_mouseY);}if(m_dragVolume)m_dragVolume=false;m_dragMix=false;SyncSliderHover();if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
         case WM_SETFOCUS:InvalidateControls();return 0;

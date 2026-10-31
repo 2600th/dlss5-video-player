@@ -1596,6 +1596,105 @@ void toolbar_menus_mirror_the_menu_bar_rows_test()
     }
 }
 
+// The right-click menu on the picture: menu bar commands only, the compare
+// modes with the bar's radio mark, the two toolbar drop-downs as submenus, and
+// every row that has a key showing it, so the menu teaches the keys.
+void picture_context_menu_is_rows_of_the_menu_bar_test()
+{
+    using namespace app_menu;
+    const Localizer localizer;
+    const key_bindings::Table& keys = key_bindings::Defaults();
+    HMENU bar = CreateMenuBar(localizer, true);
+    CHECK(bar != nullptr);
+    if (!bar) return;
+    CHECK(CheckRadioCommand(bar, IDM_COMPARE_NEURAL, kLastComparisonModeCommand, IDM_COMPARE_SPLIT));
+    HMENU menu = CreateToolbarMenu(ToolbarMenu::Picture, bar, localizer, keys);
+    CHECK(menu != nullptr);
+    if (!menu) { DestroyMenu(bar); return; }
+    std::vector<UINT> commands;
+    HMENU modes = nullptr, looks = nullptr, upscalers = nullptr;
+    for (int index = 0; index < GetMenuItemCount(menu); ++index) {
+        wchar_t text[256]{};
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_ID | MIIM_SUBMENU | MIIM_STRING | MIIM_FTYPE;
+        item.dwTypeData = text;
+        item.cch = static_cast<UINT>(std::size(text));
+        CHECK(GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item) != FALSE);
+        if (item.fType & MFT_SEPARATOR) continue;
+        const std::wstring label = text;
+        if (item.hSubMenu) {
+            if (label == localizer.Get(L"menu.compare")) modes = item.hSubMenu;
+            if (label == localizer.Get(L"menu.neural_presets")) looks = item.hSubMenu;
+            if (label == localizer.Get(L"menu.picture_upscaler")) upscalers = item.hSubMenu;
+            continue;
+        }
+        commands.push_back(item.wID);
+        // The bar's row, key column and all.
+        wchar_t barText[256]{};
+        CHECK(GetMenuStringW(bar, item.wID, barText, static_cast<int>(std::size(barText)), MF_BYCOMMAND) > 0);
+        CHECK_EQ(std::wstring(barText), label);
+        const std::wstring bound = keys.KeysFor(item.wID);
+        if (!bound.empty()) CHECK(label.find(L"\t" + bound) != std::wstring::npos);
+    }
+    for (const UINT command : {IDM_PLAY, IDM_NEURAL_RENDERING, IDM_NEURAL_SETTINGS, IDM_VIDEO_ADJUSTMENTS,
+                               IDM_RERENDER_HERE, IDM_SAVE_COMPARISON_IMAGE, IDM_ASPECT_FIT, IDM_FULLSCREEN})
+        CHECK(std::find(commands.begin(), commands.end(), command) != commands.end());
+    CHECK(modes != nullptr);
+    CHECK(looks != nullptr);
+    CHECK(upscalers != nullptr);
+    if (modes) {
+        CHECK_EQ(8, GetMenuItemCount(modes));
+        CHECK_EQ(IDM_COMPARE_NEURAL, GetMenuItemID(modes, 0));
+        CHECK((GetMenuState(modes, IDM_COMPARE_SPLIT, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        CHECK((GetMenuState(modes, IDM_COMPARE_NEURAL, MF_BYCOMMAND) & MF_CHECKED) == 0);
+    }
+    if (looks) CHECK_EQ(IDM_NEURAL_PRESET_FIRST, GetMenuItemID(looks, 1));
+    if (upscalers) CHECK_EQ(IDM_RTX_VSR_UPSCALING, GetMenuItemID(upscalers, 0));
+    DestroyMenu(menu);
+    DestroyMenu(bar);
+}
+
+// The export dialog opens on the picture being watched (UI proposal X7).
+void export_dialog_opens_on_the_picture_being_watched_test()
+{
+    using upscaler_choice::Upscaler;
+    ExportSelection previous;
+    previous.frameGeneration = true;
+    previous.multiplier = 3;
+    previous.engine = SuperResolutionEngine::Dlss;
+    // DLSS 5 over RTX VSR, a 1080p source on a 4K display: both, to 2160p, on RTX VSR.
+    ExportSelection chosen = ExportSelectionForWatching(previous, WatchedPicture{true, Upscaler::RtxVsr, 1080, 2160});
+    CHECK(chosen.neural);
+    CHECK(chosen.upscale);
+    CHECK_EQ(2160u, chosen.targetHeight);
+    CHECK(chosen.engine == SuperResolutionEngine::RtxVsr);
+    // Frame generation was nothing on screen asked for; the multiplier is kept for when it is.
+    CHECK(!chosen.frameGeneration);
+    CHECK_EQ(3u, chosen.multiplier);
+    // DLSS Super Resolution playing: its engine.
+    chosen = ExportSelectionForWatching(previous, WatchedPicture{false, Upscaler::SuperResolution, 720, 1440});
+    CHECK(!chosen.neural);
+    CHECK(chosen.upscale);
+    CHECK_EQ(1440u, chosen.targetHeight);
+    CHECK(chosen.engine == SuperResolutionEngine::Dlss);
+    // An output between rungs plays at the rung below it.
+    chosen = ExportSelectionForWatching(previous, WatchedPicture{false, Upscaler::RtxVsr, 720, 1600});
+    CHECK_EQ(1440u, chosen.targetHeight);
+    // Nothing would grow: no upscale, and the saved engine is left alone.
+    for (const WatchedPicture watched : {WatchedPicture{true, Upscaler::None, 720, 2160},
+                                         WatchedPicture{true, Upscaler::RtxVsr, 2160, 2160},
+                                         WatchedPicture{true, Upscaler::RtxVsr, 720, 0},
+                                         WatchedPicture{true, Upscaler::RtxVsr, 0, 2160}}) {
+        chosen = ExportSelectionForWatching(previous, watched);
+        CHECK(!chosen.upscale);
+        CHECK(chosen.engine == SuperResolutionEngine::Dlss);
+        CHECK(chosen.neural);
+    }
+    // And what it picks is an export the planner takes.
+    chosen = ExportSelectionForWatching(ExportSelection{}, WatchedPicture{true, Upscaler::RtxVsr, 1080, 2160});
+    CHECK(PlanExport(chosen, 1920, 1080, 30.0, 2, false).valid);
+}
+
 void key_binding_template_reads_back_as_the_defaults_test()
 {
     const std::string text = key_bindings::TemplateText();
@@ -16328,6 +16427,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(key_binding_file_rebinds_unbinds_and_reports_bad_lines_test),
     TEST_CASE(key_binding_template_reads_back_as_the_defaults_test),
     TEST_CASE(toolbar_menus_mirror_the_menu_bar_rows_test),
+    TEST_CASE(picture_context_menu_is_rows_of_the_menu_bar_test),
+    TEST_CASE(export_dialog_opens_on_the_picture_being_watched_test),
     TEST_CASE(upscaler_radios_reach_every_state_from_every_other_test),
     TEST_CASE(label_column_grows_for_longer_labels_and_stops_test),
     TEST_CASE(keyboard_cheat_sheet_flows_whole_groups_into_columns_test),

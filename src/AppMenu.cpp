@@ -78,7 +78,39 @@ HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& local
         if (const std::wstring bound = keys.KeysFor(command); !bound.empty()) label += L"\t" + bound;
         AppendMenuW(menu, MF_STRING, command, label.c_str());
     };
+    const auto submenu = [&](ToolbarMenu child, const wchar_t* key) {
+        if (HMENU nested = CreateToolbarMenu(child, menuBar, localizer, keys))
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(nested), localizer.Get(key).c_str());
+    };
     switch (which) {
+    case ToolbarMenu::Picture: {
+        mirror(IDM_PLAY, L"menu.playpause");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        mirror(IDM_NEURAL_RENDERING, L"menu.neural_rendering");
+        HMENU modes = CreatePopupMenu();
+        if (modes) {
+            // The Compare menu's mode radios, in its order, checks copied.
+            const HMENU saved = menu;
+            menu = modes;
+            for (const UINT command : {IDM_COMPARE_NEURAL, IDM_COMPARE_ORIGINAL, IDM_COMPARE_VSR, IDM_COMPARE_SPLIT,
+                                       IDM_COMPARE_WIPE, IDM_COMPARE_DIFFERENCE, IDM_COMPARE_SIDE_BY_SIDE, IDM_COMPARE_QUAD})
+                mirror(command, nullptr);
+            menu = saved;
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(modes), localizer.Get(L"menu.compare").c_str());
+        }
+        submenu(ToolbarMenu::Neural, L"menu.neural_presets");
+        submenu(ToolbarMenu::Upscaler, L"menu.picture_upscaler");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        mirror(IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+        mirror(IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments");
+        mirror(IDM_RERENDER_HERE, L"menu.rerender_here");
+        mirror(IDM_SAVE_COMPARISON_IMAGE, L"menu.save_comparison");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        mirror(IDM_ASPECT_FIT, L"menu.aspectfit");
+        mirror(IDM_ASPECT_FILL, L"menu.aspectfill");
+        mirror(IDM_FULLSCREEN, L"menu.fullscreen");
+        break;
+    }
     case ToolbarMenu::Neural:
         heading(L"menu.neural_presets");
         for (UINT index = 0; index < neural_presets::kPresetCount; ++index) mirror(IDM_NEURAL_PRESET_FIRST + index, nullptr);

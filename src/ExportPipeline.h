@@ -98,6 +98,44 @@ struct ExportPlan {
 // has no successor frame to interpolate toward.
 // `vsrReady` is whether RTX VSR can run here at all, as far as can be known
 // without a device: the build has it, its DLL is beside the player, the GPU is RTX.
+// What the export dialog opens with: the picture being watched (UI proposal
+// X7). The dialog used to open on whatever was ticked last, so a viewer
+// watching DLSS 5 over RTX VSR could export the original at source size
+// without noticing.
+struct WatchedPicture {
+    // The DLSS 5 render is what is on screen (or the toggle has it requested).
+    bool neuralOnScreen{};
+    // The upscaler playing: the Upscaler pill's choice.
+    upscaler_choice::Upscaler upscaler{upscaler_choice::Upscaler::None};
+    uint32_t sourceHeight{};
+    // The rung playback upscales to (the DLSS SR output size, Auto resolved
+    // against the display); 0 when the display is below every rung.
+    uint32_t outputHeight{};
+};
+
+// `previous` keeps what the picture does not decide: the multiplier, and the
+// engine when nothing upscales. Frame generation starts off: it is a second,
+// minutes-long pass and nothing on screen asked for it. An upscale is ticked
+// only where the upscaler would grow the source, to the rung it plays at
+// (the largest rung at or below `outputHeight`), on the engine playing.
+inline ExportSelection ExportSelectionForWatching(ExportSelection previous, const WatchedPicture& watched)
+{
+    ExportSelection selection = previous;
+    selection.neural = watched.neuralOnScreen;
+    selection.frameGeneration = false;
+    selection.upscale = false;
+    if (watched.upscaler == upscaler_choice::Upscaler::None || !watched.sourceHeight) return selection;
+    uint32_t rung = 0;
+    for (const uint32_t candidate : kUpscaleRungHeights)
+        if (candidate <= watched.outputHeight) rung = candidate;
+    if (!rung || watched.sourceHeight >= rung) return selection;
+    selection.upscale = true;
+    selection.targetHeight = rung;
+    selection.engine = watched.upscaler == upscaler_choice::Upscaler::SuperResolution ? SuperResolutionEngine::Dlss
+                                                                                     : SuperResolutionEngine::RtxVsr;
+    return selection;
+}
+
 inline ExportPlan PlanExport(const ExportSelection& selection, uint32_t sourceWidth,
                              uint32_t sourceHeight, double sourceFps, uint32_t maxMultiplier,
                              bool stillImage, bool vsrReady = true)

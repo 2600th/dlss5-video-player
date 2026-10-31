@@ -4399,10 +4399,35 @@ struct PlayerAppTestAccess {
     // neural settings dialog, and was invisible until a test pressed it.
     static void CheckExportStagesDialog(PlayerApp& app)
     {
+        // A fresh dialog opens on what is being watched (UI proposal X7): with
+        // DLSS 5 requested the neural stage is ticked, and frame generation,
+        // which nothing on screen asked for, is not.
+        const bool requested = app.m_neuralRequested;
         app.m_exportSelection = {};
+        app.m_exportSelection.frameGeneration = true;
+        app.m_neuralRequested = true;
         app.ShowExportStages();
         CHECK(app.m_exportStagesWnd != nullptr);
+        if (!app.m_exportStagesWnd) { app.m_neuralRequested = requested; return; }
+        CHECK(app.m_exportSelection.neural);
+        CHECK(!app.m_exportSelection.frameGeneration);
+        CHECK_EQ(LRESULT{BST_CHECKED}, SendMessageW(GetDlgItem(app.m_exportStagesWnd, IDC_EX_NEURAL), BM_GETCHECK, 0, 0));
+        // An open dialog keeps what the viewer ticks: opening it again changes nothing.
+        // DLSS 5 neither requested nor on screen: the neural stage is not ticked.
+        DestroyWindow(app.m_exportStagesWnd);
+        const bool cached = app.m_cachedPlayback;
+        app.m_neuralRequested = false;
+        app.m_cachedPlayback = false;
+        app.ShowExportStages();
+        app.m_neuralRequested = requested;
+        app.m_cachedPlayback = cached;
+        CHECK(app.m_exportStagesWnd != nullptr);
         if (!app.m_exportStagesWnd) return;
+        CHECK(!app.m_exportSelection.neural);
+        app.m_exportSelection = {};
+        app.SyncExportStageControls(app.m_exportStagesWnd);
+        app.ShowExportStages();
+        CHECK(!app.m_exportSelection.neural);
         const HWND dialog = app.m_exportStagesWnd;
         const auto click = [&](int id) {
             HWND box = GetDlgItem(dialog, id);

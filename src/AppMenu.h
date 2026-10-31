@@ -245,7 +245,13 @@ HMENU CreateDebugViewMenu(UINT selectedCommand);
 // Every row is a menu bar command with the bar's text, key column, check and
 // grey copied from `menuBar`, so the two places cannot disagree; a command the
 // bar lacks is labelled from `localizer` and `keys`. The caller destroys it.
-enum class ToolbarMenu { Neural, Upscaler };
+//
+// Picture is the right-click menu on the picture (UI proposal X5): play, the
+// DLSS 5 toggle, the compare modes, the look and the upscaler as submenus
+// (the two drop-downs above), Picture and Viewing adjustments, Re-render from
+// here, Save comparison image, and the view. Every row is still a menu bar
+// command, so the key column teaches the key.
+enum class ToolbarMenu { Neural, Upscaler, Picture };
 HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& localizer, const key_bindings::Table& keys);
 bool RoutesToRehook(PlayerCommandRoute route, UINT value);
 // Shows, relabels or removes the right-justified update item in the menu bar.
