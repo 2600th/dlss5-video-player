@@ -274,6 +274,11 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
     return json;
 }
 
+std::string PreflightNeuralRuntimeFile(std::string_view preflightJson)
+{
+    return std::string(ScanString(TrimmedPreflight(preflightJson), "runtime", "dlssnrFile"));
+}
+
 std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs)
 {
     const std::string_view preflight = inputs.preflightJson;
@@ -288,6 +293,10 @@ std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs
     line += OrDash(ScanString(preflight, "runtime", "renodx"));
     line += " nr=";
     line += OrDash(ScanString(preflight, "runtime", "dlssnr"));
+    line += " nr-file=";
+    line += OrDash(ScanString(preflight, "runtime", "dlssnrFile"));
+    line += " nr-signature=";
+    line += OrDash(ScanString(preflight, "runtime", "dlssnrSignature"));
     line += " feature18=";
     line += armed.empty() ? "unknown" : (armed == "true" ? "armed" : "not-armed");
     // The feature's own NGX result, not the carrier's: a receipt that showed

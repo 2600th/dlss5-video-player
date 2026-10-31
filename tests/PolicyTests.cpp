@@ -57,6 +57,8 @@
 #include "CachedRenderVerdict.h"
 #include "Nv12Convert.h"
 #include "NeuralPresets.h"
+#include "NeuralPreflight.h"
+#include "NeuralReceipt.h"
 #include "RuntimeLock.h"
 #include "HexText.h"
 #include "AtomicFile.h"
@@ -13128,6 +13130,50 @@ void neural_runtime_choice_follows_the_gpu_and_never_sends_the_default_preset_te
     CHECK(NeuralSettings{}.network == Network::A && !NeuralSettings{}.previousRuntime);
 }
 
+// The NR DLL a preflight names is checked against the one selected; the
+// add-on's log gives an absolute path, which only counts inside the runtime.
+void neural_runtime_file_is_named_from_the_addon_log_test()
+{
+    const std::filesystem::path root = L"D:\\Player\\neural-runtime";
+    CHECK_EQ(std::string("nvngx_dlssnr.dll"),
+             NeuralRuntimeFileRelativeTo("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", root));
+    CHECK_EQ(std::string("310.8.SF-v2/nvngx_dlssnr.dll"),
+             NeuralRuntimeFileRelativeTo("d:/player/NEURAL-RUNTIME/310.8.SF-v2\\nvngx_dlssnr.dll", root));
+    // The add-on's own fallback, and a neighbour that only shares a prefix.
+    CHECK(NeuralRuntimeFileRelativeTo("C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll", root).empty());
+    CHECK(NeuralRuntimeFileRelativeTo("D:\\Player\\neural-runtime2\\nvngx_dlssnr.dll", root).empty());
+    CHECK(NeuralRuntimeFileRelativeTo("", root).empty());
+    CHECK(SameNeuralRuntimeFile("310.8.sf-v2\\NVNGX_DLSSNR.dll", neural_runtime::kPrevious.file));
+    CHECK(SameNeuralRuntimeFile("nvngx_dlssnr.dll", neural_runtime::kCurrent.file));
+    CHECK(!SameNeuralRuntimeFile("nvngx_dlssnr.dll", neural_runtime::kPrevious.file));
+    CHECK(!SameNeuralRuntimeFile("", neural_runtime::kCurrent.file));
+
+    // RenoDX 10.8.0's lines; its start line names 310.8.0 whichever DLL ran.
+    constexpr std::string_view log =
+        "INFO  | [DLSS 5 Neural Rendering] DLSS5 Generic: NR runtime D:\\Program Files\\Player\\neural-runtime\\"
+        "310.8.SF-v2\\nvngx_dlssnr.dll (looked in D:\\Program Files\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll; "
+        "C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll); models=1\r\n"
+        "INFO  | [DLSS 5 Neural Rendering] DLSS5 Generic: NR runtime declares file version 310.8.2.0, GPU architecture "
+        "NVSDK_NGX_GPU_Arch_Blackwell2, minimum driver 615.00\r\n"
+        "INFO  | [DLSS 5 Neural Rendering] DLSS5 Generic: signed DLSSNR 310.8.0 D3D12 runtime initialized\r\n";
+    const NeuralRuntimeBanner banner = ParseNeuralRuntimeBanner(log);
+    CHECK_EQ(std::string("310.8.2.0"), banner.dlssnrRuntime);
+    CHECK_EQ(std::string("D:\\Program Files\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll"), banner.dlssnrFile);
+    CHECK_EQ(std::string("310.8.SF-v2/nvngx_dlssnr.dll"),
+             NeuralRuntimeFileRelativeTo(banner.dlssnrFile, L"D:\\Program Files\\Player\\neural-runtime"));
+    // 6.5.3 wrote only the start line.
+    CHECK_EQ(std::string("310.8.0"),
+             ParseNeuralRuntimeBanner("DLSS5 Generic: signed DLSSNR 310.8.0 D3D12 runtime initialized\r\n").dlssnrRuntime);
+    CHECK(ParseNeuralRuntimeBanner("DLSS5 Generic: signed DLSSNR 310.8.0 D3D12 runtime initialized\r\n").dlssnrFile.empty());
+
+    // The receipt's reader of it.
+    CHECK_EQ(std::string("310.8.SF-v2/nvngx_dlssnr.dll"),
+             PreflightNeuralRuntimeFile("{\"schema\":3,\"runtime\":{\"dlssnr\":\"310.8.2.0\","
+                                        "\"dlssnrFile\":\"310.8.SF-v2/nvngx_dlssnr.dll\",\"dlssnrSignature\":\"NotSigned\"}}"));
+    CHECK(PreflightNeuralRuntimeFile("{\"schema\":3,\"runtime\":{\"dlssnr\":\"310.8.0\"}}").empty());
+    CHECK(PreflightNeuralRuntimeFile("").empty());
+}
+
 // The comparison reference conversion runs on every presented frame once the
 // viewer picks Blend, Split or Wipe, which a scalar double pass over 3.69 Mpx
 // cannot do inside a 16.68 ms budget. Speeding it up is only allowed if the
@@ -16245,6 +16291,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(nv12_reference_conversion_is_bit_identical_to_the_scalar_original_test),
     TEST_CASE(neural_presets_round_trip_and_default_to_the_shipped_settings_test),
     TEST_CASE(neural_runtime_choice_follows_the_gpu_and_never_sends_the_default_preset_test),
+    TEST_CASE(neural_runtime_file_is_named_from_the_addon_log_test),
     TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
     TEST_CASE(variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test),
     TEST_CASE(variable_frame_rate_is_decided_on_b_frame_decode_order_test),
