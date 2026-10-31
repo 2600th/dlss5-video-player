@@ -58,11 +58,11 @@ inline HRESULT LoadGray(const std::filesystem::path& path, compare_mask::Gray& o
     return S_OK;
 }
 
-// Writes 24-bit BGR rows (`stride` bytes apart) as a PNG. Encoded in memory and
-// published through atomic_file::Replace, so a failed save never leaves half a PNG -
-// or anything else - under the name the user chose.
-inline HRESULT SavePngBgr(const std::filesystem::path& path, const uint8_t* bgr, UINT width, UINT height, UINT stride)
+// 24-bit BGR rows (`stride` bytes apart) as the bytes of a PNG file, in memory: what
+// SavePngBgr publishes, and what a copy puts on the clipboard (P2.41).
+inline HRESULT EncodePngBgr(const uint8_t* bgr, UINT width, UINT height, UINT stride, std::string& png)
 {
+    png.clear();
     if (!bgr || !width || !height || width > kMaxDimension || height > kMaxDimension || stride < width * 3u) return E_INVALIDARG;
     Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
     HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
@@ -96,8 +96,20 @@ inline HRESULT SavePngBgr(const std::filesystem::path& path, const uint8_t* bgr,
     if (FAILED(hr = memory->Stat(&stat, STATFLAG_NONAME))) return hr;
     const void* bytes = GlobalLock(global);
     if (!bytes) return HRESULT_FROM_WIN32(GetLastError());
-    const auto outcome = atomic_file::Replace(path, std::string_view(static_cast<const char*>(bytes), size_t(stat.cbSize.QuadPart)));
+    png.assign(static_cast<const char*>(bytes), size_t(stat.cbSize.QuadPart));
     GlobalUnlock(global);
+    return S_OK;
+}
+
+// Writes 24-bit BGR rows (`stride` bytes apart) as a PNG. Encoded in memory and
+// published through atomic_file::Replace, so a failed save never leaves half a PNG -
+// or anything else - under the name the user chose.
+inline HRESULT SavePngBgr(const std::filesystem::path& path, const uint8_t* bgr, UINT width, UINT height, UINT stride)
+{
+    std::string png;
+    const HRESULT hr = EncodePngBgr(bgr, width, height, stride, png);
+    if (FAILED(hr)) return hr;
+    const auto outcome = atomic_file::Replace(path, png);
     return outcome ? S_OK : HRESULT_FROM_WIN32(outcome.error);
 }
 

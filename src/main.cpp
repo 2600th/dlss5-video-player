@@ -68,6 +68,7 @@
 #include "Nv12Convert.h"
 #include "FrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
+#include "ClipboardPolicy.h"
 #include "FolderPlaylistPolicy.h"
 #include "ResumePolicy.h"
 #include "StatusNotePolicy.h"
@@ -5678,20 +5679,165 @@ private:
         SelectObject(dc,oldFont);if(font)DeleteObject(font);SelectObject(dc,oldBitmap);DeleteObject(bitmap);DeleteDC(dc);
         return bgr;
     }
-    bool SaveComparisonImageTo(const std::filesystem::path& path){
+    // The comparison on screen above its footer, as 24-bit BGR rows: what Save
+    // comparison image writes and Copy comparison image puts on the clipboard.
+    bool ComposedComparison(std::vector<uint8_t>& bgr,uint32_t& width,uint32_t& height,uint32_t& total,uint32_t& stride){
+        bgr.clear();width=height=total=stride=0;
         if(!m_loaded||!m_renderer)return false;
         // The present first, so an original uploaded since the last one is in the capture.
         if(!m_renderer->PresentCurrent()){RecoverUnusableRenderer();return false;}
-        std::vector<uint8_t> rgba;uint32_t width=0,height=0;
-        if(!m_renderer->CaptureComposedView(rgba,width,height)){LOG("Save comparison image: the composed view could not be read back.");return false;}
+        std::vector<uint8_t> rgba;
+        if(!m_renderer->CaptureComposedView(rgba,width,height)){LOG("Comparison image: the composed view could not be read back.");return false;}
         const auto lines=compare_provenance::FooterLines(ComparisonProvenance());
-        uint32_t total=0,stride=0;
-        const auto bgr=ComposeComparisonImage(rgba,width,height,lines,total,stride);
-        if(bgr.empty())return false;
+        bgr=ComposeComparisonImage(rgba,width,height,lines,total,stride);
+        return !bgr.empty();
+    }
+    bool SaveComparisonImageTo(const std::filesystem::path& path){
+        std::vector<uint8_t> bgr;uint32_t width=0,height=0,total=0,stride=0;
+        if(!ComposedComparison(bgr,width,height,total,stride))return false;
         const HRESULT hr=compare_image::SavePngBgr(path,bgr.data(),width,total,stride);
         if(FAILED(hr)){LOG("Save comparison image failed hr="<<HexText(hr)<<" path="<<WideToUtf8(path.wstring()));return false;}
         LOG("Comparison image saved: "<<width<<"x"<<height<<" plus a "<<(total-height)<<" px footer -> "<<WideToUtf8(path.wstring()));
         return true;
+    }
+    // ---- The clipboard (P2.41) ---------------------------------------------------
+    //
+    // Ctrl+Shift+C puts the saved comparison - picture and provenance footer - on
+    // the clipboard twice: as CF_DIB, which every program that pastes a picture
+    // reads (Windows makes CF_DIBV5 and CF_BITMAP from it), and as "PNG", the
+    // lossless form browsers, Office and image editors prefer. Ctrl+V opens what
+    // a drop would: files first, then a YouTube link or a path in the text, then a
+    // picture, which is written as a PNG and opened as a photo.
+    bool OpenClipboardBriefly()const{
+        // Another program holding the clipboard lets go within milliseconds.
+        for(int attempt=0;attempt<5;++attempt){if(OpenClipboard(m_hwnd))return true;Sleep(10);}
+        LOG("Clipboard: another program kept it open (winerr="<<GetLastError()<<").");
+        return false;
+    }
+    static bool PutClipboardBytes(UINT format,const void* bytes,size_t size){
+        if(!format||!bytes||!size)return false;
+        HGLOBAL global=GlobalAlloc(GMEM_MOVEABLE,size);if(!global)return false;
+        void* to=GlobalLock(global);if(!to){GlobalFree(global);return false;}
+        std::memcpy(to,bytes,size);GlobalUnlock(global);
+        // The clipboard owns it once this succeeds, and only then.
+        if(!SetClipboardData(format,global)){GlobalFree(global);return false;}
+        return true;
+    }
+    // A clipboard format's bytes while the clipboard is open; none past 1 GB.
+    static std::vector<uint8_t> ClipboardBytes(UINT format){
+        if(!format)return{};
+        HANDLE data=GetClipboardData(format);if(!data)return{};
+        const SIZE_T size=GlobalSize(data);if(!size||size>(SIZE_T(1)<<30))return{};
+        const void* from=GlobalLock(data);if(!from)return{};
+        std::vector<uint8_t> bytes(static_cast<const uint8_t*>(from),static_cast<const uint8_t*>(from)+size);
+        GlobalUnlock(data);
+        return bytes;
+    }
+    void CopyComparisonImage(){
+        if(!m_loaded||!m_renderer)return;
+        std::vector<uint8_t> bgr;uint32_t width=0,height=0,total=0,stride=0;bool copied=false;
+        if(ComposedComparison(bgr,width,height,total,stride)){
+            std::string png;const HRESULT encoded=compare_image::EncodePngBgr(bgr.data(),width,total,stride,png);
+            if(FAILED(encoded))LOG("Copy comparison image: the PNG could not be encoded (hr="<<HexText(encoded)<<"); copying the bitmap alone.");
+            const std::vector<uint8_t> dib=clipboard::DibFromBgr(bgr.data(),width,total,stride);
+            bgr=std::vector<uint8_t>{};
+            if(!dib.empty()&&OpenClipboardBriefly()){
+                EmptyClipboard();
+                copied=PutClipboardBytes(CF_DIB,dib.data(),dib.size());
+                if(SUCCEEDED(encoded)&&!PutClipboardBytes(RegisterClipboardFormatW(L"PNG"),png.data(),png.size()))
+                    LOG("Copy comparison image: the PNG form was refused; the bitmap is there.");
+                CloseClipboard();
+            }
+        }
+        if(copied)LOG("Comparison image copied: "<<width<<"x"<<height<<" plus a "<<(total-height)<<" px footer.");
+        m_sourceNotice=T(copied?L"compare.copy.copied":L"compare.copy.failed");
+        if(copied)ShowToast(m_sourceNotice);
+        UpdateCachedStatus();
+    }
+    void PasteFromClipboard(){
+        if(!OpenClipboardBriefly()){ShowToast(T(L"paste.busy"));return;}
+        clipboard::PasteContent content;
+        if(HANDLE drop=GetClipboardData(CF_HDROP)){
+            // The clipboard owns this HDROP: it is read, never DragFinish'ed.
+            const HDROP files=static_cast<HDROP>(drop);
+            const UINT count=DragQueryFileW(files,0xFFFFFFFF,nullptr,0);
+            for(UINT index=0;index<count&&index<1024;++index){
+                const UINT length=DragQueryFileW(files,index,nullptr,0);std::wstring path(length,L'\0');
+                if(!length||DragQueryFileW(files,index,path.data(),length+1)!=length)path.clear();
+                content.files.push_back(std::move(path));
+            }
+        }
+        if(HANDLE text=GetClipboardData(CF_UNICODETEXT)){
+            if(const auto* chars=static_cast<const wchar_t*>(GlobalLock(text))){
+                const size_t limit=std::min<size_t>(GlobalSize(text)/sizeof(wchar_t),8192);
+                content.text.assign(chars,std::find(chars,chars+limit,L'\0'));
+                GlobalUnlock(text);
+            }
+        }
+        const UINT pngFormat=RegisterClipboardFormatW(L"PNG");
+        content.image=(pngFormat&&IsClipboardFormatAvailable(pngFormat))||IsClipboardFormatAvailable(CF_DIBV5)||IsClipboardFormatAvailable(CF_DIB);
+        const auto decision=clipboard::Decide(content,kVideoPatterns,
+            [](const std::wstring& path){std::error_code error;return std::filesystem::is_directory(path,error);},
+            [](const std::wstring& path){std::error_code error;return std::filesystem::is_regular_file(path,error);},
+            [](const std::wstring& text){return IsSupportedYouTubeUrl(text);});
+        // The picture is read only when it is what opens: a copied 4K screenshot is 33 MB.
+        std::vector<uint8_t> png,dib;
+        if(decision.kind==clipboard::PasteKind::Image){
+            png=ClipboardBytes(pngFormat);
+            if(!clipboard::IsPng(png)){png.clear();dib=ClipboardBytes(CF_DIBV5);if(dib.empty())dib=ClipboardBytes(CF_DIB);}
+        }
+        CloseClipboard();
+        switch(decision.kind){
+        case clipboard::PasteKind::File:
+            if(!ToolbarActionEnabled(ToolbarAction::Open))return;
+            LOG("Paste: opening a file from the clipboard.");
+            if(Load(decision.target)&&decision.ignored)ShowToast(Format(T(L"paste.ignored"),std::to_wstring(decision.ignored).c_str()));
+            return;
+        case clipboard::PasteKind::YouTube:
+            if(!YouTubePlaybackAvailable()){ShowToast(T(L"paste.youtube_unavailable"));return;}
+            if(!ToolbarActionEnabled(ToolbarAction::OpenYouTube))return;
+            LOG("Paste: opening a YouTube link from the clipboard.");
+            StartYouTubeResolution(decision.target,L"",m_youtubeSourceQuality);
+            return;
+        case clipboard::PasteKind::Image:
+            if(!ToolbarActionEnabled(ToolbarAction::Open))return;
+            OpenPastedImage(png,dib);
+            return;
+        case clipboard::PasteKind::UnsupportedLink:ShowToast(T(L"paste.unsupported_link"));return;
+        case clipboard::PasteKind::Nothing:ShowToast(T(L"paste.nothing"));return;
+        }
+    }
+    // A pasted picture is written as a PNG where the cache lives, and opened as a
+    // photo is. The newest kPastedImagesKept stay, so one stays reachable from
+    // Recent videos and the folder does not grow with every paste.
+    static constexpr size_t kPastedImagesKept=20;
+    void OpenPastedImage(const std::vector<uint8_t>& png,const std::vector<uint8_t>& dib){
+        std::error_code error;
+        const std::filesystem::path root=m_cacheRoot.empty()?std::filesystem::temp_directory_path(error):m_cacheRoot;
+        const std::filesystem::path folder=root/L"pasted";
+        std::filesystem::create_directories(folder,error);
+        SYSTEMTIME now{};GetLocalTime(&now);wchar_t name[64]{};
+        swprintf_s(name,L"pasted-%04u%02u%02u-%02u%02u%02u-%03u.png",now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute,now.wSecond,now.wMilliseconds);
+        const std::filesystem::path path=folder/name;
+        bool written=false;
+        if(!png.empty()){
+            written=static_cast<bool>(atomic_file::Replace(path,std::string_view(reinterpret_cast<const char*>(png.data()),png.size())));
+        }else{
+            std::vector<uint8_t> bgr;uint32_t width=0,height=0,stride=0;
+            if(clipboard::BgrFromDib(dib,bgr,width,height,stride))written=SUCCEEDED(compare_image::SavePngBgr(path,bgr.data(),width,height,stride));
+            else LOG("Paste: the clipboard's bitmap is in a form this player does not read.");
+        }
+        if(!written){LOG("Paste: the picture could not be written to "<<WideToUtf8(folder.wstring())<<".");ShowToast(T(L"paste.image_failed"));return;}
+        std::vector<std::pair<std::filesystem::file_time_type,std::filesystem::path>> kept;
+        for(std::filesystem::directory_iterator it(folder,error),end;!error&&it!=end;it.increment(error)){
+            std::error_code itemError;
+            if(it->is_regular_file(itemError)&&it->path().extension()==L".png")kept.emplace_back(it->last_write_time(itemError),it->path());
+        }
+        std::sort(kept.begin(),kept.end(),[](const auto& a,const auto& b){return a.first>b.first;});
+        for(size_t index=kPastedImagesKept;index<kept.size();++index)
+            if(kept[index].second!=path){std::error_code removeError;std::filesystem::remove(kept[index].second,removeError);}
+        LOG("Paste: opening a picture from the clipboard.");
+        Load(path.wstring(),T(L"paste.image_title"));
     }
     void SaveComparisonImage(){
         if(!m_loaded||!m_renderer)return;
@@ -5992,6 +6138,7 @@ private:
             app_menu::UpdateMaskMenu(menu,m_loaded,!m_maskSource.pixels.empty(),m_maskInvert,MaskFeatherIndex());
             app_menu::UpdateSecondMixMenu(menu,ComparisonModesAvailable(),SecondMixIndex());
             EnableMenuItem(menu,IDM_SAVE_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
+            EnableMenuItem(menu,IDM_COPY_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
             for(const UINT command:{IDM_NEXT_FILE,IDM_PREVIOUS_FILE})EnableMenuItem(menu,command,MF_BYCOMMAND|(NeighbourFolder()?MF_ENABLED:MF_GRAYED));
             CheckMenuItem(menu,IDM_RESUME_POSITION,MF_BYCOMMAND|(m_resumeEnabled?MF_CHECKED:MF_UNCHECKED));
             DrawMenuBar(m_hwnd);
@@ -12504,7 +12651,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         // the view Blend became, the neural frame at the Mix.
         case IDM_COMPARE_NEURAL:case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_ORIGINAL:SetComparisonMode(ComparisonMode::Original);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustMix(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustMix(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
-        case IDM_SAVE_COMPARISON_IMAGE:SaveComparisonImage();break;
+        case IDM_SAVE_COMPARISON_IMAGE:SaveComparisonImage();break;case IDM_COPY_COMPARISON_IMAGE:CopyComparisonImage();break;
+        case IDM_PASTE:PasteFromClipboard();break;
         case IDM_COMPARE_MASK_LOAD:LoadMaskFromDialog();break;case IDM_COMPARE_MASK_INVERT:ToggleMaskInvert();break;case IDM_COMPARE_MASK_CLEAR:ClearMaskForSource();break;
         case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_DIFFERENCE:SetComparisonMode(ComparisonMode::Difference);break;
         case IDM_COMPARE_SIDE_BY_SIDE:SetComparisonMode(ComparisonMode::SideBySide);break;case IDM_COMPARE_QUAD:SetComparisonMode(ComparisonMode::Quad);break;

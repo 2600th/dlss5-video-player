@@ -1,6 +1,7 @@
 #include "CacheEvictionPolicy.h"
 #include "VariableFrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
+#include "ClipboardPolicy.h"
 #include "FolderPlaylistPolicy.h"
 #include "ResumePolicy.h"
 #include "StatusNotePolicy.h"
@@ -3572,7 +3573,8 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(CommandForPlayerKey('H', false, false) == app_menu::IDM_SUBTITLE_EARLIER);
     CHECK(CommandForPlayerKey('J', false, false) == app_menu::IDM_SUBTITLE_LATER);
     CHECK(!CommandForPlayerKey('V', false, true).has_value());
-    CHECK(!CommandForPlayerKey('V', true, false).has_value());
+    // Ctrl+V is every Windows program's paste, which opens the clipboard (P2.41).
+    CHECK(CommandForPlayerKey('V', true, false) == app_menu::IDM_PASTE);
     // Ctrl+Alt+C is the overlay hotkey for the adjustments; Ctrl+C stays unclaimed.
     CHECK(!CommandForPlayerKey('C', true, false).has_value());
     // The keys main.cpp used to match one by one before the table, each still
@@ -11043,6 +11045,157 @@ void compare_saved_image_carries_its_provenance_test()
     CHECK(app_menu::CommandForPlayerKey('S',true,true)==app_menu::IDM_SAVE_COMPARISON_IMAGE);
 }
 
+// P2.41: Ctrl+V opens what a drop would - files first, then a YouTube link or a
+// path in the text, then a picture - and says why when it opens nothing.
+void clipboard_paste_opens_files_then_links_then_pictures_test()
+{
+    using namespace clipboard;
+    const std::wstring patterns = dropped_files::kMediaPatterns;
+    const auto folder = [](const std::wstring& path) { return path.ends_with(L"\\folder"); };
+    const auto exists = [](const std::wstring& path) { return path == L"C:\\clips\\film.mkv" || path == L"C:\\clips\\notes.txt"; };
+    const auto youtube = [](const std::wstring& text) { return IsSupportedYouTubeUrl(text); };
+    const std::wstring link = L"https://www.youtube.com/watch?v=VQRLujxTm3c";
+
+    CHECK(PastedLine(L"  \r\n\t\"C:\\clips\\film.mkv\" \r\nsecond") == L"C:\\clips\\film.mkv");
+    CHECK(PastedLine(L"<" + link + L">") == link);
+    CHECK(PastedLine(L" \r\n \n").empty());
+    CHECK(PastedLine(L"\"") == L"\"");
+    CHECK(LooksLikeLink(L"HTTPS://vimeo.com/1") && LooksLikeLink(L"www.example.com") && !LooksLikeLink(L"C:\\a.mkv"));
+
+    // Files, as Explorer copies them: the drop's choice, with the rest counted.
+    PasteContent files;
+    files.files = {L"C:\\a\\folder", L"C:\\a\\film.srt", L"C:\\a\\film.mkv"};
+    files.text = link;
+    files.image = true;
+    PasteDecision decision = Decide(files, patterns, folder, exists, youtube);
+    CHECK(decision.kind == PasteKind::File);
+    CHECK(decision.target == L"C:\\a\\film.mkv");
+    CHECK_EQ(size_t{2}, decision.ignored);
+    // Only folders on the clipboard: the text is next.
+    files.files = {L"C:\\a\\folder"};
+    decision = Decide(files, patterns, folder, exists, youtube);
+    CHECK(decision.kind == PasteKind::YouTube);
+    CHECK(decision.target == link);
+    CHECK_EQ(size_t{0}, decision.ignored);
+
+    // A link beats a picture copied with it; a path does too.
+    PasteContent text;
+    text.text = L"  " + link + L"\r\n";
+    text.image = true;
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::YouTube);
+    text.text = L"\"C:\\clips\\film.mkv\"";
+    decision = Decide(text, patterns, folder, exists, youtube);
+    CHECK(decision.kind == PasteKind::File);
+    CHECK(decision.target == L"C:\\clips\\film.mkv");
+    // Any text that names no file and no video leaves the picture to open.
+    text.text = L"A caption copied with the picture";
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::Image);
+    text.text = L"https://vimeo.com/123";
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::Image);
+    // Without a picture, another site's link is named as such; the rest is nothing.
+    text.image = false;
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::UnsupportedLink);
+    text.text = L"https://www.youtube.com/channel/UC123";
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::UnsupportedLink);
+    text.text = L"C:\\clips\\missing.mkv";
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::Nothing);
+    CHECK(Decide(PasteContent{}, patterns, folder, exists, youtube).kind == PasteKind::Nothing);
+}
+
+// P2.41: the copied comparison is a bottom-up 24-bit CF_DIB beside a PNG, and a
+// pasted bitmap in any of the forms screenshots and browsers use reads back as the
+// same pixels.
+void clipboard_bitmaps_round_trip_through_a_dib_test()
+{
+    using namespace clipboard;
+    // 3x2 BGR, rows 12 bytes apart: every pixel its own colour.
+    constexpr uint32_t width = 3, height = 2, stride = 12;
+    std::vector<uint8_t> bgr(size_t(stride) * height, 0);
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x)
+            for (uint32_t c = 0; c < 3; ++c) bgr[size_t(y) * stride + x * 3 + c] = uint8_t(10 * (y * 3 + x) + c + 1);
+    CHECK_EQ(stride, DibStride(width));
+    const std::vector<uint8_t> dib = DibFromBgr(bgr.data(), width, height, stride);
+    REQUIRE(dib.size() == sizeof(BITMAPINFOHEADER) + size_t(stride) * height);
+    BITMAPINFOHEADER header{};
+    std::memcpy(&header, dib.data(), sizeof(header));
+    CHECK_EQ(LONG(width), header.biWidth);
+    CHECK_EQ(LONG(height), header.biHeight);  // bottom-up
+    CHECK_EQ(WORD(24), header.biBitCount);
+    CHECK_EQ(DWORD(BI_RGB), header.biCompression);
+    // The bottom row is stored first.
+    CHECK_EQ(int(bgr[size_t(stride)]), int(dib[sizeof(header)]));
+    std::vector<uint8_t> back;
+    uint32_t w = 0, h = 0, s = 0;
+    REQUIRE(BgrFromDib(dib, back, w, h, s));
+    CHECK_EQ(width, w);
+    CHECK_EQ(height, h);
+    CHECK_EQ(stride, s);
+    CHECK(back == bgr);
+
+    // 32-bit, top-down, as BI_RGB, as BI_BITFIELDS after a plain header, and in a V5 header.
+    const auto thirtyTwo = [&](DWORD headerSize, DWORD compression, bool masksAfter) {
+        std::vector<uint8_t> bytes(headerSize + (masksAfter ? 12u : 0u) + size_t(width) * 4 * height, 0);
+        BITMAPV5HEADER v5{};
+        v5.bV5Size = headerSize;
+        v5.bV5Width = LONG(width);
+        v5.bV5Height = -LONG(height);
+        v5.bV5Planes = 1;
+        v5.bV5BitCount = 32;
+        v5.bV5Compression = compression;
+        v5.bV5RedMask = 0x00FF0000u;
+        v5.bV5GreenMask = 0x0000FF00u;
+        v5.bV5BlueMask = 0x000000FFu;
+        std::memcpy(bytes.data(), &v5, headerSize);
+        size_t at = headerSize;
+        if (masksAfter) {
+            const uint32_t masks[3] = {0x00FF0000u, 0x0000FF00u, 0x000000FFu};
+            std::memcpy(bytes.data() + at, masks, sizeof(masks));
+            at += sizeof(masks);
+        }
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x) {
+                for (uint32_t c = 0; c < 3; ++c) bytes[at + (size_t(y) * width + x) * 4 + c] = bgr[size_t(y) * stride + x * 3 + c];
+                bytes[at + (size_t(y) * width + x) * 4 + 3] = 0x80;
+            }
+        return bytes;
+    };
+    for (const auto& form : {thirtyTwo(sizeof(BITMAPINFOHEADER), BI_RGB, false), thirtyTwo(sizeof(BITMAPINFOHEADER), BI_BITFIELDS, true),
+                             thirtyTwo(sizeof(BITMAPV5HEADER), BI_BITFIELDS, false), thirtyTwo(sizeof(BITMAPV5HEADER), BI_RGB, false)}) {
+        CHECK(BgrFromDib(form, back, w, h, s));
+        CHECK(back == bgr);
+    }
+    // What it does not guess at: odd masks, palettes, compression, a short buffer, a giant.
+    std::vector<uint8_t> odd = thirtyTwo(sizeof(BITMAPINFOHEADER), BI_BITFIELDS, true);
+    odd[sizeof(BITMAPINFOHEADER)] = 0x1F;
+    CHECK(!BgrFromDib(odd, back, w, h, s));
+    std::vector<uint8_t> palette = dib;
+    reinterpret_cast<BITMAPINFOHEADER*>(palette.data())->biBitCount = 8;
+    CHECK(!BgrFromDib(palette, back, w, h, s));
+    std::vector<uint8_t> compressed = dib;
+    reinterpret_cast<BITMAPINFOHEADER*>(compressed.data())->biCompression = BI_RLE8;
+    CHECK(!BgrFromDib(compressed, back, w, h, s));
+    CHECK(!BgrFromDib(std::span<const uint8_t>(dib.data(), dib.size() - 1), back, w, h, s));
+    CHECK(back.empty() && w == 0 && h == 0);
+    std::vector<uint8_t> giant = dib;
+    reinterpret_cast<BITMAPINFOHEADER*>(giant.data())->biWidth = LONG(kMaxSide + 1);
+    CHECK(!BgrFromDib(giant, back, w, h, s));
+    CHECK(DibFromBgr(bgr.data(), width, height, width * 3 - 1).empty());
+
+    // The PNG beside it is a PNG.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    std::string png;
+    CHECK(SUCCEEDED(compare_image::EncodePngBgr(bgr.data(), width, height, stride, png)));
+    CHECK(IsPng(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(png.data()), png.size())));
+    CHECK(!IsPng(dib));
+    if (SUCCEEDED(com)) CoUninitialize();
+    CHECK(app_menu::CommandForPlayerKey('C', true, true) == app_menu::IDM_COPY_COMPARISON_IMAGE);
+    CHECK(app_menu::CommandForPlayerKey('V', true, false) == app_menu::IDM_PASTE);
+    // Shift+C and V keep their jobs.
+    CHECK(app_menu::CommandForPlayerKey('C', false, true) == app_menu::IDM_COMPARE_PREVIOUS_MODE);
+    CHECK(app_menu::CommandForPlayerKey('V', false, false) == app_menu::IDM_SUBTITLE_NEXT);
+}
+
 // Side by side and 2x2 put one frame of the pair in every pane; zoom, pan and the loupe
 // work in the pane under the pointer.
 void compare_panes_locate_the_point_under_the_pointer_test()
@@ -16913,6 +17066,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(resume_keeps_a_position_only_between_the_ends_test),
     TEST_CASE(resume_records_round_trip_and_the_oldest_go_first_test),
     TEST_CASE(folder_playlist_steps_through_the_folder_in_explorer_order_test),
+    TEST_CASE(clipboard_paste_opens_files_then_links_then_pictures_test),
+    TEST_CASE(clipboard_bitmaps_round_trip_through_a_dib_test),
     TEST_CASE(status_notes_last_exactly_as_long_as_they_are_true_test),
     TEST_CASE(child_stderr_tail_keeps_the_last_bytes_as_log_lines_test),
     TEST_CASE(video_decoder_seeks_a_source_with_an_unknown_duration_test),

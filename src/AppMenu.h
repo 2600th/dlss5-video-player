@@ -21,6 +21,8 @@ namespace app_menu {
 inline constexpr UINT IDM_OPEN = 100;
 inline constexpr UINT IDM_EXIT = 101;
 inline constexpr UINT IDM_OPEN_YOUTUBE = 102;
+// File > Open from clipboard: a copied file, picture or YouTube link (P2.41).
+inline constexpr UINT IDM_PASTE = 103;
 inline constexpr UINT IDM_EXAMPLE_VIDEO_FIRST = 110;
 inline constexpr UINT IDM_RECENT_VIDEO_FIRST = 130;
 inline constexpr UINT IDM_EXPORT_CACHED_VIDEO = 140;
@@ -29,6 +31,8 @@ inline constexpr UINT IDM_EXPORT_CACHED_VIDEO = 140;
 inline constexpr UINT IDM_EXPORT_STAGES = 142;
 // The composed comparison as shown, with a provenance footer, as a PNG.
 inline constexpr UINT IDM_SAVE_COMPARISON_IMAGE = 143;
+// The same picture and footer on the clipboard, as a bitmap and a PNG (P2.41).
+inline constexpr UINT IDM_COPY_COMPARISON_IMAGE = 144;
 inline constexpr UINT IDM_PLAY = 200;
 inline constexpr UINT IDM_STOP = 201;
 inline constexpr UINT IDM_BACK10 = 202;

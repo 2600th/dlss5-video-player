@@ -386,6 +386,35 @@ struct PlayerAppTestAccess {
         app.m_resumeKey.clear();
     }
 
+    // P2.41: File's clipboard rows and their keys. Copy needs a picture on
+    // screen; a paste opens a file or a link, so it is live with nothing open.
+    // The real clipboard is the user's, so no case here writes to it.
+    static void clipboard_rows_test()
+    {
+        PlayerApp& app = fixture->app;
+        REQUIRE(app.m_hwnd != nullptr);
+        const HMENU menu = GetMenu(app.m_hwnd);
+        REQUIRE(menu != nullptr);
+        app.SyncFeatureMenuState();
+        app.SyncSourceActionAvailability();
+        const HMENU file = GetSubMenu(menu, 0);
+        REQUIRE(file != nullptr);
+        CHECK(GetMenuState(file, IDM_PASTE, MF_BYCOMMAND) != static_cast<UINT>(-1));
+        CHECK(GetMenuState(file, IDM_COPY_COMPARISON_IMAGE, MF_BYCOMMAND) != static_cast<UINT>(-1));
+        CHECK((GetMenuState(menu, IDM_COPY_COMPARISON_IMAGE, MF_BYCOMMAND) & MF_GRAYED) != 0);
+        CHECK((GetMenuState(menu, IDM_PASTE, MF_BYCOMMAND) & MF_GRAYED) == 0);
+        CHECK(app.m_keys.KeysFor(IDM_PASTE) == L"Ctrl+V");
+        CHECK(app.m_keys.KeysFor(IDM_COPY_COMPARISON_IMAGE) == L"Ctrl+Shift+C");
+        wchar_t text[128]{};
+        GetMenuStringW(menu, IDM_COPY_COMPARISON_IMAGE, text, static_cast<int>(std::size(text)), MF_BYCOMMAND);
+        CHECK(std::wstring(text) == app.T(L"menu.copy_comparison") + L"\tCtrl+Shift+C");
+        // Nothing to copy: the command does nothing and says nothing.
+        app.m_sourceNotice.clear();
+        app.HandleCommand(IDM_COPY_COMPARISON_IMAGE);
+        CHECK(app.m_sourceNotice.empty());
+    }
+
+
     static void old_source_policy_requests_a_fresh_resolution_test()
     {
         PlayerApp& app = fixture->app;
@@ -3111,6 +3140,7 @@ struct PlayerAppTestAccess {
         UI_CASE(saved_settings_survive_a_reload_test),
         UI_CASE(hidden_window_and_menu_bar_open_test),
         UI_CASE(resume_position_and_folder_rows_test),
+        UI_CASE(clipboard_rows_test),
         UI_CASE(old_source_policy_requests_a_fresh_resolution_test),
         UI_CASE(recent_rollover_keeps_the_cache_test),
         UI_CASE(neural_button_label_and_upscaling_rungs_test),
