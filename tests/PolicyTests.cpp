@@ -1,6 +1,8 @@
 #include "CacheEvictionPolicy.h"
 #include "VariableFrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
+#include "FolderPlaylistPolicy.h"
+#include "ResumePolicy.h"
 #include "StatusNotePolicy.h"
 #include "Log.h"
 #include "AudioFadePolicy.h"
@@ -9606,6 +9608,98 @@ void dropped_files_open_the_first_supported_file_and_count_the_rest_test()
     CHECK_EQ(size_t{2},none.ignored);
 }
 
+// P2.52: a position is kept only between the ends. The first 10 s are not worth a
+// jump, and the last 5 % (never less than 10 s) is a video that was watched.
+void resume_keeps_a_position_only_between_the_ends_test()
+{
+    using namespace resume;
+    // A two-hour film: the end is its last six minutes.
+    CHECK_EQ(360.0, EndThreshold(7200.0));
+    CHECK(!Worth(9.9, 7200.0));
+    CHECK(Worth(10.0, 7200.0));
+    CHECK(Worth(3600.0, 7200.0));
+    CHECK(Worth(6840.0, 7200.0));
+    CHECK(!Worth(6840.5, 7200.0));
+    // A two-minute trailer: the 10 s floor, not 5 % (6 s), decides its end.
+    CHECK_EQ(10.0, EndThreshold(120.0));
+    CHECK(Worth(110.0, 120.0));
+    CHECK(!Worth(110.5, 120.0));
+    // Too short to have a middle, of no known length, or not a number.
+    CHECK(!Worth(10.0, 19.0));
+    CHECK(!Worth(30.0, 0.0));
+    CHECK(!Worth(std::numeric_limits<double>::quiet_NaN(), 600.0));
+    CHECK(!Worth(30.0, std::numeric_limits<double>::infinity()));
+
+    // Resumed where it was left, while the source is the length it was.
+    const Record record{7, 1234.5, 3600.0};
+    CHECK(ResumeAt(record, 3600.0) == std::optional<double>(1234.5));
+    CHECK(ResumeAt(record, 3600.9) == std::optional<double>(1234.5));
+    // A different file saved under the same name starts at the beginning.
+    CHECK(!ResumeAt(record, 3700.0).has_value());
+    // A position the same file now counts as its end does not resume.
+    CHECK(!ResumeAt(Record{1, 3550.0, 3600.0}, 3600.0).has_value());
+    CHECK(!ResumeAt(Record{1, 5.0, 3600.0}, 3600.0).has_value());
+}
+
+void resume_records_round_trip_and_the_oldest_go_first_test()
+{
+    using namespace resume;
+    const Record record{42, 1234.5, 3600.25};
+    CHECK(Format(record) == L"42|1234.500|3600.250");
+    CHECK(Parse(Format(record)) == std::optional<Record>(record));
+    CHECK(Parse(L"1|10|20") == std::optional<Record>(Record{1, 10.0, 20.0}));
+    // A hand edit that is not three plain numbers is nothing, never a seek.
+    for (const wchar_t* bad : {L"", L"1|2", L"1|2|3|4", L"x|2|3", L"1|-2|3", L"1|2|1e9", L"1|inf|3", L"1|2.|3",
+                               L"1|.5|3", L"1|1.2.3|4", L"|2|3", L"1||3", L"1|2|"})
+        CHECK(!Parse(bad).has_value());
+
+    std::map<std::wstring, Record> records;
+    for (uint64_t index = 1; index <= 5; ++index) records[L"k" + std::to_wstring(index)] = Record{index, 60.0, 600.0};
+    CHECK(Evict(records, 5).empty());
+    CHECK((Evict(records, 3) == std::vector<std::wstring>{L"k1", L"k2"}));
+    CHECK_EQ(size_t{200}, kMaxRemembered);
+
+    CHECK(ClockText(0.0) == L"0:00");
+    CHECK(ClockText(65.9) == L"1:05");
+    CHECK(ClockText(3723.0) == L"1:02:03");
+    CHECK(ClockText(-4.0) == L"0:00");
+}
+
+// P2.52: the folder's media in Explorer's order, one step either way, and no wrap.
+void folder_playlist_steps_through_the_folder_in_explorer_order_test()
+{
+    using namespace folder_playlist;
+    CHECK(CompareNatural(L"Episode 2.mkv", L"Episode 10.mkv") < 0);
+    CHECK(CompareNatural(L"episode 10.mkv", L"Episode 9.mkv") > 0);
+    CHECK(CompareNatural(L"a.mkv", L"B.mkv") < 0);
+    CHECK(CompareNatural(L"clip.mkv", L"clip.mkv") == 0);
+    CHECK(CompareNatural(L"clip", L"clip 1") < 0);
+    CHECK(CompareNatural(L"7.mp4", L"007.mp4") < 0);
+    CHECK(CompareNatural(L"Clip.mp4", L"clip.mp4") != 0);
+
+    const std::wstring patterns = dropped_files::kMediaPatterns;
+    const std::vector<std::wstring> folder{L"Episode 10.mkv", L"Episode 2.mkv", L"Episode 1.mkv", L"Episode 2.srt",
+                                           L"cover.jpg",      L"notes.txt",     L"Episode 3.MP4"};
+    // Pictures are media too: the open dialog lists them.
+    CHECK((Ordered(L"Episode 1.mkv", folder, patterns) ==
+           std::vector<std::wstring>{L"cover.jpg", L"Episode 1.mkv", L"Episode 2.mkv", L"Episode 3.MP4", L"Episode 10.mkv"}));
+    CHECK(Neighbour(L"Episode 2.mkv", folder, patterns, +1) == std::optional<std::wstring>(L"Episode 3.MP4"));
+    CHECK(Neighbour(L"episode 3.mp4", folder, patterns, +1) == std::optional<std::wstring>(L"Episode 10.mkv"));
+    CHECK(Neighbour(L"Episode 2.mkv", folder, patterns, -1) == std::optional<std::wstring>(L"Episode 1.mkv"));
+    // No wrap at either end.
+    CHECK(!Neighbour(L"Episode 10.mkv", folder, patterns, +1).has_value());
+    CHECK(!Neighbour(L"cover.jpg", folder, patterns, -1).has_value());
+    CHECK(!Neighbour(L"Episode 2.mkv", folder, patterns, 0).has_value());
+    // A file the dialog does not list is still a place in the order when it is playing.
+    const std::vector<std::wstring> withOdd{L"a.mkv", L"b.xyz", L"c.mkv"};
+    CHECK(Neighbour(L"b.xyz", withOdd, patterns, +1) == std::optional<std::wstring>(L"c.mkv"));
+    CHECK(Neighbour(L"a.mkv", withOdd, patterns, +1) == std::optional<std::wstring>(L"c.mkv"));
+    // A file deleted while it played: its neighbours are where it would sort.
+    CHECK(Neighbour(L"Episode 4.mkv", folder, patterns, +1) == std::optional<std::wstring>(L"Episode 10.mkv"));
+    CHECK(Neighbour(L"Episode 4.mkv", folder, patterns, -1) == std::optional<std::wstring>(L"Episode 3.MP4"));
+    CHECK(!Neighbour(L"", folder, patterns, +1).has_value());
+}
+
 // A header's width, height and rate are untrusted. A crafted 20000x20000 file
 // asked for ~11 GB of frame buffers, and a known open took any rate at all
 // although FrameRate() promises 1..240.
@@ -16816,6 +16910,9 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_open_metadata_decides_the_playback_layout_without_a_decoder_test),
     TEST_CASE(video_decoder_bounds_declared_geometry_and_known_rates_test),
     TEST_CASE(dropped_files_open_the_first_supported_file_and_count_the_rest_test),
+    TEST_CASE(resume_keeps_a_position_only_between_the_ends_test),
+    TEST_CASE(resume_records_round_trip_and_the_oldest_go_first_test),
+    TEST_CASE(folder_playlist_steps_through_the_folder_in_explorer_order_test),
     TEST_CASE(status_notes_last_exactly_as_long_as_they_are_true_test),
     TEST_CASE(child_stderr_tail_keeps_the_last_bytes_as_log_lines_test),
     TEST_CASE(video_decoder_seeks_a_source_with_an_unknown_duration_test),

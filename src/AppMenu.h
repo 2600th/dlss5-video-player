@@ -62,6 +62,11 @@ inline constexpr UINT IDM_SUBTITLE_LATER = 251;
 inline constexpr UINT IDM_SUBTITLE_DELAY_RESET = 252;
 // Playback > Step one cached frame: the '.' key, which had no menu row.
 inline constexpr UINT IDM_STEP_FRAME = 253;
+// Playback: the next and previous file in the playing file's folder, and
+// whether a video starts where it was left (P2.52, ResumePolicy.h).
+inline constexpr UINT IDM_NEXT_FILE = 254;
+inline constexpr UINT IDM_PREVIOUS_FILE = 255;
+inline constexpr UINT IDM_RESUME_POSITION = 256;
 inline constexpr UINT IDM_NEURAL_RENDERING = 300;
 inline constexpr UINT IDM_REHOOK = 301;
 inline constexpr UINT IDM_VIEW_FINAL = 302;

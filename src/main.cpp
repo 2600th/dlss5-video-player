@@ -68,6 +68,8 @@
 #include "Nv12Convert.h"
 #include "FrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
+#include "FolderPlaylistPolicy.h"
+#include "ResumePolicy.h"
 #include "StatusNotePolicy.h"
 #include "SeekPolicy.h"
 #include "RenderPacePolicy.h"
@@ -351,11 +353,7 @@ static POINT MinimumPlayerWindowTrackSize(HWND window, UINT dpi)
     return POINT{outer.right - outer.left, outer.bottom - outer.top};
 }
 
-static const wchar_t* kVideoPatterns =
-    L"*.mp4;*.m4v;*.mov;*.mkv;*.webm;*.avi;*.wmv;*.asf;*.flv;*.f4v;"
-    L"*.ts;*.m2ts;*.mts;*.mpg;*.mpeg;*.mpe;*.vob;*.ogv;*.ogg;*.3gp;*.3g2;"
-    L"*.mxf;*.nut;*.rm;*.rmvb;*.divx;*.dv;*.y4m;*.ivf;*.hevc;*.h265;*.h264;*.264;*.av1;*.vp9;"
-    L"*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp";
+static const wchar_t* kVideoPatterns = dropped_files::kMediaPatterns;
 
 static constexpr int HK_PLAY_PAUSE = 9001;
 static constexpr int HK_BACK_10 = 9002;
@@ -2662,7 +2660,7 @@ class PlayerApp {
 #endif
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){}
-    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_fontTitle)DeleteObject(m_fontTitle); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
+    ~PlayerApp(){RememberPlaybackPosition();if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_fontTitle)DeleteObject(m_fontTitle); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
 
     bool Create(HINSTANCE hi) {
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
@@ -2882,6 +2880,7 @@ public:
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
         }
+        ServiceResume();
         // Ahead of both presents below, so a subtitle that changed is in the
         // frame or the paused re-present this tick makes.
         ServiceSubtitles();
@@ -3327,6 +3326,100 @@ private:
         if(!frame||frame->Empty()){m_renderer->SetSubtitleOverlay(nullptr,0,0);return;}
         if(!m_renderer->SetSubtitleOverlay(frame->bgra.data(),frame->width,frame->height,&frame->drawn))
             LOG("Subtitles: the renderer did not take a "<<frame->width<<"x"<<frame->height<<" picture.");
+    }
+    // ---- Resume where you left off, and the folder's next file (P2.52) ------------
+    //
+    // Kept in [Resume] under the key the subtitle choice and the mask use, so a
+    // video's position comes back with them. The tick watches the position while
+    // nothing is moving it; the source changing - another file opened, the video
+    // closed - writes what it saw last, and the player's exit does the same.
+    // Nothing waits for a file to be written while a video plays.
+    std::wstring ResumeSourceKey()const{
+        if(!m_loaded||m_decoder.IsStillImage())return{};
+        const std::wstring identity=MaskIdentity();
+        return identity.empty()?std::wstring{}:compare_mask::SourceKey(identity);
+    }
+    void ServiceResume(){
+        const std::wstring key=ResumeSourceKey();
+        if(key!=m_resumeKey){
+            RememberPlaybackPosition();
+            m_resumeKey=key;m_resumeSeenSec=-1.0;m_resumeSeenDuration=0.0;m_resumePending=!key.empty();
+        }
+        // A seek or a stream reopening has no position worth keeping yet.
+        if(m_resumeKey.empty()||m_seekPending||m_seeking||m_youtubeLifecycle.IsResolving())return;
+        if(m_resumePending){m_resumePending=false;if(ResumeRememberedPosition())return;}
+        m_resumeSeenSec=Position();m_resumeSeenDuration=m_decoder.DurationSeconds();
+    }
+    std::map<std::wstring,resume::Record> RememberedPositions(uint64_t& newest)const{
+        std::vector<wchar_t> section(65536,L'\0');
+        const DWORD length=GetPrivateProfileSectionW(L"Resume",section.data(),static_cast<DWORD>(section.size()),SettingsPath().c_str());
+        std::map<std::wstring,resume::Record> records;newest=0;
+        for(size_t at=0;at<length&&section[at];){
+            const std::wstring line(section.data()+at);at+=line.size()+1;
+            const size_t equals=line.find(L'=');if(equals==std::wstring::npos)continue;
+            if(const auto record=resume::Parse(std::wstring_view(line).substr(equals+1))){
+                records[line.substr(0,equals)]=*record;newest=std::max(newest,record->sequence);
+            }
+        }
+        return records;
+    }
+    // A position in the middle is kept; one near either end removes the entry,
+    // so the next open starts at the beginning.
+    void RememberPlaybackPosition(){
+        if(m_resumeKey.empty()||m_resumeSeenSec<0.0)return;
+        const std::wstring key=m_resumeKey;const double position=m_resumeSeenSec,duration=m_resumeSeenDuration;
+        m_resumeSeenSec=-1.0;
+        if(!m_resumeEnabled)return;
+        const auto path=SettingsPath();
+        if(!resume::Worth(position,duration)){WritePrivateProfileStringW(L"Resume",key.c_str(),nullptr,path.c_str());return;}
+        uint64_t newest=0;auto records=RememberedPositions(newest);
+        const resume::Record record{newest+1,position,duration};
+        records[key]=record;
+        WritePrivateProfileStringW(L"Resume",key.c_str(),resume::Format(record).c_str(),path.c_str());
+        for(const std::wstring& stale:resume::Evict(records))WritePrivateProfileStringW(L"Resume",stale.c_str(),nullptr,path.c_str());
+    }
+    // Seeks to where this source was left, and says so. False when it starts here.
+    bool ResumeRememberedPosition(){
+        if(!m_resumeEnabled||m_resumeKey.empty())return false;
+        wchar_t saved[256]{};
+        GetPrivateProfileStringW(L"Resume",m_resumeKey.c_str(),L"",saved,static_cast<DWORD>(std::size(saved)),SettingsPath().c_str());
+        const auto record=resume::Parse(saved);if(!record)return false;
+        const auto at=resume::ResumeAt(*record,m_decoder.DurationSeconds());
+        if(!at){LOG("Resume: the position kept for this source no longer fits it; starting at the beginning.");return false;}
+        LOG("Resume: starting at "<<*at<<" s of "<<m_decoder.DurationSeconds()<<" s.");
+        RequestSeek(*at,m_playing);
+        // What the tick would have seen, so closing during the seek keeps it.
+        m_resumeSeenSec=*at;m_resumeSeenDuration=m_decoder.DurationSeconds();
+        ShowToast(Format(T(L"resume.resumed"),resume::ClockText(*at).c_str()));
+        return true;
+    }
+    void SetResumeEnabled(bool enabled){
+        m_resumeEnabled=enabled;SaveVideoSettings();
+        // Off forgets nothing already kept; it stops keeping and stops resuming.
+        if(const HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr){CheckMenuItem(menu,IDM_RESUME_POSITION,MF_BYCOMMAND|(enabled?MF_CHECKED:MF_UNCHECKED));DrawMenuBar(m_hwnd);}
+    }
+    // The folder of the file playing, when there is one to step through: a file
+    // opened from disk, not a stream or the player's own copy of one.
+    std::optional<std::filesystem::path> NeighbourFolder()const{
+        if(!m_loaded||m_sourceKind!=MediaSourceKind::LocalFile||m_cachedSourceFile||m_path.empty())return std::nullopt;
+        const std::filesystem::path folder=std::filesystem::path(m_path).parent_path();
+        if(folder.empty())return std::nullopt;
+        return folder;
+    }
+    void OpenNeighbourFile(int direction){
+        const auto folder=NeighbourFolder();
+        if(!folder){if(m_loaded)ShowToast(T(L"playlist.local_only"));return;}
+        std::vector<std::wstring> names;
+        std::error_code error;
+        for(std::filesystem::directory_iterator it(*folder,std::filesystem::directory_options::skip_permission_denied,error),end;!error&&it!=end;it.increment(error)){
+            std::error_code kindError;
+            if(it->is_regular_file(kindError))names.push_back(it->path().filename().wstring());
+        }
+        if(error)LOG("Next file: the folder could not be listed completely ("<<error.message()<<").");
+        const auto next=folder_playlist::Neighbour(std::filesystem::path(m_path).filename().wstring(),names,kVideoPatterns,direction);
+        if(!next){ShowToast(T(direction>0?L"playlist.last":L"playlist.first"));return;}
+        LOG("Opening the "<<(direction>0?"next":"previous")<<" file in the folder.");
+        Load((*folder/ *next).wstring());
     }
     void RecordRecent(const NeuralJobCompletion& completion,bool preserveCache=false){
         if(!m_recent)return;
@@ -4949,6 +5042,7 @@ private:
         m_neuralRequested=ReadIniFloat(L"Playback",L"NeuralView",1.0f)!=0.0f;
         m_upscalingRequested=ReadIniFloat(L"Playback",L"SuperResolution",0.0f)==1.0f;
         m_playbackVsr=ReadIniFloat(L"Playback",L"RtxVsr",vsr_policy::kPlaybackDefault?1.0f:0.0f)!=0.0f;
+        m_resumeEnabled=ReadIniFloat(L"Playback",L"ResumePosition",1.0f)!=0.0f;
         // Auto and the rung are separate keys on purpose. Every earlier version
         // persisted UpscaleHeight on every save, so a stored 1440 is the old
         // default rather than evidence of a choice, and keying Auto off that
@@ -5107,6 +5201,7 @@ private:
         WriteIniFloat(L"Playback",L"NeuralView",m_neuralRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"SuperResolution",m_upscalingRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"RtxVsr",m_playbackVsr?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"ResumePosition",m_resumeEnabled?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleAuto",m_upscaleAuto?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
         WriteIniFloat(L"Playback",L"FrameGenerationGenerated",static_cast<float>(m_frameGenPreference));
@@ -5897,6 +5992,8 @@ private:
             app_menu::UpdateMaskMenu(menu,m_loaded,!m_maskSource.pixels.empty(),m_maskInvert,MaskFeatherIndex());
             app_menu::UpdateSecondMixMenu(menu,ComparisonModesAvailable(),SecondMixIndex());
             EnableMenuItem(menu,IDM_SAVE_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
+            for(const UINT command:{IDM_NEXT_FILE,IDM_PREVIOUS_FILE})EnableMenuItem(menu,command,MF_BYCOMMAND|(NeighbourFolder()?MF_ENABLED:MF_GRAYED));
+            CheckMenuItem(menu,IDM_RESUME_POSITION,MF_BYCOMMAND|(m_resumeEnabled?MF_CHECKED:MF_UNCHECKED));
             DrawMenuBar(m_hwnd);
         }
     }
@@ -12389,6 +12486,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         case IDM_HELP_KEY_BINDINGS:EditKeyBindings();break;case IDM_HELP_USER_GUIDE:OpenUserGuide();break;
         case IDM_HELP_LOG_FOLDER:OpenLogFolder();break;case IDM_HELP_ABOUT:ShowAbout();break;
         case IDM_STEP_FRAME:StepCachedFrame();break;
+        case IDM_NEXT_FILE:OpenNeighbourFile(+1);break;case IDM_PREVIOUS_FILE:OpenNeighbourFile(-1);break;
+        case IDM_RESUME_POSITION:SetResumeEnabled(!m_resumeEnabled);break;
         // A, Fit and Fill in turn; from 1:1 it goes to Fit.
         case IDM_ASPECT_TOGGLE:SetAspect(m_onePixel?false:!m_fill,false);break;
         // Apply's path: a running session restarts at the playhead with the
@@ -12785,6 +12884,13 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     bool m_subtitleProbeRemember=false;
     subtitle::Choice m_subtitleChoice;
     int m_subtitleDelayMs=0;
+    // Where the loaded video is, as the last settled tick saw it, and for which
+    // source (ServiceResume). m_resumePending: the source has just arrived and
+    // its remembered position has not been looked up yet.
+    bool m_resumeEnabled=true;
+    std::wstring m_resumeKey;
+    double m_resumeSeenSec=-1.0,m_resumeSeenDuration=0.0;
+    bool m_resumePending=false;
     std::optional<SubtitleOverlay::Source> m_subtitleWanted;
     std::shared_ptr<const subtitle::Frame> m_subtitleFrame;
     const D3D12Renderer* m_subtitleRenderer=nullptr;

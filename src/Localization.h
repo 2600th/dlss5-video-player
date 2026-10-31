@@ -60,6 +60,12 @@ private:
             {L"menu.subtitles_next", L"Next subtitles"}, {L"menu.subtitles_load", L"Load subtitle file\u2026"},
             {L"menu.subtitles_earlier", L"Subtitles earlier (−0.1 s)"}, {L"menu.subtitles_later", L"Subtitles later (+0.1 s)"},
             {L"menu.subtitles_delay_reset", L"Reset subtitle delay"},
+            // P2.52: the folder's neighbours, and coming back where a video was left (ResumePolicy.h).
+            {L"menu.next_file", L"Next file in folder"}, {L"menu.previous_file", L"Previous file in folder"},
+            {L"menu.resume_position", L"Resume where you left off"},
+            {L"resume.resumed", L"Resumed at %s · Playback > Stop goes back to the start"},
+            {L"playlist.last", L"This is the last video in its folder"}, {L"playlist.first", L"This is the first video in its folder"},
+            {L"playlist.local_only", L"Next and previous file work on a video opened from a folder"},
             {L"subtitles.dialog", L"Load a subtitle file"}, {L"subtitles.filter", L"Subtitles"},
             {L"subtitles.failed", L"The subtitle file could not be read"}, {L"subtitles.delay", L"Subtitle delay "},
             {L"menu.mark_in", L"Mark In"}, {L"menu.mark_out", L"Mark Out"}, {L"menu.clear_marks", L"Clear marks"},

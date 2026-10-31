@@ -210,6 +210,11 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key
     add(play, IDM_STEP_FRAME, L"menu.step_frame");
     add(play, IDM_GOTO_TIMECODE, L"menu.goto_timecode");
     separator(play);
+    // Which file, and where in it: the folder's neighbours, and the checkbox
+    // that brings a video back where it was left (P2.52).
+    add(play, IDM_NEXT_FILE, L"menu.next_file"); add(play, IDM_PREVIOUS_FILE, L"menu.previous_file");
+    add(play, IDM_RESUME_POSITION, L"menu.resume_position", MF_CHECKED);
+    separator(play);
     add(play, IDM_MUTE, L"menu.mute");
     // Which track, then how it leaves the machine. UpdateAudioTracks rebuilds
     // only the rows above the separator, so the passthrough check survives

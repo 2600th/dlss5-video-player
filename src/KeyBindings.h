@@ -65,6 +65,8 @@ inline constexpr Command kCommands[] = {
     {L"subtitles-load", app_menu::IDM_SUBTITLE_LOAD}, {L"subtitles-earlier", app_menu::IDM_SUBTITLE_EARLIER},
     {L"subtitles-later", app_menu::IDM_SUBTITLE_LATER}, {L"subtitles-reset-delay", app_menu::IDM_SUBTITLE_DELAY_RESET},
     {L"mark-in", app_menu::IDM_MARK_IN}, {L"mark-out", app_menu::IDM_MARK_OUT}, {L"clear-marks", app_menu::IDM_CLEAR_MARKS},
+    {L"next-file", app_menu::IDM_NEXT_FILE}, {L"previous-file", app_menu::IDM_PREVIOUS_FILE},
+    {L"resume-toggle", app_menu::IDM_RESUME_POSITION},
     // View
     {L"aspect-toggle", app_menu::IDM_ASPECT_TOGGLE}, {L"aspect-fit", app_menu::IDM_ASPECT_FIT},
     {L"aspect-fill", app_menu::IDM_ASPECT_FILL}, {L"aspect-pixels", app_menu::IDM_ASPECT_ONE_TO_ONE},
@@ -114,6 +116,9 @@ inline constexpr DefaultBinding kDefaults[] = {
     {L".", L"step-frame"}, {L"Ctrl+G", L"goto-timecode"}, {L"M", L"mute"},
     {L"V", L"subtitles-next"}, {L"H", L"subtitles-earlier"}, {L"J", L"subtitles-later"},
     {L"I", L"mark-in"}, {L"O", L"mark-out"}, {L"Shift+I", L"clear-marks"}, {L"Shift+O", L"clear-marks"},
+    // New in 0.30.0, MPC-HC's and PotPlayer's keys for the folder's next and
+    // previous file; nothing had them.
+    {L"PgDn", L"next-file"}, {L"PgUp", L"previous-file"},
     {L"A", L"aspect-toggle"}, {L"F11", L"fullscreen"}, {L"Ctrl+E", L"viewing-adjustments"},
     {L"1", L"debug-final"}, {L"2", L"debug-input"}, {L"3", L"debug-motion"}, {L"4", L"debug-depth"},
     {L"R", L"compare-vsr"}, {L"C", L"compare-next"}, {L"Shift+C", L"compare-previous"},
