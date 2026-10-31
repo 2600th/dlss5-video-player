@@ -2688,7 +2688,9 @@ public:
                 return items;
             },
             [this]{return int(neural_runtime::ChoiceIndex(m_opt.detectedGpu.generation,m_neuralSettings.network,m_neuralSettings.previousRuntime));},
-            [this](int index){neural_runtime::ApplyChoice(m_opt.detectedGpu.generation,size_t(index),m_neuralSettings.network,m_neuralSettings.previousRuntime);}});
+            [this](int index){neural_runtime::ApplyChoice(m_opt.detectedGpu.generation,size_t(index),m_neuralSettings.network,m_neuralSettings.previousRuntime);},
+            // The default is network A on the current runtime (NeuralSettings{}).
+            int(neural_runtime::ChoiceIndex(m_opt.detectedGpu.generation,NeuralSettings{}.network,NeuralSettings{}.previousRuntime))});
     }
     ~PlayerApp(){RememberPlaybackPosition();if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_fontTitle)DeleteObject(m_fontTitle); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
 

@@ -1919,6 +1919,11 @@ struct PlayerAppTestAccess {
             [] { return std::vector<std::wstring>{L"A", L"B", L"C"}; },
             [&chosen] { return chosen; }, [&chosen](int index) { chosen = index; }};
         row.defaultChoice = 0;
+        // After the built-in rows (Network), which stay where they are.
+        const int rowId = IDC_PIC_RENDER_ROW_FIRST + int(app.m_pictureRenderRows.size());
+        // Network is marked against its default, A, like every other setting.
+        REQUIRE(!app.m_pictureRenderRows.empty());
+        CHECK_EQ(app.m_pictureRenderRows.front().defaultChoice, 0);
         app.m_pictureRenderRows.push_back(row);
         app.m_neuralSettings = {};
         app.m_colorSettings = {};
@@ -1993,16 +1998,16 @@ struct PlayerAppTestAccess {
         app.m_neuralSettings.style = 0; app.SyncNeuralSettingControls(dialog);
         // A table-driven row with a default is marked and reset like the rest.
         app.ShowPicturePage(dialog, true);
-        const HWND extra = GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST);
+        const HWND extra = GetDlgItem(dialog, rowId);
         SendMessageW(extra, CB_SETCURSEL, 2, 0);
-        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST, CBN_SELCHANGE), reinterpret_cast<LPARAM>(extra));
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(rowId, CBN_SELCHANGE), reinterpret_cast<LPARAM>(extra));
         CHECK_EQ(chosen, 2);
-        CHECK(marked(IDC_PIC_RENDER_ROW_FIRST));
-        CHECK(IsWindowVisible(dot(IDC_PIC_RENDER_ROW_FIRST)) != FALSE);
+        CHECK(marked(rowId));
+        CHECK(IsWindowVisible(dot(rowId)) != FALSE);
         CHECK(IsWindowVisible(dot(IDC_NS_TONE)) == FALSE);
-        doubleClick(IDC_PIC_RENDER_ROW_FIRST + kPictureLabelIdOffset);
+        doubleClick(rowId + kPictureLabelIdOffset);
         CHECK_EQ(chosen, 0);
-        CHECK(!marked(IDC_PIC_RENDER_ROW_FIRST));
+        CHECK(!marked(rowId));
         app.ShowPicturePage(dialog, false);
         CHECK(IsWindowVisible(dot(IDC_NS_TONE)) != FALSE);
         // Ctrl+Z is Revert: a key of the table, in its menu row, from the control
@@ -2042,7 +2047,7 @@ struct PlayerAppTestAccess {
         app.HandleCommand(IDM_PICTURE_REVERT);
         CHECK_EQ(app.m_neuralSettings.localTone, 0.7f);
         app.m_neuralSettings = settings;
-        app.m_pictureRenderRows.clear();
+        app.m_pictureRenderRows.pop_back();
         app.m_picturePipelinePage = false;
     }
 
