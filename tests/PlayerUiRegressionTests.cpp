@@ -3589,6 +3589,138 @@ struct PlayerAppTestAccess {
         app.m_comparison = entry; app.m_zoomStep = entryZoom; app.m_comparison.strength = 1.0f; app.ApplyComparison(false);
     }
 
+    // The compare bar's 0.30.0 parts (UI proposal 3.3): the selected mode's own
+    // controls, the "more" button and the Compare menu it opens, and the Mix's
+    // double-click, which is the bar's own and never the window's class style.
+    static void CheckCompareBarContextAndMix(PlayerApp& app)
+    {
+        const ComparisonSettings entry = app.m_comparison;
+        const bool configured = app.m_opt.neuralAddonConfigured;
+        app.m_opt.neuralAddonConfigured = true;
+        REQUIRE(app.CompareBarVisible());
+        REQUIRE(app.ComparisonModesAvailable());
+        // No class style: a double-click on a toolbar button would arrive as one.
+        CHECK((GetClassLongPtrW(app.m_hwnd, GCL_STYLE) & CS_DBLCLKS) == 0);
+        const auto find = [&](const compare_bar::Layout& layout, compare_bar::Part part) -> const compare_bar::Item* {
+            for (const auto& item : layout.items) if (item.part == part) return &item;
+            return nullptr;
+        };
+        const auto press = [&](const compare_bar::Item& item) {
+            return app.CompareBarMouseDown((item.bounds.left + item.bounds.right) / 2, (item.bounds.top + item.bounds.bottom) / 2, 1000);
+        };
+        // A mode without controls of its own has none, and "more" is always at the end.
+        app.SetComparisonMode(ComparisonMode::SplitVertical);
+        auto layout = app.CompareBarLayout();
+        CHECK(app.CompareBarContext().empty());
+        CHECK(find(layout, compare_bar::Part::DifferenceGain) == nullptr);
+        const auto* more = find(layout, compare_bar::Part::More);
+        REQUIRE(more != nullptr);
+        CHECK(&layout.items.back() == more);
+        CHECK(app.CompareBarItemEnabled(*more));
+        // Difference: its gain, then Luma | Color, whose mark follows the channels.
+        app.SetComparisonMode(ComparisonMode::Difference);
+        layout = app.CompareBarLayout();
+        const auto* gain = find(layout, compare_bar::Part::DifferenceGain);
+        const auto* luma = find(layout, compare_bar::Part::DifferenceLuma);
+        const auto* color = find(layout, compare_bar::Part::DifferenceColor);
+        if (!layout.contextFolded) {
+            REQUIRE(gain != nullptr && luma != nullptr && color != nullptr);
+            CHECK(gain->bounds.right <= luma->bounds.left && luma->bounds.right <= color->bounds.left);
+            CHECK(color->bounds.right < find(layout, compare_bar::Part::More)->bounds.left);
+            app.m_comparison.differenceLuma = true;
+            CHECK(press(*color));
+            CHECK(!app.m_comparison.differenceLuma);
+            CHECK(press(*color));
+            CHECK(!app.m_comparison.differenceLuma);
+            CHECK(press(*luma));
+            CHECK(app.m_comparison.differenceLuma);
+            CHECK_EQ(app.CompareContextLabel(compare_bar::Part::DifferenceGain), std::wstring(L"\u00d7") + std::to_wstring(int(app.m_comparison.differenceGain)));
+        } else {
+            CHECK(gain == nullptr && luma == nullptr && color == nullptr);
+        }
+        // The gain menu's pick: on the ladder, and named in the tag.
+        const uint64_t revision = app.m_labelTextRevision;
+        app.SetDifferenceGain(16.0f);
+        CHECK_EQ(app.m_comparison.differenceGain, 16.0f);
+        CHECK(app.m_labelTextRevision != revision);
+        app.SetDifferenceGain(5.0f);
+        CHECK_EQ(app.m_comparison.differenceGain, 4.0f);
+        // 2 x 2 shows its fourth pane's Mix where that pane is DLSS 5, not RTX VSR.
+        app.SetComparisonMode(ComparisonMode::Quad);
+        CHECK(app.CompareBarContext() == std::vector<compare_bar::Part>{compare_bar::Part::SecondMix});
+        CHECK(app.CompareContextLabel(compare_bar::Part::SecondMix).find(app.PercentText(app.m_comparison.secondMix)) != std::wstring::npos);
+        // The tips that name keys take them from the key table.
+        CHECK(app.CompareTipText(compare_bar::Part::MixTrack, L"compare.tip.mix").find(L"([ / ])") != std::wstring::npos);
+        CHECK(app.CompareTipText(compare_bar::Part::MixTrack, L"compare.tip.mix").find(L"Double-click") != std::wstring::npos);
+        CHECK(app.CompareTipText(compare_bar::Part::DifferenceGain, L"compare.tip.difference_gain").find(L"Shift+[ / Shift+]") != std::wstring::npos);
+        // "More" opens the whole Compare menu: the same rows, submenus and checks.
+        app.SyncFeatureMenuState();
+        const HMENU source = GetSubMenu(GetMenu(app.m_hwnd), 3);
+        HMENU copy = app_menu::CreateToolbarMenu(app_menu::ToolbarMenu::Compare, GetMenu(app.m_hwnd), app.m_loc, app.m_keys);
+        REQUIRE(source != nullptr && copy != nullptr);
+        CHECK(GetMenuState(source, IDM_COMPARE_NEURAL, MF_BYCOMMAND) != UINT(-1));
+        CHECK_EQ(GetMenuItemCount(source), GetMenuItemCount(copy));
+        for (const UINT command : {IDM_COMPARE_QUAD, IDM_COMPARE_AGAINST_VSR, IDM_COMPARE_HDR_AT_SDR, IDM_COMPARE_MASK_LOAD, IDM_COMPARE_DIFFERENCE_LUMA, IDM_COMPARE_SECOND_MIX_FIRST})
+            CHECK_EQ(GetMenuState(source, command, MF_BYCOMMAND), GetMenuState(copy, command, MF_BYCOMMAND));
+        DestroyMenu(copy);
+        // Two presses on the Mix inside the double-click time and distance put it back
+        // to 100%; the first press set it, as a single press always has.
+        app.SetComparisonMode(ComparisonMode::SplitVertical);
+        layout = app.CompareBarLayout();
+        const int y = (layout.bar.top + layout.bar.bottom) / 2;
+        const int quarter = layout.mixTrack.left + (layout.mixTrack.right - layout.mixTrack.left) / 4;
+        const DWORD interval = GetDoubleClickTime();
+        app.m_mixClick.Forget();
+        CHECK(app.CompareBarMouseDown(quarter, y, 5000));
+        CHECK(std::abs(app.m_comparison.strength - 0.5f) < 0.051f);
+        CHECK(app.CompareBarMouseDown(quarter, y, 5000 + interval));
+        CHECK_EQ(app.m_comparison.strength, 1.0f);
+        CHECK(!app.m_dragMix);
+        // The caption is part of the target; a slow second press is a new first one.
+        app.MouseUp(quarter, y);
+        CHECK(app.CompareBarMouseDown(quarter, y, 9000));
+        CHECK(app.CompareBarMouseDown(quarter, y, 9000 + interval + 1));
+        CHECK(app.m_comparison.strength != 1.0f);
+        app.MouseUp(quarter, y);
+        // A press anywhere else between the two - a toolbar button - is not part of
+        // a double-click, so the button acted and the Mix keeps its value.
+        app.m_mixClick.Forget();
+        CHECK(app.CompareBarMouseDown(quarter, y, 12000));
+        app.MouseUp(quarter, y);
+        CHECK(!app.CompareBarMouseDown(4, layout.bar.bottom + 4, 12010));
+        CHECK(app.CompareBarMouseDown(quarter, y, 12020));
+        CHECK(app.m_comparison.strength != 1.0f);
+        app.MouseUp(quarter, y);
+        if (layout.mixLabel.right > layout.mixLabel.left) {
+            app.m_mixClick.Forget();
+            const int caption = (layout.mixLabel.left + layout.mixLabel.right) / 2;
+            CHECK(app.CompareBarMouseDown(caption, y, 20000));
+            CHECK(app.CompareBarMouseDown(caption, y, 20001));
+            CHECK_EQ(app.m_comparison.strength, 1.0f);
+        }
+        // Every contextual label, 40 % longer, still fits its segment: the bar
+        // measures the widest value it can show, not the one it shows now.
+        const Localizer english = app.m_loc;
+        Localizer::Map pseudo;
+        for (const auto& [key, text] : Localizer::All()) pseudo[key] = translation::Pseudo(text, 0.4);
+        app.m_loc = Localizer(std::move(pseudo), L"x-pseudo");
+        for (const ComparisonMode mode : {ComparisonMode::Difference, ComparisonMode::Quad}) {
+            app.SetComparisonMode(mode);
+            const auto metrics = app.CompareBarMetrics();
+            const auto wide = compare_bar::LayoutBar(4000, 0, 96, metrics, true);
+            CHECK(!wide.contextFolded);
+            for (const auto& label : metrics.context) {
+                const auto* item = find(wide, label.part);
+                REQUIRE(item != nullptr);
+                const int needed = label.label + 2 * compare_bar::kLabelInsetDip + (label.menu ? compare_bar::kIconLabelGapDip + compare_bar::kChevronDip : 0);
+                CHECK(item->bounds.right - item->bounds.left >= needed);
+            }
+        }
+        app.m_loc = english;
+        app.m_opt.neuralAddonConfigured = configured;
+        app.m_comparison = entry; app.ApplyComparison(false);
+    }
+
     // The spatial mask on the Mix: loaded for a source, remembered for it, restored when
     // it comes back, and forgotten on Clear.
     static void CheckComparisonMask(PlayerApp& app)
@@ -3703,6 +3835,7 @@ struct PlayerAppTestAccess {
         CHECK_EQ(app.m_comparison.strength, 0.0f);
         app.m_comparison.strength = 1.0f;
         CheckCompareBarAndPeek(app);
+        CheckCompareBarContextAndMix(app);
         CheckComparisonMask(app);
         CheckSavedComparisonComposition(app);
         // Z steps along the ladder; with no render window or output to measure it is

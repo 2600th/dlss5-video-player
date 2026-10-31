@@ -255,7 +255,12 @@ HMENU CreateDebugViewMenu(UINT selectedCommand);
 // (the two drop-downs above), Picture and Viewing adjustments, Re-render from
 // here, Save comparison image, and the view. Every row is still a menu bar
 // command, so the key column teaches the key.
-enum class ToolbarMenu { Neural, Upscaler, Picture };
+//
+// Compare is the compare bar's "more" button (UI proposal 3.3): the menu bar's
+// whole Compare menu, submenus and all, so the settings the bar has no room
+// for - against RTX VSR, a view's own settings, the mask, HDR at SDR - are one
+// click from it, with the bar's checks, greys and keys.
+enum class ToolbarMenu { Neural, Upscaler, Picture, Compare };
 HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& localizer, const key_bindings::Table& keys);
 bool RoutesToRehook(PlayerCommandRoute route, UINT value);
 // Shows, relabels or removes the right-justified update item in the menu bar.

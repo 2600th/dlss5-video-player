@@ -5362,7 +5362,10 @@ private:
         // fade (a slow mode change, a busy queue), and must still present the
         // landed level rather than find nothing moving and leave the tags out.
         if(mode!=m_comparison.mode){m_tagFade.Reset(false);m_tagFade.Set(true,Clock::now(),m_activityMotionEnabled);m_tagsWereMoving=true;if(m_activityMotionEnabled)EnsureHoverTimer();}
+        const bool changed=mode!=m_comparison.mode;
         m_comparison.mode=mode;ApplyComparison();
+        // A mode brings its own controls onto the compare bar, and their tips move with them.
+        if(changed)RefreshToolbarTips();
         LOG("Comparison mode="<<static_cast<int>(mode)<<" splitX="<<m_comparison.splitX<<" zoomStep="<<m_zoomStep
             <<" reference="<<m_havePresentedPair);
     }
@@ -5394,6 +5397,12 @@ private:
         return 1;
     }
     void ToggleDifferenceLuma(){if(!ComparisonModesAvailable())return;m_comparison.differenceLuma=!m_comparison.differenceLuma;++m_labelTextRevision;ApplyComparison();}
+    // A rung picked from the compare bar's gain menu; off the ladder snaps onto it.
+    void SetDifferenceGain(float gain){
+        if(!ComparisonModesAvailable())return;
+        const float snapped=compare_settings::LoadDifferenceGain(gain);if(snapped==m_comparison.differenceGain)return;
+        m_comparison.differenceGain=snapped;++m_labelTextRevision;ApplyComparison();
+    }
     // Shift+R: Split, Wipe, Difference and Side by side compare the original against
     // RTX VSR instead of DLSS 5, and back. Named in the Difference tag, so it redraws.
     void ToggleAgainstVsr(){
@@ -6029,6 +6038,20 @@ private:
         }
         return {};
     }
+    // A compare bar tip; the parts added in 0.30.0 name their keys from the key
+    // table (toolbar_tips::WithKeys), so a rebinding is the key the tip says.
+    std::wstring CompareTipText(compare_bar::Part part,const wchar_t* key)const{
+        const auto both=[&](UINT less,UINT more){
+            const std::wstring a=m_keys.KeysFor(less),b=m_keys.KeysFor(more);
+            return a.empty()||b.empty()?a+b:a+L" / "+b;
+        };
+        switch(part){
+        case compare_bar::Part::MixTrack:return toolbar_tips::WithKeys(T(key),both(IDM_COMPARE_BLEND_LESS,IDM_COMPARE_BLEND_MORE));
+        case compare_bar::Part::DifferenceGain:return toolbar_tips::WithKeys(T(key),both(IDM_COMPARE_DIFFERENCE_LESS,IDM_COMPARE_DIFFERENCE_MORE));
+        case compare_bar::Part::DifferenceLuma:case compare_bar::Part::DifferenceColor:return toolbar_tips::WithKeys(T(key),m_keys.KeysFor(IDM_COMPARE_DIFFERENCE_LUMA));
+        default:return T(key);
+        }
+    }
     std::wstring m_callbackTip;
     LRESULT TipNotify(const NMHDR& header){
         if(header.code!=TTN_GETDISPINFOW)return 0;
@@ -6043,6 +6066,11 @@ private:
         if(HWND host=EnsureTipHost(m_hwnd)){
             for(size_t index=0;index<static_cast<size_t>(ToolbarAction::None);++index){
                 TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.hwnd=m_hwnd;info.uId=index;
+                SendMessageW(host,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&info));
+            }
+            // The compare bar's tips that name keys, too.
+            for(int part=0;part<=static_cast<int>(compare_bar::Part::More);++part){
+                TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.hwnd=m_hwnd;info.uId=kCompareTipIdBase+static_cast<UINT_PTR>(part);
                 SendMessageW(host,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&info));
             }
         }
@@ -6080,18 +6108,23 @@ private:
         // The compare bar's parts that can lose their words, named on hover. A part the
         // bar does not show keeps its tool with an empty rectangle, which never fires.
         const auto bar=CompareBarVisible()?CompareBarLayout():compare_bar::Layout{};
-        static constexpr std::array<std::pair<compare_bar::Part,const wchar_t*>,5> kCompareTips{{
+        static constexpr std::array<std::pair<compare_bar::Part,const wchar_t*>,11> kCompareTips{{
             {compare_bar::Part::ModeMenu,L"compare.tip.mode"},{compare_bar::Part::ZoomOut,L"compare.tip.zoom_out"},{compare_bar::Part::ZoomIn,L"compare.tip.zoom_in"},
-            {compare_bar::Part::Swap,L"compare.tip.swap"},{compare_bar::Part::Loupe,L"compare.tip.loupe"}}};
+            {compare_bar::Part::Swap,L"compare.tip.swap"},{compare_bar::Part::Loupe,L"compare.tip.loupe"},
+            {compare_bar::Part::MixTrack,L"compare.tip.mix"},{compare_bar::Part::DifferenceGain,L"compare.tip.difference_gain"},
+            {compare_bar::Part::DifferenceLuma,L"compare.tip.difference_luma"},{compare_bar::Part::DifferenceColor,L"compare.tip.difference_color"},
+            {compare_bar::Part::SecondMix,L"compare.tip.second_mix"},{compare_bar::Part::More,L"compare.tip.more"}}};
         for(const auto& [part,key]:kCompareTips){
             RECT bounds{};
             for(const auto& item:bar.items)if(item.part==part)bounds=item.bounds;
+            // The Mix's tip covers its caption and read-out too: the double-click does.
+            if(part==compare_bar::Part::MixTrack&&bounds.right>bounds.left)bounds=bar.mixGroup;
             TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_SUBCLASS;
             info.hwnd=m_hwnd;info.uId=kCompareTipIdBase+static_cast<UINT_PTR>(part);
             if(SendMessageW(host,TTM_GETTOOLINFOW,0,reinterpret_cast<LPARAM>(&info))){
                 info.rect=bounds;SendMessageW(host,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&info));continue;
             }
-            text.push_back(std::make_unique<std::wstring>(T(key)));
+            text.push_back(std::make_unique<std::wstring>(CompareTipText(part,key)));
             info.lpszText=text.back()->data();info.rect=bounds;
             SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
         }
@@ -9339,6 +9372,7 @@ private:
     static constexpr wchar_t kCompareSwapGlyph=L'\xeb31';    // switch-horizontal
     static constexpr wchar_t kCompareLoupeGlyph=L'\xfcb0';   // zoom-scan
     static constexpr wchar_t kCompareChevronGlyph=L'\xea5f'; // chevron-down
+    static constexpr wchar_t kCompareMoreGlyph=L'\xea95';    // dots
     struct CompareHover{compare_bar::Part part=compare_bar::Part::None;int index=0;
         friend bool operator==(const CompareHover&,const CompareHover&)=default;};
     // The bar's text measured in the fonts it is painted with, so the layout steps down
@@ -9353,9 +9387,46 @@ private:
         compare_bar::Metrics metrics;
         for(const ComparisonMode mode:CompareBarModes()){metrics.modeLabels.push_back(measure(CompareModeLabel(mode,false)));metrics.modeShortLabels.push_back(measure(CompareModeLabel(mode,true)));}
         metrics.swapLabel=measure(T(L"compare.swap"));metrics.loupeLabel=measure(T(L"compare.loupe"));metrics.mixLabel=measure(T(L"compare.mix"));
+        // The contextual controls are measured at their widest value, so a change of
+        // gain or of fourth-pane Mix never moves the row.
+        for(const compare_bar::Part part:CompareBarContext()){
+            std::wstring widest=CompareContextLabel(part);bool menu=false;
+            if(part==compare_bar::Part::DifferenceGain){widest=DifferenceGainText(compare_settings::kDifferenceGains.back());menu=true;}
+            if(part==compare_bar::Part::SecondMix){widest=SecondMixText(2.0f);menu=true;}
+            metrics.context.push_back({part,measure(widest),menu});
+        }
         if(m_iconFont){SelectObject(dc,m_iconFont);const wchar_t glyph=kCompareSwapGlyph;SIZE size{};GetTextExtentPoint32W(dc,&glyph,1,&size);metrics.icon=std::max(1,int(size.cx));}
         SelectObject(dc,old);ReleaseDC(m_hwnd,dc);
         return metrics;
+    }
+    // The selected mode's own controls (UI proposal 3.3), in bar order: Difference
+    // shows its gain and which channels it compares, 2 x 2 its fourth pane's Mix
+    // where that pane is DLSS 5 again rather than RTX VSR. Split and Wipe have Swap,
+    // which the bar carries for every mode. Each is also a row of the Compare menu
+    // the bar's "more" button opens, which is where they go when the row is full.
+    // M3 (0.31.0): the loop, speed and flicker-map controls join here, by mode.
+    std::vector<compare_bar::Part> CompareBarContext()const{
+        if(!ComparisonModesAvailable())return {};
+        switch(SelectedComparisonMode()){
+        case ComparisonMode::Difference:return {compare_bar::Part::DifferenceGain,compare_bar::Part::DifferenceLuma,compare_bar::Part::DifferenceColor};
+        case ComparisonMode::Quad:if(!VsrUsable())return {compare_bar::Part::SecondMix};return {};
+        default:return {};
+        }
+    }
+    static std::wstring DifferenceGainText(float gain){wchar_t text[16]{};swprintf_s(text,L"\u00d7%g",double(gain));return text;}
+    std::wstring SecondMixText(float mix)const{
+        std::wstring text=T(L"compare.second_mix");
+        if(const size_t at=text.find(L"%s");at!=std::wstring::npos)text.replace(at,2,PercentText(mix));
+        return text;
+    }
+    std::wstring CompareContextLabel(compare_bar::Part part)const{
+        switch(part){
+        case compare_bar::Part::DifferenceGain:return DifferenceGainText(m_comparison.differenceGain);
+        case compare_bar::Part::DifferenceLuma:return T(L"compare.luma");
+        case compare_bar::Part::DifferenceColor:return T(L"compare.color");
+        case compare_bar::Part::SecondMix:return SecondMixText(m_comparison.secondMix);
+        default:return {};
+        }
     }
     compare_bar::Layout CompareBarLayout()const{
         RECT c{};GetClientRect(m_hwnd,&c);
@@ -9419,6 +9490,8 @@ private:
     bool CompareBarPartEnabled(compare_bar::Part part)const{
         switch(part){
         case compare_bar::Part::ZoomOut:case compare_bar::Part::ZoomIn:return m_loaded&&m_renderer!=nullptr;
+        // The Compare menu greys its own rows; the button to it is always live.
+        case compare_bar::Part::More:return true;
         case compare_bar::Part::None:return false;
         default:return ComparisonModesAvailable();
         }
@@ -9431,21 +9504,39 @@ private:
         }
         return CompareBarPartEnabled(item.part);
     }
+    // The Mix's double-click (compare_bar::DoubleClick): the press time is the
+    // message's, so the test of "quick enough" is the one Windows applies.
+    compare_bar::DoubleClick m_mixClick;
     void CompareBarMouseMove(int x,int y){
         if(m_dragMix&&GetCapture()==m_hwnd){SetMix(compare_bar::MixFromX(CompareBarLayout().mixTrack,x));return;}
         if(!CompareBarVisible()){SetCompareHover({});return;}
         const auto layout=CompareBarLayout();const auto* item=compare_bar::HitTest(layout,POINT{x,y});
         SetCompareHover(item&&CompareBarItemEnabled(*item)?CompareHover{item->part,item->index}:CompareHover{});
     }
-    bool CompareBarMouseDown(int x,int y){
-        if(!CompareBarVisible())return false;
+    bool CompareBarMouseDown(int x,int y){return CompareBarMouseDown(x,y,static_cast<DWORD>(GetMessageTime()));}
+    bool CompareBarMouseDown(int x,int y,DWORD time){
+        if(!CompareBarVisible()){m_mixClick.Forget();return false;}
         const auto layout=CompareBarLayout();
-        if(!PtIn(layout.bar,x,y))return false;
+        if(!PtIn(layout.bar,x,y)){m_mixClick.Forget();return false;}
+        // Two presses on the Mix within the system's double-click time and distance
+        // put it back to 100%, the render as the model made it. Detected here, not
+        // through CS_DBLCLKS, so a toolbar button keeps acting on every press.
+        if(PtIn(layout.mixGroup,x,y)&&ComparisonModesAvailable()){
+            if(m_mixClick.Press(time,POINT{x,y},GetDoubleClickTime(),GetSystemMetrics(SM_CXDOUBLECLK),GetSystemMetrics(SM_CYDOUBLECLK))){
+                if(m_dragMix){m_dragMix=false;if(GetCapture()==m_hwnd)ReleaseCapture();}
+                SetMix(1.0f);SyncSliderHover();return true;
+            }
+        }else m_mixClick.Forget();
         const auto* item=compare_bar::HitTest(layout,POINT{x,y});
         // A press anywhere on the row is the row's, enabled or not, so it never falls
         // through to a toolbar button that happens to sit under it.
         if(!item||!CompareBarItemEnabled(*item))return true;
         switch(item->part){
+        case compare_bar::Part::DifferenceGain:ShowDifferenceGainMenu(item->bounds);break;
+        case compare_bar::Part::DifferenceLuma:if(!m_comparison.differenceLuma)ToggleDifferenceLuma();break;
+        case compare_bar::Part::DifferenceColor:if(m_comparison.differenceLuma)ToggleDifferenceLuma();break;
+        case compare_bar::Part::SecondMix:ShowSecondMixMenu(item->bounds);break;
+        case compare_bar::Part::More:ShowToolbarMenu(app_menu::ToolbarMenu::Compare,item->bounds,true);break;
         case compare_bar::Part::Mode:SetComparisonMode(CompareBarModes()[size_t(item->index)]);break;
         case compare_bar::Part::ModeMenu:ShowCompareModeMenu(item->bounds);break;
         case compare_bar::Part::MixTrack:m_dragMix=true;SetCapture(m_hwnd);SetMix(compare_bar::MixFromX(layout.mixTrack,x));SyncSliderHover();break;
@@ -9468,6 +9559,32 @@ private:
         const UINT chosen=UINT(TrackPopupMenuEx(menu,TPM_RETURNCMD|TPM_NONOTIFY|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,anchor.x,anchor.y,m_hwnd,nullptr));
         DestroyMenu(menu);
         if(chosen>=1&&chosen<=modes.size())SetComparisonMode(modes[chosen-1]);
+    }
+    // The contextual drop-downs: the gain ladder and the fourth pane's Mixes, the
+    // current one checked, opening upward from the control like the mode menu.
+    UINT TrackCompareChoiceMenu(RECT button,const std::vector<std::wstring>& labels,size_t checked){
+        HMENU menu=CreatePopupMenu();if(!menu)return 0;
+        for(size_t index=0;index<labels.size();++index)
+            AppendMenuW(menu,MF_STRING|(index==checked?MF_CHECKED:0u),UINT_PTR(index+1),labels[index].c_str());
+        POINT anchor{button.left,button.top};ClientToScreen(m_hwnd,&anchor);
+        const UINT chosen=UINT(TrackPopupMenuEx(menu,TPM_RETURNCMD|TPM_NONOTIFY|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,anchor.x,anchor.y,m_hwnd,nullptr));
+        DestroyMenu(menu);
+        return chosen;
+    }
+    void ShowDifferenceGainMenu(RECT button){
+        std::vector<std::wstring> labels;size_t checked=0;
+        for(size_t index=0;index<compare_settings::kDifferenceGains.size();++index){
+            labels.push_back(DifferenceGainText(compare_settings::kDifferenceGains[index]));
+            if(compare_settings::kDifferenceGains[index]==m_comparison.differenceGain)checked=index;
+        }
+        const UINT chosen=TrackCompareChoiceMenu(button,labels,checked);
+        if(chosen>=1&&chosen<=labels.size())SetDifferenceGain(compare_settings::kDifferenceGains[chosen-1]);
+    }
+    void ShowSecondMixMenu(RECT button){
+        std::vector<std::wstring> labels;
+        for(UINT index=0;index<IDM_COMPARE_SECOND_MIX_COUNT;++index)labels.push_back(T((L"menu.compare_second_mix_"+std::to_wstring(index)).c_str()));
+        const UINT chosen=TrackCompareChoiceMenu(button,labels,SecondMixIndex());
+        if(chosen>=1&&chosen<=labels.size())SetSecondMix(compare_settings::kSecondMixes[chosen-1]);
     }
     // `glyph` is drawn in the icon font ahead of the label, or alone when the label is
     // empty; a chevron after the label marks a button that opens a menu.
@@ -9535,6 +9652,15 @@ private:
                 const bool icon=item.face==compare_bar::Face::Icon||item.face==compare_bar::Face::IconLabel;
                 DrawCompareSegment(dc,item.bounds,item.face==compare_bar::Face::Icon?std::wstring{}:T(swap?L"compare.swap":L"compare.loupe"),enabled,swap?m_comparison.swap:m_loupe,level(item),
                                    icon?(swap?kCompareSwapGlyph:kCompareLoupeGlyph):wchar_t(0));break;}
+            // The mode's own controls: two drop-downs, and Luma | Color as one
+            // segmented pair whose mark says which channels are compared.
+            case compare_bar::Part::DifferenceGain:case compare_bar::Part::SecondMix:
+                DrawCompareSegment(dc,item.bounds,CompareContextLabel(item.part),enabled,false,level(item),0,true);break;
+            case compare_bar::Part::DifferenceLuma:case compare_bar::Part::DifferenceColor:
+                DrawCompareSegment(dc,item.bounds,CompareContextLabel(item.part),enabled,(item.part==compare_bar::Part::DifferenceLuma)==m_comparison.differenceLuma,level(item));break;
+            // Without the icon font the button is an ellipsis in the text font.
+            case compare_bar::Part::More:
+                DrawCompareSegment(dc,item.bounds,m_iconFont?std::wstring{}:std::wstring(L"\u2026"),enabled,false,level(item),m_iconFont?kCompareMoreGlyph:wchar_t(0));break;
             default:break;
             }
         }
@@ -12180,11 +12306,12 @@ private:
     // with the bar's checks and greys copied (AppMenu.cpp CreateToolbarMenu), so
     // the menu state is brought up to date first and a pick runs the same
     // command the bar's row would.
-    void ShowToolbarMenu(app_menu::ToolbarMenu which,const RECT& anchor){
+    // `alignRight` opens it from the anchor's right edge, for a button at the end of a row.
+    void ShowToolbarMenu(app_menu::ToolbarMenu which,const RECT& anchor,bool alignRight=false){
         SyncFeatureMenuState();
         HMENU menu=app_menu::CreateToolbarMenu(which,GetMenu(m_hwnd),m_loc,m_keys);if(!menu)return;
-        POINT point{anchor.left,anchor.top};ClientToScreen(m_hwnd,&point);
-        const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,point.x,point.y,0,m_hwnd,nullptr);
+        POINT point{alignRight?anchor.right:anchor.left,anchor.top};ClientToScreen(m_hwnd,&point);
+        const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|(alignRight?TPM_RIGHTALIGN:TPM_LEFTALIGN)|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,point.x,point.y,0,m_hwnd,nullptr);
         DestroyMenu(menu);if(command)HandleCommand(command);
     }
 

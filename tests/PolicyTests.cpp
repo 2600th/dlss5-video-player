@@ -10703,6 +10703,94 @@ void compare_bar_fits_every_width_and_dpi_test()
     for(const Item& item:plain.items)if(item.part==Part::Swap||item.part==Part::Loupe)CHECK(item.face==Face::Label);
 }
 
+// The selected mode's own controls (UI proposal 3.3): placed after Loupe in the
+// hint's room, all of them or none, never changing the tier; the "more" button at
+// the right end of every tier, at every width from the player's minimum up.
+void compare_bar_carries_the_modes_controls_and_folds_them_test()
+{
+    using namespace compare_bar;
+    for(const UINT dpi:{96u,144u,192u}){
+        Metrics metrics=EstimatedMetrics(8,dpi);
+        const Metrics plain=metrics;
+        // Difference: a gain drop-down and Luma | Color.
+        metrics.context={{Part::DifferenceGain,Scale(24,dpi),true},{Part::DifferenceLuma,Scale(30,dpi),false},{Part::DifferenceColor,Scale(34,dpi),false}};
+        const int gutter=Scale(kGutterDip,dpi);
+        bool shown=false,folded=false;
+        for(int width=MinimumToolbarClientWidth(dpi);width<=Scale(2400,dpi);width+=Scale(7,dpi)){
+            const Layout bar=LayoutBar(width,0,dpi,metrics,true);
+            CHECK(bar.fits);
+            // The controls never cost the modes their labels.
+            CHECK(bar.tier==LayoutBar(width,0,dpi,plain,true).tier);
+            // "More" is last, at the gutter, the size it should be.
+            REQUIRE(!bar.items.empty());
+            const Item& more=bar.items.back();
+            CHECK(more.part==Part::More);
+            CHECK_EQ(LONG(width-gutter),more.bounds.right);
+            CHECK_EQ(LONG(Scale(kMoreDip,dpi)),more.bounds.right-more.bounds.left);
+            size_t context=0;LONG previous=0,loupeRight=0;
+            for(const Item& item:bar.items){
+                CHECK(item.bounds.left>=previous);previous=item.bounds.right;
+                if(item.part==Part::Loupe)loupeRight=item.bounds.right;
+                if(item.part==Part::DifferenceGain||item.part==Part::DifferenceLuma||item.part==Part::DifferenceColor){
+                    ++context;CHECK(item.bounds.left>loupeRight);CHECK(item.bounds.right<more.bounds.left);
+                    // Wide enough for its text, and the gain for its chevron too.
+                    const ContextLabel* label=nullptr;for(const ContextLabel& c:metrics.context)if(c.part==item.part)label=&c;
+                    REQUIRE(label!=nullptr);
+                    const int extra=label->menu?Scale(kIconLabelGapDip,dpi)+Scale(kChevronDip,dpi):0;
+                    CHECK(item.bounds.right-item.bounds.left>=label->label+2*Scale(kLabelInsetDip,dpi)+extra);
+                }
+            }
+            // All or none, and folded exactly when none.
+            CHECK(context==0||context==metrics.context.size());
+            CHECK(bar.contextFolded==(context==0));
+            if(context)shown=true;else folded=true;
+            if(bar.hint.right>bar.hint.left)CHECK(bar.hint.right<=more.bounds.left);
+            // The Mix group runs from its caption (or track) to its read-out.
+            CHECK(bar.mixGroup.left<=bar.mixTrack.left&&bar.mixGroup.right>=bar.mixTrack.right);
+            CHECK(bar.mixGroup.top==bar.bar.top&&bar.mixGroup.bottom==bar.bar.bottom);
+        }
+        // The player's minimum folds them; a wide window shows them.
+        CHECK(shown);CHECK(folded);
+    }
+    // A mode with no controls of its own folds nothing.
+    const Layout none=LayoutBar(700,0,96,EstimatedMetrics(8,96),true);
+    CHECK(!none.contextFolded);
+    CHECK(none.items.back().part==Part::More);
+    // "More" is a target like the rest.
+    const Item& more=none.items.back();
+    const Item* hit=HitTest(none,POINT{(more.bounds.left+more.bounds.right)/2,(more.bounds.top+more.bounds.bottom)/2});
+    CHECK(hit!=nullptr&&hit->part==Part::More);
+}
+
+// The Mix's double-click: two presses within the system's time and distance,
+// the second one reported once; slow, far or forgotten presses are first presses.
+void compare_bar_double_click_is_the_systems_and_the_mixs_own_test()
+{
+    using compare_bar::DoubleClick;
+    const UINT interval=500;const int cx=4,cy=4;
+    DoubleClick click;
+    CHECK(!click.Press(1000,POINT{10,10},interval,cx,cy));
+    CHECK(click.Press(1000+interval,POINT{12,8},interval,cx,cy));
+    // A third press starts over, so a triple-click is one double-click and a press.
+    CHECK(!click.Press(1000+interval+10,POINT{12,8},interval,cx,cy));
+    // Too slow: the second becomes a first.
+    CHECK(!click.Press(5000,POINT{10,10},interval,cx,cy));
+    CHECK(!click.Press(5000+interval+1,POINT{10,10},interval,cx,cy));
+    CHECK(click.Press(5000+interval+2,POINT{10,10},interval,cx,cy));
+    // Too far, in either direction (the rectangle is centred on the first press).
+    CHECK(!click.Press(9000,POINT{10,10},interval,cx,cy));
+    CHECK(!click.Press(9001,POINT{13,10},interval,cx,cy));
+    CHECK(!click.Press(9100,POINT{50,10},interval,cx,cy));
+    CHECK(!click.Press(9101,POINT{50,13},interval,cx,cy));
+    // Forgotten (a press elsewhere between the two): no double-click.
+    CHECK(!click.Press(12000,POINT{10,10},interval,cx,cy));
+    click.Forget();
+    CHECK(!click.Press(12001,POINT{10,10},interval,cx,cy));
+    // The tick count wraps; an interval across the wrap still counts.
+    CHECK(!click.Press(0xFFFFFF00u,POINT{10,10},interval,cx,cy));
+    CHECK(click.Press(0x00000010u,POINT{10,10},interval,cx,cy));
+}
+
 // The zoom ladder is in screen pixels per output pixel, so the same step is a
 // different scale in a different window, and steps that would not magnify are skipped.
 void compare_zoom_ladder_zooms_at_the_pointer_and_pans_test()
@@ -16844,6 +16932,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_label_premultiply_matches_the_gdi_composite_test),
     TEST_CASE(compare_bar_lays_out_and_hit_tests_test),
     TEST_CASE(compare_bar_fits_every_width_and_dpi_test),
+    TEST_CASE(compare_bar_carries_the_modes_controls_and_folds_them_test),
+    TEST_CASE(compare_bar_double_click_is_the_systems_and_the_mixs_own_test),
     TEST_CASE(compare_zoom_ladder_zooms_at_the_pointer_and_pans_test),
     TEST_CASE(compare_loupe_and_one_to_one_placement_test),
     TEST_CASE(compare_mask_shrinks_feathers_and_is_remembered_per_source_test),

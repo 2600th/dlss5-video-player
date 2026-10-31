@@ -84,6 +84,15 @@ private:
             // What a narrow window shows instead: the bar steps down to these before it folds the modes into a menu.
             {L"compare.mode.neural.short", L"DLSS 5"}, {L"compare.mode.original.short", L"Orig."}, {L"compare.mode.split.short", L"Split"}, {L"compare.mode.wipe.short", L"Wipe"}, {L"compare.mode.difference.short", L"Diff."}, {L"compare.mode.side_by_side.short", L"Side"}, {L"compare.mode.quad.short", L"2 \u00d7 2"},
             {L"compare.tip.mode", L"Compare mode (C)"}, {L"compare.tip.swap", L"Swap sides (X)"}, {L"compare.tip.loupe", L"Loupe (L)"}, {L"compare.tip.zoom_in", L"Zoom in (Z)"}, {L"compare.tip.zoom_out", L"Zoom out (Shift+Z)"},
+            // The selected mode's own controls on the bar, and the button to the rest of the Compare menu.
+            // The tips name their keys from the key table, after the first line.
+            {L"compare.luma", L"Luma"}, {L"compare.color", L"Color"}, {L"compare.second_mix", L"Pane 4 \u00b7 %s"},
+            {L"compare.tip.mix", L"Mix: how much of the DLSS 5 render you see\nInstant, and not exported. Double-click to put it back to 100%."},
+            {L"compare.tip.difference_gain", L"Difference gain: how far the difference is amplified\n\u00d71 is the raw difference; \u00d732 makes a one-step change visible."},
+            {L"compare.tip.difference_luma", L"Luma: compare brightness only"},
+            {L"compare.tip.difference_color", L"Color: compare each color channel"},
+            {L"compare.tip.second_mix", L"Pane 4: DLSS 5 at a second Mix, to see two strengths at once"},
+            {L"compare.tip.more", L"More compare settings: against RTX VSR, each view's own settings, the mask, HDR at SDR"},
             {L"compare.hint.hold", L"Hold on the picture to see the original"},
             {L"compare.hint.unavailable", L"Turn on DLSS 5 to compare"}, {L"compare.tip.mode_cycle", L" (C and Shift+C step through the modes)"},
             {L"compare.tag.original", L"ORIGINAL"}, {L"compare.tag.dlss", L"DLSS 5"},
