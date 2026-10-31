@@ -331,6 +331,90 @@ struct PlayerAppTestAccess {
         CHECK(WritePrivateProfileStringW(L"Start", L"ThumbnailFetch", L"0", app.SettingsPath().c_str()));
     }
 
+    // P2.52: Playback's rows for the folder and for resuming, the checkbox's
+    // setting, and the [Resume] entry kept between the ends and dropped at them.
+    static void resume_position_and_folder_rows_test()
+    {
+        PlayerApp& app = fixture->app;
+        REQUIRE(app.m_hwnd != nullptr);
+        const HMENU menu = GetMenu(app.m_hwnd);
+        REQUIRE(menu != nullptr);
+        app.SyncFeatureMenuState();
+        // Nothing open: no folder to step through.
+        CHECK((GetMenuState(menu, IDM_NEXT_FILE, MF_BYCOMMAND) & MF_GRAYED) != 0);
+        CHECK((GetMenuState(menu, IDM_PREVIOUS_FILE, MF_BYCOMMAND) & MF_GRAYED) != 0);
+        CHECK(app.m_resumeEnabled);
+        CHECK((GetMenuState(menu, IDM_RESUME_POSITION, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        CHECK(app.m_keys.KeysFor(IDM_NEXT_FILE) == L"PgDn");
+        CHECK(app.m_keys.KeysFor(IDM_PREVIOUS_FILE) == L"PgUp");
+
+        // The checkbox is a setting: it survives a reload, and off keeps nothing.
+        app.HandleCommand(IDM_RESUME_POSITION);
+        CHECK(!app.m_resumeEnabled);
+        CHECK((GetMenuState(menu, IDM_RESUME_POSITION, MF_BYCOMMAND) & MF_CHECKED) == 0);
+        app.m_resumeEnabled = true;
+        app.LoadVideoSettings();
+        CHECK(!app.m_resumeEnabled);
+        const auto settings = app.SettingsPath();
+        const std::wstring key = L"00000000p2520052";
+        const auto kept = [&] {
+            wchar_t text[128]{};
+            GetPrivateProfileStringW(L"Resume", key.c_str(), L"", text, static_cast<DWORD>(std::size(text)), settings.c_str());
+            return resume::Parse(text);
+        };
+        WritePrivateProfileStringW(L"Resume", key.c_str(), nullptr, settings.c_str());
+        app.m_resumeKey = key; app.m_resumeSeenSec = 1234.5; app.m_resumeSeenDuration = 3600.0;
+        app.RememberPlaybackPosition();
+        CHECK(!kept().has_value());
+        app.HandleCommand(IDM_RESUME_POSITION);
+        CHECK(app.m_resumeEnabled);
+
+        // On: the middle of a video is kept, numbered after the newest entry.
+        app.m_resumeSeenSec = 1234.5; app.m_resumeSeenDuration = 3600.0;
+        app.RememberPlaybackPosition();
+        const auto record = kept();
+        REQUIRE(record.has_value());
+        CHECK_EQ(record->position, 1234.5);
+        CHECK_EQ(record->duration, 3600.0);
+        CHECK(record->sequence >= 1);
+        // What was seen is written once: a second call has nothing new to say.
+        CHECK(app.m_resumeSeenSec < 0.0);
+        // Stopped in the credits: the entry goes, so the next open starts at the top.
+        app.m_resumeSeenSec = 3590.0;
+        app.RememberPlaybackPosition();
+        CHECK(!kept().has_value());
+        app.m_resumeKey.clear();
+    }
+
+    // P2.41: File's clipboard rows and their keys. Copy needs a picture on
+    // screen; a paste opens a file or a link, so it is live with nothing open.
+    // The real clipboard is the user's, so no case here writes to it.
+    static void clipboard_rows_test()
+    {
+        PlayerApp& app = fixture->app;
+        REQUIRE(app.m_hwnd != nullptr);
+        const HMENU menu = GetMenu(app.m_hwnd);
+        REQUIRE(menu != nullptr);
+        app.SyncFeatureMenuState();
+        app.SyncSourceActionAvailability();
+        const HMENU file = GetSubMenu(menu, 0);
+        REQUIRE(file != nullptr);
+        CHECK(GetMenuState(file, IDM_PASTE, MF_BYCOMMAND) != static_cast<UINT>(-1));
+        CHECK(GetMenuState(file, IDM_COPY_COMPARISON_IMAGE, MF_BYCOMMAND) != static_cast<UINT>(-1));
+        CHECK((GetMenuState(menu, IDM_COPY_COMPARISON_IMAGE, MF_BYCOMMAND) & MF_GRAYED) != 0);
+        CHECK((GetMenuState(menu, IDM_PASTE, MF_BYCOMMAND) & MF_GRAYED) == 0);
+        CHECK(app.m_keys.KeysFor(IDM_PASTE) == L"Ctrl+V");
+        CHECK(app.m_keys.KeysFor(IDM_COPY_COMPARISON_IMAGE) == L"Ctrl+Shift+C");
+        wchar_t text[128]{};
+        GetMenuStringW(menu, IDM_COPY_COMPARISON_IMAGE, text, static_cast<int>(std::size(text)), MF_BYCOMMAND);
+        CHECK(std::wstring(text) == app.T(L"menu.copy_comparison") + L"\tCtrl+Shift+C");
+        // Nothing to copy: the command does nothing and says nothing.
+        app.m_sourceNotice.clear();
+        app.HandleCommand(IDM_COPY_COMPARISON_IMAGE);
+        CHECK(app.m_sourceNotice.empty());
+    }
+
+
     static void old_source_policy_requests_a_fresh_resolution_test()
     {
         PlayerApp& app = fixture->app;
@@ -3055,6 +3139,8 @@ struct PlayerAppTestAccess {
         UI_CASE(cache_settings_round_trip_test),
         UI_CASE(saved_settings_survive_a_reload_test),
         UI_CASE(hidden_window_and_menu_bar_open_test),
+        UI_CASE(resume_position_and_folder_rows_test),
+        UI_CASE(clipboard_rows_test),
         UI_CASE(old_source_policy_requests_a_fresh_resolution_test),
         UI_CASE(recent_rollover_keeps_the_cache_test),
         UI_CASE(neural_button_label_and_upscaling_rungs_test),

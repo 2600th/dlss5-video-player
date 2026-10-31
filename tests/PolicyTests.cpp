@@ -1,6 +1,9 @@
 #include "CacheEvictionPolicy.h"
 #include "VariableFrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
+#include "ClipboardPolicy.h"
+#include "FolderPlaylistPolicy.h"
+#include "ResumePolicy.h"
 #include "StatusNotePolicy.h"
 #include "Log.h"
 #include "AudioFadePolicy.h"
@@ -112,6 +115,7 @@
 #include <powerbase.h>
 
 #include <filesystem>
+#include <regex>
 #include <fstream>
 #include <iterator>
 #include <algorithm>
@@ -3570,7 +3574,8 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(CommandForPlayerKey('H', false, false) == app_menu::IDM_SUBTITLE_EARLIER);
     CHECK(CommandForPlayerKey('J', false, false) == app_menu::IDM_SUBTITLE_LATER);
     CHECK(!CommandForPlayerKey('V', false, true).has_value());
-    CHECK(!CommandForPlayerKey('V', true, false).has_value());
+    // Ctrl+V is every Windows program's paste, which opens the clipboard (P2.41).
+    CHECK(CommandForPlayerKey('V', true, false) == app_menu::IDM_PASTE);
     // Ctrl+Alt+C is the overlay hotkey for the adjustments; Ctrl+C stays unclaimed.
     CHECK(!CommandForPlayerKey('C', true, false).has_value());
     // The keys main.cpp used to match one by one before the table, each still
@@ -8789,9 +8794,19 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--format-sort-force",
         L"-S",
         L"height,vbr,abr",
+        // Captions in the interface language and English: chosen and printed,
+        // never downloaded by yt-dlp (P2.42).
+        L"--write-subs",
+        L"--write-auto-subs",
+        L"--sub-langs",
+        L"en(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?",
+        L"--sub-format",
+        L"vtt",
         L"--get-url",
         L"--print",
         L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s",
+        L"--print",
+        L"captions=%(requested_subtitles)j",
         // The end of the options: nothing after it is read as one.
         L"--",
         std::wstring(url),
@@ -8799,6 +8814,182 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
 
     CHECK_EQ(expected, BuildYouTubeResolverArguments(
                            helperDirectory, url, YouTubeSourceQuality::P1080));
+    // Another interface language is asked for first, and English after it.
+    const auto german = BuildYouTubeResolverArguments(helperDirectory, url, YouTubeSourceQuality::P1080, L"de-DE");
+    const auto langs = std::find(german.begin(), german.end(), L"--sub-langs");
+    REQUIRE(langs != german.end() && langs + 1 != german.end());
+    CHECK_EQ(std::wstring(L"de(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?,en(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?"), *(langs + 1));
+    // Still nothing that updates or reconfigures the pinned helper.
+    for (const auto& argument : german) {
+        CHECK(argument != L"-U" && argument != L"--update" && argument != L"--update-to");
+        CHECK(argument != L"-o" && argument != L"--output" && argument != L"-P" && argument != L"--paths");
+    }
+}
+
+// P2.42: the --sub-langs yt-dlp is given. yt-dlp anchors each pattern at both
+// ends (re.match with '$' appended), which std::regex_match does too, so this is
+// the set of keys a resolve can return.
+void youtube_captions_are_asked_for_in_the_viewers_language_then_english_test()
+{
+    const std::wstring english = L"en(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?";
+    CHECK(YouTubeCaptionLanguages(L"en") == english);
+    CHECK(YouTubeCaptionLanguages(L"EN-gb") == english);
+    CHECK(YouTubeCaptionLanguages(L"") == english);
+    // Not a language subtag: English alone, never a pattern built from it.
+    CHECK(YouTubeCaptionLanguages(L"x-test") == english);
+    CHECK(YouTubeCaptionLanguages(L"d3") == english);
+    CHECK(YouTubeCaptionLanguages(L"de)|.*") == english);
+    const std::wstring chinese = YouTubeCaptionLanguages(L"zh-Hans");
+    CHECK(chinese == L"zh(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?," + english);
+    const auto matches = [](const std::wstring& languages, const std::wstring& key) {
+        for (size_t start = 0; start <= languages.size();) {
+            const size_t comma = languages.find(L',', start);
+            const std::wstring pattern = languages.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start);
+            if (std::regex_match(key, std::wregex(pattern))) return true;
+            if (comma == std::wstring::npos) break;
+            start = comma + 1;
+        }
+        return false;
+    };
+    for (const wchar_t* key : {L"zh-Hans", L"zh-Hant", L"zh-TW", L"zh", L"en", L"en-orig", L"en-GB"})
+        CHECK(matches(chinese, key));
+    CHECK(matches(YouTubeCaptionLanguages(L"es"), L"es-419"));
+    // Read case-sensitively, the pattern leaves out translations from a third
+    // language ("en-ja" is Japanese machine-translated into English). yt-dlp
+    // matches without regard to case and sends them anyway, so the parser drops
+    // them too (the next test).
+    for (const wchar_t* key : {L"en-ja", L"en-zh-Hans", L"de-en", L"en-en", L"fr-FR", L"ja"})
+        CHECK(!matches(chinese, key));
+}
+
+// P2.42: what yt-dlp's requested_subtitles becomes - WebVTT on youtube.com or
+// googlevideo.com only, told apart by the URL, best first, and never more than
+// kMaximumCaptionTracks. The URLs are shaped like the ones 2026.10.10 printed for
+// a built-in trailer.
+void youtube_caption_tracks_are_trusted_vtt_ordered_and_capped_test()
+{
+    const std::string base = "https://www.youtube.com/api/timedtext?v=VQRLujxTm3c&caps=asr&xoaf=5&hl=en&key=yt8";
+    const auto entry = [](std::string_view key, std::string_view url, std::string_view ext = "vtt",
+                          std::string_view name = "Name") {
+        return "\"" + std::string(key) + "\": {\"ext\": \"" + std::string(ext) + "\", \"url\": \"" + std::string(url) +
+               "\", \"name\": \"" + std::string(name) + "\"}";
+    };
+    const std::string json = "{" + entry("en", base + "&lang=en&fmt=vtt", "vtt", "English") + ", " +
+                             entry("en-orig", base + "&kind=asr&lang=en&fmt=vtt", "vtt", "English (Original)") + ", " +
+                             entry("de", base + "&lang=de&fmt=vtt", "vtt", "German") + ", " +
+                             entry("de-DE", base + "&kind=asr&lang=en&tlang=de&fmt=vtt", "vtt", "German (Germany)") + ", " +
+                             entry("en-GB", base + "&lang=en-GB&fmt=vtt", "vtt", "English (United Kingdom)") + ", " +
+                             // Refused: another host, plain http, another port, a look-alike
+                             // host, a user name, another format, and a key that is not a tag.
+                             entry("fr", "https://captions.example.com/fr.vtt") + ", " +
+                             entry("it", "http://www.youtube.com/api/timedtext?lang=it&fmt=vtt") + ", " +
+                             entry("ja", "https://www.youtube.com:8443/api/timedtext?lang=ja&fmt=vtt") + ", " +
+                             entry("ko", "https://youtube.com.example.net/api/timedtext?lang=ko") + ", " +
+                             entry("pl", "https://user@www.youtube.com/api/timedtext?lang=pl") + ", " +
+                             entry("ru", base + "&lang=ru&fmt=srv3", "srv3") + ", " +
+                             entry("es\\u0000", base + "&lang=es&fmt=vtt") + ", " +
+                             // Third-language translations, as 2026.10.10 sent them for
+                             // the trailer: dropped, whatever the case of the key.
+                             entry("en-de", base + "&lang=de&tlang=en&fmt=vtt", "vtt", "English from German") + ", " +
+                             entry("en-zh-Hans", base + "&lang=zh-Hans&tlang=en&fmt=vtt") + ", " +
+                             entry("de-en", base + "&lang=en&tlang=de&fmt=vtt") + ", " +
+                             // The same recognition track under a second key is listed once.
+                             entry("en-US", base + "&kind=asr&lang=en&fmt=vtt", "vtt", "English (US)") + "}";
+
+    const std::vector<CaptionTrack> english = ParseCaptionTracks(json, L"en");
+    REQUIRE(english.size() == 5);
+    // Written first, then recognised, then translated; English before German.
+    CHECK(english[0].language == "en" && english[0].kind == CaptionKind::Manual && english[0].name == "English");
+    CHECK(english[1].language == "en-GB" && english[1].kind == CaptionKind::Manual);
+    CHECK(english[2].language == "de" && english[2].kind == CaptionKind::Manual);
+    CHECK(english[3].language == "en-orig" && english[3].kind == CaptionKind::AutoGenerated);
+    CHECK(english[4].language == "de-DE" && english[4].kind == CaptionKind::AutoTranslated);
+    for (const CaptionTrack& track : english) CHECK(IsTrustedCaptionUrl(track.url));
+
+    // A German interface puts German first within each kind.
+    const std::vector<CaptionTrack> german = ParseCaptionTracks(json, L"de-DE");
+    REQUIRE(german.size() == 5);
+    CHECK(german[0].language == "de");
+    CHECK(german[1].language == "en");
+    CHECK(german[4].language == "de-DE");
+
+    // Nothing, and anything that is not the object yt-dlp prints, is no captions.
+    for (const std::string_view none : {"", "null", "NA", "[]", "{", "\"text\"", "{\"en\": []}", "{\"en\": {\"ext\": 1}}"})
+        CHECK(ParseCaptionTracks(none, L"en").empty());
+
+    // Capped, best first.
+    std::string many = "{";
+    for (int index = 0; index < 20; ++index) {
+        if (index) many += ", ";
+        many += entry("en-" + std::string(1, char('A' + index)) + "X", base + "&lang=" + std::to_string(index) + "&fmt=vtt");
+    }
+    many += "}";
+    CHECK_EQ(kMaximumCaptionTracks, ParseCaptionTracks(many, L"en").size());
+}
+
+void youtube_caption_output_rides_beside_the_streams_without_loosening_them_test()
+{
+    const std::string metadata = "duration=167;live_status=not_live;video_available_at=0;audio_available_at=0"
+                                 ";selected_height=1440;video_kbps=7854;age_limit=0";
+    const std::string streams = "https://v.googlevideo.com/video\nhttps://a.googlevideo.com/audio\n";
+    const std::string captions =
+        "{\"en\": {\"ext\": \"vtt\", \"url\": \"https://www.youtube.com/api/timedtext?v=VQRLujxTm3c&lang=en&fmt=vtt\", \"name\": \"English\"}}";
+
+    const ResolveResult resolved = ParseResolverOutput(metadata + "\ncaptions=" + captions + "\n" + streams, 0, L"en");
+    REQUIRE(resolved.ok);
+    CHECK_EQ(1440, resolved.selectedHeight);
+    CHECK(resolved.mediaUrl == L"https://v.googlevideo.com/video");
+    CHECK(resolved.audioUrl == L"https://a.googlevideo.com/audio");
+    REQUIRE(resolved.captions.size() == 1);
+    CHECK(resolved.captions[0].language == "en" && resolved.captions[0].kind == CaptionKind::Manual);
+    // CRLF, as a console would write it.
+    CHECK_EQ(size_t{1}, ParseResolverOutput(metadata + "\r\ncaptions=" + captions + "\r\n" + "https://v.googlevideo.com/video\r\n", 0).captions.size());
+
+    // No captions, or captions that do not parse, never fail a stream that resolved.
+    for (const std::string& line : std::vector<std::string>{std::string("null"), std::string("NA"), std::string("{not json"),
+                                    "{\"en\": {\"ext\": \"vtt\", \"url\": \"https://evil.example/en.vtt\"}}",
+                                    std::string(40 * 1024, 'x')}) {
+        const ResolveResult result = ParseResolverOutput(metadata + "\ncaptions=" + line + "\n" + streams, 0);
+        CHECK(result.ok);
+        CHECK(result.captions.empty());
+        CHECK(result.mediaUrl == L"https://v.googlevideo.com/video");
+    }
+    // A captions line and nothing after it is not a stream.
+    CHECK(!ParseResolverOutput(metadata + "\ncaptions=" + captions + "\n", 0).ok);
+    CHECK(!ParseResolverOutput(metadata + "\ncaptions=" + captions, 0).ok);
+    // The streams keep their own 16 KB, captions or not.
+    const std::string longStream = "https://v.googlevideo.com/" + std::string(16 * 1024, 'a') + "\n";
+    CHECK_EQ(ResolveError::InvalidOutput, ParseResolverOutput(metadata + "\ncaptions=" + captions + "\n" + longStream, 0).error);
+    // A second captions line is a third stream line, which was never allowed.
+    CHECK(!ParseResolverOutput(metadata + "\ncaptions=" + captions + "\ncaptions=" + captions + "\n" + streams, 0).ok);
+    // The captions line is only ever the one after the metadata.
+    CHECK(!ParseResolverOutput("captions=" + captions + "\n" + metadata + "\n" + streams, 0).ok);
+}
+
+void youtube_caption_fetch_goes_only_where_yt_dlp_pointed_test()
+{
+    CHECK(IsTrustedCaptionUrl(L"https://www.youtube.com/api/timedtext?v=VQRLujxTm3c&lang=en&fmt=vtt"));
+    CHECK(IsTrustedCaptionUrl(L"https://youtube.com/api/timedtext?lang=en"));
+    CHECK(IsTrustedCaptionUrl(L"https://manifest.googlevideo.com/api/manifest/hls_timedtext_playlist/id/1"));
+    CHECK(IsTrustedCaptionUrl(L"https://www.youtube.com:443/api/timedtext?lang=en"));
+    for (const wchar_t* refused : {L"", L"http://www.youtube.com/api/timedtext", L"https://www.youtube.com:8443/api/timedtext",
+                                   L"https://youtube.com.evil.example/api/timedtext", L"https://notyoutube.com/api/timedtext",
+                                   L"https://user:pass@www.youtube.com/api/timedtext", L"https://www.youtube.com/api/timed text",
+                                   L"https://www.youtube.com/api/\"timedtext", L"ftp://www.youtube.com/a", L"file:///C:/a.vtt",
+                                   L"https://captions.example.com/en.vtt"})
+        CHECK(!IsTrustedCaptionUrl(refused));
+    const auto request = CaptionRequestFor(L"https://www.youtube.com/api/timedtext?v=VQRLujxTm3c&lang=en&fmt=vtt#t=1");
+    REQUIRE(request.has_value());
+    CHECK(request->host == L"www.youtube.com");
+    CHECK(request->path == L"/api/timedtext?v=VQRLujxTm3c&lang=en&fmt=vtt");
+    CHECK(!CaptionRequestFor(L"https://captions.example.com/en.vtt").has_value());
+
+    CHECK(LooksLikeWebVtt("WEBVTT\nKind: captions\nLanguage: en\n\n00:00:01.000 --> 00:00:02.000\nHello\n"));
+    CHECK(LooksLikeWebVtt("\xEF\xBB\xBFWEBVTT\r\n"));
+    CHECK(LooksLikeWebVtt("WEBVTT"));
+    CHECK(LooksLikeWebVtt("WEBVTT - title\n"));
+    for (const std::string_view body : {"", "<html>", "WEBVTTX\n", "webvtt\n", "#EXTM3U\n", " WEBVTT\n"})
+        CHECK(!LooksLikeWebVtt(body));
 }
 
 void youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test()
@@ -9604,6 +9795,98 @@ void dropped_files_open_the_first_supported_file_and_count_the_rest_test()
     const Choice none=Choose(std::vector<std::wstring>{L"C:\\a\\folder",L""},patterns,folders);
     CHECK(!none.open.has_value());
     CHECK_EQ(size_t{2},none.ignored);
+}
+
+// P2.52: a position is kept only between the ends. The first 10 s are not worth a
+// jump, and the last 5 % (never less than 10 s) is a video that was watched.
+void resume_keeps_a_position_only_between_the_ends_test()
+{
+    using namespace resume;
+    // A two-hour film: the end is its last six minutes.
+    CHECK_EQ(360.0, EndThreshold(7200.0));
+    CHECK(!Worth(9.9, 7200.0));
+    CHECK(Worth(10.0, 7200.0));
+    CHECK(Worth(3600.0, 7200.0));
+    CHECK(Worth(6840.0, 7200.0));
+    CHECK(!Worth(6840.5, 7200.0));
+    // A two-minute trailer: the 10 s floor, not 5 % (6 s), decides its end.
+    CHECK_EQ(10.0, EndThreshold(120.0));
+    CHECK(Worth(110.0, 120.0));
+    CHECK(!Worth(110.5, 120.0));
+    // Too short to have a middle, of no known length, or not a number.
+    CHECK(!Worth(10.0, 19.0));
+    CHECK(!Worth(30.0, 0.0));
+    CHECK(!Worth(std::numeric_limits<double>::quiet_NaN(), 600.0));
+    CHECK(!Worth(30.0, std::numeric_limits<double>::infinity()));
+
+    // Resumed where it was left, while the source is the length it was.
+    const Record record{7, 1234.5, 3600.0};
+    CHECK(ResumeAt(record, 3600.0) == std::optional<double>(1234.5));
+    CHECK(ResumeAt(record, 3600.9) == std::optional<double>(1234.5));
+    // A different file saved under the same name starts at the beginning.
+    CHECK(!ResumeAt(record, 3700.0).has_value());
+    // A position the same file now counts as its end does not resume.
+    CHECK(!ResumeAt(Record{1, 3550.0, 3600.0}, 3600.0).has_value());
+    CHECK(!ResumeAt(Record{1, 5.0, 3600.0}, 3600.0).has_value());
+}
+
+void resume_records_round_trip_and_the_oldest_go_first_test()
+{
+    using namespace resume;
+    const Record record{42, 1234.5, 3600.25};
+    CHECK(Format(record) == L"42|1234.500|3600.250");
+    CHECK(Parse(Format(record)) == std::optional<Record>(record));
+    CHECK(Parse(L"1|10|20") == std::optional<Record>(Record{1, 10.0, 20.0}));
+    // A hand edit that is not three plain numbers is nothing, never a seek.
+    for (const wchar_t* bad : {L"", L"1|2", L"1|2|3|4", L"x|2|3", L"1|-2|3", L"1|2|1e9", L"1|inf|3", L"1|2.|3",
+                               L"1|.5|3", L"1|1.2.3|4", L"|2|3", L"1||3", L"1|2|"})
+        CHECK(!Parse(bad).has_value());
+
+    std::map<std::wstring, Record> records;
+    for (uint64_t index = 1; index <= 5; ++index) records[L"k" + std::to_wstring(index)] = Record{index, 60.0, 600.0};
+    CHECK(Evict(records, 5).empty());
+    CHECK((Evict(records, 3) == std::vector<std::wstring>{L"k1", L"k2"}));
+    CHECK_EQ(size_t{200}, kMaxRemembered);
+
+    CHECK(ClockText(0.0) == L"0:00");
+    CHECK(ClockText(65.9) == L"1:05");
+    CHECK(ClockText(3723.0) == L"1:02:03");
+    CHECK(ClockText(-4.0) == L"0:00");
+}
+
+// P2.52: the folder's media in Explorer's order, one step either way, and no wrap.
+void folder_playlist_steps_through_the_folder_in_explorer_order_test()
+{
+    using namespace folder_playlist;
+    CHECK(CompareNatural(L"Episode 2.mkv", L"Episode 10.mkv") < 0);
+    CHECK(CompareNatural(L"episode 10.mkv", L"Episode 9.mkv") > 0);
+    CHECK(CompareNatural(L"a.mkv", L"B.mkv") < 0);
+    CHECK(CompareNatural(L"clip.mkv", L"clip.mkv") == 0);
+    CHECK(CompareNatural(L"clip", L"clip 1") < 0);
+    CHECK(CompareNatural(L"7.mp4", L"007.mp4") < 0);
+    CHECK(CompareNatural(L"Clip.mp4", L"clip.mp4") != 0);
+
+    const std::wstring patterns = dropped_files::kMediaPatterns;
+    const std::vector<std::wstring> folder{L"Episode 10.mkv", L"Episode 2.mkv", L"Episode 1.mkv", L"Episode 2.srt",
+                                           L"cover.jpg",      L"notes.txt",     L"Episode 3.MP4"};
+    // Pictures are media too: the open dialog lists them.
+    CHECK((Ordered(L"Episode 1.mkv", folder, patterns) ==
+           std::vector<std::wstring>{L"cover.jpg", L"Episode 1.mkv", L"Episode 2.mkv", L"Episode 3.MP4", L"Episode 10.mkv"}));
+    CHECK(Neighbour(L"Episode 2.mkv", folder, patterns, +1) == std::optional<std::wstring>(L"Episode 3.MP4"));
+    CHECK(Neighbour(L"episode 3.mp4", folder, patterns, +1) == std::optional<std::wstring>(L"Episode 10.mkv"));
+    CHECK(Neighbour(L"Episode 2.mkv", folder, patterns, -1) == std::optional<std::wstring>(L"Episode 1.mkv"));
+    // No wrap at either end.
+    CHECK(!Neighbour(L"Episode 10.mkv", folder, patterns, +1).has_value());
+    CHECK(!Neighbour(L"cover.jpg", folder, patterns, -1).has_value());
+    CHECK(!Neighbour(L"Episode 2.mkv", folder, patterns, 0).has_value());
+    // A file the dialog does not list is still a place in the order when it is playing.
+    const std::vector<std::wstring> withOdd{L"a.mkv", L"b.xyz", L"c.mkv"};
+    CHECK(Neighbour(L"b.xyz", withOdd, patterns, +1) == std::optional<std::wstring>(L"c.mkv"));
+    CHECK(Neighbour(L"a.mkv", withOdd, patterns, +1) == std::optional<std::wstring>(L"c.mkv"));
+    // A file deleted while it played: its neighbours are where it would sort.
+    CHECK(Neighbour(L"Episode 4.mkv", folder, patterns, +1) == std::optional<std::wstring>(L"Episode 10.mkv"));
+    CHECK(Neighbour(L"Episode 4.mkv", folder, patterns, -1) == std::optional<std::wstring>(L"Episode 3.MP4"));
+    CHECK(!Neighbour(L"", folder, patterns, +1).has_value());
 }
 
 // A header's width, height and rate are untrusted. A crafted 20000x20000 file
@@ -10947,6 +11230,157 @@ void compare_saved_image_carries_its_provenance_test()
     std::filesystem::remove(png,ignored);
     if(SUCCEEDED(com))CoUninitialize();
     CHECK(app_menu::CommandForPlayerKey('S',true,true)==app_menu::IDM_SAVE_COMPARISON_IMAGE);
+}
+
+// P2.41: Ctrl+V opens what a drop would - files first, then a YouTube link or a
+// path in the text, then a picture - and says why when it opens nothing.
+void clipboard_paste_opens_files_then_links_then_pictures_test()
+{
+    using namespace clipboard;
+    const std::wstring patterns = dropped_files::kMediaPatterns;
+    const auto folder = [](const std::wstring& path) { return path.ends_with(L"\\folder"); };
+    const auto exists = [](const std::wstring& path) { return path == L"C:\\clips\\film.mkv" || path == L"C:\\clips\\notes.txt"; };
+    const auto youtube = [](const std::wstring& text) { return IsSupportedYouTubeUrl(text); };
+    const std::wstring link = L"https://www.youtube.com/watch?v=VQRLujxTm3c";
+
+    CHECK(PastedLine(L"  \r\n\t\"C:\\clips\\film.mkv\" \r\nsecond") == L"C:\\clips\\film.mkv");
+    CHECK(PastedLine(L"<" + link + L">") == link);
+    CHECK(PastedLine(L" \r\n \n").empty());
+    CHECK(PastedLine(L"\"") == L"\"");
+    CHECK(LooksLikeLink(L"HTTPS://vimeo.com/1") && LooksLikeLink(L"www.example.com") && !LooksLikeLink(L"C:\\a.mkv"));
+
+    // Files, as Explorer copies them: the drop's choice, with the rest counted.
+    PasteContent files;
+    files.files = {L"C:\\a\\folder", L"C:\\a\\film.srt", L"C:\\a\\film.mkv"};
+    files.text = link;
+    files.image = true;
+    PasteDecision decision = Decide(files, patterns, folder, exists, youtube);
+    CHECK(decision.kind == PasteKind::File);
+    CHECK(decision.target == L"C:\\a\\film.mkv");
+    CHECK_EQ(size_t{2}, decision.ignored);
+    // Only folders on the clipboard: the text is next.
+    files.files = {L"C:\\a\\folder"};
+    decision = Decide(files, patterns, folder, exists, youtube);
+    CHECK(decision.kind == PasteKind::YouTube);
+    CHECK(decision.target == link);
+    CHECK_EQ(size_t{0}, decision.ignored);
+
+    // A link beats a picture copied with it; a path does too.
+    PasteContent text;
+    text.text = L"  " + link + L"\r\n";
+    text.image = true;
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::YouTube);
+    text.text = L"\"C:\\clips\\film.mkv\"";
+    decision = Decide(text, patterns, folder, exists, youtube);
+    CHECK(decision.kind == PasteKind::File);
+    CHECK(decision.target == L"C:\\clips\\film.mkv");
+    // Any text that names no file and no video leaves the picture to open.
+    text.text = L"A caption copied with the picture";
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::Image);
+    text.text = L"https://vimeo.com/123";
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::Image);
+    // Without a picture, another site's link is named as such; the rest is nothing.
+    text.image = false;
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::UnsupportedLink);
+    text.text = L"https://www.youtube.com/channel/UC123";
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::UnsupportedLink);
+    text.text = L"C:\\clips\\missing.mkv";
+    CHECK(Decide(text, patterns, folder, exists, youtube).kind == PasteKind::Nothing);
+    CHECK(Decide(PasteContent{}, patterns, folder, exists, youtube).kind == PasteKind::Nothing);
+}
+
+// P2.41: the copied comparison is a bottom-up 24-bit CF_DIB beside a PNG, and a
+// pasted bitmap in any of the forms screenshots and browsers use reads back as the
+// same pixels.
+void clipboard_bitmaps_round_trip_through_a_dib_test()
+{
+    using namespace clipboard;
+    // 3x2 BGR, rows 12 bytes apart: every pixel its own colour.
+    constexpr uint32_t width = 3, height = 2, stride = 12;
+    std::vector<uint8_t> bgr(size_t(stride) * height, 0);
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x)
+            for (uint32_t c = 0; c < 3; ++c) bgr[size_t(y) * stride + x * 3 + c] = uint8_t(10 * (y * 3 + x) + c + 1);
+    CHECK_EQ(stride, DibStride(width));
+    const std::vector<uint8_t> dib = DibFromBgr(bgr.data(), width, height, stride);
+    REQUIRE(dib.size() == sizeof(BITMAPINFOHEADER) + size_t(stride) * height);
+    BITMAPINFOHEADER header{};
+    std::memcpy(&header, dib.data(), sizeof(header));
+    CHECK_EQ(LONG(width), header.biWidth);
+    CHECK_EQ(LONG(height), header.biHeight);  // bottom-up
+    CHECK_EQ(WORD(24), header.biBitCount);
+    CHECK_EQ(DWORD(BI_RGB), header.biCompression);
+    // The bottom row is stored first.
+    CHECK_EQ(int(bgr[size_t(stride)]), int(dib[sizeof(header)]));
+    std::vector<uint8_t> back;
+    uint32_t w = 0, h = 0, s = 0;
+    REQUIRE(BgrFromDib(dib, back, w, h, s));
+    CHECK_EQ(width, w);
+    CHECK_EQ(height, h);
+    CHECK_EQ(stride, s);
+    CHECK(back == bgr);
+
+    // 32-bit, top-down, as BI_RGB, as BI_BITFIELDS after a plain header, and in a V5 header.
+    const auto thirtyTwo = [&](DWORD headerSize, DWORD compression, bool masksAfter) {
+        std::vector<uint8_t> bytes(headerSize + (masksAfter ? 12u : 0u) + size_t(width) * 4 * height, 0);
+        BITMAPV5HEADER v5{};
+        v5.bV5Size = headerSize;
+        v5.bV5Width = LONG(width);
+        v5.bV5Height = -LONG(height);
+        v5.bV5Planes = 1;
+        v5.bV5BitCount = 32;
+        v5.bV5Compression = compression;
+        v5.bV5RedMask = 0x00FF0000u;
+        v5.bV5GreenMask = 0x0000FF00u;
+        v5.bV5BlueMask = 0x000000FFu;
+        std::memcpy(bytes.data(), &v5, headerSize);
+        size_t at = headerSize;
+        if (masksAfter) {
+            const uint32_t masks[3] = {0x00FF0000u, 0x0000FF00u, 0x000000FFu};
+            std::memcpy(bytes.data() + at, masks, sizeof(masks));
+            at += sizeof(masks);
+        }
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x) {
+                for (uint32_t c = 0; c < 3; ++c) bytes[at + (size_t(y) * width + x) * 4 + c] = bgr[size_t(y) * stride + x * 3 + c];
+                bytes[at + (size_t(y) * width + x) * 4 + 3] = 0x80;
+            }
+        return bytes;
+    };
+    for (const auto& form : {thirtyTwo(sizeof(BITMAPINFOHEADER), BI_RGB, false), thirtyTwo(sizeof(BITMAPINFOHEADER), BI_BITFIELDS, true),
+                             thirtyTwo(sizeof(BITMAPV5HEADER), BI_BITFIELDS, false), thirtyTwo(sizeof(BITMAPV5HEADER), BI_RGB, false)}) {
+        CHECK(BgrFromDib(form, back, w, h, s));
+        CHECK(back == bgr);
+    }
+    // What it does not guess at: odd masks, palettes, compression, a short buffer, a giant.
+    std::vector<uint8_t> odd = thirtyTwo(sizeof(BITMAPINFOHEADER), BI_BITFIELDS, true);
+    odd[sizeof(BITMAPINFOHEADER)] = 0x1F;
+    CHECK(!BgrFromDib(odd, back, w, h, s));
+    std::vector<uint8_t> palette = dib;
+    reinterpret_cast<BITMAPINFOHEADER*>(palette.data())->biBitCount = 8;
+    CHECK(!BgrFromDib(palette, back, w, h, s));
+    std::vector<uint8_t> compressed = dib;
+    reinterpret_cast<BITMAPINFOHEADER*>(compressed.data())->biCompression = BI_RLE8;
+    CHECK(!BgrFromDib(compressed, back, w, h, s));
+    CHECK(!BgrFromDib(std::span<const uint8_t>(dib.data(), dib.size() - 1), back, w, h, s));
+    CHECK(back.empty() && w == 0 && h == 0);
+    std::vector<uint8_t> giant = dib;
+    reinterpret_cast<BITMAPINFOHEADER*>(giant.data())->biWidth = LONG(kMaxSide + 1);
+    CHECK(!BgrFromDib(giant, back, w, h, s));
+    CHECK(DibFromBgr(bgr.data(), width, height, width * 3 - 1).empty());
+
+    // The PNG beside it is a PNG.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    std::string png;
+    CHECK(SUCCEEDED(compare_image::EncodePngBgr(bgr.data(), width, height, stride, png)));
+    CHECK(IsPng(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(png.data()), png.size())));
+    CHECK(!IsPng(dib));
+    if (SUCCEEDED(com)) CoUninitialize();
+    CHECK(app_menu::CommandForPlayerKey('C', true, true) == app_menu::IDM_COPY_COMPARISON_IMAGE);
+    CHECK(app_menu::CommandForPlayerKey('V', true, false) == app_menu::IDM_PASTE);
+    // Shift+C and V keep their jobs.
+    CHECK(app_menu::CommandForPlayerKey('C', false, true) == app_menu::IDM_COMPARE_PREVIOUS_MODE);
+    CHECK(app_menu::CommandForPlayerKey('V', false, false) == app_menu::IDM_SUBTITLE_NEXT);
 }
 
 // Side by side and 2x2 put one frame of the pair in every pane; zoom, pan and the loupe
@@ -12566,7 +13000,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
             }
         }
     }
-    if (argc != 18 || std::wstring_view(argv[1]) != L"--no-config" ||
+    if (argc != 26 || std::wstring_view(argv[1]) != L"--no-config" ||
         std::wstring_view(argv[2]) != L"--no-cache-dir" ||
         std::wstring_view(argv[3]) != L"--no-plugin-dirs" ||
         std::wstring_view(argv[4]) != L"--no-playlist" ||
@@ -12578,10 +13012,18 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         std::wstring_view(argv[10]) != L"--format-sort-force" ||
         std::wstring_view(argv[11]) != L"-S" ||
         std::wstring_view(argv[12]) != L"height,vbr,abr" ||
-        std::wstring_view(argv[13]) != L"--get-url" ||
-        std::wstring_view(argv[14]) != L"--print" ||
-        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s" ||
-        std::wstring_view(argv[16]) != L"--") {
+        std::wstring_view(argv[13]) != L"--write-subs" ||
+        std::wstring_view(argv[14]) != L"--write-auto-subs" ||
+        std::wstring_view(argv[15]) != L"--sub-langs" ||
+        std::wstring_view(argv[16]) != YouTubeCaptionLanguages(L"en") ||
+        std::wstring_view(argv[17]) != L"--sub-format" ||
+        std::wstring_view(argv[18]) != L"vtt" ||
+        std::wstring_view(argv[19]) != L"--get-url" ||
+        std::wstring_view(argv[20]) != L"--print" ||
+        std::wstring_view(argv[21]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s" ||
+        std::wstring_view(argv[22]) != L"--print" ||
+        std::wstring_view(argv[23]) != L"captions=%(requested_subtitles)j" ||
+        std::wstring_view(argv[24]) != L"--") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
@@ -12593,7 +13035,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         return 92;
     }
 
-    const std::wstring_view url = argv[17];
+    const std::wstring_view url = argv[25];
     if (url.find(L"stderrnoise") != std::wstring_view::npos) {
         // What a Python interpreter prints around a run that works: warnings
         // on stderr, far more of them than stdout's whole cap, with the real
@@ -16688,6 +17130,47 @@ void youtube_bundled_helper_plays_a_built_in_trailer_past_the_first_minute_netwo
     CHECK(seconds >= 69.0);   // read for the whole minute and more, not cut short
 }
 
+// P2.42, the `network` tier: the bundled yt-dlp names the first built-in
+// trailer's caption tracks the way a resolve in the player does - the trailer
+// has a written English track and YouTube's recognition - and the written one
+// arrives from the host yt-dlp gave as WebVTT, without a redirect. Checked on
+// 2026-10-31 with yt-dlp 2026.10.10: "en" written, "en-orig" recognised.
+void youtube_captions_of_a_built_in_trailer_arrive_as_webvtt_network_test()
+{
+    const std::wstring page(kExampleVideos[0].url);
+    YouTubeResolver resolver;
+    resolver.SetCaptionLanguage(L"en");
+    const ResolveResult resolved = resolver.Resolve(page, YouTubeSourceQuality::Auto, {});
+    if (!resolved.ok) std::wcerr << L"resolve failed: error " << static_cast<int>(resolved.error) << L" " << resolved.detail << L"\n";
+    REQUIRE(resolved.ok);
+    for (const CaptionTrack& track : resolved.captions)
+        std::cerr << "caption " << track.language << " (" << track.name << ") kind " << static_cast<int>(track.kind) << '\n';
+    REQUIRE(!resolved.captions.empty());
+    CHECK(resolved.captions.size() <= kMaximumCaptionTracks);
+    CHECK(resolved.captions.front().kind == CaptionKind::Manual);
+    CHECK(resolved.captions.front().language == "en");
+    CHECK(std::any_of(resolved.captions.begin(), resolved.captions.end(),
+                      [](const CaptionTrack& track) { return track.kind == CaptionKind::AutoGenerated; }));
+    for (const CaptionTrack& track : resolved.captions) CHECK(IsTrustedCaptionUrl(track.url));
+    // yt-dlp also sends "English from German" and the like; none is listed.
+    for (const CaptionTrack& track : resolved.captions) CHECK(track.kind != CaptionKind::AutoTranslated);
+
+    const auto request = CaptionRequestFor(resolved.captions.front().url);
+    REQUIRE(request.has_value());
+    HttpsGetRequest get;
+    get.host = request->host;
+    get.path = request->path;
+    get.maximumBodyBytes = 4u * 1024u * 1024u;
+    get.timeoutMilliseconds = 15000;
+    get.followRedirects = false;
+    const HttpsGetResult fetched = HttpsGet(get, {});
+    if (fetched.outcome != HttpsGetResult::Outcome::Ok)
+        std::wcerr << L"caption fetch: outcome " << static_cast<int>(fetched.outcome) << L" status " << fetched.status << L" " << fetched.error << L"\n";
+    REQUIRE(fetched.outcome == HttpsGetResult::Outcome::Ok);
+    CHECK(LooksLikeWebVtt(fetched.body));
+    CHECK(fetched.body.find("-->") != std::string::npos);
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(runtime_shutdown_releases_player_before_media_foundation_and_com_test),
@@ -16816,6 +17299,11 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_open_metadata_decides_the_playback_layout_without_a_decoder_test),
     TEST_CASE(video_decoder_bounds_declared_geometry_and_known_rates_test),
     TEST_CASE(dropped_files_open_the_first_supported_file_and_count_the_rest_test),
+    TEST_CASE(resume_keeps_a_position_only_between_the_ends_test),
+    TEST_CASE(resume_records_round_trip_and_the_oldest_go_first_test),
+    TEST_CASE(folder_playlist_steps_through_the_folder_in_explorer_order_test),
+    TEST_CASE(clipboard_paste_opens_files_then_links_then_pictures_test),
+    TEST_CASE(clipboard_bitmaps_round_trip_through_a_dib_test),
     TEST_CASE(status_notes_last_exactly_as_long_as_they_are_true_test),
     TEST_CASE(child_stderr_tail_keeps_the_last_bytes_as_log_lines_test),
     TEST_CASE(video_decoder_seeks_a_source_with_an_unknown_duration_test),
@@ -17003,6 +17491,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test),
     TEST_CASE(youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test),
     TEST_CASE(youtube_resolver_argument_vector_is_exact_and_ordered_test),
+    TEST_CASE(youtube_captions_are_asked_for_in_the_viewers_language_then_english_test),
+    TEST_CASE(youtube_caption_tracks_are_trusted_vtt_ordered_and_capped_test),
+    TEST_CASE(youtube_caption_output_rides_beside_the_streams_without_loosening_them_test),
+    TEST_CASE(youtube_caption_fetch_goes_only_where_yt_dlp_pointed_test),
     TEST_CASE(youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test),
     TEST_CASE(resolver_metadata_reports_selected_height_video_bitrate_and_age_limit_test),
     TEST_CASE(youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test),
@@ -17128,6 +17620,7 @@ constexpr test_support::TestCase kSlowCases[] = {
 // never the quick, slow, portable or hardware runs, which must pass offline.
 constexpr test_support::TestCase kNetworkCases[] = {
     TEST_CASE(youtube_bundled_helper_plays_a_built_in_trailer_past_the_first_minute_network_test),
+    TEST_CASE(youtube_captions_of_a_built_in_trailer_arrive_as_webvtt_network_test),
 };
 
 
@@ -17160,7 +17653,8 @@ int wmain(int argc, wchar_t* argv[])
     // `--only=<text>` runs the cases whose name contains the text, from either
     // offline table. `--tier=quick` runs kCases and `--tier=slow` kSlowCases;
     // with neither, every offline case runs. `--tier=network` runs
-    // kNetworkCases and nothing else.
+    // kNetworkCases and nothing else, and `--tier=network --only=<text>` the
+    // online cases whose name contains the text.
     std::string only;
     bool quick = true;
     bool slow = true;
@@ -17176,6 +17670,13 @@ int wmain(int argc, wchar_t* argv[])
     } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=slow") {
         quick = false;
     } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=network") {
+        quick = slow = false;
+        network = true;
+    } else if (argc == 3 && std::wstring_view(argv[1]) == L"--tier=network" &&
+               std::wstring_view(argv[2]).starts_with(L"--only=") && std::wstring_view(argv[2]).size() > 7) {
+        // One online case: `--tier=network --only=captions` fetches captions
+        // without also decoding the trailer.
+        for (const wchar_t character : std::wstring_view(argv[2]).substr(7)) only.push_back(static_cast<char>(character));
         quick = slow = false;
         network = true;
     } else if (argc > 1) {

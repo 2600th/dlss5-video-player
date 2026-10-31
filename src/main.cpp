@@ -68,6 +68,9 @@
 #include "Nv12Convert.h"
 #include "FrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
+#include "ClipboardPolicy.h"
+#include "FolderPlaylistPolicy.h"
+#include "ResumePolicy.h"
 #include "StatusNotePolicy.h"
 #include "SeekPolicy.h"
 #include "RenderPacePolicy.h"
@@ -351,11 +354,7 @@ static POINT MinimumPlayerWindowTrackSize(HWND window, UINT dpi)
     return POINT{outer.right - outer.left, outer.bottom - outer.top};
 }
 
-static const wchar_t* kVideoPatterns =
-    L"*.mp4;*.m4v;*.mov;*.mkv;*.webm;*.avi;*.wmv;*.asf;*.flv;*.f4v;"
-    L"*.ts;*.m2ts;*.mts;*.mpg;*.mpeg;*.mpe;*.vob;*.ogv;*.ogg;*.3gp;*.3g2;"
-    L"*.mxf;*.nut;*.rm;*.rmvb;*.divx;*.dv;*.y4m;*.ivf;*.hevc;*.h265;*.h264;*.264;*.av1;*.vp9;"
-    L"*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp";
+static const wchar_t* kVideoPatterns = dropped_files::kMediaPatterns;
 
 static constexpr int HK_PLAY_PAUSE = 9001;
 static constexpr int HK_BACK_10 = 9002;
@@ -2662,7 +2661,7 @@ class PlayerApp {
 #endif
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){}
-    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_fontTitle)DeleteObject(m_fontTitle); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
+    ~PlayerApp(){RememberPlaybackPosition();if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_fontTitle)DeleteObject(m_fontTitle); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
 
     bool Create(HINSTANCE hi) {
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
@@ -2882,6 +2881,7 @@ public:
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
         }
+        ServiceResume();
         // Ahead of both presents below, so a subtitle that changed is in the
         // frame or the paused re-present this tick makes.
         ServiceSubtitles();
@@ -3146,6 +3146,7 @@ private:
         m_subtitleTracks.clear();m_subtitleSidecar.clear();m_subtitleOrigin=0.0;
         m_subtitleFile.clear();m_subtitleFileCodec.clear();m_subtitleFileCharenc.clear();m_subtitleProbeFile.clear();
         m_subtitleChoice={};m_subtitleDelayMs=0;m_subtitleWanted.reset();m_subtitleClock=-1.0;m_subtitleDiscovering=false;
+        m_subtitleStreamCount=0;CancelCaptionFetch();
         m_subtitles.Hide();
         if(m_renderer)m_renderer->SetSubtitleOverlay(nullptr,0,0);
         m_subtitleFrame.reset();
@@ -3154,7 +3155,7 @@ private:
             // cheaply; only a file the viewer loaded for it before comes back.
             const bool local=_wcsnicmp(source.c_str(),L"http://",7)!=0&&_wcsnicmp(source.c_str(),L"https://",8)!=0;
             if(local){m_subtitles.Discover(source,true);m_subtitleDiscovering=true;}
-            else ChooseInitialSubtitles();
+            else{AddYouTubeCaptionTracks();ChooseInitialSubtitles();}
         }
         UpdateSubtitleMenu();
     }
@@ -3181,6 +3182,9 @@ private:
             if(m_subtitleDiscovering&&found->media==m_subtitlesForPath){
                 m_subtitleDiscovering=false;
                 m_subtitleTracks=std::move(found->tracks);m_subtitleSidecar=found->sidecar;m_subtitleOrigin=found->origin;
+                // A render of a YouTube video plays the player's copy, which
+                // carries no captions; the video's own come back beside it.
+                AddYouTubeCaptionTracks();
                 ChooseInitialSubtitles();
                 UpdateSubtitleMenu();
             }else if(!m_subtitleProbeFile.empty()&&found->media==m_subtitleProbeFile){
@@ -3211,6 +3215,14 @@ private:
         const subtitle::Track& track=m_subtitleTracks[size_t(index)];
         if(track.Drawn()==subtitle::Kind::Unsupported){LOG("Subtitles: "<<subtitle::Describe(track)<<" cannot be drawn.");return;}
         m_subtitleChoice={};m_subtitleChoice.mode=subtitle::Choice::Mode::Track;m_subtitleChoice.track=index;
+        if(size_t(index)>=m_subtitleStreamCount){
+            // A YouTube caption track: a WebVTT file once it is fetched.
+            m_subtitleWanted.reset();
+            ShowYouTubeCaption(size_t(index));
+            if(remember)RememberSubtitleChoice();
+            UpdateSubtitleMenu();
+            return;
+        }
         SubtitleOverlay::Source source;
         source.path=m_path;source.stream=index;source.codec=track.codec;source.origin=m_subtitleOrigin;
         m_subtitleWanted=source;
@@ -3254,7 +3266,7 @@ private:
         std::wstring label;
         if(next==-1){SelectSubtitlesOff(true);label=T(L"menu.subtitles_off");}
         else if(next==-2){SelectSubtitleFile(true);label=std::filesystem::path(m_subtitleFile).filename().wstring();}
-        else{SelectSubtitleTrack(next,true);label=Utf8ToWide(subtitle::Describe(m_subtitleTracks[size_t(next)]));}
+        else{SelectSubtitleTrack(next,true);label=SubtitleTrackLabel(size_t(next));}
         m_sourceNotice=T(L"menu.subtitles")+L": "+label;UpdateCachedStatus();
     }
     std::wstring SubtitleDelayText()const{
@@ -3275,7 +3287,7 @@ private:
         const HMENU menu=GetMenu(m_hwnd);
         if(!menu)return;
         std::vector<std::wstring> labels;
-        for(const auto& track:m_subtitleTracks)labels.push_back(Utf8ToWide(subtitle::Describe(track)));
+        for(size_t index=0;index<m_subtitleTracks.size();++index)labels.push_back(SubtitleTrackLabel(index));
         const std::wstring file=m_subtitleFile.empty()?std::wstring{}:
             T(L"menu.subtitles_file")+std::filesystem::path(m_subtitleFile).filename().wstring();
         UINT chosen=IDM_SUBTITLE_OFF;
@@ -3295,6 +3307,7 @@ private:
     void ServiceSubtitles(){
         SyncSubtitlesToSource();
         TakeSubtitleDiscoveries();
+        TakeCaptionFetch();
         if(!m_loaded||!m_renderer)return;
         // A rebuilt renderer holds no picture of its own.
         if(m_subtitleRenderer!=m_renderer.get()){m_subtitleRenderer=m_renderer.get();m_subtitleFrame.reset();}
@@ -3327,6 +3340,248 @@ private:
         if(!frame||frame->Empty()){m_renderer->SetSubtitleOverlay(nullptr,0,0);return;}
         if(!m_renderer->SetSubtitleOverlay(frame->bgra.data(),frame->width,frame->height,&frame->drawn))
             LOG("Subtitles: the renderer did not take a "<<frame->width<<"x"<<frame->height<<" picture.");
+    }
+    // ---- Resume where you left off, and the folder's next file (P2.52) ------------
+    //
+    // Kept in [Resume] under the key the subtitle choice and the mask use, so a
+    // video's position comes back with them. The tick watches the position while
+    // nothing is moving it; the source changing - another file opened, the video
+    // closed - writes what it saw last, and the player's exit does the same.
+    // Nothing waits for a file to be written while a video plays.
+    std::wstring ResumeSourceKey()const{
+        if(!m_loaded||m_decoder.IsStillImage())return{};
+        const std::wstring identity=MaskIdentity();
+        return identity.empty()?std::wstring{}:compare_mask::SourceKey(identity);
+    }
+    void ServiceResume(){
+        const std::wstring key=ResumeSourceKey();
+        if(key!=m_resumeKey){
+            RememberPlaybackPosition();
+            m_resumeKey=key;m_resumeSeenSec=-1.0;m_resumeSeenDuration=0.0;m_resumePending=!key.empty();
+        }
+        // A seek or a stream reopening has no position worth keeping yet.
+        if(m_resumeKey.empty()||m_seekPending||m_seeking||m_youtubeLifecycle.IsResolving())return;
+        if(m_resumePending){m_resumePending=false;if(ResumeRememberedPosition())return;}
+        m_resumeSeenSec=Position();m_resumeSeenDuration=m_decoder.DurationSeconds();
+    }
+    std::map<std::wstring,resume::Record> RememberedPositions(uint64_t& newest)const{
+        std::vector<wchar_t> section(65536,L'\0');
+        const DWORD length=GetPrivateProfileSectionW(L"Resume",section.data(),static_cast<DWORD>(section.size()),SettingsPath().c_str());
+        std::map<std::wstring,resume::Record> records;newest=0;
+        for(size_t at=0;at<length&&section[at];){
+            const std::wstring line(section.data()+at);at+=line.size()+1;
+            const size_t equals=line.find(L'=');if(equals==std::wstring::npos)continue;
+            if(const auto record=resume::Parse(std::wstring_view(line).substr(equals+1))){
+                records[line.substr(0,equals)]=*record;newest=std::max(newest,record->sequence);
+            }
+        }
+        return records;
+    }
+    // A position in the middle is kept; one near either end removes the entry,
+    // so the next open starts at the beginning.
+    void RememberPlaybackPosition(){
+        if(m_resumeKey.empty()||m_resumeSeenSec<0.0)return;
+        const std::wstring key=m_resumeKey;const double position=m_resumeSeenSec,duration=m_resumeSeenDuration;
+        m_resumeSeenSec=-1.0;
+        if(!m_resumeEnabled)return;
+        const auto path=SettingsPath();
+        if(!resume::Worth(position,duration)){WritePrivateProfileStringW(L"Resume",key.c_str(),nullptr,path.c_str());return;}
+        uint64_t newest=0;auto records=RememberedPositions(newest);
+        const resume::Record record{newest+1,position,duration};
+        records[key]=record;
+        WritePrivateProfileStringW(L"Resume",key.c_str(),resume::Format(record).c_str(),path.c_str());
+        for(const std::wstring& stale:resume::Evict(records))WritePrivateProfileStringW(L"Resume",stale.c_str(),nullptr,path.c_str());
+    }
+    // Seeks to where this source was left, and says so. False when it starts here.
+    bool ResumeRememberedPosition(){
+        if(!m_resumeEnabled||m_resumeKey.empty())return false;
+        wchar_t saved[256]{};
+        GetPrivateProfileStringW(L"Resume",m_resumeKey.c_str(),L"",saved,static_cast<DWORD>(std::size(saved)),SettingsPath().c_str());
+        const auto record=resume::Parse(saved);if(!record)return false;
+        const auto at=resume::ResumeAt(*record,m_decoder.DurationSeconds());
+        if(!at){LOG("Resume: the position kept for this source no longer fits it; starting at the beginning.");return false;}
+        LOG("Resume: starting at "<<*at<<" s of "<<m_decoder.DurationSeconds()<<" s.");
+        RequestSeek(*at,m_playing);
+        // What the tick would have seen, so closing during the seek keeps it.
+        m_resumeSeenSec=*at;m_resumeSeenDuration=m_decoder.DurationSeconds();
+        ShowToast(Format(T(L"resume.resumed"),resume::ClockText(*at).c_str()));
+        return true;
+    }
+    void SetResumeEnabled(bool enabled){
+        m_resumeEnabled=enabled;SaveVideoSettings();
+        // Off forgets nothing already kept; it stops keeping and stops resuming.
+        if(const HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr){CheckMenuItem(menu,IDM_RESUME_POSITION,MF_BYCOMMAND|(enabled?MF_CHECKED:MF_UNCHECKED));DrawMenuBar(m_hwnd);}
+    }
+    // The folder of the file playing, when there is one to step through: a file
+    // opened from disk, not a stream or the player's own copy of one.
+    std::optional<std::filesystem::path> NeighbourFolder()const{
+        if(!m_loaded||m_sourceKind!=MediaSourceKind::LocalFile||m_cachedSourceFile||m_path.empty())return std::nullopt;
+        const std::filesystem::path folder=std::filesystem::path(m_path).parent_path();
+        if(folder.empty())return std::nullopt;
+        return folder;
+    }
+    void OpenNeighbourFile(int direction){
+        const auto folder=NeighbourFolder();
+        if(!folder){if(m_loaded)ShowToast(T(L"playlist.local_only"));return;}
+        std::vector<std::wstring> names;
+        std::error_code error;
+        for(std::filesystem::directory_iterator it(*folder,std::filesystem::directory_options::skip_permission_denied,error),end;!error&&it!=end;it.increment(error)){
+            std::error_code kindError;
+            if(it->is_regular_file(kindError))names.push_back(it->path().filename().wstring());
+        }
+        if(error)LOG("Next file: the folder could not be listed completely ("<<error.message()<<").");
+        const auto next=folder_playlist::Neighbour(std::filesystem::path(m_path).filename().wstring(),names,kVideoPatterns,direction);
+        if(!next){ShowToast(T(direction>0?L"playlist.last":L"playlist.first"));return;}
+        LOG("Opening the "<<(direction>0?"next":"previous")<<" file in the folder.");
+        Load((*folder/ *next).wstring());
+    }
+    // ---- YouTube captions (P2.42) ---------------------------------------------------
+    //
+    // yt-dlp names the tracks when it resolves the video (YouTubeResolver.cpp:
+    // the viewer's language and English, written, recognised or translated); a
+    // chosen one is fetched as WebVTT from the host yt-dlp gave - youtube.com or
+    // googlevideo.com, nothing else (IsTrustedCaptionUrl), no redirect followed -
+    // kept in the cache folder, and drawn by the overlay like any subtitle file.
+    // They are rows after the source's own streams in Playback > Subtitles, and
+    // start off: YouTube's own player shows none until the viewer asks, and
+    // this one shows a file's track only when its author marks it default.
+    // The choice is remembered for the video like any other.
+    static constexpr size_t kMaximumCaptionBytes=4u*1024u*1024u;
+    static constexpr size_t kCaptionFilesKept=100;
+    struct CaptionFetchState{
+        std::mutex mutex;
+        bool done=false,ok=false;
+        int track=-1;
+        std::filesystem::path file;
+    };
+    std::vector<CaptionTrack> m_youtubeCaptions;
+    std::wstring m_youtubeCaptionsPage;
+    // Rows of m_subtitleTracks from here on are YouTube's captions, in m_youtubeCaptions' order.
+    size_t m_subtitleStreamCount=0;
+    std::shared_ptr<CaptionFetchState> m_captionFetch;
+    std::jthread m_captionWorker;
+    void AddYouTubeCaptionTracks(){
+        m_subtitleStreamCount=m_subtitleTracks.size();
+        if(m_youtubePageUrl.empty()||m_youtubeCaptions.empty())return;
+        const std::string page=CanonicalYouTubeVideoId(m_youtubePageUrl);
+        if(page.empty()||page!=CanonicalYouTubeVideoId(m_youtubeCaptionsPage))return;
+        for(const CaptionTrack& caption:m_youtubeCaptions){
+            if(m_subtitleTracks.size()>=IDM_SUBTITLE_TRACK_COUNT)break;
+            subtitle::Track track;
+            track.subtitleIndex=int(m_subtitleTracks.size());track.title=caption.name;track.codec="webvtt";
+            m_subtitleTracks.push_back(std::move(track));
+        }
+        LOG("Subtitles: "<<(m_subtitleTracks.size()-m_subtitleStreamCount)<<" YouTube caption track(s) listed.");
+    }
+    const CaptionTrack* CaptionForTrack(size_t index)const{
+        if(index<m_subtitleStreamCount)return nullptr;
+        const size_t caption=index-m_subtitleStreamCount;
+        return caption<m_youtubeCaptions.size()?&m_youtubeCaptions[caption]:nullptr;
+    }
+    // "3. English - YouTube, auto-generated": YouTube's name and what made it.
+    std::wstring SubtitleTrackLabel(size_t index)const{
+        if(index>=m_subtitleTracks.size())return{};
+        const CaptionTrack* caption=CaptionForTrack(index);
+        if(!caption)return Utf8ToWide(subtitle::Describe(m_subtitleTracks[index]));
+        const wchar_t* kind=caption->kind==CaptionKind::AutoGenerated?L"subtitles.youtube.auto":
+                            caption->kind==CaptionKind::AutoTranslated?L"subtitles.youtube.translated":L"subtitles.youtube.manual";
+        return std::to_wstring(index+1)+L". "+Utf8ToWide(caption->name)+L" - "+T(kind);
+    }
+    std::filesystem::path CaptionFolder()const{
+        std::error_code error;
+        return (m_cacheRoot.empty()?std::filesystem::temp_directory_path(error):m_cacheRoot)/L"captions";
+    }
+    // One file per video, track and kind: the id is eleven URL-safe characters and
+    // the key letters, digits and dashes, so the name needs no escaping.
+    std::filesystem::path CaptionFile(const CaptionTrack& caption)const{
+        const std::string id=CanonicalYouTubeVideoId(m_youtubePageUrl);
+        if(id.empty())return{};
+        const char* kind=caption.kind==CaptionKind::AutoGenerated?"auto":caption.kind==CaptionKind::AutoTranslated?"translated":"manual";
+        return CaptionFolder()/Utf8ToWide(id+"."+caption.language+"."+kind+".vtt");
+    }
+    void ShowCaptionFile(const std::filesystem::path& file){
+        SubtitleOverlay::Source source;
+        source.path=file.wstring();source.external=true;source.codec="webvtt";
+        m_subtitleWanted=source;
+    }
+    void ShowYouTubeCaption(size_t index){
+        const CaptionTrack* caption=CaptionForTrack(index);
+        if(!caption)return;
+        const std::filesystem::path file=CaptionFile(*caption);
+        if(file.empty())return;
+        std::error_code error;
+        if(std::filesystem::is_regular_file(file,error)&&std::filesystem::file_size(file,error)>0&&!error){
+            LOG("Subtitles: showing YouTube captions kept from an earlier fetch.");
+            ShowCaptionFile(file);return;
+        }
+        CancelCaptionFetch();
+        auto state=std::make_shared<CaptionFetchState>();state->track=int(index);state->file=file;
+        m_captionFetch=state;
+        const std::wstring url=caption->url;
+        LOG("Subtitles: fetching YouTube captions.");
+        try{
+            m_captionWorker=std::jthread([state,url](std::stop_token stop){
+                bool ok=false;
+                if(const auto request=CaptionRequestFor(url)){
+                    HttpsGetRequest get;
+                    get.host=request->host;get.path=request->path;get.maximumBodyBytes=kMaximumCaptionBytes;
+                    get.timeoutMilliseconds=15000;get.followRedirects=false;
+                    const HttpsGetResult got=HttpsGet(get,stop);
+                    if(got.outcome==HttpsGetResult::Outcome::Ok&&LooksLikeWebVtt(got.body)){
+                        std::error_code error;std::filesystem::create_directories(state->file.parent_path(),error);
+                        ok=static_cast<bool>(atomic_file::Replace(state->file,got.body));
+                    }else if(!stop.stop_requested()){
+                        LOG("Subtitles: the YouTube captions did not arrive as WebVTT (outcome="<<static_cast<int>(got.outcome)
+                            <<", status "<<got.status<<", "<<got.body.size()<<" bytes).");
+                    }
+                }
+                const std::lock_guard lock(state->mutex);
+                state->done=true;state->ok=ok;
+            });
+        }catch(const std::system_error&){
+            m_captionFetch.reset();
+            LOG("Subtitles: the caption fetch could not start.");
+        }
+    }
+    void CancelCaptionFetch(){
+        if(m_captionWorker.joinable()){m_captionWorker.request_stop();m_captionWorker.join();}
+        m_captionWorker=std::jthread{};
+        m_captionFetch.reset();
+    }
+    void TakeCaptionFetch(){
+        if(!m_captionFetch)return;
+        bool ok=false;
+        {
+            const std::lock_guard lock(m_captionFetch->mutex);
+            if(!m_captionFetch->done)return;
+            ok=m_captionFetch->ok;
+        }
+        const std::shared_ptr<CaptionFetchState> state=std::move(m_captionFetch);
+        if(m_captionWorker.joinable())m_captionWorker.join();
+        m_captionWorker=std::jthread{};
+        // Only the choice it was fetched for is shown; a choice made since stands.
+        if(m_subtitleChoice.mode!=subtitle::Choice::Mode::Track||m_subtitleChoice.track!=state->track)return;
+        if(!ok){
+            m_subtitleChoice={};m_subtitleChoice.mode=subtitle::Choice::Mode::Off;m_subtitleWanted.reset();
+            m_sourceNotice=T(L"subtitles.youtube.failed");UpdateCachedStatus();UpdateSubtitleMenu();
+            return;
+        }
+        LOG("Subtitles: showing YouTube captions.");
+        ShowCaptionFile(state->file);
+        PruneCaptionFiles(state->file);
+    }
+    // The newest kCaptionFilesKept stay; they are copies of what YouTube serves.
+    void PruneCaptionFiles(const std::filesystem::path& keep)const{
+        std::error_code error;
+        std::vector<std::pair<std::filesystem::file_time_type,std::filesystem::path>> files;
+        for(std::filesystem::directory_iterator it(CaptionFolder(),error),end;!error&&it!=end;it.increment(error)){
+            std::error_code itemError;
+            if(it->is_regular_file(itemError)&&it->path().extension()==L".vtt")files.emplace_back(it->last_write_time(itemError),it->path());
+        }
+        if(files.size()<=kCaptionFilesKept)return;
+        std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.first>b.first;});
+        for(size_t index=kCaptionFilesKept;index<files.size();++index)
+            if(files[index].second!=keep){std::error_code removeError;std::filesystem::remove(files[index].second,removeError);}
     }
     void RecordRecent(const NeuralJobCompletion& completion,bool preserveCache=false){
         if(!m_recent)return;
@@ -4949,6 +5204,7 @@ private:
         m_neuralRequested=ReadIniFloat(L"Playback",L"NeuralView",1.0f)!=0.0f;
         m_upscalingRequested=ReadIniFloat(L"Playback",L"SuperResolution",0.0f)==1.0f;
         m_playbackVsr=ReadIniFloat(L"Playback",L"RtxVsr",vsr_policy::kPlaybackDefault?1.0f:0.0f)!=0.0f;
+        m_resumeEnabled=ReadIniFloat(L"Playback",L"ResumePosition",1.0f)!=0.0f;
         // Auto and the rung are separate keys on purpose. Every earlier version
         // persisted UpscaleHeight on every save, so a stored 1440 is the old
         // default rather than evidence of a choice, and keying Auto off that
@@ -5107,6 +5363,7 @@ private:
         WriteIniFloat(L"Playback",L"NeuralView",m_neuralRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"SuperResolution",m_upscalingRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"RtxVsr",m_playbackVsr?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"ResumePosition",m_resumeEnabled?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleAuto",m_upscaleAuto?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
         WriteIniFloat(L"Playback",L"FrameGenerationGenerated",static_cast<float>(m_frameGenPreference));
@@ -5583,20 +5840,165 @@ private:
         SelectObject(dc,oldFont);if(font)DeleteObject(font);SelectObject(dc,oldBitmap);DeleteObject(bitmap);DeleteDC(dc);
         return bgr;
     }
-    bool SaveComparisonImageTo(const std::filesystem::path& path){
+    // The comparison on screen above its footer, as 24-bit BGR rows: what Save
+    // comparison image writes and Copy comparison image puts on the clipboard.
+    bool ComposedComparison(std::vector<uint8_t>& bgr,uint32_t& width,uint32_t& height,uint32_t& total,uint32_t& stride){
+        bgr.clear();width=height=total=stride=0;
         if(!m_loaded||!m_renderer)return false;
         // The present first, so an original uploaded since the last one is in the capture.
         if(!m_renderer->PresentCurrent()){RecoverUnusableRenderer();return false;}
-        std::vector<uint8_t> rgba;uint32_t width=0,height=0;
-        if(!m_renderer->CaptureComposedView(rgba,width,height)){LOG("Save comparison image: the composed view could not be read back.");return false;}
+        std::vector<uint8_t> rgba;
+        if(!m_renderer->CaptureComposedView(rgba,width,height)){LOG("Comparison image: the composed view could not be read back.");return false;}
         const auto lines=compare_provenance::FooterLines(ComparisonProvenance());
-        uint32_t total=0,stride=0;
-        const auto bgr=ComposeComparisonImage(rgba,width,height,lines,total,stride);
-        if(bgr.empty())return false;
+        bgr=ComposeComparisonImage(rgba,width,height,lines,total,stride);
+        return !bgr.empty();
+    }
+    bool SaveComparisonImageTo(const std::filesystem::path& path){
+        std::vector<uint8_t> bgr;uint32_t width=0,height=0,total=0,stride=0;
+        if(!ComposedComparison(bgr,width,height,total,stride))return false;
         const HRESULT hr=compare_image::SavePngBgr(path,bgr.data(),width,total,stride);
         if(FAILED(hr)){LOG("Save comparison image failed hr="<<HexText(hr)<<" path="<<WideToUtf8(path.wstring()));return false;}
         LOG("Comparison image saved: "<<width<<"x"<<height<<" plus a "<<(total-height)<<" px footer -> "<<WideToUtf8(path.wstring()));
         return true;
+    }
+    // ---- The clipboard (P2.41) ---------------------------------------------------
+    //
+    // Ctrl+Shift+C puts the saved comparison - picture and provenance footer - on
+    // the clipboard twice: as CF_DIB, which every program that pastes a picture
+    // reads (Windows makes CF_DIBV5 and CF_BITMAP from it), and as "PNG", the
+    // lossless form browsers, Office and image editors prefer. Ctrl+V opens what
+    // a drop would: files first, then a YouTube link or a path in the text, then a
+    // picture, which is written as a PNG and opened as a photo.
+    bool OpenClipboardBriefly()const{
+        // Another program holding the clipboard lets go within milliseconds.
+        for(int attempt=0;attempt<5;++attempt){if(OpenClipboard(m_hwnd))return true;Sleep(10);}
+        LOG("Clipboard: another program kept it open (winerr="<<GetLastError()<<").");
+        return false;
+    }
+    static bool PutClipboardBytes(UINT format,const void* bytes,size_t size){
+        if(!format||!bytes||!size)return false;
+        HGLOBAL global=GlobalAlloc(GMEM_MOVEABLE,size);if(!global)return false;
+        void* to=GlobalLock(global);if(!to){GlobalFree(global);return false;}
+        std::memcpy(to,bytes,size);GlobalUnlock(global);
+        // The clipboard owns it once this succeeds, and only then.
+        if(!SetClipboardData(format,global)){GlobalFree(global);return false;}
+        return true;
+    }
+    // A clipboard format's bytes while the clipboard is open; none past 1 GB.
+    static std::vector<uint8_t> ClipboardBytes(UINT format){
+        if(!format)return{};
+        HANDLE data=GetClipboardData(format);if(!data)return{};
+        const SIZE_T size=GlobalSize(data);if(!size||size>(SIZE_T(1)<<30))return{};
+        const void* from=GlobalLock(data);if(!from)return{};
+        std::vector<uint8_t> bytes(static_cast<const uint8_t*>(from),static_cast<const uint8_t*>(from)+size);
+        GlobalUnlock(data);
+        return bytes;
+    }
+    void CopyComparisonImage(){
+        if(!m_loaded||!m_renderer)return;
+        std::vector<uint8_t> bgr;uint32_t width=0,height=0,total=0,stride=0;bool copied=false;
+        if(ComposedComparison(bgr,width,height,total,stride)){
+            std::string png;const HRESULT encoded=compare_image::EncodePngBgr(bgr.data(),width,total,stride,png);
+            if(FAILED(encoded))LOG("Copy comparison image: the PNG could not be encoded (hr="<<HexText(encoded)<<"); copying the bitmap alone.");
+            const std::vector<uint8_t> dib=clipboard::DibFromBgr(bgr.data(),width,total,stride);
+            bgr=std::vector<uint8_t>{};
+            if(!dib.empty()&&OpenClipboardBriefly()){
+                EmptyClipboard();
+                copied=PutClipboardBytes(CF_DIB,dib.data(),dib.size());
+                if(SUCCEEDED(encoded)&&!PutClipboardBytes(RegisterClipboardFormatW(L"PNG"),png.data(),png.size()))
+                    LOG("Copy comparison image: the PNG form was refused; the bitmap is there.");
+                CloseClipboard();
+            }
+        }
+        if(copied)LOG("Comparison image copied: "<<width<<"x"<<height<<" plus a "<<(total-height)<<" px footer.");
+        m_sourceNotice=T(copied?L"compare.copy.copied":L"compare.copy.failed");
+        if(copied)ShowToast(m_sourceNotice);
+        UpdateCachedStatus();
+    }
+    void PasteFromClipboard(){
+        if(!OpenClipboardBriefly()){ShowToast(T(L"paste.busy"));return;}
+        clipboard::PasteContent content;
+        if(HANDLE drop=GetClipboardData(CF_HDROP)){
+            // The clipboard owns this HDROP: it is read, never DragFinish'ed.
+            const HDROP files=static_cast<HDROP>(drop);
+            const UINT count=DragQueryFileW(files,0xFFFFFFFF,nullptr,0);
+            for(UINT index=0;index<count&&index<1024;++index){
+                const UINT length=DragQueryFileW(files,index,nullptr,0);std::wstring path(length,L'\0');
+                if(!length||DragQueryFileW(files,index,path.data(),length+1)!=length)path.clear();
+                content.files.push_back(std::move(path));
+            }
+        }
+        if(HANDLE text=GetClipboardData(CF_UNICODETEXT)){
+            if(const auto* chars=static_cast<const wchar_t*>(GlobalLock(text))){
+                const size_t limit=std::min<size_t>(GlobalSize(text)/sizeof(wchar_t),8192);
+                content.text.assign(chars,std::find(chars,chars+limit,L'\0'));
+                GlobalUnlock(text);
+            }
+        }
+        const UINT pngFormat=RegisterClipboardFormatW(L"PNG");
+        content.image=(pngFormat&&IsClipboardFormatAvailable(pngFormat))||IsClipboardFormatAvailable(CF_DIBV5)||IsClipboardFormatAvailable(CF_DIB);
+        const auto decision=clipboard::Decide(content,kVideoPatterns,
+            [](const std::wstring& path){std::error_code error;return std::filesystem::is_directory(path,error);},
+            [](const std::wstring& path){std::error_code error;return std::filesystem::is_regular_file(path,error);},
+            [](const std::wstring& text){return IsSupportedYouTubeUrl(text);});
+        // The picture is read only when it is what opens: a copied 4K screenshot is 33 MB.
+        std::vector<uint8_t> png,dib;
+        if(decision.kind==clipboard::PasteKind::Image){
+            png=ClipboardBytes(pngFormat);
+            if(!clipboard::IsPng(png)){png.clear();dib=ClipboardBytes(CF_DIBV5);if(dib.empty())dib=ClipboardBytes(CF_DIB);}
+        }
+        CloseClipboard();
+        switch(decision.kind){
+        case clipboard::PasteKind::File:
+            if(!ToolbarActionEnabled(ToolbarAction::Open))return;
+            LOG("Paste: opening a file from the clipboard.");
+            if(Load(decision.target)&&decision.ignored)ShowToast(Format(T(L"paste.ignored"),std::to_wstring(decision.ignored).c_str()));
+            return;
+        case clipboard::PasteKind::YouTube:
+            if(!YouTubePlaybackAvailable()){ShowToast(T(L"paste.youtube_unavailable"));return;}
+            if(!ToolbarActionEnabled(ToolbarAction::OpenYouTube))return;
+            LOG("Paste: opening a YouTube link from the clipboard.");
+            StartYouTubeResolution(decision.target,L"",m_youtubeSourceQuality);
+            return;
+        case clipboard::PasteKind::Image:
+            if(!ToolbarActionEnabled(ToolbarAction::Open))return;
+            OpenPastedImage(png,dib);
+            return;
+        case clipboard::PasteKind::UnsupportedLink:ShowToast(T(L"paste.unsupported_link"));return;
+        case clipboard::PasteKind::Nothing:ShowToast(T(L"paste.nothing"));return;
+        }
+    }
+    // A pasted picture is written as a PNG where the cache lives, and opened as a
+    // photo is. The newest kPastedImagesKept stay, so one stays reachable from
+    // Recent videos and the folder does not grow with every paste.
+    static constexpr size_t kPastedImagesKept=20;
+    void OpenPastedImage(const std::vector<uint8_t>& png,const std::vector<uint8_t>& dib){
+        std::error_code error;
+        const std::filesystem::path root=m_cacheRoot.empty()?std::filesystem::temp_directory_path(error):m_cacheRoot;
+        const std::filesystem::path folder=root/L"pasted";
+        std::filesystem::create_directories(folder,error);
+        SYSTEMTIME now{};GetLocalTime(&now);wchar_t name[64]{};
+        swprintf_s(name,L"pasted-%04u%02u%02u-%02u%02u%02u-%03u.png",now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute,now.wSecond,now.wMilliseconds);
+        const std::filesystem::path path=folder/name;
+        bool written=false;
+        if(!png.empty()){
+            written=static_cast<bool>(atomic_file::Replace(path,std::string_view(reinterpret_cast<const char*>(png.data()),png.size())));
+        }else{
+            std::vector<uint8_t> bgr;uint32_t width=0,height=0,stride=0;
+            if(clipboard::BgrFromDib(dib,bgr,width,height,stride))written=SUCCEEDED(compare_image::SavePngBgr(path,bgr.data(),width,height,stride));
+            else LOG("Paste: the clipboard's bitmap is in a form this player does not read.");
+        }
+        if(!written){LOG("Paste: the picture could not be written to "<<WideToUtf8(folder.wstring())<<".");ShowToast(T(L"paste.image_failed"));return;}
+        std::vector<std::pair<std::filesystem::file_time_type,std::filesystem::path>> kept;
+        for(std::filesystem::directory_iterator it(folder,error),end;!error&&it!=end;it.increment(error)){
+            std::error_code itemError;
+            if(it->is_regular_file(itemError)&&it->path().extension()==L".png")kept.emplace_back(it->last_write_time(itemError),it->path());
+        }
+        std::sort(kept.begin(),kept.end(),[](const auto& a,const auto& b){return a.first>b.first;});
+        for(size_t index=kPastedImagesKept;index<kept.size();++index)
+            if(kept[index].second!=path){std::error_code removeError;std::filesystem::remove(kept[index].second,removeError);}
+        LOG("Paste: opening a picture from the clipboard.");
+        Load(path.wstring(),T(L"paste.image_title"));
     }
     void SaveComparisonImage(){
         if(!m_loaded||!m_renderer)return;
@@ -5897,6 +6299,9 @@ private:
             app_menu::UpdateMaskMenu(menu,m_loaded,!m_maskSource.pixels.empty(),m_maskInvert,MaskFeatherIndex());
             app_menu::UpdateSecondMixMenu(menu,ComparisonModesAvailable(),SecondMixIndex());
             EnableMenuItem(menu,IDM_SAVE_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
+            EnableMenuItem(menu,IDM_COPY_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
+            for(const UINT command:{IDM_NEXT_FILE,IDM_PREVIOUS_FILE})EnableMenuItem(menu,command,MF_BYCOMMAND|(NeighbourFolder()?MF_ENABLED:MF_GRAYED));
+            CheckMenuItem(menu,IDM_RESUME_POSITION,MF_BYCOMMAND|(m_resumeEnabled?MF_CHECKED:MF_UNCHECKED));
             DrawMenuBar(m_hwnd);
         }
     }
@@ -11450,7 +11855,7 @@ private:
                 StartNeuralJob(url,{},title,url,MediaSourceKind::YouTube,sourceQuality,sourceKey,0.0,{},true);return;
             }
         }
-        if(!m_youtubeResolver)m_youtubeResolver=std::make_unique<YouTubeResolver>();
+        if(!m_youtubeResolver){m_youtubeResolver=std::make_unique<YouTubeResolver>();m_youtubeResolver->SetCaptionLanguage(m_loc.Language());}
         const uint64_t generation=m_youtubeLifecycle.Begin();
         m_pendingYouTubeTitle=DisplayTitleForSource(MediaSourceKind::YouTube,displayTitle);
         SyncSourceActionAvailability();
@@ -11670,6 +12075,11 @@ private:
         // After the install, not before: committing a prepared renderer runs
         // through Unload, which clears the notice.
         if(committed)NoteResolvedSourceQuality(completion->result);
+        // A seek reopens the streams without asking yt-dlp again, so only a
+        // resolve brings caption tracks; a seek keeps the ones there are.
+        if(committed&&completion->commitKind!=NetworkCommitKind::Seek){
+            m_youtubeCaptions=completion->result.captions;m_youtubeCaptionsPage=completion->pageUrl;
+        }
     }
     PlayerRuntimeStatus RuntimeStatus()const{
         return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());
@@ -12389,6 +12799,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         case IDM_HELP_KEY_BINDINGS:EditKeyBindings();break;case IDM_HELP_USER_GUIDE:OpenUserGuide();break;
         case IDM_HELP_LOG_FOLDER:OpenLogFolder();break;case IDM_HELP_ABOUT:ShowAbout();break;
         case IDM_STEP_FRAME:StepCachedFrame();break;
+        case IDM_NEXT_FILE:OpenNeighbourFile(+1);break;case IDM_PREVIOUS_FILE:OpenNeighbourFile(-1);break;
+        case IDM_RESUME_POSITION:SetResumeEnabled(!m_resumeEnabled);break;
         // A, Fit and Fill in turn; from 1:1 it goes to Fit.
         case IDM_ASPECT_TOGGLE:SetAspect(m_onePixel?false:!m_fill,false);break;
         // Apply's path: a running session restarts at the playhead with the
@@ -12405,7 +12817,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         // the view Blend became, the neural frame at the Mix.
         case IDM_COMPARE_NEURAL:case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_ORIGINAL:SetComparisonMode(ComparisonMode::Original);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustMix(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustMix(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
-        case IDM_SAVE_COMPARISON_IMAGE:SaveComparisonImage();break;
+        case IDM_SAVE_COMPARISON_IMAGE:SaveComparisonImage();break;case IDM_COPY_COMPARISON_IMAGE:CopyComparisonImage();break;
+        case IDM_PASTE:PasteFromClipboard();break;
         case IDM_COMPARE_MASK_LOAD:LoadMaskFromDialog();break;case IDM_COMPARE_MASK_INVERT:ToggleMaskInvert();break;case IDM_COMPARE_MASK_CLEAR:ClearMaskForSource();break;
         case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_DIFFERENCE:SetComparisonMode(ComparisonMode::Difference);break;
         case IDM_COMPARE_SIDE_BY_SIDE:SetComparisonMode(ComparisonMode::SideBySide);break;case IDM_COMPARE_QUAD:SetComparisonMode(ComparisonMode::Quad);break;
@@ -12785,6 +13198,13 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     bool m_subtitleProbeRemember=false;
     subtitle::Choice m_subtitleChoice;
     int m_subtitleDelayMs=0;
+    // Where the loaded video is, as the last settled tick saw it, and for which
+    // source (ServiceResume). m_resumePending: the source has just arrived and
+    // its remembered position has not been looked up yet.
+    bool m_resumeEnabled=true;
+    std::wstring m_resumeKey;
+    double m_resumeSeenSec=-1.0,m_resumeSeenDuration=0.0;
+    bool m_resumePending=false;
     std::optional<SubtitleOverlay::Source> m_subtitleWanted;
     std::shared_ptr<const subtitle::Frame> m_subtitleFrame;
     const D3D12Renderer* m_subtitleRenderer=nullptr;

@@ -238,6 +238,13 @@ junction checks doing their job and mean the install has been tampered with.
 "The YouTube helpers are present, but their cache folder beside the app could
 not be created" is a read-only install folder.
 
+*Captions.* No YouTube tracks under **Playback > Subtitles** means the video
+has none in the interface language or in English. If picking one says the
+captions could not be fetched, the connection failed or YouTube sent something
+that was not WebVTT. Subtitles go back to Off; pick the track again to retry.
+Captions come only from the youtube.com or googlevideo.com address yt-dlp
+named, with no redirects followed.
+
 Every refusal is also written to the log, with the cause named, which is what
 to attach to a bug report when YouTube changes something upstream.
 

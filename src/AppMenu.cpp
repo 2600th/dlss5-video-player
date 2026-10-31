@@ -105,6 +105,7 @@ HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& local
         mirror(IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments");
         mirror(IDM_RERENDER_HERE, L"menu.rerender_here");
         mirror(IDM_SAVE_COMPARISON_IMAGE, L"menu.save_comparison");
+        mirror(IDM_COPY_COMPARISON_IMAGE, L"menu.copy_comparison");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         mirror(IDM_ASPECT_FIT, L"menu.aspectfit");
         mirror(IDM_ASPECT_FILL, L"menu.aspectfill");
@@ -170,6 +171,8 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key
     HMENU file = CreatePopupMenu();
     add(file, IDM_OPEN, L"menu.open");
     add(file, IDM_OPEN_YOUTUBE, L"menu.open_youtube", youtubeAvailable ? 0 : MF_GRAYED);
+    // What a drop does, from the clipboard: a file, a picture or a YouTube link.
+    add(file, IDM_PASTE, L"menu.paste");
     // The resolution a YouTube source is fetched at is a property of opening it,
     // so it sits under Open YouTube URL rather than among the view settings.
     HMENU youtubeQuality = CreatePopupMenu();
@@ -195,6 +198,7 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key
     add(file, IDM_EXPORT_STAGES, L"menu.export_stages");
     add(file, IDM_EXPORT_CACHED_VIDEO, L"menu.export_cached", MF_GRAYED);
     add(file, IDM_SAVE_COMPARISON_IMAGE, L"menu.save_comparison", MF_GRAYED);
+    add(file, IDM_COPY_COMPARISON_IMAGE, L"menu.copy_comparison", MF_GRAYED);
     // Grayed on creation: main.cpp enables it once an export or a frame
     // generation has written a file, which is otherwise unreachable once its
     // confirmation closes.
@@ -209,6 +213,11 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key
     // The '.' key had no row and was found only on the shortcut sheet.
     add(play, IDM_STEP_FRAME, L"menu.step_frame");
     add(play, IDM_GOTO_TIMECODE, L"menu.goto_timecode");
+    separator(play);
+    // Which file, and where in it: the folder's neighbours, and the checkbox
+    // that brings a video back where it was left (P2.52).
+    add(play, IDM_NEXT_FILE, L"menu.next_file"); add(play, IDM_PREVIOUS_FILE, L"menu.previous_file");
+    add(play, IDM_RESUME_POSITION, L"menu.resume_position", MF_CHECKED);
     separator(play);
     add(play, IDM_MUTE, L"menu.mute");
     // Which track, then how it leaves the machine. UpdateAudioTracks rebuilds
@@ -632,6 +641,8 @@ bool UpdateSourceActionAvailability(HMENU menuBar, bool openEnabled,
     const UINT youtubeState = EnableMenuItem(
         fileMenu, IDM_OPEN_YOUTUBE,
         MF_BYCOMMAND | (youtubeEnabled ? MF_ENABLED : MF_GRAYED));
+    // A paste opens a file or a link, so it is live while either can open.
+    EnableMenuItem(fileMenu, IDM_PASTE, MF_BYCOMMAND | (openEnabled || youtubeEnabled ? MF_ENABLED : MF_GRAYED));
     bool examplesUpdated = true;
     for (size_t index = 0; index < kExampleVideos.size(); ++index) {
         const UINT state = EnableMenuItem(

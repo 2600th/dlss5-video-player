@@ -16,6 +16,15 @@
 // refusal), and the caller is told how many it did not open so it can say so.
 namespace dropped_files {
 
+// The media the player opens by name: the open dialog's "Photos, GIFs and
+// videos" filter, and what a drop, a paste and the next file in a folder
+// prefer.
+inline constexpr const wchar_t* kMediaPatterns =
+    L"*.mp4;*.m4v;*.mov;*.mkv;*.webm;*.avi;*.wmv;*.asf;*.flv;*.f4v;"
+    L"*.ts;*.m2ts;*.mts;*.mpg;*.mpeg;*.mpe;*.vob;*.ogv;*.ogg;*.3gp;*.3g2;"
+    L"*.mxf;*.nut;*.rm;*.rmvb;*.divx;*.dv;*.y4m;*.ivf;*.hevc;*.h265;*.h264;*.264;*.av1;*.vp9;"
+    L"*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp";
+
 // Whether `path` ends in one of the extensions in `patterns`, the open
 // dialog's own "*.mp4;*.mkv;..." list, compared case-insensitively.
 inline bool MatchesPatterns(std::wstring_view path, std::wstring_view patterns)

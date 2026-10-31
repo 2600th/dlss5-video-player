@@ -52,9 +52,10 @@ struct Command {
 
 inline constexpr Command kCommands[] = {
     // File
-    {L"open", app_menu::IDM_OPEN}, {L"open-youtube", app_menu::IDM_OPEN_YOUTUBE},
+    {L"open", app_menu::IDM_OPEN}, {L"open-youtube", app_menu::IDM_OPEN_YOUTUBE}, {L"paste", app_menu::IDM_PASTE},
     {L"export", app_menu::IDM_EXPORT_STAGES}, {L"save-rendered", app_menu::IDM_EXPORT_CACHED_VIDEO},
-    {L"save-comparison", app_menu::IDM_SAVE_COMPARISON_IMAGE}, {L"show-last-export", app_menu::IDM_SHOW_FRAMEGEN_OUTPUT},
+    {L"save-comparison", app_menu::IDM_SAVE_COMPARISON_IMAGE}, {L"copy-comparison", app_menu::IDM_COPY_COMPARISON_IMAGE},
+    {L"show-last-export", app_menu::IDM_SHOW_FRAMEGEN_OUTPUT},
     {L"exit", app_menu::IDM_EXIT},
     // Playback
     {L"play-pause", app_menu::IDM_PLAY}, {L"stop", app_menu::IDM_STOP},
@@ -65,6 +66,8 @@ inline constexpr Command kCommands[] = {
     {L"subtitles-load", app_menu::IDM_SUBTITLE_LOAD}, {L"subtitles-earlier", app_menu::IDM_SUBTITLE_EARLIER},
     {L"subtitles-later", app_menu::IDM_SUBTITLE_LATER}, {L"subtitles-reset-delay", app_menu::IDM_SUBTITLE_DELAY_RESET},
     {L"mark-in", app_menu::IDM_MARK_IN}, {L"mark-out", app_menu::IDM_MARK_OUT}, {L"clear-marks", app_menu::IDM_CLEAR_MARKS},
+    {L"next-file", app_menu::IDM_NEXT_FILE}, {L"previous-file", app_menu::IDM_PREVIOUS_FILE},
+    {L"resume-toggle", app_menu::IDM_RESUME_POSITION},
     // View
     {L"aspect-toggle", app_menu::IDM_ASPECT_TOGGLE}, {L"aspect-fit", app_menu::IDM_ASPECT_FIT},
     {L"aspect-fill", app_menu::IDM_ASPECT_FILL}, {L"aspect-pixels", app_menu::IDM_ASPECT_ONE_TO_ONE},
@@ -110,10 +113,16 @@ struct DefaultBinding {
 };
 inline constexpr DefaultBinding kDefaults[] = {
     {L"Ctrl+O", L"open"}, {L"Ctrl+L", L"open-youtube"}, {L"Ctrl+S", L"export"}, {L"Ctrl+Shift+S", L"save-comparison"},
+    // New in 0.30.0 (P2.41): every Windows program's paste, and Save comparison's
+    // Ctrl+Shift beside it for the copy, since Ctrl+C alone is a copy of text.
+    {L"Ctrl+V", L"paste"}, {L"Ctrl+Shift+C", L"copy-comparison"},
     {L"Space", L"play-pause"}, {L"S", L"stop"}, {L"Left", L"seek-back"}, {L"Right", L"seek-forward"},
     {L".", L"step-frame"}, {L"Ctrl+G", L"goto-timecode"}, {L"M", L"mute"},
     {L"V", L"subtitles-next"}, {L"H", L"subtitles-earlier"}, {L"J", L"subtitles-later"},
     {L"I", L"mark-in"}, {L"O", L"mark-out"}, {L"Shift+I", L"clear-marks"}, {L"Shift+O", L"clear-marks"},
+    // New in 0.30.0, MPC-HC's and PotPlayer's keys for the folder's next and
+    // previous file; nothing had them.
+    {L"PgDn", L"next-file"}, {L"PgUp", L"previous-file"},
     {L"A", L"aspect-toggle"}, {L"F11", L"fullscreen"}, {L"Ctrl+E", L"viewing-adjustments"},
     {L"1", L"debug-final"}, {L"2", L"debug-input"}, {L"3", L"debug-motion"}, {L"4", L"debug-depth"},
     {L"R", L"compare-vsr"}, {L"C", L"compare-next"}, {L"Shift+C", L"compare-previous"},
