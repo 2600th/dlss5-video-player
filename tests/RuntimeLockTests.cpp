@@ -137,8 +137,8 @@ void embedded_lock_parses_and_names_the_locked_runtime_files_test()
     // so the two sets are deliberately different sizes.
     const auto pinned = LockPinnedRuntimeFileNames();
     const auto hashed = LockedRuntimeFileNames();
-    CHECK_EQ(size_t{12}, pinned.size());
-    CHECK_EQ(size_t{13}, hashed.size());
+    CHECK_EQ(size_t{13}, pinned.size());
+    CHECK_EQ(size_t{14}, hashed.size());
     CHECK_EQ(pinned.size(), lock.entries.size());
     for (const std::wstring_view name : pinned) {
         const bool listed = std::any_of(lock.entries.begin(), lock.entries.end(),
@@ -281,6 +281,23 @@ void unlocked_runtime_modules_are_named_and_packaged_files_are_allowed_test()
 
     // A directory that cannot be listed is a refusal, not a pass.
     CHECK(!FindUnlockedRuntimeModules(directory / L"does-not-exist", lock).has_value());
+
+    // A folder a lock destination names is a load path too (the previous NR
+    // runtime's), so a stray there is named with its folder; its locked file
+    // is not, and a folder the lock does not name is still not looked in.
+    for (const wchar_t* name : {L"Stray.DLL", L"other.addon32", L"plain.addon", L"zzz-extra.addon64"})
+        std::filesystem::remove(directory / name);
+    lock.entries.push_back(RuntimeLockEntry{L"310.8.SF-v2/nvngx_dlssnr.dll", 1, Hex("x"), L""});
+    const auto missingFolder = FindUnlockedRuntimeModules(directory, lock);
+    CHECK(missingFolder.has_value() && missingFolder->empty());
+    std::filesystem::create_directories(directory / L"310.8.SF-v2");
+    WriteFile(directory / L"310.8.SF-v2" / L"NVNGX_DLSSNR.dll", "x");
+    WriteFile(directory / L"310.8.SF-v2" / L"ReShade.log", "x");
+    const auto folderClean = FindUnlockedRuntimeModules(directory, lock);
+    CHECK(folderClean.has_value() && folderClean->empty());
+    WriteFile(directory / L"310.8.SF-v2" / L"beside.dll", "x");
+    const auto folderStray = FindUnlockedRuntimeModules(directory, lock);
+    CHECK_EQ((std::vector<std::wstring>{L"310.8.SF-v2/beside.dll"}), folderStray.value_or(std::vector<std::wstring>{}));
 
     // A preflight helper that refuses to start says why in a diagnosis, which
     // is where the parent reads the user's message from - not only in its log.

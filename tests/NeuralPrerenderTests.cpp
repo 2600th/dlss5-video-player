@@ -913,15 +913,21 @@ void hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test()
 {
     const auto hashed = LockedRuntimeFileNames();
     const auto pinned = LockPinnedRuntimeFileNames();
-    CHECK_EQ(size_t{13}, hashed.size());
-    CHECK_EQ(size_t{12}, pinned.size());
+    CHECK_EQ(size_t{14}, hashed.size());
+    CHECK_EQ(size_t{13}, pinned.size());
     CHECK(std::ranges::find(hashed, std::wstring_view(L"NeuralWorker.exe")) != hashed.end());
+    // Both NR DLLs: the render identity names the pair, whichever one runs.
+    CHECK(std::ranges::find(pinned, std::wstring_view(L"nvngx_dlssnr.dll")) != pinned.end());
+    CHECK(std::ranges::find(pinned, std::wstring_view(L"310.8.SF-v2/nvngx_dlssnr.dll")) != pinned.end());
     CHECK(std::ranges::find(pinned, std::wstring_view(L"NeuralWorker.exe")) == pinned.end());
     for (const std::wstring_view name : pinned)
         CHECK(std::ranges::find(hashed, name) != hashed.end());
 
     TempDirectory fixture;
-    for (const std::wstring_view name : hashed) WriteBytes(fixture.Path() / name, "staged-module");
+    for (const std::wstring_view name : hashed) {
+        std::filesystem::create_directories((fixture.Path() / name).parent_path());
+        WriteBytes(fixture.Path() / name, "staged-module");
+    }
     const auto staged = BuildRuntimeDigest(fixture.Path(), hashed);
     CHECK(staged.has_value());
     WriteBytes(fixture.Path() / L"NeuralWorker.exe", "rebuilt-worker");

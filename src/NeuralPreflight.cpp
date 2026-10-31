@@ -27,14 +27,14 @@
 
 namespace {
 
-// The twelve lock-pinned vendor modules first, then the worker, so the pinned
-// set is this array's leading twelve entries and neither list can drift from
-// the other.
-constexpr std::array<std::wstring_view, 13> kLockedRuntimeFiles{
-    L"nvngx_dlssnr.dll", L"nvngx_dlss.dll", L"dxgi.dll", L"renodx-dlss5.addon64", L"sl.common.dll",
-    L"sl.dlss.dll", L"sl.dlss_g.dll", L"sl.dlss_nr.dll", L"sl.interposer.dll", L"sl.nis.dll", L"sl.pcl.dll",
-    L"sl.reflex.dll", L"NeuralWorker.exe"};
-constexpr size_t kLockPinnedRuntimeFileCount = 12;
+// The thirteen lock-pinned vendor modules first, then the worker, so the
+// pinned set is this array's leading thirteen entries and neither list can
+// drift from the other. Both NR DLLs: either may be the one a render loads.
+constexpr std::array<std::wstring_view, 14> kLockedRuntimeFiles{
+    L"nvngx_dlssnr.dll", L"310.8.SF-v2/nvngx_dlssnr.dll", L"nvngx_dlss.dll", L"dxgi.dll",
+    L"renodx-dlss5.addon64", L"sl.common.dll", L"sl.dlss.dll", L"sl.dlss_g.dll", L"sl.dlss_nr.dll",
+    L"sl.interposer.dll", L"sl.nis.dll", L"sl.pcl.dll", L"sl.reflex.dll", L"NeuralWorker.exe"};
+constexpr size_t kLockPinnedRuntimeFileCount = 13;
 
 // The NGX core registration the display driver writes; NGX resolves the same
 // value through NGXGetPathUsingQAI, and on this machine it reads

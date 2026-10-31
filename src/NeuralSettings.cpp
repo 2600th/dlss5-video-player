@@ -70,6 +70,14 @@ bool ReadBool(const std::wstring& path, const wchar_t* key, bool& value)
     return true;
 }
 
+bool ReadNetwork(const std::wstring& path, neural_runtime::Network& value)
+{
+    const auto text = ReadKey(path, L"Network");
+    if (!text) return false;
+    if (const auto network = neural_runtime::ParseKey(*text)) value = *network;
+    return true;
+}
+
 bool WriteKey(const std::wstring& path, const wchar_t* key, const std::string& value)
 {
     const std::wstring wide(value.begin(), value.end()); // ASCII digits only.
@@ -78,20 +86,29 @@ bool WriteKey(const std::wstring& path, const wchar_t* key, const std::string& v
 
 } // namespace
 
-std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& settings)
+std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& settings,
+                                                         const neural_runtime::Runtime& runtime)
 {
+    const int preset = neural_runtime::PresetValue(neural_runtime::Effective(runtime, settings.network));
+    const std::string color = FormatFloat(WrittenColorStrength(settings.colorStrength));
     std::vector<NeuralAddonOverride> overrides{
         {"NRIntensity", FormatFloat(settings.intensity)},
         {"NRLocalTone", FormatFloat(settings.localTone)},
         {"NRLocalStructure", FormatFloat(settings.localStructure)},
         {"NRSkinStructure", FormatFloat(settings.skinStructure)},
-        {"NRColorStrength", FormatFloat(settings.colorStrength)},
-        {"NRPreset", std::to_string(settings.preset)},
+        {"NRColorStrength", color},
+        {"NRPreset", std::to_string(preset)},
         {"NRStyle", std::to_string(settings.style)},
         {"NRAutoMask", settings.autoMask ? "1" : "0"},
         {"NRPasses", std::to_string(settings.passes)},
         {"NRChainedHistory", settings.chainedHistory ? "1" : "0"},
         {"NRNormGovernor", std::string(kPinnedNormGovernor)},
+        {"NRDetailStability", std::string(kPinnedDetailStability)},
+        {"NRSkinIndependent", std::string(kPinnedSkinIndependent)},
+        // Named for both runtimes, so a job after one on the other never
+        // inherits its NRRuntimePath, and the snapshot, the settings digest and
+        // with them the cache key all name the DLL that ran.
+        {"NRRuntimePath", std::string(runtime.addonPath)},
     };
     // Stacked passes 2..4 read their own strength keys and never NRIntensity or
     // NRColorStrength: at 2 passes and Intensity 0.40, adding NRPass2Intensity=0.40
@@ -100,7 +117,7 @@ std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& s
     // strength controls only reached the first pass. Every pass gets them.
     for (int pass = 2; pass <= kMaxNeuralPasses; ++pass) {
         overrides.emplace_back("NRPass" + std::to_string(pass) + "Intensity", FormatFloat(settings.intensity));
-        overrides.emplace_back("NRPass" + std::to_string(pass) + "Color", FormatFloat(settings.colorStrength));
+        overrides.emplace_back("NRPass" + std::to_string(pass) + "Color", color);
     }
     return overrides;
 }
@@ -114,11 +131,12 @@ bool LoadNeuralSettings(const std::filesystem::path& ini, NeuralSettings& settin
         ReadFloat(path, L"LocalStructure", settings.localStructure, 0.0f, 2.0f),
         ReadFloat(path, L"SkinStructure", settings.skinStructure, -1.0f, 1.0f),
         ReadFloat(path, L"ColorStrength", settings.colorStrength, 0.0f, 1.0f),
-        ReadInt(path, L"Preset", settings.preset, 0, 3),
+        ReadNetwork(path, settings.network),
         ReadInt(path, L"Style", settings.style, 0, 2),
         ReadBool(path, L"AutoMask", settings.autoMask),
         ReadInt(path, L"Passes", settings.passes, 1, kMaxNeuralPasses),
         ReadBool(path, L"ChainedHistory", settings.chainedHistory),
+        ReadBool(path, L"PreviousRuntime", settings.previousRuntime),
     };
     // The migration of a pre-Off value: see skin_structure. The next save
     // writes the normalized value back.
@@ -135,12 +153,16 @@ bool SaveNeuralSettings(const std::filesystem::path& ini, const NeuralSettings& 
         WriteKey(path, L"LocalStructure", FormatFloat(settings.localStructure)),
         WriteKey(path, L"SkinStructure", FormatFloat(settings.skinStructure)),
         WriteKey(path, L"ColorStrength", FormatFloat(settings.colorStrength)),
-        WriteKey(path, L"Preset", std::to_string(settings.preset)),
+        WriteKey(path, L"Network", std::string(neural_runtime::Key(settings.network))),
         WriteKey(path, L"Style", std::to_string(settings.style)),
         WriteKey(path, L"AutoMask", settings.autoMask ? "1" : "0"),
         WriteKey(path, L"Passes", std::to_string(settings.passes)),
         WriteKey(path, L"ChainedHistory", settings.chainedHistory ? "1" : "0"),
+        WriteKey(path, L"PreviousRuntime", settings.previousRuntime ? "1" : "0"),
     };
+    // The hidden render preset this section used to carry. Every build saved 0,
+    // which 310.9.16 reads as its own default network, so it is not migrated.
+    WritePrivateProfileStringW(kSection, L"Preset", nullptr, path.c_str());
     return std::ranges::all_of(written, [](bool value) { return value; });
 }
 
@@ -151,11 +173,12 @@ std::string CanonicalNeuralSettings(const NeuralSettings& settings)
         " localStructure=" + FormatFloat(settings.localStructure) +
         " skinStructure=" + FormatFloat(settings.skinStructure) +
         " colorStrength=" + FormatFloat(settings.colorStrength) +
-        " preset=" + std::to_string(settings.preset) +
+        " network=" + std::string(neural_runtime::Key(settings.network)) +
         " style=" + std::to_string(settings.style) +
         " autoMask=" + (settings.autoMask ? "1" : "0") +
         " passes=" + std::to_string(settings.passes) +
         " chainedHistory=" + (settings.chainedHistory ? "1" : "0") +
+        (settings.previousRuntime ? " runtime=previous" : "") +
         // Since every pass takes the strength controls, a stacked render with
         // either below 1.00 is a different picture from the one cached under the
         // same settings before: those renders get their own identity. Every

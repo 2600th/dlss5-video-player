@@ -66,6 +66,10 @@ struct Command {
     // it a script can render with one style and render the result again with
     // another without editing the player's saved settings in between.
     std::optional<int> style;
+    // The NR network (neural_runtime::Network, P3.14): a, the default, or b,
+    // the lightweight one. Applies over the preset and the saved settings, as
+    // the knobs above do; a runtime without B renders A.
+    std::optional<neural_runtime::Network> network;
     // Encoder settings' quality ladder, by its stable name (standard, high,
     // lossless; EncoderQualityName); empty uses the saved rung.
     std::string quality;
@@ -193,7 +197,7 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
          seenHeight = false, seenMultiplier = false, seenOut = false, seenQuiet = false,
          seenScale = false, seenPasses = false, seenIntensity = false, seenTone = false,
          seenStructure = false, seenColor = false, seenEncode = false, seenHistory = false, seenEngine = false,
-         seenStyle = false;
+         seenStyle = false, seenNetwork = false;
     std::wstring_view presetName;
     // What the dialog opens with: the neural pass alone.
     command.selection = ExportSelection{};
@@ -299,6 +303,10 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             for (int candidate = 0; candidate < 3; ++candidate)
                 if (EqualsIgnoringCase(value, std::wstring(styles[candidate]))) command.style = candidate;
             if (!command.style) return bad(L"--style takes default, natural or cinematic.");
+        } else if (argument == L"--network") {
+            if (!once(seenNetwork)) return bad(L"--network was given twice.");
+            command.network = neural_runtime::ParseKey(value);
+            if (!command.network) return bad(L"--network takes a or b.");
         } else if (argument == L"--encode") {
             if (!once(seenEncode)) return bad(L"--encode was given twice.");
             if (value != L"standard" && value != L"high" && value != L"lossless")
@@ -360,8 +368,10 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
     if (seenScale && (!selection.neural || selection.upscale))
         return bad(L"--processing-scale needs the nr stage without sr.");
     if (seenMultiplier && !selection.frameGeneration) return bad(L"--multiplier needs the fg stage.");
-    if ((seenPasses || seenIntensity || seenTone || seenStructure || seenColor || seenStyle) && !selection.neural)
-        return bad(L"--passes, --style, --intensity, --local-tone, --local-structure and --color-strength need the nr stage.");
+    if ((seenPasses || seenIntensity || seenTone || seenStructure || seenColor || seenStyle || seenNetwork) &&
+        !selection.neural)
+        return bad(L"--passes, --style, --network, --intensity, --local-tone, --local-structure and --color-strength "
+                   L"need the nr stage.");
     // The model keeps its own history on the carrier it runs on, so History is
     // Super Resolution's choice only when the model does not run (the dialog
     // greys it out the same way).
@@ -426,6 +436,9 @@ inline std::wstring Usage()
         L"                     preset's or the saved setting.\n"
         L"  --style S          Neural style for nr: default, natural (the strongest\n"
         L"                     change) or cinematic. Applies over --preset.\n"
+        L"  --network N        NR network for nr: a (the 0.28 look, recommended) or b\n"
+        L"                     (lightweight: faster, a milder picture). RTX 50 only;\n"
+        L"                     other GPUs render a. Default: the saved setting.\n"
         L"  --intensity X      nr intensity, 0 to 1; up to 2 is accepted and renders as 1,\n"
         L"                     all the runtime applies. --local-tone X and\n"
         L"                     --local-structure X, 0 to 2, and --color-strength X, 0 to 1,\n"

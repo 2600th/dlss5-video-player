@@ -66,10 +66,12 @@ std::wstring StageExportRuntimeRefusal(const std::filesystem::path& runtimeDirec
 
 // Everything a neural render writes into the add-on's [RenoDX.DLSS5]: the
 // Neural settings, and the model's place against the carrier's upscale that
-// the processing scale needs (PreUpscaleOverride says when that is written).
+// the processing scale needs (PreUpscaleOverride says when that is written),
+// on the NR runtime `gpu` and the settings select (neural_runtime::Select).
 std::vector<NeuralAddonOverride> RenderAddonOverrides(const std::filesystem::path& ini,
                                                       const NeuralSettings& settings,
-                                                      uint32_t processingScale);
+                                                      uint32_t processingScale,
+                                                      GpuGeneration gpu);
 
 // ---- The passes themselves -----------------------------------------------
 
@@ -107,6 +109,9 @@ struct StageExportJob {
     // from Neural settings", but nothing wrote them: the export used whatever
     // the last live render had left in ReShade.ini.
     NeuralSettings neuralSettings{};
+    // Which NR runtime the pass loads (neural_runtime::Select). Unsupported
+    // selects 310.8.SF-v2, which runs on every generation.
+    GpuGeneration gpu{GpuGeneration::Unsupported};
     // The capture-quality switches of Encoder settings, so the export's neural pass
     // writes the same way the cache does.
     bool captureDither{true};

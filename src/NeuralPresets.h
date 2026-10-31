@@ -82,17 +82,18 @@ inline constexpr Preset kPresets[] = {
 
     {"detail-only", "detail-only", "Detail only",
      "Keeps the source colour and lets the model change structure alone - "
-     "NRColorStrength to 0. For material whose grade you do not want touched.",
+     "NRColorStrength to 0, sent as 0.01, the least RenoDX 10.8.0 renders. For "
+     "material whose grade you do not want touched.",
      "6.31 s measured. Every preset renders in the same time - they change the "
      "look, not the speed.",
-     NeuralSettings{1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 0, 0, true}},
+     NeuralSettings{1.0f, 1.0f, 1.0f, -1.0f, 0.0f, neural_runtime::Network::A, 0, true}},
 
     {"gentle", "gentle", "Gentle",
      "Half intensity and softer local structure. For faces and film grain, "
      "where a full-strength render is the one that reads as waxy.",
      "6.30 s measured. Every preset renders in the same time - they change the "
      "look, not the speed.",
-     NeuralSettings{0.5f, 1.0f, 0.5f, 0.0f, 1.0f, 0, 0, true}},
+     NeuralSettings{0.5f, 1.0f, 0.5f, 0.0f, 1.0f, neural_runtime::Network::A, 0, true}},
 
     // Strong used to be Intensity 1.50 / tone 1.25 / structure 1.50: its Intensity
     // rendered byte-identical to 1.00 and it landed 6 % further from the source
@@ -104,7 +105,7 @@ inline constexpr Preset kPresets[] = {
      "a low-bitrate stream - where the default leaves the artefacts visible.",
      "6.31 s measured. Every preset renders in the same time - they change the "
      "look, not the speed.",
-     NeuralSettings{1.0f, 2.0f, 1.5f, -1.0f, 1.0f, 0, 0, true}},
+     NeuralSettings{1.0f, 2.0f, 1.5f, -1.0f, 1.0f, neural_runtime::Network::A, 0, true}},
 };
 
 inline constexpr size_t kPresetCount = sizeof(kPresets) / sizeof(kPresets[0]);
@@ -112,14 +113,25 @@ inline constexpr size_t kPresetCount = sizeof(kPresets) / sizeof(kPresets[0]);
 // The shipped default, and the one a first run gets.
 inline constexpr size_t kDefaultPresetIndex = 0;
 
+// A preset sets the Look controls and keeps the network and the runtime the
+// user chose: those decide what runs and what it costs, not the look, so
+// picking Gentle on network B stays on B.
+inline NeuralSettings Applied(const NeuralSettings& preset, const NeuralSettings& current)
+{
+    NeuralSettings settings = preset;
+    settings.network = current.network;
+    settings.previousRuntime = current.previousRuntime;
+    return settings;
+}
+
 // The preset whose settings these are, or kPresetCount when the user has moved
 // a control away from all of them. "Custom" is a real state, not a failure:
 // the presets are starting points and editing one afterwards is the expected
-// path.
+// path. The network and the runtime are not part of a preset (Applied).
 inline size_t IndexOf(const NeuralSettings& settings)
 {
     for (size_t index = 0; index < kPresetCount; ++index)
-        if (kPresets[index].settings == settings) return index;
+        if (Applied(kPresets[index].settings, settings) == settings) return index;
     return kPresetCount;
 }
 

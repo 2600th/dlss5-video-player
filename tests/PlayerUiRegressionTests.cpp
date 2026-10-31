@@ -184,7 +184,7 @@ struct PlayerAppTestAccess {
         app.m_neuralRequested = false; app.m_upscaleTargetHeight = 2160;
         app.m_youtubeSourceQuality = YouTubeSourceQuality::P1440;
         app.m_renderGuides = GuideControls{false, true};
-        app.m_neuralSettings.intensity = 0.5f; app.m_neuralSettings.preset = 2; app.m_neuralSettings.autoMask = false;
+        app.m_neuralSettings.intensity = 0.5f; app.m_neuralSettings.network = neural_runtime::Network::B; app.m_neuralSettings.autoMask = false;
         app.m_comparison.mode = ComparisonMode::Wipe; app.m_comparison.swap = true; app.m_comparison.splitX = 0.8f; app.m_zoomStep = 3;
         app.m_comparison.strength = 0.4f;
         const auto savedCacheRoot=app.SettingsPath().parent_path()/L"shared-cache-location";
@@ -202,7 +202,7 @@ struct PlayerAppTestAccess {
         CHECK_EQ(app.m_upscaleTargetHeight, 2160u);
         CHECK(app.m_youtubeSourceQuality == YouTubeSourceQuality::P1440);
         CHECK((app.m_renderGuides == GuideControls{false, true}));
-        CHECK(app.m_neuralSettings.intensity == 0.5f && app.m_neuralSettings.preset == 2 && !app.m_neuralSettings.autoMask);
+        CHECK(app.m_neuralSettings.intensity == 0.5f && app.m_neuralSettings.network == neural_runtime::Network::B && !app.m_neuralSettings.autoMask);
         CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
         CHECK(app.m_comparison.swap && std::abs(app.m_comparison.splitX - 0.8f) < 0.001f);
         CHECK_EQ(app.m_zoomStep, 3);
@@ -4373,7 +4373,7 @@ struct PlayerAppTestAccess {
         setTrack(IDC_NS_SKIN, 0);
         app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
         CHECK_EQ(app.m_neuralSettings.skinStructure, -1.0f);
-        CHECK(NeuralAddonOverridesFor(app.m_neuralSettings)[3] == NeuralAddonOverride("NRSkinStructure", "-1.000000"));
+        CHECK(NeuralAddonOverridesFor(app.m_neuralSettings, neural_runtime::kCurrent)[3] == NeuralAddonOverride("NRSkinStructure", "-1.000000"));
         setTrack(IDC_NS_SKIN, 26);
         app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
         // Colour strength is offered again: RenoDX 6.5.3 honours it, where 4.70
@@ -4427,7 +4427,7 @@ struct PlayerAppTestAccess {
         // writes into the runtime's ReShade.ini, and a control the dialog edits
         // but never sends is the failure this pins.
         {
-            const auto overrides = NeuralAddonOverridesFor(app.m_neuralSettings);
+            const auto overrides = NeuralAddonOverridesFor(app.m_neuralSettings, neural_runtime::kCurrent);
             const auto valueOf = [&](std::string_view key) {
                 for (const auto& entry : overrides)
                     if (entry.first == key) return entry.second;

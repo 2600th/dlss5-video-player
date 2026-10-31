@@ -69,8 +69,9 @@ bool RuntimeLockSatisfied(std::span<const RuntimeLockCheck> checks);
 // lock is satisfied.
 std::wstring DescribeRuntimeLockDrift(std::span<const RuntimeLockCheck> checks);
 
-// Every loadable module in the top level of `runtimeDirectory` that the lock
-// does not name: a *.dll the loader would find beside the helper, or a
+// Every loadable module in the top level of `runtimeDirectory`, or in a folder
+// a lock destination names (310.8.SF-v2/, named "310.8.SF-v2/x.dll"), that the
+// lock does not name: a *.dll the loader would find beside the helper, or a
 // *.addon / *.addon32 / *.addon64 the ReShade proxy loads from `AddonPath=.`.
 // VerifyRuntimeLock only looks at the files it knows, so a stray add-on was
 // loaded into feature 18's process while the digest, the cache key and the

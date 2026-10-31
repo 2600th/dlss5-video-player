@@ -669,15 +669,19 @@ void writing_the_ini_sweeps_only_temporaries_older_than_this_process()
 
 void neural_settings_round_trip_and_format_renodx_overrides()
 {
-    const auto defaults = NeuralAddonOverridesFor(NeuralSettings{});
+    const auto defaults = NeuralAddonOverridesFor(NeuralSettings{}, neural_runtime::kCurrent);
     const std::vector<NeuralAddonOverride> expected{
         {"NRIntensity", "1.000000"}, {"NRLocalTone", "1.000000"},
         {"NRLocalStructure", "1.000000"}, {"NRSkinStructure", "-1.000000"},
-        {"NRColorStrength", "1.000000"}, {"NRPreset", "0"}, {"NRStyle", "0"},
+        // Network A, named: 0 is 310.9.16's own default, which is B.
+        {"NRColorStrength", "1.000000"}, {"NRPreset", "1"}, {"NRStyle", "0"},
         {"NRAutoMask", "1"}, {"NRPasses", "1"}, {"NRChainedHistory", "1"},
         // Slew, not the add-on's stable default: stable does not repeat itself
         // (docs/measurements/governor-20260924), and the cache assumes it does.
         {"NRNormGovernor", "1"},
+        // RenoDX 10.8.0's detail stability and independent skin, both off
+        // (docs/measurements/runtime-310916-20261031), and the DLL it loads.
+        {"NRDetailStability", "1"}, {"NRSkinIndependent", "0"}, {"NRRuntimePath", "nvngx_dlssnr.dll"},
         // Stacked passes read their own strength keys, never NRIntensity or
         // NRColorStrength (docs/measurements/knobs-upper-20261003); every pass
         // gets the dialog's values.
@@ -686,9 +690,35 @@ void neural_settings_round_trip_and_format_renodx_overrides()
         {"NRPass4Intensity", "1.000000"}, {"NRPass4Color", "1.000000"}};
     CHECK(expected == defaults);
     {
+        // The previous runtime: its folder, and A whatever was asked for, since
+        // 310.8.SF-v2 has no B.
+        NeuralSettings b;
+        b.network = neural_runtime::Network::B;
+        const auto previous = NeuralAddonOverridesFor(b, neural_runtime::kPrevious);
+        const auto value = [&](std::string_view key) {
+            for (const auto& [name, text] : previous) if (name == key) return text;
+            return std::string();
+        };
+        CHECK_EQ(std::string("1"), value("NRPreset"));
+        CHECK_EQ(std::string("310.8.SF-v2\\nvngx_dlssnr.dll"), value("NRRuntimePath"));
+        CHECK_EQ(std::string("2"), NeuralAddonOverridesFor(b, neural_runtime::kCurrent)[5].second);
+    }
+    {
+        // Colour 0 is written as 0.01: RenoDX 10.8.0 declines an all-zero
+        // session and the render fails. The setting itself keeps 0.
+        NeuralSettings detail;
+        detail.colorStrength = 0.0f; detail.passes = 2;
+        const auto overrides = NeuralAddonOverridesFor(detail, neural_runtime::kCurrent);
+        for (const auto& [name, text] : overrides)
+            if (name == "NRColorStrength" || name.ends_with("Color")) CHECK_EQ(std::string("0.010000"), text);
+        CHECK_EQ(0.0f, detail.colorStrength);
+        CHECK_EQ(0.01f, WrittenColorStrength(0.0f));
+        CHECK_EQ(0.5f, WrittenColorStrength(0.5f));
+    }
+    {
         NeuralSettings stacked;
         stacked.passes = 3; stacked.intensity = 0.4f; stacked.colorStrength = 0.6f;
-        const auto overrides = NeuralAddonOverridesFor(stacked);
+        const auto overrides = NeuralAddonOverridesFor(stacked, neural_runtime::kCurrent);
         const auto value = [&](std::string_view key) {
             for (const auto& [name, text] : overrides) if (name == key) return text;
             return std::string();
@@ -709,9 +739,18 @@ void neural_settings_round_trip_and_format_renodx_overrides()
     // a render at two stack passes is a different render, and one that keyed the
     // same as a single-pass render would be served from the wrong cache entry.
     CHECK_EQ(std::string("intensity=1.000000 localTone=1.000000 localStructure=1.000000 "
-                         "skinStructure=-1.000000 colorStrength=1.000000 preset=0 style=0 "
+                         "skinStructure=-1.000000 colorStrength=1.000000 network=a style=0 "
                          "autoMask=1 passes=1 chainedHistory=1"),
              CanonicalNeuralSettings(NeuralSettings{}));
+    {
+        // The network and the previous runtime are different pictures, so
+        // different keys.
+        NeuralSettings b; b.network = neural_runtime::Network::B;
+        NeuralSettings previous; previous.previousRuntime = true;
+        CHECK(CanonicalNeuralSettings(b).find(" network=b ") != std::string::npos);
+        CHECK(CanonicalNeuralSettings(previous).ends_with(" runtime=previous"));
+        CHECK(CanonicalNeuralSettings(previous) != CanonicalNeuralSettings(NeuralSettings{}));
+    }
 
     NeuralSettings tuned;
     tuned.intensity = 0.75f;
@@ -719,12 +758,13 @@ void neural_settings_round_trip_and_format_renodx_overrides()
     tuned.localStructure = 1.5f;
     tuned.skinStructure = 0.25f;
     tuned.colorStrength = 0.75f;
-    tuned.preset = 2;
+    tuned.network = neural_runtime::Network::B;
+    tuned.previousRuntime = true;
     tuned.style = 1;
     tuned.autoMask = false;
     tuned.passes = 3;
     tuned.chainedHistory = false;
-    const auto tunedOverrides = NeuralAddonOverridesFor(tuned);
+    const auto tunedOverrides = NeuralAddonOverridesFor(tuned, neural_runtime::kCurrent);
     CHECK_EQ(std::string("0.750000"), tunedOverrides[0].second);
     CHECK_EQ(std::string("0.250000"), tunedOverrides[3].second);
     CHECK_EQ(std::string("2"), tunedOverrides[5].second);
@@ -750,13 +790,14 @@ void neural_settings_round_trip_and_format_renodx_overrides()
     CHECK(text.find("[NeuralSettings]") != std::string::npos);
     CHECK(text.find("Intensity=0.750000") != std::string::npos);
     // Out-of-range and partial entries clamp and keep defaults elsewhere.
-    Write(ini, "[NeuralSettings]\r\nIntensity=9\r\nSkinStructure=-4\r\nPreset=7\r\nAutoMask=5\r\n");
+    Write(ini, "[NeuralSettings]\r\nIntensity=9\r\nSkinStructure=-4\r\nNetwork=c\r\nAutoMask=5\r\n");
     NeuralSettings clamped;
     CHECK(LoadNeuralSettings(ini, clamped));
     // Intensity holds at what the runtime applies (kIntensityMax), not the add-on's 2.
     CHECK_EQ(kIntensityMax, clamped.intensity);
     CHECK_EQ(-1.0f, clamped.skinStructure);
-    CHECK_EQ(3, clamped.preset);
+    CHECK(clamped.network == neural_runtime::Network::A);
+    CHECK(!clamped.previousRuntime);
     CHECK(clamped.autoMask);
     CHECK_EQ(1.0f, clamped.localTone);
     CHECK_EQ(0, clamped.style);
@@ -799,7 +840,8 @@ void skin_structure_is_off_or_what_the_runtime_acts_on()
     // Off reaches the add-on and the render identity exactly as the default did.
     NeuralSettings off;
     off.skinStructure = FromSliderPosition(0);
-    CHECK(NeuralAddonOverridesFor(off) == NeuralAddonOverridesFor(NeuralSettings{}));
+    CHECK(NeuralAddonOverridesFor(off, neural_runtime::kCurrent) ==
+          NeuralAddonOverridesFor(NeuralSettings{}, neural_runtime::kCurrent));
     CHECK_EQ(CanonicalNeuralSettings(NeuralSettings{}), CanonicalNeuralSettings(off));
 
     // The migration: what the old slider saved loads as what it rendered as.

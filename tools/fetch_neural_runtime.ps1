@@ -26,32 +26,48 @@ $lock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-l
 # member provides which lock destination.
 $sources = @(
     @{
-        Name = 'nvngx_dlssnr_310.8.SF-v2.zip'
-        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/dlssnr-310.8.SF-v2/nvngx_dlssnr_310.8.SF-v2.zip'
-        Sha256 = '1DA35941894994EB087E017577829E492454E9BAE3A6A9397027069CEB74955C'
+        # The current NR runtime, sent to RTX 50 (src/NeuralRuntimeChoice.h).
+        Name = 'nvngx_dlssnr_310.9.16.zip'
+        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/dlssnr-310.9.16/nvngx_dlssnr_310.9.16.zip'
+        Sha256 = 'DBEB1F2790B5C621887DB99B1A56AC8BD5CB35207E8C074CBB806710F7460CAB'
         Members = @{ 'nvngx_dlssnr.dll' = 'nvngx_dlssnr.dll' }
     },
     @{
-        Name = 'nvngx_dlss_310.9.1.zip'
-        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/dlss-310.9.1/nvngx_dlss_310.9.1.zip'
-        Sha256 = 'AABA83B288BD145C3808E8D7A0BA03CC8C8676D18AD984B1BFA6563046A3BA37'
+        # The previous NR runtime: RTX 20-40, and the RTX 50 opt-in. Its own
+        # folder, so both keep the file name the add-on loads.
+        Name = 'nvngx_dlssnr_310.8.SF-v2.zip'
+        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/dlssnr-310.8.SF-v2/nvngx_dlssnr_310.8.SF-v2.zip'
+        Sha256 = '1DA35941894994EB087E017577829E492454E9BAE3A6A9397027069CEB74955C'
+        Members = @{ 'nvngx_dlssnr.dll' = '310.8.SF-v2/nvngx_dlssnr.dll' }
+    },
+    @{
+        Name = 'nvngx_dlss_310.9.16.zip'
+        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/dlss-310.9.16/nvngx_dlss_310.9.16.zip'
+        Sha256 = '1823EC911C77482E6731447DFB0DB3DEF8AA710E092F59F58C4C4C55285D492D'
         Members = @{ 'nvngx_dlss.dll' = 'nvngx_dlss.dll' }
     },
     @{
-        Name = 'renodx-dlss5_6.5.3.zip'
-        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/renodx-dlss5-6.5.3/renodx-dlss5_6.5.3.zip'
-        Sha256 = '553B1619B9E5DDFBCB4EBC7F2F3BFFFF9256A48A25B988F4817F5C63F4CAA1DE'
+        Name = 'renodx-dlss5_10.8.0.zip'
+        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/renodx-dlss5-10.8.0/renodx-dlss5_10.8.0.zip'
+        Sha256 = 'FABA7814FA90B6B21786C98A45732DBE80F01FA36745C46324472E14AC0F440D'
         Members = @{ 'renodx-dlss5.addon64' = 'renodx-dlss5.addon64' }
     },
     @{
+        Name = 'streamline_2.14.16.0-v2.zip'
+        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/streamline-2.14.16.0-v2/streamline_2.14.16.0-v2.zip'
+        Sha256 = '72BD6B55920EEF6AC624D1B253E3B1A06927E84A6E34F1C85EBEC0AAFD3FFA07'
+        Members = @{
+            'sl.common.dll' = 'sl.common.dll'; 'sl.dlss.dll' = 'sl.dlss.dll'; 'sl.dlss_g.dll' = 'sl.dlss_g.dll'
+            'sl.interposer.dll' = 'sl.interposer.dll'; 'sl.nis.dll' = 'sl.nis.dll'
+            'sl.pcl.dll' = 'sl.pcl.dll'; 'sl.reflex.dll' = 'sl.reflex.dll'
+        }
+    },
+    @{
+        # No 2.14 release ships sl.dlss_nr.dll (THIRD_PARTY.md); it stays 2.13.
         Name = 'streamline_2.13.0.0.zip'
         Url = 'https://github.com/RankFTW/rhi-repo/releases/download/streamline-2.13.0.0/streamline_2.13.0.0.zip'
         Sha256 = '7F38B5B2B7CC83AE859CCB3266160B8E5E517F379F81987FE3C758AE5C9E8C02'
-        Members = @{
-            'sl.common.dll' = 'sl.common.dll'; 'sl.dlss.dll' = 'sl.dlss.dll'; 'sl.dlss_g.dll' = 'sl.dlss_g.dll'
-            'sl.dlss_nr.dll' = 'sl.dlss_nr.dll'; 'sl.interposer.dll' = 'sl.interposer.dll'; 'sl.nis.dll' = 'sl.nis.dll'
-            'sl.pcl.dll' = 'sl.pcl.dll'; 'sl.reflex.dll' = 'sl.reflex.dll'
-        }
+        Members = @{ 'sl.dlss_nr.dll' = 'sl.dlss_nr.dll' }
     },
     @{
         # The ReShade installer is a ZIP container carrying the proxy DLLs. Its
