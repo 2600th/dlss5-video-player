@@ -545,11 +545,11 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
         ToolbarAction::Forward10,
         ToolbarAction::Mute,
         ToolbarAction::ToggleNeuralRendering,
-        ToolbarAction::ToggleUpscaling,
-        ToolbarAction::ToggleFrameGeneration,
-        ToolbarAction::Aspect,
+        ToolbarAction::NeuralMenu,
+        ToolbarAction::Upscaler,
         ToolbarAction::Adjustments,
-        ToolbarAction::DebugView,
+        ToolbarAction::Export,
+        ToolbarAction::Aspect,
         ToolbarAction::Fullscreen,
     };
 
@@ -600,20 +600,28 @@ void toolbar_layout_preserves_group_separation_test()
     const ToolbarItem* play = find_toolbar_item(items, ToolbarAction::PlayPause);
     const ToolbarItem* mute = find_toolbar_item(items, ToolbarAction::Mute);
     const ToolbarItem* neural = find_toolbar_item(items, ToolbarAction::ToggleNeuralRendering);
-    const ToolbarItem* upscaling = find_toolbar_item(items, ToolbarAction::ToggleUpscaling);
-    const ToolbarItem* frameGeneration = find_toolbar_item(items, ToolbarAction::ToggleFrameGeneration);
-    const ToolbarItem* adjustments = find_toolbar_item(items, ToolbarAction::Adjustments);
-    const ToolbarItem* debug = find_toolbar_item(items, ToolbarAction::DebugView);
+    const ToolbarItem* neuralMenu = find_toolbar_item(items, ToolbarAction::NeuralMenu);
+    const ToolbarItem* upscaler = find_toolbar_item(items, ToolbarAction::Upscaler);
+    const ToolbarItem* picture = find_toolbar_item(items, ToolbarAction::Adjustments);
+    const ToolbarItem* exportButton = find_toolbar_item(items, ToolbarAction::Export);
+    const ToolbarItem* aspect = find_toolbar_item(items, ToolbarAction::Aspect);
     const ToolbarItem* fullscreen = find_toolbar_item(items, ToolbarAction::Fullscreen);
-    CHECK(back && play && mute && neural && upscaling && frameGeneration && adjustments && debug && fullscreen);
-    if (!(back && play && mute && neural && upscaling && frameGeneration && adjustments && debug && fullscreen)) return;
+    CHECK(back && play && mute && neural && neuralMenu && upscaler && picture && exportButton && aspect && fullscreen);
+    if (!(back && play && mute && neural && neuralMenu && upscaler && picture && exportButton && aspect && fullscreen)) return;
 
+    // Transport | DLSS 5 split button, Upscaler | Picture, Export | the view.
     CHECK_EQ(4L, play->bounds.left - back->bounds.right);
     CHECK_EQ(12L, neural->bounds.left - mute->bounds.right);
-    CHECK_EQ(4L, upscaling->bounds.left - neural->bounds.right);
-    CHECK_EQ(4L, frameGeneration->bounds.left - upscaling->bounds.right);
-    CHECK_EQ(12L, debug->bounds.left - adjustments->bounds.right);
-    CHECK_EQ(4L, fullscreen->bounds.left - debug->bounds.right);
+    CHECK_EQ(4L, neuralMenu->bounds.left - neural->bounds.right);
+    CHECK_EQ(4L, upscaler->bounds.left - neuralMenu->bounds.right);
+    CHECK_EQ(12L, picture->bounds.left - upscaler->bounds.right);
+    CHECK_EQ(4L, exportButton->bounds.left - picture->bounds.right);
+    CHECK_EQ(12L, aspect->bounds.left - exportButton->bounds.right);
+    CHECK_EQ(4L, fullscreen->bounds.left - aspect->bounds.right);
+    // Frame generation and the debug views left the bar for Enhance and View.
+    CHECK(!find_toolbar_item(items, ToolbarAction::ToggleUpscaling));
+    CHECK(!find_toolbar_item(items, ToolbarAction::ToggleFrameGeneration));
+    CHECK(!find_toolbar_item(items, ToolbarAction::DebugView));
 }
 
 void toolbar_layout_scales_hit_height_and_avoids_overlap_test()
@@ -747,14 +755,28 @@ void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
     // Frame generation is not on the renderer's gate here: the assertion that
     // used to sit at this line read as "no renderer, so no conversion" while
     // passing only because availability was false. Its real rule is below.
-    CHECK(!IsToolbarActionEnabled(ToolbarAction::Adjustments, withoutRenderer));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::DebugView, withoutRenderer));
+    // Picture, the look menu and the upscaler choice are settings: live with
+    // no renderer and no video, as their menu rows are.
+    const ToolbarAvailability nothing{};
+    for (const ToolbarAction action : {ToolbarAction::Adjustments, ToolbarAction::NeuralMenu, ToolbarAction::Upscaler}) {
+        CHECK(IsToolbarActionEnabled(action, withoutRenderer));
+        CHECK(IsToolbarActionEnabled(action, nothing));
+    }
+    // Export needs a video and not a seek.
+    CHECK(IsToolbarActionEnabled(ToolbarAction::Export, withoutRenderer));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::Export, nothing));
     const ToolbarAvailability seeking{true, true, true};
     CHECK(!IsToolbarActionEnabled(ToolbarAction::Aspect, seeking));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::Export, seeking));
     CHECK(IsToolbarActionEnabled(ToolbarAction::Adjustments, seeking));
     CHECK(IsToolbarActionEnabled(ToolbarAction::DebugView, seeking));
-    CHECK_EQ(ToolbarAction::Adjustments,
+    // Mid-seek Tab skips the greyed DLSS 5 pill and stops on its menu half.
+    CHECK_EQ(ToolbarAction::NeuralMenu,
              NextFocusableToolbarAction(loadedItems, ToolbarAction::Mute, false,
+                                        seeking));
+    CHECK_EQ(ToolbarAction::Adjustments,
+             NextFocusableToolbarAction(loadedItems, ToolbarAction::Upscaler, false,
                                         seeking));
 }
 
@@ -824,15 +846,17 @@ void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
                            [action](const ToolbarItem& item) { return item.action == action; });
     };
 
-    CHECK(contains(wide, ToolbarAction::DebugView));
-    CHECK(!contains(narrow, ToolbarAction::DebugView));
+    CHECK(contains(wide, ToolbarAction::Export));
+    CHECK(!contains(narrow, ToolbarAction::Export));
     CHECK(contains(wide, ToolbarAction::ToggleNeuralRendering));
-    CHECK(contains(wide, ToolbarAction::ToggleUpscaling));
-    CHECK(contains(wide, ToolbarAction::ToggleFrameGeneration));
+    CHECK(contains(wide, ToolbarAction::NeuralMenu));
+    CHECK(contains(narrow, ToolbarAction::NeuralMenu));
+    CHECK(contains(wide, ToolbarAction::Upscaler));
+    CHECK(contains(narrow, ToolbarAction::Upscaler));
     CHECK(contains(wide, ToolbarAction::PlayPause));
 
     CHECK_EQ(ToolbarAction::Open,
-             ReconcileFocusedToolbarAction(narrow, ToolbarAction::DebugView, loaded));
+             ReconcileFocusedToolbarAction(narrow, ToolbarAction::Export, loaded));
 
     ToolbarAvailability withoutRenderer = loaded;
     withoutRenderer.rendererReady = false;
@@ -1501,6 +1525,77 @@ void key_binding_file_rebinds_unbinds_and_reports_bad_lines_test()
 // The file Help > Edit key bindings writes: the defaults and every other
 // command, all commented out, so it reads back as exactly the defaults and a
 // line is changed by deleting its #.
+// The toolbar's two drop-downs are rows of the menu bar: the same commands,
+// and the bar's checks, greys and key columns copied, so a pill's menu and the
+// Enhance menu cannot disagree about what is chosen or available.
+void toolbar_menus_mirror_the_menu_bar_rows_test()
+{
+    using namespace app_menu;
+    const Localizer localizer;
+    const key_bindings::Table& keys = key_bindings::Defaults();
+    HMENU bar = CreateMenuBar(localizer, true);
+    CHECK(bar != nullptr);
+    if (!bar) return;
+    CHECK(CheckRadioCommand(bar, IDM_NEURAL_PRESET_FIRST, IDM_NEURAL_PRESET_CUSTOM, IDM_NEURAL_PRESET_FIRST + 2));
+    EnableMenuItem(bar, IDM_RERENDER_HERE, MF_BYCOMMAND | MF_GRAYED);
+    CHECK(UpdateUpscalerMenu(bar, IDM_DLSS_UPSCALING, false, true));
+    const auto text = [](HMENU menu, UINT position) {
+        wchar_t buffer[256]{};
+        GetMenuStringW(menu, position, buffer, static_cast<int>(std::size(buffer)), MF_BYPOSITION);
+        return std::wstring(buffer);
+    };
+    const auto state = [](HMENU menu, UINT position) { return GetMenuState(menu, position, MF_BYPOSITION); };
+
+    HMENU neural = CreateToolbarMenu(ToolbarMenu::Neural, bar, localizer, keys);
+    CHECK(neural != nullptr);
+    if (neural) {
+        CHECK_EQ(int(neural_presets::kPresetCount + 6), GetMenuItemCount(neural));
+        // A greyed heading, then the presets with the bar's radio mark.
+        CHECK_EQ(UINT{0}, GetMenuItemID(neural, 0));
+        CHECK((state(neural, 0) & MF_GRAYED) != 0);
+        for (UINT index = 0; index < neural_presets::kPresetCount; ++index) {
+            CHECK_EQ(IDM_NEURAL_PRESET_FIRST + index, GetMenuItemID(neural, int(1 + index)));
+            CHECK_EQ(index == 2, (state(neural, 1 + index) & MF_CHECKED) != 0);
+        }
+        const UINT custom = UINT(1 + neural_presets::kPresetCount);
+        CHECK_EQ(IDM_NEURAL_PRESET_CUSTOM, GetMenuItemID(neural, int(custom)));
+        CHECK((state(neural, custom) & MF_GRAYED) != 0);
+        CHECK_EQ(IDM_NEURAL_SETTINGS, GetMenuItemID(neural, int(custom + 2)));
+        CHECK_EQ(localizer.Get(L"menu.neural_settings") + L"\t" + keys.KeysFor(IDM_NEURAL_SETTINGS), text(neural, custom + 2));
+        CHECK_EQ(IDM_RERENDER_HERE, GetMenuItemID(neural, int(custom + 3)));
+        CHECK((state(neural, custom + 3) & MF_GRAYED) != 0);
+        CHECK_EQ(IDM_PREVIEW_FRAME, GetMenuItemID(neural, int(custom + 4)));
+        DestroyMenu(neural);
+    }
+
+    HMENU upscaler = CreateToolbarMenu(ToolbarMenu::Upscaler, bar, localizer, keys);
+    CHECK(upscaler != nullptr);
+    if (upscaler) {
+        CHECK_EQ(int(IDM_COMPARE_VSR_QUALITY_COUNT + 5), GetMenuItemCount(upscaler));
+        CHECK_EQ(IDM_RTX_VSR_UPSCALING, GetMenuItemID(upscaler, 0));
+        CHECK_EQ(IDM_DLSS_UPSCALING, GetMenuItemID(upscaler, 1));
+        CHECK_EQ(IDM_UPSCALER_NONE, GetMenuItemID(upscaler, 2));
+        CHECK((state(upscaler, 0) & MF_GRAYED) != 0);
+        CHECK((state(upscaler, 1) & MF_CHECKED) != 0);
+        CHECK((state(upscaler, 2) & MF_CHECKED) == 0);
+        CHECK_EQ(localizer.Get(L"menu.compare_vsr_quality"), text(upscaler, 4));
+        for (UINT index = 0; index < IDM_COMPARE_VSR_QUALITY_COUNT; ++index)
+            CHECK_EQ(IDM_COMPARE_VSR_QUALITY_FIRST + index, GetMenuItemID(upscaler, int(5 + index)));
+        DestroyMenu(upscaler);
+    }
+    DestroyMenu(bar);
+
+    // With no bar to copy from, the rows are labelled from the table and keys.
+    HMENU bare = CreateToolbarMenu(ToolbarMenu::Neural, nullptr, localizer, keys);
+    CHECK(bare != nullptr);
+    if (bare) {
+        const UINT settings = UINT(neural_presets::kPresetCount + 3);
+        CHECK_EQ(IDM_NEURAL_SETTINGS, GetMenuItemID(bare, int(settings)));
+        CHECK_EQ(localizer.Get(L"menu.neural_settings") + L"\t" + keys.KeysFor(IDM_NEURAL_SETTINGS), text(bare, settings));
+        DestroyMenu(bare);
+    }
+}
+
 void key_binding_template_reads_back_as_the_defaults_test()
 {
     const std::string text = key_bindings::TemplateText();
@@ -2412,43 +2507,43 @@ void status_chips_keep_fixed_places_and_give_the_line_the_rest_test()
 
 void feature_pills_shrink_before_the_bar_goes_compact_test()
 {
-    // The floor, measured in UiLayout terms: 1114 dip at 96 dpi while the
-    // three feature pills were fixed at 270/270/264, 850 now that they shrink
-    // to kFeaturePillNarrowWidthDip.
-    CHECK_EQ(850, MinimumToolbarClientWidth(96));
-    CHECK_EQ(1114, FullPillToolbarClientWidth(96));
+    // The floor, measured in UiLayout terms. 850 dip at 96 dpi with three
+    // feature pills; 706 with the 0.30.0 bar - the DLSS 5 pill narrowed to
+    // kFeaturePillNarrowWidthDip, the split button's 36 dip menu half and the
+    // Upscaler pill, which are fixed.
+    CHECK_EQ(706, MinimumToolbarClientWidth(96));
+    CHECK_EQ(758, FullPillToolbarClientWidth(96));
     const auto width = [](const std::vector<ToolbarItem>& items, ToolbarAction action) {
         for (const auto& item : items) if (item.action == action) return int(item.bounds.right - item.bounds.left);
         return 0;
     };
     // At the floor the pills are at their narrow width, not compact.
-    const auto floor = LayoutToolbar(850, 180, 96);
-    for (const ToolbarAction action : {ToolbarAction::ToggleNeuralRendering, ToolbarAction::ToggleUpscaling,
-                                       ToolbarAction::ToggleFrameGeneration}) {
-        CHECK_EQ(kFeaturePillNarrowWidthDip, width(floor, action));
-    }
-    // Between the floor and the full-pill width they share the room evenly,
-    // and the bar still ends exactly at the gutter.
-    const auto between = LayoutToolbar(970, 180, 96);
-    CHECK_EQ(220, width(between, ToolbarAction::ToggleNeuralRendering));
-    CHECK_EQ(220, width(between, ToolbarAction::ToggleUpscaling));
-    CHECK_EQ(220, width(between, ToolbarAction::ToggleFrameGeneration));
-    CHECK_EQ(970L - kToolbarOuterGutterDip, between.back().bounds.right);
+    const auto floor = LayoutToolbar(706, 180, 96);
+    CHECK_EQ(kFeaturePillNarrowWidthDip, width(floor, ToolbarAction::ToggleNeuralRendering));
+    CHECK_EQ(kFeaturePillNarrowWidthDip, width(floor, ToolbarAction::Upscaler));
+    CHECK_EQ(36, width(floor, ToolbarAction::NeuralMenu));
+    for (const auto& item : floor) CHECK(!item.compact);
+    // Between the floor and the full-pill width the DLSS 5 pill takes the
+    // room, and the bar still ends exactly at the gutter.
+    const auto between = LayoutToolbar(726, 180, 96);
+    CHECK_EQ(200, width(between, ToolbarAction::ToggleNeuralRendering));
+    CHECK_EQ(kFeaturePillNarrowWidthDip, width(between, ToolbarAction::Upscaler));
+    CHECK_EQ(726L - kToolbarOuterGutterDip, between.back().bounds.right);
     for (const auto& item : between) CHECK(!item.compact);
     check_toolbar_items_do_not_overlap(between);
-    // A pill that reaches its full width stops growing and the rest share the
-    // remainder: frame generation tops out at 264 before the other two at 270.
-    const auto nearlyFull = LayoutToolbar(1112, 180, 96);
-    CHECK_EQ(264, width(nearlyFull, ToolbarAction::ToggleFrameGeneration));
-    CHECK_EQ(538, width(nearlyFull, ToolbarAction::ToggleNeuralRendering) +
-                  width(nearlyFull, ToolbarAction::ToggleUpscaling));
-    // At the full-pill width the pills are exactly as they were.
-    const auto full = LayoutToolbar(1114, 180, 96);
-    CHECK_EQ(270, width(full, ToolbarAction::ToggleNeuralRendering));
-    CHECK_EQ(270, width(full, ToolbarAction::ToggleUpscaling));
-    CHECK_EQ(264, width(full, ToolbarAction::ToggleFrameGeneration));
+    // At the full-pill width it stops growing: more would be empty padding.
+    const auto full = LayoutToolbar(800, 180, 96);
+    CHECK_EQ(232, width(full, ToolbarAction::ToggleNeuralRendering));
+    CHECK(full.back().bounds.right < 800L - kToolbarOuterGutterDip);
 
     // What a narrowed pill keeps: the state, never the name.
+    CHECK(FeaturePillStateLabel(L"DLSS 5 \u00b7 On \u00b7 Standard") == L"On \u00b7 Standard");
+    // The pill names the preset without the menu's remark.
+    CHECK(neural_presets::ShortLabel("Standard (recommended)") == "Standard");
+    CHECK(neural_presets::ShortLabel("Gentle") == "Gentle");
+    CHECK(neural_presets::ShortLabel("").empty());
+    for (const auto& preset : neural_presets::kPresets) CHECK(!neural_presets::ShortLabel(preset.label).empty());
+    CHECK(FeaturePillStateLabel(L"Upscaler \u00b7 RTX VSR") == L"RTX VSR");
     CHECK(FeaturePillStateLabel(L"Neural Rendering \u00b7 Queued for the seek") == L"Queued for the seek");
     CHECK(FeaturePillStateLabel(L"Neural Rendering \u00b7 Seeking \u00b7 On") == L"Seeking \u00b7 On");
     CHECK(FeaturePillStateLabel(L"Frame Generation \u00b7 Generate") == L"Generate");
@@ -16232,6 +16327,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(key_binding_defaults_are_the_players_keys_test),
     TEST_CASE(key_binding_file_rebinds_unbinds_and_reports_bad_lines_test),
     TEST_CASE(key_binding_template_reads_back_as_the_defaults_test),
+    TEST_CASE(toolbar_menus_mirror_the_menu_bar_rows_test),
     TEST_CASE(upscaler_radios_reach_every_state_from_every_other_test),
     TEST_CASE(label_column_grows_for_longer_labels_and_stops_test),
     TEST_CASE(keyboard_cheat_sheet_flows_whole_groups_into_columns_test),

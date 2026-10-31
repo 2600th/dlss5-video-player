@@ -123,6 +123,15 @@ inline size_t IndexOf(const NeuralSettings& settings)
     return kPresetCount;
 }
 
+// The label without its trailing remark - "Standard (recommended)" is
+// "Standard" - for a place too narrow for the remark: the toolbar's DLSS 5
+// pill, which names the preset it renders with.
+inline std::string_view ShortLabel(std::string_view label)
+{
+    const size_t open = label.rfind(" (");
+    return open != std::string_view::npos && !label.empty() && label.back() == ')' ? label.substr(0, open) : label;
+}
+
 // Lookup by the key persisted in the ini. kPresetCount for an unknown key, so
 // a file written by a later version does not silently land on a preset that
 // means something else.

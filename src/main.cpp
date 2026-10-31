@@ -8932,7 +8932,32 @@ private:
         case ToolbarAction::PlayPause:{const bool playing=m_playing||LiveResumePending();return{playing?UiIcon::Pause:UiIcon::Play,playing?L"Pause":L"Play",enabled,playing};}
         // A toggle pressed during a seek is queued rather than dropped, and the
         // label says so: a dead-looking key is how it read before.
-        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=m_neuralToggleDeferred?L"Neural Rendering · Queued for the seek":WarmUpStep()!=warm_up::Step::None?L"Neural Rendering · Starting":m_previewJob?L"Neural Rendering · Previewing settings":m_previewShown?L"Neural Rendering · Settings preview":enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active,m_previewJob!=0||NeuralJobActive()};}
+        // "DLSS 5 · On · Standard": on, the pill names the look it renders with,
+        // so the preset a viewer picked from the chevron beside it is on screen.
+        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;
+            const auto state=[&](const wchar_t* key){return T(L"toolbar.neural.name")+L" · "+T(key);};
+            const auto onOff=[&](bool on){return T(on?L"toolbar.state.on":L"toolbar.state.off");};
+            std::wstring label;
+            if(m_neuralToggleDeferred)label=state(L"toolbar.neural.queued");
+            else if(WarmUpStep()!=warm_up::Step::None)label=state(L"toolbar.neural.starting");
+            else if(m_previewJob)label=state(L"toolbar.neural.previewing");
+            else if(m_previewShown)label=state(L"toolbar.neural.preview_shown");
+            else if(enabled){label=state(active?L"toolbar.state.on":L"toolbar.state.off");if(active)label+=L" · "+NeuralPresetName();}
+            else if(cachedPair)label=state(L"toolbar.neural.seeking")+L" · "+onOff(active);
+            else label=state(NeuralJobActive()?L"toolbar.neural.preparing":L"toolbar.neural.no_cache");
+            return{UiIcon::Sparkles,label,enabled,active,m_previewJob!=0||NeuralJobActive()};}
+        // The DLSS 5 split button's menu half: the looks, Picture, Re-render.
+        // A control of its own, so Tab stops on it and Enter opens it.
+        case ToolbarAction::NeuralMenu:return{UiIcon::ChevronDown,L"▾",enabled,false};
+        // Names the upscaler playing, which used to be a status-line fact
+        // beside a pill that said "DLSS Upscaling · Off".
+        case ToolbarAction::Upscaler:{const auto shown=upscaler_choice::Shown(UpscalingActive(),m_playbackVsr);
+            const wchar_t* key=shown==upscaler_choice::Upscaler::SuperResolution?L"toolbar.upscaler.dlss_sr":
+                               shown==upscaler_choice::Upscaler::RtxVsr?L"toolbar.upscaler.rtx_vsr":L"toolbar.state.off";
+            return{UiIcon::Upscaling,T(L"toolbar.upscaler.name")+L" · "+T(key),enabled,shown!=upscaler_choice::Upscaler::None};}
+        // While an export runs this is how to stop it, as File > Export is.
+        case ToolbarAction::Export:{const bool running=m_exportWorker.joinable();
+            return{running?UiIcon::Stop:UiIcon::Export,T(running?L"toolbar.export.cancel":L"toolbar.export"),enabled||running,running,running};}
         case ToolbarAction::Stop:return{UiIcon::Stop,L"Stop",enabled,false};
         case ToolbarAction::Forward10:return{UiIcon::FastForward,L"10s",enabled,false};
         case ToolbarAction::Mute:return{m_muted?UiIcon::VolumeOff:UiIcon::Volume,m_muted?L"Sound":L"Mute",enabled,m_muted};
@@ -8971,7 +8996,7 @@ private:
             return{UiIcon::FrameGeneration,T(L"framegen.pill.generate"),enabled,false};
         }
         case ToolbarAction::Aspect:return{UiIcon::Crop,m_fill||m_onePixel?L"Fit":L"Fill",enabled,m_fill||m_onePixel};
-        case ToolbarAction::Adjustments:return{UiIcon::Adjustments,L"Color",enabled,m_neuralWnd!=nullptr};
+        case ToolbarAction::Adjustments:return{UiIcon::Adjustments,T(L"toolbar.picture"),enabled,m_neuralWnd!=nullptr};
         case ToolbarAction::DebugView:{const bool active=rendererReady&&m_renderer->GetDebugView()!=D3D12Renderer::DebugView::Final;return{UiIcon::Debug,L"Debug",enabled,active};}
         case ToolbarAction::Fullscreen:return{UiIcon::Maximize,L"Full",enabled,m_fullscreen};
         case ToolbarAction::None:break;
@@ -8980,6 +9005,13 @@ private:
     }
 
     bool ToolbarActionEnabled(ToolbarAction action)const{return IsToolbarActionEnabled(action,ToolbarState());}
+    // The look the pill names: the preset's short name ("Standard"), or Custom
+    // once a control has moved off every preset.
+    std::wstring NeuralPresetName()const{
+        const size_t index=neural_presets::IndexOf(m_neuralSettings);
+        if(index>=neural_presets::kPresetCount)return T(L"toolbar.neural.custom");
+        const auto name=neural_presets::ShortLabel(neural_presets::kPresets[index].label);return std::wstring(name.begin(),name.end());
+    }
 
     void DrawButton(HDC dc,ToolbarAction action,UiIcon icon,const std::wstring&label,const RECT&r,bool enabled,bool active,bool hover,bool pressed,bool focus,bool compact,bool working=false){
         // The resting and hovered looks mixed by how far the hover fade has got,
@@ -9002,7 +9034,7 @@ private:
         if(showIcon){const HGDIOBJ measured=SelectObject(dc,m_iconFont);GetTextExtentPoint32W(dc,&glyph,1,&iconSize);SelectObject(dc,measured);}
         const HFONT textFont=m_fontSmall?m_fontSmall:m_font;const HGDIOBJ measuredText=SelectObject(dc,textFont);
         GetTextExtentPoint32W(dc,label.c_str(),static_cast<int>(label.size()),&textSize);
-        const bool featureLabel=action==ToolbarAction::ToggleNeuralRendering||action==ToolbarAction::ToggleUpscaling||action==ToolbarAction::ToggleFrameGeneration;
+        const bool featureLabel=action==ToolbarAction::ToggleNeuralRendering||action==ToolbarAction::ToggleUpscaling||action==ToolbarAction::ToggleFrameGeneration||action==ToolbarAction::Upscaler;
         int neededWidth=iconSize.cx+textSize.cx+Dip(2*kButtonHorizontalInsetDip+kButtonIconLabelGapDip);
         // A feature pill the layout has narrowed keeps its state and drops its
         // name, rather than ellipsising the state - the one part of the label
@@ -11900,6 +11932,17 @@ private:
         const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,point.x,point.y,0,m_hwnd,nullptr);
         DestroyMenu(menu);if(command)HandleCommand(command);
     }
+    // The toolbar's two drop-downs. Their rows are the menu bar's own commands
+    // with the bar's checks and greys copied (AppMenu.cpp CreateToolbarMenu), so
+    // the menu state is brought up to date first and a pick runs the same
+    // command the bar's row would.
+    void ShowToolbarMenu(app_menu::ToolbarMenu which,const RECT& anchor){
+        SyncFeatureMenuState();
+        HMENU menu=app_menu::CreateToolbarMenu(which,GetMenu(m_hwnd),m_loc,m_keys);if(!menu)return;
+        POINT point{anchor.left,anchor.top};ClientToScreen(m_hwnd,&point);
+        const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,point.x,point.y,0,m_hwnd,nullptr);
+        DestroyMenu(menu);if(command)HandleCommand(command);
+    }
 
     void ActivateToolbarAction(ToolbarAction action,const RECT& anchor){
         if(!ToolbarActionEnabled(action))return;
@@ -11918,8 +11961,13 @@ private:
             if(m_frameGenWorker.joinable())CancelFrameGeneration();else StartFrameGeneration();
             break;
         case ToolbarAction::Aspect:SetAspect(m_onePixel?false:!m_fill,false);break;
-        case ToolbarAction::Adjustments:ShowAdjustments();break;
+        // Picture opens on the render zone, as Ctrl+N and Enhance > Picture do;
+        // the viewing zone is beside it in the same panel.
+        case ToolbarAction::Adjustments:ShowNeuralSettings();break;
         case ToolbarAction::DebugView:ShowDebugMenu(anchor);break;
+        case ToolbarAction::NeuralMenu:ShowToolbarMenu(app_menu::ToolbarMenu::Neural,anchor);break;
+        case ToolbarAction::Upscaler:ShowToolbarMenu(app_menu::ToolbarMenu::Upscaler,anchor);break;
+        case ToolbarAction::Export:HandleCommand(IDM_EXPORT_STAGES);break;
         case ToolbarAction::Fullscreen:ToggleFullscreen();break;
         case ToolbarAction::None:break;
         }

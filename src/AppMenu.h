@@ -239,6 +239,14 @@ void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int 
 void UpdateSubtitles(HMENU menuBar, const std::wstring& offLabel, std::span<const std::wstring> trackLabels,
                      const std::wstring& fileLabel, UINT chosen, bool loaded);
 HMENU CreateDebugViewMenu(UINT selectedCommand);
+// The toolbar's drop-downs (UI proposal 3.2): the DLSS 5 split button's menu -
+// the look presets, Picture, Re-render from here, Preview frame - and the
+// Upscaler pill's - the three upscaler radios and RTX VSR's quality ladder.
+// Every row is a menu bar command with the bar's text, key column, check and
+// grey copied from `menuBar`, so the two places cannot disagree; a command the
+// bar lacks is labelled from `localizer` and `keys`. The caller destroys it.
+enum class ToolbarMenu { Neural, Upscaler };
+HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& localizer, const key_bindings::Table& keys);
 bool RoutesToRehook(PlayerCommandRoute route, UINT value);
 // Shows, relabels or removes the right-justified update item in the menu bar.
 // An empty label removes it; the caller redraws the bar.

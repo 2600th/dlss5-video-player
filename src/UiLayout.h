@@ -16,7 +16,13 @@
 enum class ToolbarAction {
     Open, OpenYouTube, Back10, PlayPause, Stop, Forward10, Mute,
     ToggleNeuralRendering, ToggleUpscaling, ToggleFrameGeneration,
-    Aspect, Adjustments, DebugView, Fullscreen, None
+    Aspect, Adjustments, DebugView, Fullscreen,
+    // The 0.30.0 bar (UI proposal 3.2): the DLSS 5 split button's menu half,
+    // the Upscaler pill, and Export. ToggleUpscaling, ToggleFrameGeneration and
+    // DebugView keep their values and their availability rules, which the
+    // menus read, but are no longer on the bar.
+    NeuralMenu, Upscaler, Export,
+    None
 };
 
 struct ToolbarItem {

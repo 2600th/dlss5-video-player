@@ -50,6 +50,56 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
     return menu;
 }
 
+HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& localizer, const key_bindings::Table& keys)
+{
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return nullptr;
+    const auto heading = [&](const wchar_t* key) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, localizer.Get(key).c_str());
+    };
+    const auto mirror = [&](UINT command, const wchar_t* fallbackKey) {
+        const HMENU source = find_menu_containing_command(menuBar, command);
+        wchar_t text[256]{};
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_STATE | MIIM_FTYPE | MIIM_STRING;
+        item.dwTypeData = text;
+        item.cch = static_cast<UINT>(std::size(text));
+        if (source && GetMenuItemInfoW(source, command, FALSE, &item)) {
+            MENUITEMINFOW copy{sizeof(copy)};
+            copy.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_STRING;
+            copy.wID = command;
+            copy.fType = item.fType & MFT_RADIOCHECK;
+            copy.fState = item.fState & (MFS_CHECKED | MFS_DISABLED);
+            copy.dwTypeData = text;
+            InsertMenuItemW(menu, static_cast<UINT>(GetMenuItemCount(menu)), TRUE, &copy);
+            return;
+        }
+        std::wstring label = fallbackKey ? localizer.Get(fallbackKey) : std::wstring{};
+        if (const std::wstring bound = keys.KeysFor(command); !bound.empty()) label += L"\t" + bound;
+        AppendMenuW(menu, MF_STRING, command, label.c_str());
+    };
+    switch (which) {
+    case ToolbarMenu::Neural:
+        heading(L"menu.neural_presets");
+        for (UINT index = 0; index < neural_presets::kPresetCount; ++index) mirror(IDM_NEURAL_PRESET_FIRST + index, nullptr);
+        mirror(IDM_NEURAL_PRESET_CUSTOM, L"menu.neural_preset_custom");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        mirror(IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+        mirror(IDM_RERENDER_HERE, L"menu.rerender_here");
+        mirror(IDM_PREVIEW_FRAME, L"menu.preview_frame");
+        break;
+    case ToolbarMenu::Upscaler:
+        mirror(IDM_RTX_VSR_UPSCALING, L"menu.rtx_vsr_upscaling");
+        mirror(IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
+        mirror(IDM_UPSCALER_NONE, L"menu.upscaler_none");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        heading(L"menu.compare_vsr_quality");
+        for (UINT index = 0; index < IDM_COMPARE_VSR_QUALITY_COUNT; ++index) mirror(IDM_COMPARE_VSR_QUALITY_FIRST + index, nullptr);
+        break;
+    }
+    return menu;
+}
+
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
 {
     return CreateMenuBar(localizer, youtubeAvailable, key_bindings::Defaults());

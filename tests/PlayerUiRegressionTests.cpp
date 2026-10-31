@@ -421,9 +421,12 @@ struct PlayerAppTestAccess {
 
         // This must remain a synchronized neural/original comparison, never an
         // ambiguous label for runtime Super Resolution.
+        // It is "DLSS 5", the neural renderer, and never says Super Resolution
+        // or upscaling: that is the Upscaler pill beside it.
         const auto comparisonContent = app.ButtonContent(ToolbarAction::ToggleNeuralRendering);
-        CHECK(comparisonContent.label.find(L"Neural Rendering") != std::wstring::npos);
-        CHECK(comparisonContent.label.find(L"DLSS") == std::wstring::npos);
+        CHECK(comparisonContent.label.rfind(L"DLSS 5 · ", 0) == 0);
+        CHECK(comparisonContent.label.find(L"Super Resolution") == std::wstring::npos);
+        CHECK(comparisonContent.label.find(L"Upscal") == std::wstring::npos);
         CHECK(!comparisonContent.enabled);
         CHECK(!comparisonContent.active);
         CHECK(app.m_neuralRequested);
@@ -434,9 +437,15 @@ struct PlayerAppTestAccess {
         // since it pushes none.
         CHECK(app.m_playbackVsr);
         CHECK(app.EffectiveComparison().playbackVsr);
+        // The Upscaler pill names the upscaler playing, live with nothing loaded.
+        CHECK_EQ(std::wstring(L"Upscaler · RTX VSR"), app.ButtonContent(ToolbarAction::Upscaler).label);
+        CHECK(app.ButtonContent(ToolbarAction::Upscaler).enabled);
+        CHECK(app.ButtonContent(ToolbarAction::Upscaler).active);
         app.HandleCommand(IDM_UPSCALER_NONE);
         CHECK(!app.m_playbackVsr);
         CHECK(!app.EffectiveComparison().playbackVsr);
+        CHECK_EQ(std::wstring(L"Upscaler · Off"), app.ButtonContent(ToolbarAction::Upscaler).label);
+        CHECK(!app.ButtonContent(ToolbarAction::Upscaler).active);
         app.HandleCommand(IDM_RTX_VSR_UPSCALING);
         CHECK(app.m_playbackVsr);
         // The keep-up guard lowers playback's quality for one video and never the
@@ -725,8 +734,6 @@ struct PlayerAppTestAccess {
     static void toolbar_pills_and_progress_panel_test()
     {
         PlayerApp& app = fixture->app;
-        PlayerApp::ToolbarButtonContent& upscalingContent = fixture->upscalingContent;
-        PlayerApp::ToolbarButtonContent& frameGenerationContent = fixture->frameGenerationContent;
         HMENU& featureMenu = fixture->featureMenu;
 
         app.m_seeking = false;
@@ -789,17 +796,38 @@ struct PlayerAppTestAccess {
                        ? 0
                        : static_cast<int>(found->bounds.right - found->bounds.left);
         };
-        struct FeatureLabel { UiIcon icon; const std::wstring& label; int widthDip; };
-        const std::array featureLabels{
+        // Every arm of the two pills, at the width the bar gives them: the two
+        // states read back above, and the rest built from the same keys.
+        struct FeatureLabel { UiIcon icon; std::wstring label; int widthDip; };
+        std::vector<FeatureLabel> featureLabels{
             FeatureLabel{preparingContent.icon, preparingContent.label,
                          pillWidthDip(ToolbarAction::ToggleNeuralRendering)},
             FeatureLabel{seekingOffContent.icon, seekingOffContent.label,
                          pillWidthDip(ToolbarAction::ToggleNeuralRendering)},
-            FeatureLabel{upscalingContent.icon, upscalingContent.label,
-                         pillWidthDip(ToolbarAction::ToggleUpscaling)},
-            FeatureLabel{frameGenerationContent.icon, frameGenerationContent.label,
-                         pillWidthDip(ToolbarAction::ToggleFrameGeneration)},
         };
+        const std::wstring dot = L" \u00b7 ";
+        const std::wstring neuralName = app.T(L"toolbar.neural.name");
+        const int neuralWidth = pillWidthDip(ToolbarAction::ToggleNeuralRendering);
+        for (const wchar_t* key : {L"toolbar.neural.queued", L"toolbar.neural.starting", L"toolbar.neural.previewing",
+                                   L"toolbar.neural.preview_shown", L"toolbar.neural.preparing", L"toolbar.neural.no_cache"})
+            featureLabels.push_back(FeatureLabel{UiIcon::Sparkles, neuralName + dot + app.T(key), neuralWidth});
+        featureLabels.push_back(FeatureLabel{UiIcon::Sparkles,
+            neuralName + dot + app.T(L"toolbar.neural.seeking") + dot + app.T(L"toolbar.state.off"), neuralWidth});
+        featureLabels.push_back(FeatureLabel{UiIcon::Sparkles,
+            neuralName + dot + app.T(L"toolbar.state.on") + dot + app.T(L"toolbar.neural.custom"), neuralWidth});
+        for (const auto& preset : neural_presets::kPresets) {
+            const auto name = neural_presets::ShortLabel(preset.label);
+            featureLabels.push_back(FeatureLabel{UiIcon::Sparkles,
+                neuralName + dot + app.T(L"toolbar.state.on") + dot + std::wstring(name.begin(), name.end()), neuralWidth});
+        }
+        for (const wchar_t* key : {L"toolbar.upscaler.rtx_vsr", L"toolbar.upscaler.dlss_sr", L"toolbar.state.off"})
+            featureLabels.push_back(FeatureLabel{UiIcon::Upscaling, app.T(L"toolbar.upscaler.name") + dot + app.T(key),
+                                                 pillWidthDip(ToolbarAction::Upscaler)});
+        // Picture and Export show their words too: a button that drops its label
+        // for want of room is an icon nobody has learnt yet.
+        featureLabels.push_back(FeatureLabel{UiIcon::Adjustments, app.T(L"toolbar.picture"), pillWidthDip(ToolbarAction::Adjustments)});
+        featureLabels.push_back(FeatureLabel{UiIcon::Export, app.T(L"toolbar.export"), pillWidthDip(ToolbarAction::Export)});
+        featureLabels.push_back(FeatureLabel{UiIcon::Stop, app.T(L"toolbar.export.cancel"), pillWidthDip(ToolbarAction::Export)});
         for (const UINT dpi : {96u, 120u, 144u, 192u}) {
             app.UpdateFontsForDpi(dpi);
             for (const auto& feature : featureLabels) {
@@ -1377,6 +1405,12 @@ struct PlayerAppTestAccess {
         const float volume = app.m_volume;
         const bool muted = app.m_muted;
         app.m_loaded = true;
+        // The slider sits right of the bar and shows only where the bar leaves
+        // it room: at the 800 px fixture window the 0.30.0 bar is at full
+        // width, not compact, and fills it.
+        RECT window{};
+        GetWindowRect(app.m_hwnd, &window);
+        SetWindowPos(app.m_hwnd, nullptr, 0, 0, 1460, 1000, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
         app.ResetHoverFades();
         for (const bool animated : {true, false}) {
             app.m_activityMotionEnabled = animated;
@@ -1410,6 +1444,8 @@ struct PlayerAppTestAccess {
         app.m_volume = volume; app.m_muted = muted;
         app.m_activityMotionEnabled = motion;
         app.m_loaded = loaded;
+        SetWindowPos(app.m_hwnd, nullptr, 0, 0, window.right - window.left, window.bottom - window.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
     }
 
     // A greyed compare mode says what would make it work; a live one names

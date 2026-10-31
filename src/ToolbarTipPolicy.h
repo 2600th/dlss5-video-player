@@ -44,6 +44,9 @@ inline const wchar_t* TipKey(ToolbarAction action)
     case ToolbarAction::Adjustments: return L"toolbar.tip.color";
     case ToolbarAction::DebugView: return L"toolbar.tip.debug";
     case ToolbarAction::Fullscreen: return L"toolbar.tip.fullscreen";
+    case ToolbarAction::NeuralMenu: return L"toolbar.tip.neural_menu";
+    case ToolbarAction::Upscaler: return L"toolbar.tip.upscaler";
+    case ToolbarAction::Export: return L"toolbar.tip.export";
     case ToolbarAction::None: break;
     }
     return nullptr;
@@ -65,7 +68,9 @@ inline UINT Command(ToolbarAction action)
     case ToolbarAction::Mute: return app_menu::IDM_MUTE;
     case ToolbarAction::ToggleNeuralRendering: return app_menu::IDM_NEURAL_RENDERING;
     case ToolbarAction::Aspect: return app_menu::IDM_ASPECT_TOGGLE;
-    case ToolbarAction::Adjustments: return app_menu::IDM_VIDEO_ADJUSTMENTS;
+    // Picture opens the panel on its render zone, as Ctrl+N does.
+    case ToolbarAction::Adjustments: return app_menu::IDM_NEURAL_SETTINGS;
+    case ToolbarAction::Export: return app_menu::IDM_EXPORT_STAGES;
     case ToolbarAction::Fullscreen: return app_menu::IDM_FULLSCREEN;
     default: return 0;
     }
