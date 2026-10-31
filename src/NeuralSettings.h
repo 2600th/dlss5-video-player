@@ -1,5 +1,6 @@
 #pragma once
 
+#include "NeuralRuntimeChoice.h"
 #include "ReShadeConfig.h"
 
 #include <filesystem>
@@ -7,14 +8,16 @@
 #include <string_view>
 #include <vector>
 
-// Player-owned RenoDX 6.5.3 neural tuning. Field defaults, key names and value
+// Player-owned RenoDX neural tuning. Field defaults, key names and value
 // ranges follow the add-on's persisted [RenoDX.DLSS5] controls as exercised by
 // the MIT-licensed DLSS5-Feeder project, confirmed against the pinned build's
 // own overlay strings, and echoed in RenoDX's "active settings" log line.
 // Ranges: intensity 0..1 (kIntensityMax below; the add-on takes 0..2 but the
 // runtime applies no more than 1), localTone/localStructure 0..2, skinStructure
 // follow-structure or 0..0.99 (skin_structure below), colorStrength 0..1,
-// preset 0..3, style 0..2, passes 1..4.
+// style 0..2, passes 1..4. `network` and `previousRuntime` choose what runs
+// rather than how it looks (NeuralRuntimeChoice.h): NRPreset 1 or 2, never the
+// add-on's 0, and NRRuntimePath.
 //
 // `passes` and `chainedHistory` arrived with RenoDX 6.x and have no 4.70
 // equivalent. Stacking is the one place where an offline video render and a
@@ -28,11 +31,14 @@ struct NeuralSettings {
     float localStructure{1.0f};  // NRLocalStructure
     float skinStructure{-1.0f};  // NRSkinStructure; -1 (skin_structure::kOff) follows localStructure
     float colorStrength{1.0f};   // NRColorStrength
-    int preset{0};               // NRPreset
+    neural_runtime::Network network{neural_runtime::Network::A};  // NRPreset 1 (A) or 2 (B)
     int style{0};                // NRStyle
     bool autoMask{true};         // NRAutoMask
     int passes{1};               // NRPasses
     bool chainedHistory{true};   // NRChainedHistory
+    // 310.8.SF-v2 on a GPU that is offered 310.9.16 (NRRuntimePath); every other
+    // GPU runs it whatever this says.
+    bool previousRuntime{false};
 
     friend bool operator==(const NeuralSettings&, const NeuralSettings&) = default;
 };
@@ -111,10 +117,34 @@ inline float FromSliderPosition(int position)
 // a render property, keyed through the settings snapshot like any other key.
 inline constexpr std::string_view kPinnedNormGovernor = "1";
 
-// Exact-case [RenoDX.DLSS5] overrides in field order, then the pinned governor.
-// Floats use RenoDX's six-decimal form ("1.000000"), integers are plain and
-// booleans are 0/1.
-std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& settings);
+// RenoDX 10.8.0's Detail stability (NRDetailStability: 0 Auto, 1 Off, 2 Always)
+// and Independent skin (NRSkinIndependent, default 1), both new since 6.5.3 and
+// both pinned off, as 8.5's were (docs/measurements/renodx-85-20261016). Auto
+// engages in the player's after-upscale path and filters the model's edit along
+// the motion vectors; independent skin sends Local structure at most 1, so the
+// Strong preset's 1.50 was rendered as 1.00. Measured on 10.8.0 in
+// docs/measurements/runtime-310916-20261031.
+inline constexpr std::string_view kPinnedDetailStability = "1";
+inline constexpr std::string_view kPinnedSkinIndependent = "0";
+
+// The least colour strength written. RenoDX 10.8.0 reads a colour strength of
+// 0 on every pass as "exact passthrough", declines the NR session and the
+// render fails (feature 18 never armed); 6.5.3 ran the model and kept the
+// structure. 0.01 renders, and lands where 6.5.3's 0 did (docs/measurements/
+// runtime-310916-20261031, looks.csv). The setting keeps 0; only what is
+// written, and so the settings digest, carries the floor.
+inline constexpr float kMinWrittenColorStrength = 0.01f;
+inline float WrittenColorStrength(float colorStrength)
+{
+    return colorStrength < kMinWrittenColorStrength ? kMinWrittenColorStrength : colorStrength;
+}
+
+// Exact-case [RenoDX.DLSS5] overrides in field order, then the pinned governor,
+// the two 10.8.0 pins and the runtime the add-on loads. Floats use RenoDX's
+// six-decimal form ("1.000000"), integers are plain and booleans are 0/1.
+// `runtime` is neural_runtime::Select's answer for this GPU and these settings.
+std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& settings,
+                                                         const neural_runtime::Runtime& runtime);
 
 // [NeuralSettings] section of the player's DLSSVideoPlayer.ini. Load leaves
 // absent keys at their defaults, clamps values into range (a saved skin
@@ -127,5 +157,5 @@ bool LoadNeuralSettings(const std::filesystem::path& ini, NeuralSettings& settin
 bool SaveNeuralSettings(const std::filesystem::path& ini, const NeuralSettings& settings);
 
 // One-line canonical form for logs, e.g.
-// "intensity=1.000000 localTone=1.000000 ... preset=0 style=0 autoMask=1".
+// "intensity=1.000000 localTone=1.000000 ... network=a style=0 autoMask=1".
 std::string CanonicalNeuralSettings(const NeuralSettings& settings);

@@ -226,26 +226,43 @@ std::optional<std::vector<std::wstring>> FindUnlockedRuntimeModules(const std::f
         }
         return text;
     };
-    std::vector<std::wstring> locked;
+    // Destinations as generic relative paths ("310.8.SF-v2/nvngx_dlssnr.dll"),
+    // and every folder one names: a locked DLL in a folder is loaded from it,
+    // and the loader looks beside it for what it imports.
+    std::vector<std::wstring> locked, folders{L""};
     locked.reserve(lock.entries.size());
-    for (const RuntimeLockEntry& entry : lock.entries) locked.push_back(lower(entry.destination));
+    for (const RuntimeLockEntry& entry : lock.entries) {
+        const std::filesystem::path destination(entry.destination);
+        locked.push_back(lower(destination.generic_wstring()));
+        const std::wstring folder = destination.parent_path().generic_wstring();
+        if (std::none_of(folders.begin(), folders.end(), [&](const std::wstring& seen) { return lower(seen) == lower(folder); }))
+            folders.push_back(folder);
+    }
 
     std::vector<std::wstring> unlocked;
-    std::error_code error;
-    std::filesystem::directory_iterator it(runtimeDirectory, error);
-    if (error) return std::nullopt;
-    for (const std::filesystem::directory_iterator end{}; it != end; it.increment(error)) {
+    for (const std::wstring& folder : folders) {
+        std::error_code error;
+        std::filesystem::directory_iterator it(folder.empty() ? runtimeDirectory : runtimeDirectory / folder, error);
+        if (error) {
+            // A locked folder that is not there holds nothing to load; the
+            // lock check names the missing file.
+            if (!folder.empty() && (error == std::errc::no_such_file_or_directory)) continue;
+            return std::nullopt;
+        }
+        for (const std::filesystem::directory_iterator end{}; it != end; it.increment(error)) {
+            if (error) return std::nullopt;
+            std::error_code typeError;
+            // Follows links: a symlinked DLL is loaded exactly like a copied one.
+            if (!it->is_regular_file(typeError) || typeError) continue;
+            const std::wstring extension = lower(it->path().extension().wstring());
+            if (extension != L".dll" && extension != L".addon" && extension != L".addon32" && extension != L".addon64")
+                continue;
+            const std::wstring name = it->path().filename().wstring();
+            const std::wstring relative = folder.empty() ? name : folder + L"/" + name;
+            if (std::find(locked.begin(), locked.end(), lower(relative)) == locked.end()) unlocked.push_back(relative);
+        }
         if (error) return std::nullopt;
-        std::error_code typeError;
-        // Follows links: a symlinked DLL is loaded exactly like a copied one.
-        if (!it->is_regular_file(typeError) || typeError) continue;
-        const std::wstring name = it->path().filename().wstring();
-        const std::wstring extension = lower(it->path().extension().wstring());
-        if (extension != L".dll" && extension != L".addon" && extension != L".addon32" && extension != L".addon64")
-            continue;
-        if (std::find(locked.begin(), locked.end(), lower(name)) == locked.end()) unlocked.push_back(name);
     }
-    if (error) return std::nullopt;
     std::sort(unlocked.begin(), unlocked.end());
     return unlocked;
 }

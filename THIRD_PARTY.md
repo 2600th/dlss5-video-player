@@ -11,16 +11,26 @@ claimed. Exact packaged binaries are pinned in `packaging/runtime-lock.json` and
 
 Source and terms: https://github.com/NVIDIA/DLSS
 
-The package uses NVIDIA-signed DLSS SR 310.9.1 (`nvngx_dlss.dll`) and the
+The package uses NVIDIA-signed DLSS SR 310.9.16 (`nvngx_dlss.dll`) and the
 NVIDIA-signed DLSS Frame Generation snippet `nvngx_dlssg.dll` (`310.7.0.0`,
 taken unmodified from the pinned official NVIDIA/DLSS SDK checkout `a291cc7`
-and used by the offline frame-generation conversion pass), together with
-ShortFuse's community-modified universal neural-rendering DLL
-(`310.8.SF-v2`, from the `RankFTW/rhi-repo` release mirror), which extends the
-leaked 310.8.0 runtime to Turing, Ampere, Ada and Blackwell. The modification
-removed the embedded NVIDIA signature, so that file is unsigned and must not be
-represented as authentic; both NVIDIA snippets above keep NVIDIA's own
-signature. `nvngx_dlss.dll` is pinned byte for byte in
+and used by the offline frame-generation conversion pass), together with two
+community-modified neural-rendering DLLs, both from the `RankFTW/rhi-repo`
+release mirror:
+
+- `nvngx_dlssnr.dll`, DLSS-NR 310.9.16 (release `dlssnr-310.9.16`): NVIDIA's
+  310.9.16 with an added section of community-built Turing, Ampere and Ada
+  kernels. It carries no signature at all. The player loads it on RTX 50 only.
+- `310.8.SF-v2/nvngx_dlssnr.dll`, ShortFuse's universal 310.8 build
+  (`310.8.SF-v2`), which extends the leaked 310.8.0 runtime to Turing, Ampere,
+  Ada and Blackwell. Loaded on RTX 20-40, and on RTX 50 when the user picks the
+  previous runtime.
+
+Both modifications removed the embedded NVIDIA signature, so both files are
+unsigned and must not be represented as authentic. The mirror's 310.9.16 is
+not NVIDIA's signed build; that build was not available from an approved
+source, so this project has not run it. Both NVIDIA snippets above keep
+NVIDIA's own signature. `nvngx_dlss.dll` is pinned byte for byte in
 `packaging/runtime-lock.json`, which is the render helper's runtime set;
 `nvngx_dlssg.dll` is not in that lock because the helper never loads it - the
 player creates the Frame Generation feature - and `tools/verify_package.ps1`
@@ -61,19 +71,19 @@ this project and remain under NVIDIA's terms.
 
 Source and terms: https://github.com/NVIDIA-RTX/Streamline
 
-Streamline is pinned at 2.13.0.0 rather than the newer 2.14.1.0, and the
-reason is a removal rather than a risk: 2.14.x no longer ships
-`sl.dlss_nr.dll`, the Streamline plugin for the one NGX feature this player
-exists to drive. Nothing is lost by staying: the add-on runs at
-`EnableHooks=2`, which leaves Streamline unpatched, and no `sl.*` module is
-mapped in any render log - the upgrade would be new version numbers on files
-that are never loaded, bought by dropping the one that would matter if the
-`EnableHooks=1` fallback were ever needed. DLSS SR moved to 310.9.1 on its own
-because that module *is* loaded: RenoDX detours it to observe the player's
-DLSS/DLAA create before building feature 18.
+Streamline is at 2.14.16.0 (release `streamline-2.14.16.0-v2`) for every
+file but one: `sl.dlss_nr.dll`, the Streamline plugin for the NGX feature this
+player drives, stays at 2.13.0.0, because no 2.14 release ships it. The mixed
+set changes nothing that runs: the add-on runs at `EnableHooks=2`, which
+leaves Streamline unpatched, no `sl.*` module is mapped in any render log, and
+renders with the 2.14.16 files and DLSS SR 310.9.16 are byte-identical to
+renders without them on every clip measured
+(`docs/measurements/runtime-310916-20261031`). DLSS SR is the one module of
+these that *is* loaded: RenoDX detours it to observe the player's DLSS/DLAA
+create before building feature 18.
 
-The matching package includes the exact NVIDIA-signed Streamline 2.13 files in
-the runtime lock. NVIDIA files remain subject to NVIDIA's applicable terms.
+The matching package includes the exact NVIDIA-signed Streamline files in the
+runtime lock. NVIDIA files remain subject to NVIDIA's applicable terms.
 Streamline's MIT licence is included as
 `THIRD_PARTY_LICENSES/nvidia-streamline-MIT.txt`, taken from the repository's
 main branch because upstream publishes no v2.13.0 tag.
@@ -122,10 +132,13 @@ licence, from tag v6.8.0, is included as
 
 ## RenoDX
 
-The selected `renodx-dlss5.addon64` 6.5.3 binary comes from the
+The selected `renodx-dlss5.addon64` 10.8.0 binary comes from the
 `RankFTW/rhi-repo` release mirror
-(https://github.com/RankFTW/rhi-repo/releases/tag/renodx-dlss5-6.5.3). It is
-unsigned and enabled by default on every detected NVIDIA RTX GPU. No public
+(https://github.com/RankFTW/rhi-repo/releases/tag/renodx-dlss5-10.8.0). It is
+unsigned and enabled by default on every detected NVIDIA RTX GPU. It loads
+the NR DLL that `NRRuntimePath` names; when that file will not load it looks
+beside itself and then in `%LOCALAPPDATA%\DLSS5-NR\runtime\`, which is why
+the player checks the file the add-on reports loading. No public
 source for this add-on was found: the RenoDX framework repository,
 https://github.com/clshortfuse/renodx, holds no DLSS5 add-on in `src/addons`
 (devkit, dlssfix and fpslimiter only, checked 2026-10-16).

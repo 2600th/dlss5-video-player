@@ -5,6 +5,7 @@
 #include "NeuralPreflight.h"
 #include "OfflineNeuralRenderer.h"
 #include "TemporalGuides.h"
+#include "Utf8Text.h"
 
 #include <chrono>
 #include <cstdint>
@@ -136,6 +137,10 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     const NeuralRuntimeBanner banner = ParseNeuralRuntimeBanner(logPath.empty() ? segment : ReadWholeFile(logPath));
     const auto observations = CollectFeature18Observations(segment);
     const auto modules = DescribeRuntimeModules(moduleDirectory, LockedRuntimeFileNames());
+    // Which NR DLL ran, and its signature, read off the file the add-on named.
+    const std::string nrFile = NeuralRuntimeFileRelativeTo(banner.dlssnrFile, moduleDirectory);
+    const std::string nrSignature =
+        nrFile.empty() ? std::string() : AuthenticodeState(moduleDirectory / utf8_text::ToWideStrict(nrFile).value_or(L""));
     // Decided from the settled whole-log read, which is the same evidence `ok`
     // is computed from, so the two can never disagree.
     if (created && failure.empty() && !evidence.Valid())
@@ -162,6 +167,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
             JsonEscape(banner.addonVersion) + "\",\"addonApi\":\"" + JsonEscape(banner.addonApiVersion) +
             "\",\"renodx\":\"" + JsonEscape(banner.renodxVersion) + "\",\"renodxBuild\":\"" +
             JsonEscape(banner.renodxBuild) + "\",\"dlssnr\":\"" + JsonEscape(banner.dlssnrRuntime) +
+            "\",\"dlssnrFile\":\"" + JsonEscape(nrFile) + "\",\"dlssnrSignature\":\"" + JsonEscape(nrSignature) +
             "\",\"activeSettings\":\"" + JsonEscape(banner.activeSettings) + "\"}";
     // The weights the pass evaluates are resolved outside the staged runtime,
     // so the receipt records what the render identity's model-store term

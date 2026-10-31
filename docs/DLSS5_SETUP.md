@@ -24,10 +24,26 @@ from another pack.
 
 On any detected NVIDIA RTX GPU - GeForce RTX 20, 30, 40 and 50, and RTX-branded
 workstation or laptop parts - a complete experimental layout enables
-`renodx-dlss5.addon64` by default. The locked neural runtime is ShortFuse's
-community-modified universal 310.8 build (`310.8.SF-v2`), which extends the
-leaked 310.8.0 runtime from Blackwell to Turing, Ampere and Ada. None of this
-is official NVIDIA support: NVIDIA ships DLSS 5 for RTX 50 and has announced
+`renodx-dlss5.addon64` by default. The lock carries two neural runtimes, and
+the GPU decides which one a render loads:
+
+| File in `neural-runtime/` | Runtime | Rendered on |
+|---|---|---|
+| `nvngx_dlssnr.dll` | DLSS-NR 310.9.16, with two networks, A and B | RTX 50 |
+| `310.8.SF-v2/nvngx_dlssnr.dll` | ShortFuse's universal 310.8 build (`310.8.SF-v2`), network A only | RTX 20, 30 and 40; on RTX 50 when **Previous runtime** is chosen |
+
+Both are modified, unsigned files (below). The 310.9.16 file is NVIDIA's
+310.9.16 with community-built Turing, Ampere and Ada kernels added in an
+extra section and its signature removed; 310.8.SF-v2 extends the leaked
+310.8.0 runtime from Blackwell to Turing, Ampere and Ada. 310.9.16 is sent
+to RTX 50 only, because no RTX 20-40 card has run it here. Network A on
+310.9.16 renders byte-identical to 310.8.SF-v2, so an RTX 50 render keeps
+0.28's picture by default; **Enhance > Picture… > Render pipeline > Network** offers B,
+NVIDIA's lighter network (about 36 % less model time, and a milder picture that
+stays nearer the source), and
+the previous runtime. `dlss5-convert --network a|b` does the same for a
+conversion. Measured in [`docs/measurements/runtime-310916-20261031`](measurements/runtime-310916-20261031/).
+None of this is official NVIDIA support: NVIDIA ships DLSS 5 for RTX 50 and has announced
 RTX 40 for later. The product name only selects the cache label and the pace
 prior; whether feature 18 actually runs is decided by the runtime's own
 capability check and the strict evidence chain, which refuse the render rather
@@ -35,7 +51,8 @@ than publish an unverified one. Turing and Ampere lack native FP8 tensor
 math, so the same network runs several times slower there; the offline cache
 still completes, and a live session simply buffers when it cannot keep up.
 
-The runtime lock currently selects RenoDX DLSS 5 add-on 6.5.3. Normal-mode
+The runtime lock currently selects RenoDX DLSS 5 add-on 10.8.0, which drives
+both runtimes. Normal-mode
 helper bootstrap atomically enforces these managed values in
 `neural-runtime/ReShade.ini`:
 
@@ -59,15 +76,15 @@ in an existing `ReShade.ini` is left alone at whatever value it holds; 6.x
 ignores it, and rewriting a key it classifies as pre-v4 would re-run its config
 migration, which backs the file up beside the add-on every time it fires.
 
-A section the player creates also opens with `ConfigVersion=6`, the schema
-stamp 6.5.3 writes on every config it loads. Without it the add-on reads the
-section as schema v0 on its first load and migrates it: `ReShade.log` reports
-"config schema v0 migrated key-wise to v6", the file is backed up beside the
-add-on, and the add-on's own `NRChainedHistory` and `NRCodecMode` replace the
-saved ones for that launch (and the pre-v6 `NRPQCalibration=2.5375` is pinned
-into the file). The stamp is added only to a section holding nothing but keys
-the player writes; a section with anybody else's key, or a version of its own,
-is left for the add-on to migrate.
+A section the player creates also opens with `ConfigVersion=10` and
+`ConfigRevision=1`, the schema stamp 10.8.0 writes on every config it loads.
+Without it the add-on migrates the section on its first load: it backs the
+file up beside itself as `ReShade.ini.v10-backup` and fills in about 200 keys
+of its own. (6.5.3 did the same to an unstamped section and adopted its own
+`NRChainedHistory` and `NRCodecMode` for that launch.) The stamp is added only
+to a section holding nothing but keys the player writes - including a 0.28
+section, whose stamp 6 is restamped in place - and a section with anybody
+else's key, or another version, is left for the add-on to migrate.
 
 One further key is written only when **Enhance > Processing scale** asks for it:
 `NRPreUpscale=1` for the 75% and 50% rungs, which put the model on the reduced
@@ -79,12 +96,22 @@ Each neural render also writes the model settings from **DLSS > Neural
 settings** into the same section: `NRIntensity`, `NRLocalTone`,
 `NRLocalStructure`, `NRSkinStructure`, `NRColorStrength`, `NRPreset`,
 `NRStyle`, `NRAutoMask`, `NRPasses` and `NRChainedHistory`, plus
-`NRNormGovernor`, which is pinned at `1`. Keys the player does not write are
-preserved. Safe mode skips the neural helper entirely and writes none of the
+`NRNormGovernor`, which is pinned at `1`, `NRDetailStability=1` and
+`NRSkinIndependent=0`, which hold 10.8.0's two new behaviours off, and
+`NRRuntimePath`, the NR DLL for this render (`nvngx_dlssnr.dll` or
+`310.8.SF-v2\nvngx_dlssnr.dll`, relative to the add-on). `NRPreset` is the
+network: `1` is A and `2` is B, and `0` is never written, because on 310.9.16
+it means the runtime's own default, which is B. A colour strength of 0 is
+written as 0.01: 10.8.0 declines a session in which every pass is at zero
+strength, and the render then fails. Keys the player does not write are
+preserved. The preflight receipt and the render log name the NR file that
+loaded, its version and its Authenticode state, and a render on a file other
+than the selected one is refused. Safe mode skips the neural helper entirely and writes none of the
 neural settings.
 
-The selected neural runtime is modified and unsigned: its author removed the
+Both neural runtimes are modified and unsigned: their authors removed the
 embedded NVIDIA signature. The ReShade proxy and RenoDX add-on are unsigned.
+DLSS SR 310.9.16 and the Streamline files keep NVIDIA's own signature.
 These signature states do not establish malware or safety, and matching a
 SHA-256 lock proves only that a file is the expected byte stream.
 See [third-party notices](../THIRD_PARTY.md) and the packaged

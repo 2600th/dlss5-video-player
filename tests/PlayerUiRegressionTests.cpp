@@ -184,7 +184,7 @@ struct PlayerAppTestAccess {
         app.m_neuralRequested = false; app.m_upscaleTargetHeight = 2160;
         app.m_youtubeSourceQuality = YouTubeSourceQuality::P1440;
         app.m_renderGuides = GuideControls{false, true};
-        app.m_neuralSettings.intensity = 0.5f; app.m_neuralSettings.preset = 2; app.m_neuralSettings.autoMask = false;
+        app.m_neuralSettings.intensity = 0.5f; app.m_neuralSettings.network = neural_runtime::Network::B; app.m_neuralSettings.autoMask = false;
         app.m_comparison.mode = ComparisonMode::Wipe; app.m_comparison.swap = true; app.m_comparison.splitX = 0.8f; app.m_zoomStep = 3;
         app.m_comparison.strength = 0.4f;
         const auto savedCacheRoot=app.SettingsPath().parent_path()/L"shared-cache-location";
@@ -202,7 +202,7 @@ struct PlayerAppTestAccess {
         CHECK_EQ(app.m_upscaleTargetHeight, 2160u);
         CHECK(app.m_youtubeSourceQuality == YouTubeSourceQuality::P1440);
         CHECK((app.m_renderGuides == GuideControls{false, true}));
-        CHECK(app.m_neuralSettings.intensity == 0.5f && app.m_neuralSettings.preset == 2 && !app.m_neuralSettings.autoMask);
+        CHECK(app.m_neuralSettings.intensity == 0.5f && app.m_neuralSettings.network == neural_runtime::Network::B && !app.m_neuralSettings.autoMask);
         CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
         CHECK(app.m_comparison.swap && std::abs(app.m_comparison.splitX - 0.8f) < 0.001f);
         CHECK_EQ(app.m_zoomStep, 3);
@@ -1731,14 +1731,16 @@ struct PlayerAppTestAccess {
         // The page that hid the focused control handed the focus to the switch.
         CHECK(GetFocus() == page);
         CHECK_EQ(app.T(L"picture.page.look"), ReadText(page));
-        // The table-driven row: its choices, its current one, and a pick read back.
-        const HWND row = GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST);
-        REQUIRE(row != nullptr);
+        // The table-driven row, after the built-in Network row: its choices, its
+        // current one, and a pick read back.
         CHECK(visible(IDC_PIC_RENDER_ROW_FIRST));
+        const HWND row = GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST + 1);
+        REQUIRE(row != nullptr);
+        CHECK(visible(IDC_PIC_RENDER_ROW_FIRST + 1));
         CHECK_EQ(int(SendMessageW(row, CB_GETCOUNT, 0, 0)), 3);
         CHECK_EQ(int(SendMessageW(row, CB_GETCURSEL, 0, 0)), 1);
         SendMessageW(row, CB_SETCURSEL, 2, 0);
-        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST, CBN_SELCHANGE), reinterpret_cast<LPARAM>(row));
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST + 1, CBN_SELCHANGE), reinterpret_cast<LPARAM>(row));
         CHECK_EQ(chosen, 2);
         chosen = 0;
         app.SyncNeuralSettingControls(dialog);
@@ -1783,7 +1785,7 @@ struct PlayerAppTestAccess {
         app.SaveVideoSettings();
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
         CHECK(app.m_neuralWnd == nullptr);
-        app.m_pictureRenderRows.clear();
+        app.m_pictureRenderRows.pop_back();
         app.m_picturePipelinePage = false;
     }
 
@@ -4252,6 +4254,18 @@ struct PlayerAppTestAccess {
         CHECK_EQ(20.0, playback_timing::PredictRenderMs(app.RenderPaceAt(50), 1920, 1080, 0.0));
         CHECK_EQ(40.0, playback_timing::PredictRenderMs(app.RenderPaceAt(100), 1920, 1080, 0.0));
         CHECK(app.RenderPaceAt(75).samples.empty());
+        // A pace measured on one network is not read for the other; on a GPU
+        // that renders A whatever is asked, it is the same pace.
+        {
+            const NeuralSettings saved = app.m_neuralSettings;
+            app.m_neuralSettings.network = neural_runtime::Network::B;
+            app.LoadRenderPace();
+            const bool other = neural_runtime::OffersCurrent(app.m_opt.detectedGpu.generation);
+            CHECK_EQ(other ? 0.0 : 40.0, playback_timing::PredictRenderMs(app.RenderPaceAt(100), 1920, 1080, 0.0));
+            app.m_neuralSettings = saved;
+            app.LoadRenderPace();
+            CHECK_EQ(40.0, playback_timing::PredictRenderMs(app.RenderPaceAt(100), 1920, 1080, 0.0));
+        }
 
         app.m_paceHistory.clear(); app.SaveRenderPace();
         app.m_paceHistory = history; app.RebuildRenderPace();
@@ -4686,7 +4700,7 @@ struct PlayerAppTestAccess {
         setTrack(IDC_NS_SKIN, 0);
         app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
         CHECK_EQ(app.m_neuralSettings.skinStructure, -1.0f);
-        CHECK(NeuralAddonOverridesFor(app.m_neuralSettings)[3] == NeuralAddonOverride("NRSkinStructure", "-1.000000"));
+        CHECK(NeuralAddonOverridesFor(app.m_neuralSettings, neural_runtime::kCurrent)[3] == NeuralAddonOverride("NRSkinStructure", "-1.000000"));
         setTrack(IDC_NS_SKIN, 26);
         app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
         // Colour strength is offered again: RenoDX 6.5.3 honours it, where 4.70
@@ -4740,7 +4754,7 @@ struct PlayerAppTestAccess {
         // writes into the runtime's ReShade.ini, and a control the dialog edits
         // but never sends is the failure this pins.
         {
-            const auto overrides = NeuralAddonOverridesFor(app.m_neuralSettings);
+            const auto overrides = NeuralAddonOverridesFor(app.m_neuralSettings, neural_runtime::kCurrent);
             const auto valueOf = [&](std::string_view key) {
                 for (const auto& entry : overrides)
                     if (entry.first == key) return entry.second;
@@ -4771,6 +4785,28 @@ struct PlayerAppTestAccess {
         SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_SETCURSEL, 2, 0);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STABILITY, CBN_SELCHANGE), 0);
         CHECK(app.m_temporalSettings.stability == TemporalStability::Medium);
+        // The network (P3.14), the Picture panel's first render row: A first and
+        // selected; on RTX 50 B and the previous runtime follow, elsewhere the one
+        // runtime that GPU renders with is shown and cannot be changed.
+        {
+            const GpuGeneration gpu = app.m_opt.detectedGpu.generation;
+            const HWND network = GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST);
+            CHECK(network != nullptr);
+            CHECK_EQ(int(SendMessageW(network, CB_GETCOUNT, 0, 0)), int(neural_runtime::ChoiceCount(gpu)));
+            CHECK_EQ(int(SendMessageW(network, CB_GETCURSEL, 0, 0)), 0);
+            CHECK((IsWindowEnabled(network) != FALSE) == neural_runtime::OffersCurrent(gpu));
+            if (neural_runtime::OffersCurrent(gpu)) {
+                SendMessageW(network, CB_SETCURSEL, 1, 0);
+                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST, CBN_SELCHANGE), 0);
+                CHECK(app.m_neuralSettings.network == neural_runtime::Network::B && !app.m_neuralSettings.previousRuntime);
+                SendMessageW(network, CB_SETCURSEL, neural_runtime::kPreviousChoice, 0);
+                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST, CBN_SELCHANGE), 0);
+                CHECK(app.m_neuralSettings.network == neural_runtime::Network::B && app.m_neuralSettings.previousRuntime);
+            } else {
+                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST, CBN_SELCHANGE), 0);
+                CHECK(app.m_neuralSettings.network == neural_runtime::Network::A && !app.m_neuralSettings.previousRuntime);
+            }
+        }
         // Every control the dialog offers carries help text, and the text is the
         // localized tip rather than an empty tool.
         const auto tipHost = app.m_tipHosts.find(dialog);
@@ -4780,8 +4816,8 @@ struct PlayerAppTestAccess {
             CHECK(tools >= 12);
             for (const int id : {IDC_NS_INTENSITY, IDC_NS_STRUCTURE, IDC_NS_TONE, IDC_NS_SKIN,
                                  IDC_NS_STYLE, IDC_NS_AUTOMASK, IDC_NS_GUIDE_MV, IDC_NS_GUIDE_DEPTH,
-                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_NS_SCENE_CUTS, IDC_NS_STABILITY,
-                                 IDC_NS_APPLY, IDC_NS_RESET}) {
+                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_PIC_RENDER_ROW_FIRST, IDC_NS_SCENE_CUTS,
+                                 IDC_NS_STABILITY, IDC_NS_APPLY, IDC_NS_RESET}) {
                 wchar_t text[512] = {};
                 TTTOOLINFOW info{};
                 info.cbSize = TTTOOLINFOW_V2_SIZE;
@@ -4821,6 +4857,7 @@ struct PlayerAppTestAccess {
         CHECK(app.m_guides.SceneCutSensitivity() == scene_cut::Sensitivity::Default);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_SCENE_CUTS), CB_GETCURSEL, 0, 0)), 0);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_GETCURSEL, 0, 0)), 0);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST), CB_GETCURSEL, 0, 0)), 0);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_INTENSITY), TBM_GETPOS, 0, 0)), 100);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_GETCHECK, 0, 0)), BST_CHECKED);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);

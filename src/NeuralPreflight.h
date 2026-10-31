@@ -36,7 +36,8 @@ struct NeuralRuntimeBanner {
     std::string addonApiVersion;  // "18"
     std::string renodxVersion;    // "4.7"
     std::string renodxBuild;      // "Sep  2 2026 01:15:39"
-    std::string dlssnrRuntime;    // "310.8.0"
+    std::string dlssnrRuntime;    // "310.9.16.0", the file version the NR DLL declares
+    std::string dlssnrFile;       // the NR DLL the add-on loaded, as its log names it
     std::string activeSettings;   // "upscaling=OFF intensity=1.000000 ..."
 
     friend bool operator==(const NeuralRuntimeBanner&, const NeuralRuntimeBanner&) = default;
@@ -45,6 +46,18 @@ struct NeuralRuntimeBanner {
 // Parses the proxy banner lines written when the add-on loads (offset 0 of
 // ReShade.log). Missing lines leave the corresponding field empty.
 NeuralRuntimeBanner ParseNeuralRuntimeBanner(std::string_view reshadeLog);
+
+// The NR DLL the add-on loaded, relative to the runtime directory with '/'
+// ("310.8.SF-v2/nvngx_dlssnr.dll"): the receipt names it so a render on one
+// runtime can never pass for one on the other. Empty when `loaded` is empty
+// or outside `runtimeDirectory` (the add-on's %LOCALAPPDATA% fallback).
+std::string NeuralRuntimeFileRelativeTo(std::string_view loaded, const std::filesystem::path& runtimeDirectory);
+// Whether a receipt's NR file is `selected`, ignoring case and separators.
+bool SameNeuralRuntimeFile(std::string_view loaded, std::wstring_view selected);
+// The file's embedded Authenticode state in Get-AuthenticodeSignature's words
+// - Valid, NotSigned, HashMismatch, NotTrusted or UnknownError - so the
+// receipt and the runtime lock's signatureStatus read alike.
+std::string AuthenticodeState(const std::filesystem::path& file);
 
 // One feature-18 creation/evaluation observation from the log, in order.
 struct Feature18Observation {

@@ -1,0 +1,331 @@
+clip,row,reference,candidate,identical,frames,change_to_reference,distance_to_source,reference_to_source,distance_share
+real-film-cuts,Pinned rendered again,m12-base#1,m12-base#2,True,26,0.0,2.9181,2.9181,1.0
+real-film-cuts,10.8.0 + 310.8 as written vs pinned,m12-base#1,m12-r108-308-asw#1,False,26,0.1884,2.8903,2.9181,0.9905
+real-film-cuts,"10.8.0 + 310.8 fixed, preset 1 vs pinned",m12-base#1,m12-308-p1#1,False,26,0.0156,2.9047,2.9181,0.9954
+real-film-cuts,"10.8.0 + 310.8 fixed, preset 1 rendered again",m12-308-p1#1,m12-308-p1#2,True,26,0.0,2.9047,2.9047,1.0
+real-film-cuts,10.8.0 + 310.8 preset 0 vs 1,m12-308-p1#1,m12-308-p0#1,True,26,0.0,2.9047,2.9047,1.0
+real-film-cuts,10.8.0 + 310.8 preset 2 vs 1,m12-308-p1#1,m12-308-p2#1,True,26,0.0,2.9047,2.9047,1.0
+real-film-cuts,10.8.0 + 310.8 preset 3 vs 1,m12-308-p1#1,m12-308-p3#1,True,26,0.0,2.9047,2.9047,1.0
+real-film-cuts,"310.9.16 A vs 310.8 (both 10.8.0, preset 1)",m12-308-p1#1,m12-916-p1#1,True,26,0.0,2.9047,2.9047,1.0
+real-film-cuts,310.9.16 A vs pinned,m12-base#1,m12-916-p1#1,False,26,0.0156,2.9047,2.9181,0.9954
+real-film-cuts,310.9.16 A rendered again,m12-916-p1#1,m12-916-p1#2,True,26,0.0,2.9047,2.9047,1.0
+real-film-cuts,310.9.16 B vs A,m12-916-p1#1,m12-916-p2#1,False,26,1.2798,2.7244,2.9047,0.9379
+real-film-cuts,310.9.16 B vs pinned,m12-base#1,m12-916-p2#1,False,26,1.2876,2.7244,2.9181,0.9336
+real-film-cuts,310.9.16 B rendered again,m12-916-p2#1,m12-916-p2#2,True,26,0.0,2.7244,2.7244,1.0
+real-film-cuts,310.9.16 preset 0 vs A,m12-916-p1#1,m12-916-p0#1,False,26,1.2798,2.7244,2.9047,0.9379
+real-film-cuts,310.9.16 preset 0 vs B,m12-916-p2#1,m12-916-p0#1,True,26,0.0,2.7244,2.7244,1.0
+real-film-cuts,310.9.16 preset 3 vs A,m12-916-p1#1,m12-916-p3#1,False,26,1.2798,2.7244,2.9047,0.9379
+real-film-cuts,310.9.16 preset 3 vs B,m12-916-p2#1,m12-916-p3#1,True,26,0.0,2.7244,2.7244,1.0
+real-film-cuts,310.9.16 as written vs B,m12-916-p2#1,m12-r108-916-asw#1,False,26,0.1715,2.7235,2.7244,0.9997
+real-film-cuts,"310.9.16 A, SL 2.14.16 + SR 310.9.16 vs A",m12-916-p1#1,m12-916-a-sl#1,True,26,0.0,2.9047,2.9047,1.0
+real-film-cuts,"310.9.16 B, SL 2.14.16 + SR 310.9.16 vs B",m12-916-p2#1,m12-916-b-sl#1,True,26,0.0,2.7244,2.7244,1.0
+real-film-cuts,"310.8, SL 2.14.16 + SR 310.9.16 vs 310.8",m12-308-p1#1,m12-308-a-sl#1,True,26,0.0,2.9047,2.9047,1.0
+real-film-cuts,pinned gentle vs Standard,m12-base#1,m12-base-gentle#1,False,26,1.4721,2.0882,2.9181,0.7156
+real-film-cuts,310.8 (10.8.0) gentle vs Standard,m12-308-p1#1,m12-308-a-gentle#1,False,26,1.4783,2.082,2.9047,0.7168
+real-film-cuts,A gentle vs Standard,m12-916-p1#1,m12-916-a-gentle#1,False,26,1.4783,2.082,2.9047,0.7168
+real-film-cuts,B gentle vs Standard,m12-916-p2#1,m12-916-b-gentle#1,False,26,1.3211,2.0364,2.7244,0.7475
+real-film-cuts,310.8 (10.8.0) gentle vs pinned gentle,m12-base-gentle#1,m12-308-a-gentle#1,False,26,0.0071,2.082,2.0882,0.997
+real-film-cuts,A gentle vs 310.8 (10.8.0) gentle,m12-308-a-gentle#1,m12-916-a-gentle#1,True,26,0.0,2.082,2.082,1.0
+real-film-cuts,pinned strong vs Standard,m12-base#1,m12-base-strong#1,False,26,1.9525,3.5049,2.9181,1.2011
+real-film-cuts,310.8 (10.8.0) strong vs Standard,m12-308-p1#1,m12-308-a-strong#1,False,26,1.9663,3.4782,2.9047,1.1975
+real-film-cuts,A strong vs Standard,m12-916-p1#1,m12-916-a-strong#1,False,26,1.9663,3.4782,2.9047,1.1975
+real-film-cuts,B strong vs Standard,m12-916-p2#1,m12-916-b-strong#1,False,26,1.8295,3.4095,2.7244,1.2515
+real-film-cuts,310.8 (10.8.0) strong vs pinned strong,m12-base-strong#1,m12-308-a-strong#1,False,26,0.0321,3.4782,3.5049,0.9924
+real-film-cuts,A strong vs 310.8 (10.8.0) strong,m12-308-a-strong#1,m12-916-a-strong#1,True,26,0.0,3.4782,3.4782,1.0
+real-film-cuts,pinned detail vs Standard,m12-base#1,m12-base-detail#1,False,26,2.4078,1.961,2.9181,0.672
+real-film-cuts,pinned tone200 vs Standard,m12-base#1,m12-base-tone200#1,False,26,1.6332,3.4047,2.9181,1.1668
+real-film-cuts,310.8 (10.8.0) tone200 vs Standard,m12-308-p1#1,m12-308-a-tone200#1,False,26,1.6447,3.3802,2.9047,1.1637
+real-film-cuts,A tone200 vs Standard,m12-916-p1#1,m12-916-a-tone200#1,False,26,1.6447,3.3802,2.9047,1.1637
+real-film-cuts,B tone200 vs Standard,m12-916-p2#1,m12-916-b-tone200#1,False,26,2.186,4.0026,2.7244,1.4692
+real-film-cuts,310.8 (10.8.0) tone200 vs pinned tone200,m12-base-tone200#1,m12-308-a-tone200#1,False,26,0.0289,3.3802,3.4047,0.9928
+real-film-cuts,A tone200 vs 310.8 (10.8.0) tone200,m12-308-a-tone200#1,m12-916-a-tone200#1,True,26,0.0,3.3802,3.3802,1.0
+real-film-cuts,pinned int000 vs Standard,m12-base#1,m12-base-int000#1,False,26,2.4078,1.961,2.9181,0.672
+real-film-cuts,310.8 (10.8.0) int000 vs Standard,m12-308-p1#1,m12-308-a-int000#1,False,26,2.4179,1.961,2.9047,0.6751
+real-film-cuts,A int000 vs Standard,m12-916-p1#1,m12-916-a-int000#1,False,26,2.4179,1.961,2.9047,0.6751
+real-film-cuts,B int000 vs Standard,m12-916-p2#1,m12-916-b-int000#1,False,26,2.1136,1.961,2.7244,0.7198
+real-film-cuts,310.8 (10.8.0) int000 vs pinned int000,m12-base-int000#1,m12-308-a-int000#1,True,26,0.0,1.961,1.961,1.0
+real-film-cuts,A int000 vs 310.8 (10.8.0) int000,m12-308-a-int000#1,m12-916-a-int000#1,True,26,0.0,1.961,1.961,1.0
+real-film-cuts,pinned natural vs Standard,m12-base#1,m12-base-natural#1,False,26,5.7632,6.57,2.9181,2.2515
+real-film-cuts,310.8 (10.8.0) natural vs Standard,m12-308-p1#1,m12-308-a-natural#1,False,26,5.809,6.5349,2.9047,2.2498
+real-film-cuts,A natural vs Standard,m12-916-p1#1,m12-916-a-natural#1,False,26,5.809,6.5349,2.9047,2.2498
+real-film-cuts,B natural vs Standard,m12-916-p2#1,m12-916-b-natural#1,False,26,5.1769,5.9357,2.7244,2.1787
+real-film-cuts,310.8 (10.8.0) natural vs pinned natural,m12-base-natural#1,m12-308-a-natural#1,False,26,0.0582,6.5349,6.57,0.9946
+real-film-cuts,A natural vs 310.8 (10.8.0) natural,m12-308-a-natural#1,m12-916-a-natural#1,True,26,0.0,6.5349,6.5349,1.0
+real-film-cuts,pinned cinematic vs Standard,m12-base#1,m12-base-cinematic#1,False,26,4.2783,5.127,2.9181,1.757
+real-film-cuts,310.8 (10.8.0) cinematic vs Standard,m12-308-p1#1,m12-308-a-cinematic#1,False,26,4.3169,5.0825,2.9047,1.7498
+real-film-cuts,A cinematic vs Standard,m12-916-p1#1,m12-916-a-cinematic#1,False,26,4.3169,5.0825,2.9047,1.7498
+real-film-cuts,B cinematic vs Standard,m12-916-p2#1,m12-916-b-cinematic#1,False,26,3.3361,4.1148,2.7244,1.5103
+real-film-cuts,310.8 (10.8.0) cinematic vs pinned cinematic,m12-base-cinematic#1,m12-308-a-cinematic#1,False,26,0.0687,5.0825,5.127,0.9913
+real-film-cuts,A cinematic vs 310.8 (10.8.0) cinematic,m12-308-a-cinematic#1,m12-916-a-cinematic#1,True,26,0.0,5.0825,5.0825,1.0
+real-film-cuts,pinned detail001 vs Standard,m12-base#1,m12-base-detail001#1,False,26,2.3823,1.9618,2.9181,0.6723
+real-film-cuts,310.8 (10.8.0) detail001 vs Standard,m12-308-p1#1,m12-308-a-detail001#1,False,26,2.3924,1.9617,2.9047,0.6754
+real-film-cuts,A detail001 vs Standard,m12-916-p1#1,m12-916-a-detail001#1,False,26,2.3924,1.9617,2.9047,0.6754
+real-film-cuts,B detail001 vs Standard,m12-916-p2#1,m12-916-b-detail001#1,False,26,2.0919,1.9638,2.7244,0.7208
+real-film-cuts,310.8 (10.8.0) detail001 vs pinned detail001,m12-base-detail001#1,m12-308-a-detail001#1,False,26,0.0001,1.9617,1.9618,1.0
+real-film-cuts,A detail001 vs 310.8 (10.8.0) detail001,m12-308-a-detail001#1,m12-916-a-detail001#1,True,26,0.0,1.9617,1.9617,1.0
+real-film-cuts,pinned colour 0.01 vs pinned colour 0 (Detail only),m12-base-detail#1,m12-base-detail001#1,False,26,0.036,1.9618,1.961,1.0004
+real-film-cuts,310.8 (10.8.0) colour 0.01 vs pinned colour 0,m12-base-detail#1,m12-308-a-detail001#1,False,26,0.036,1.9617,1.961,1.0004
+real-game-cuts,Pinned rendered again,m12-base#1,m12-base#2,True,17,0.0,4.6597,4.6597,1.0
+real-game-cuts,10.8.0 + 310.8 as written vs pinned,m12-base#1,m12-r108-308-asw#1,False,17,0.3358,4.6289,4.6597,0.9934
+real-game-cuts,"10.8.0 + 310.8 fixed, preset 1 vs pinned",m12-base#1,m12-308-p1#1,False,17,0.0045,4.6574,4.6597,0.9995
+real-game-cuts,"10.8.0 + 310.8 fixed, preset 1 rendered again",m12-308-p1#1,m12-308-p1#2,True,17,0.0,4.6574,4.6574,1.0
+real-game-cuts,10.8.0 + 310.8 preset 0 vs 1,m12-308-p1#1,m12-308-p0#1,True,17,0.0,4.6574,4.6574,1.0
+real-game-cuts,10.8.0 + 310.8 preset 2 vs 1,m12-308-p1#1,m12-308-p2#1,True,17,0.0,4.6574,4.6574,1.0
+real-game-cuts,10.8.0 + 310.8 preset 3 vs 1,m12-308-p1#1,m12-308-p3#1,True,17,0.0,4.6574,4.6574,1.0
+real-game-cuts,"310.9.16 A vs 310.8 (both 10.8.0, preset 1)",m12-308-p1#1,m12-916-p1#1,True,17,0.0,4.6574,4.6574,1.0
+real-game-cuts,310.9.16 A vs pinned,m12-base#1,m12-916-p1#1,False,17,0.0045,4.6574,4.6597,0.9995
+real-game-cuts,310.9.16 A rendered again,m12-916-p1#1,m12-916-p1#2,True,17,0.0,4.6574,4.6574,1.0
+real-game-cuts,310.9.16 B vs A,m12-916-p1#1,m12-916-p2#1,False,17,2.0249,3.6967,4.6574,0.7937
+real-game-cuts,310.9.16 B vs pinned,m12-base#1,m12-916-p2#1,False,17,2.0258,3.6967,4.6597,0.7933
+real-game-cuts,310.9.16 B rendered again,m12-916-p2#1,m12-916-p2#2,True,17,0.0,3.6967,3.6967,1.0
+real-game-cuts,310.9.16 preset 0 vs A,m12-916-p1#1,m12-916-p0#1,False,17,2.0249,3.6967,4.6574,0.7937
+real-game-cuts,310.9.16 preset 0 vs B,m12-916-p2#1,m12-916-p0#1,True,17,0.0,3.6967,3.6967,1.0
+real-game-cuts,310.9.16 preset 3 vs A,m12-916-p1#1,m12-916-p3#1,False,17,2.0249,3.6967,4.6574,0.7937
+real-game-cuts,310.9.16 preset 3 vs B,m12-916-p2#1,m12-916-p3#1,True,17,0.0,3.6967,3.6967,1.0
+real-game-cuts,310.9.16 as written vs B,m12-916-p2#1,m12-r108-916-asw#1,False,17,0.2965,3.6875,3.6967,0.9975
+real-game-cuts,"310.9.16 A, SL 2.14.16 + SR 310.9.16 vs A",m12-916-p1#1,m12-916-a-sl#1,True,17,0.0,4.6574,4.6574,1.0
+real-game-cuts,"310.9.16 B, SL 2.14.16 + SR 310.9.16 vs B",m12-916-p2#1,m12-916-b-sl#1,True,17,0.0,3.6967,3.6967,1.0
+real-game-cuts,"310.8, SL 2.14.16 + SR 310.9.16 vs 310.8",m12-308-p1#1,m12-308-a-sl#1,True,17,0.0,4.6574,4.6574,1.0
+real-game-cuts,pinned gentle vs Standard,m12-base#1,m12-base-gentle#1,False,17,2.5613,2.8985,4.6597,0.622
+real-game-cuts,310.8 (10.8.0) gentle vs Standard,m12-308-p1#1,m12-308-a-gentle#1,False,17,2.5633,2.8975,4.6574,0.6221
+real-game-cuts,A gentle vs Standard,m12-916-p1#1,m12-916-a-gentle#1,False,17,2.5633,2.8975,4.6574,0.6221
+real-game-cuts,B gentle vs Standard,m12-916-p2#1,m12-916-b-gentle#1,False,17,1.8438,2.7005,3.6967,0.7305
+real-game-cuts,310.8 (10.8.0) gentle vs pinned gentle,m12-base-gentle#1,m12-308-a-gentle#1,False,17,0.0017,2.8975,2.8985,0.9996
+real-game-cuts,A gentle vs 310.8 (10.8.0) gentle,m12-308-a-gentle#1,m12-916-a-gentle#1,True,17,0.0,2.8975,2.8975,1.0
+real-game-cuts,pinned strong vs Standard,m12-base#1,m12-base-strong#1,False,17,3.1642,6.3958,4.6597,1.3726
+real-game-cuts,310.8 (10.8.0) strong vs Standard,m12-308-p1#1,m12-308-a-strong#1,False,17,3.166,6.3934,4.6574,1.3727
+real-game-cuts,A strong vs Standard,m12-916-p1#1,m12-916-a-strong#1,False,17,3.166,6.3934,4.6574,1.3727
+real-game-cuts,B strong vs Standard,m12-916-p2#1,m12-916-b-strong#1,False,17,2.1065,4.5833,3.6967,1.2398
+real-game-cuts,310.8 (10.8.0) strong vs pinned strong,m12-base-strong#1,m12-308-a-strong#1,False,17,0.0069,6.3934,6.3958,0.9996
+real-game-cuts,A strong vs 310.8 (10.8.0) strong,m12-308-a-strong#1,m12-916-a-strong#1,True,17,0.0,6.3934,6.3934,1.0
+real-game-cuts,pinned detail vs Standard,m12-base#1,m12-base-detail#1,False,17,4.0512,2.5528,4.6597,0.5479
+real-game-cuts,pinned tone200 vs Standard,m12-base#1,m12-base-tone200#1,False,17,2.5228,5.9186,4.6597,1.2702
+real-game-cuts,310.8 (10.8.0) tone200 vs Standard,m12-308-p1#1,m12-308-a-tone200#1,False,17,2.5241,5.9163,4.6574,1.2703
+real-game-cuts,A tone200 vs Standard,m12-916-p1#1,m12-916-a-tone200#1,False,17,2.5241,5.9163,4.6574,1.2703
+real-game-cuts,B tone200 vs Standard,m12-916-p2#1,m12-916-b-tone200#1,False,17,2.43,5.2384,3.6967,1.4171
+real-game-cuts,310.8 (10.8.0) tone200 vs pinned tone200,m12-base-tone200#1,m12-308-a-tone200#1,False,17,0.0061,5.9163,5.9186,0.9996
+real-game-cuts,A tone200 vs 310.8 (10.8.0) tone200,m12-308-a-tone200#1,m12-916-a-tone200#1,True,17,0.0,5.9163,5.9163,1.0
+real-game-cuts,pinned int000 vs Standard,m12-base#1,m12-base-int000#1,False,17,4.0512,2.5528,4.6597,0.5479
+real-game-cuts,310.8 (10.8.0) int000 vs Standard,m12-308-p1#1,m12-308-a-int000#1,False,17,4.054,2.5528,4.6574,0.5481
+real-game-cuts,A int000 vs Standard,m12-916-p1#1,m12-916-a-int000#1,False,17,4.054,2.5528,4.6574,0.5481
+real-game-cuts,B int000 vs Standard,m12-916-p2#1,m12-916-b-int000#1,False,17,2.9875,2.5528,3.6967,0.6906
+real-game-cuts,310.8 (10.8.0) int000 vs pinned int000,m12-base-int000#1,m12-308-a-int000#1,True,17,0.0,2.5528,2.5528,1.0
+real-game-cuts,A int000 vs 310.8 (10.8.0) int000,m12-308-a-int000#1,m12-916-a-int000#1,True,17,0.0,2.5528,2.5528,1.0
+real-game-cuts,pinned natural vs Standard,m12-base#1,m12-base-natural#1,False,17,6.3676,7.4593,4.6597,1.6008
+real-game-cuts,310.8 (10.8.0) natural vs Standard,m12-308-p1#1,m12-308-a-natural#1,False,17,6.3717,7.4593,4.6574,1.6016
+real-game-cuts,A natural vs Standard,m12-916-p1#1,m12-916-a-natural#1,False,17,6.3717,7.4593,4.6574,1.6016
+real-game-cuts,B natural vs Standard,m12-916-p2#1,m12-916-b-natural#1,False,17,5.3488,6.2366,3.6967,1.6871
+real-game-cuts,310.8 (10.8.0) natural vs pinned natural,m12-base-natural#1,m12-308-a-natural#1,False,17,0.0,7.4593,7.4593,1.0
+real-game-cuts,A natural vs 310.8 (10.8.0) natural,m12-308-a-natural#1,m12-916-a-natural#1,True,17,0.0,7.4593,7.4593,1.0
+real-game-cuts,pinned cinematic vs Standard,m12-base#1,m12-base-cinematic#1,False,17,5.7655,7.3851,4.6597,1.5849
+real-game-cuts,310.8 (10.8.0) cinematic vs Standard,m12-308-p1#1,m12-308-a-cinematic#1,False,17,5.7671,7.3835,4.6574,1.5853
+real-game-cuts,A cinematic vs Standard,m12-916-p1#1,m12-916-a-cinematic#1,False,17,5.7671,7.3835,4.6574,1.5853
+real-game-cuts,B cinematic vs Standard,m12-916-p2#1,m12-916-b-cinematic#1,False,17,4.4479,5.586,3.6967,1.5111
+real-game-cuts,310.8 (10.8.0) cinematic vs pinned cinematic,m12-base-cinematic#1,m12-308-a-cinematic#1,False,17,0.0061,7.3835,7.3851,0.9998
+real-game-cuts,A cinematic vs 310.8 (10.8.0) cinematic,m12-308-a-cinematic#1,m12-916-a-cinematic#1,True,17,0.0,7.3835,7.3835,1.0
+real-game-cuts,pinned detail001 vs Standard,m12-base#1,m12-base-detail001#1,False,17,4.0131,2.5539,4.6597,0.5481
+real-game-cuts,310.8 (10.8.0) detail001 vs Standard,m12-308-p1#1,m12-308-a-detail001#1,False,17,4.0159,2.5539,4.6574,0.5484
+real-game-cuts,A detail001 vs Standard,m12-916-p1#1,m12-916-a-detail001#1,False,17,4.0159,2.5539,4.6574,0.5484
+real-game-cuts,B detail001 vs Standard,m12-916-p2#1,m12-916-b-detail001#1,False,17,2.9597,2.555,3.6967,0.6912
+real-game-cuts,310.8 (10.8.0) detail001 vs pinned detail001,m12-base-detail001#1,m12-308-a-detail001#1,False,17,0.0,2.5539,2.5539,1.0
+real-game-cuts,A detail001 vs 310.8 (10.8.0) detail001,m12-308-a-detail001#1,m12-916-a-detail001#1,True,17,0.0,2.5539,2.5539,1.0
+real-game-cuts,pinned colour 0.01 vs pinned colour 0 (Detail only),m12-base-detail#1,m12-base-detail001#1,False,17,0.0551,2.5539,2.5528,1.0004
+real-game-cuts,310.8 (10.8.0) colour 0.01 vs pinned colour 0,m12-base-detail#1,m12-308-a-detail001#1,False,17,0.0551,2.5539,2.5528,1.0004
+real-game-motion,Pinned rendered again,m12-base#1,m12-base#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,10.8.0 + 310.8 as written vs pinned,m12-base#1,m12-r108-308-asw#1,False,19,0.3585,5.6044,5.628,0.9958
+real-game-motion,"10.8.0 + 310.8 fixed, preset 1 vs pinned",m12-base#1,m12-308-p1#1,False,19,0.0,5.628,5.628,1.0
+real-game-motion,"10.8.0 + 310.8 fixed, preset 1 rendered again",m12-308-p1#1,m12-308-p1#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,10.8.0 + 310.8 preset 0 vs 1,m12-308-p1#1,m12-308-p0#1,True,19,0.0,5.628,5.628,1.0
+real-game-motion,10.8.0 + 310.8 preset 2 vs 1,m12-308-p1#1,m12-308-p2#1,True,19,0.0,5.628,5.628,1.0
+real-game-motion,10.8.0 + 310.8 preset 3 vs 1,m12-308-p1#1,m12-308-p3#1,True,19,0.0,5.628,5.628,1.0
+real-game-motion,"310.9.16 A vs 310.8 (both 10.8.0, preset 1)",m12-308-p1#1,m12-916-p1#1,True,19,0.0,5.628,5.628,1.0
+real-game-motion,310.9.16 A vs pinned,m12-base#1,m12-916-p1#1,False,19,0.0,5.628,5.628,1.0
+real-game-motion,310.9.16 A rendered again,m12-916-p1#1,m12-916-p1#2,True,19,0.0,5.628,5.628,1.0
+real-game-motion,310.9.16 B vs A,m12-916-p1#1,m12-916-p2#1,False,19,2.3872,4.2581,5.628,0.7566
+real-game-motion,310.9.16 B vs pinned,m12-base#1,m12-916-p2#1,False,19,2.3872,4.2581,5.628,0.7566
+real-game-motion,310.9.16 B rendered again,m12-916-p2#1,m12-916-p2#2,True,19,0.0,4.2581,4.2581,1.0
+real-game-motion,310.9.16 preset 0 vs A,m12-916-p1#1,m12-916-p0#1,False,19,2.3872,4.2581,5.628,0.7566
+real-game-motion,310.9.16 preset 0 vs B,m12-916-p2#1,m12-916-p0#1,True,19,0.0,4.2581,4.2581,1.0
+real-game-motion,310.9.16 preset 3 vs A,m12-916-p1#1,m12-916-p3#1,False,19,2.3872,4.2581,5.628,0.7566
+real-game-motion,310.9.16 preset 3 vs B,m12-916-p2#1,m12-916-p3#1,True,19,0.0,4.2581,4.2581,1.0
+real-game-motion,310.9.16 as written vs B,m12-916-p2#1,m12-r108-916-asw#1,False,19,0.3368,4.2552,4.2581,0.9993
+real-game-motion,"310.9.16 A, SL 2.14.16 + SR 310.9.16 vs A",m12-916-p1#1,m12-916-a-sl#1,True,19,0.0,5.628,5.628,1.0
+real-game-motion,"310.9.16 B, SL 2.14.16 + SR 310.9.16 vs B",m12-916-p2#1,m12-916-b-sl#1,True,19,0.0,4.2581,4.2581,1.0
+real-game-motion,"310.8, SL 2.14.16 + SR 310.9.16 vs 310.8",m12-308-p1#1,m12-308-a-sl#1,True,19,0.0,5.628,5.628,1.0
+real-game-motion,pinned gentle vs Standard,m12-base#1,m12-base-gentle#1,False,19,2.8601,3.4432,5.628,0.6118
+real-game-motion,310.8 (10.8.0) gentle vs Standard,m12-308-p1#1,m12-308-a-gentle#1,False,19,2.8601,3.4432,5.628,0.6118
+real-game-motion,A gentle vs Standard,m12-916-p1#1,m12-916-a-gentle#1,False,19,2.8601,3.4432,5.628,0.6118
+real-game-motion,B gentle vs Standard,m12-916-p2#1,m12-916-b-gentle#1,False,19,2.1794,2.8588,4.2581,0.6714
+real-game-motion,310.8 (10.8.0) gentle vs pinned gentle,m12-base-gentle#1,m12-308-a-gentle#1,False,19,0.0,3.4432,3.4432,1.0
+real-game-motion,A gentle vs 310.8 (10.8.0) gentle,m12-308-a-gentle#1,m12-916-a-gentle#1,True,19,0.0,3.4432,3.4432,1.0
+real-game-motion,pinned strong vs Standard,m12-base#1,m12-base-strong#1,False,19,2.6595,6.0837,5.628,1.081
+real-game-motion,310.8 (10.8.0) strong vs Standard,m12-308-p1#1,m12-308-a-strong#1,False,19,2.6595,6.0837,5.628,1.081
+real-game-motion,A strong vs Standard,m12-916-p1#1,m12-916-a-strong#1,False,19,2.6595,6.0837,5.628,1.081
+real-game-motion,B strong vs Standard,m12-916-p2#1,m12-916-b-strong#1,False,19,5.453,7.3179,4.2581,1.7186
+real-game-motion,310.8 (10.8.0) strong vs pinned strong,m12-base-strong#1,m12-308-a-strong#1,False,19,0.0,6.0837,6.0837,1.0
+real-game-motion,A strong vs 310.8 (10.8.0) strong,m12-308-a-strong#1,m12-916-a-strong#1,True,19,0.0,6.0837,6.0837,1.0
+real-game-motion,pinned detail vs Standard,m12-base#1,m12-base-detail#1,False,19,4.8593,2.5581,5.628,0.4545
+real-game-motion,pinned tone200 vs Standard,m12-base#1,m12-base-tone200#1,False,19,2.3459,6.2122,5.628,1.1038
+real-game-motion,310.8 (10.8.0) tone200 vs Standard,m12-308-p1#1,m12-308-a-tone200#1,False,19,2.3459,6.2122,5.628,1.1038
+real-game-motion,A tone200 vs Standard,m12-916-p1#1,m12-916-a-tone200#1,False,19,2.3459,6.2122,5.628,1.1038
+real-game-motion,B tone200 vs Standard,m12-916-p2#1,m12-916-b-tone200#1,False,19,5.0767,7.4567,4.2581,1.7512
+real-game-motion,310.8 (10.8.0) tone200 vs pinned tone200,m12-base-tone200#1,m12-308-a-tone200#1,False,19,0.0,6.2122,6.2122,1.0
+real-game-motion,A tone200 vs 310.8 (10.8.0) tone200,m12-308-a-tone200#1,m12-916-a-tone200#1,True,19,0.0,6.2122,6.2122,1.0
+real-game-motion,pinned int000 vs Standard,m12-base#1,m12-base-int000#1,False,19,4.8593,2.5581,5.628,0.4545
+real-game-motion,310.8 (10.8.0) int000 vs Standard,m12-308-p1#1,m12-308-a-int000#1,False,19,4.8593,2.5581,5.628,0.4545
+real-game-motion,A int000 vs Standard,m12-916-p1#1,m12-916-a-int000#1,False,19,4.8593,2.5581,5.628,0.4545
+real-game-motion,B int000 vs Standard,m12-916-p2#1,m12-916-b-int000#1,False,19,3.4396,2.5581,4.2581,0.6008
+real-game-motion,310.8 (10.8.0) int000 vs pinned int000,m12-base-int000#1,m12-308-a-int000#1,True,19,0.0,2.5581,2.5581,1.0
+real-game-motion,A int000 vs 310.8 (10.8.0) int000,m12-308-a-int000#1,m12-916-a-int000#1,True,19,0.0,2.5581,2.5581,1.0
+real-game-motion,pinned natural vs Standard,m12-base#1,m12-base-natural#1,False,19,7.7128,10.9041,5.628,1.9375
+real-game-motion,310.8 (10.8.0) natural vs Standard,m12-308-p1#1,m12-308-a-natural#1,False,19,7.7128,10.9041,5.628,1.9375
+real-game-motion,A natural vs Standard,m12-916-p1#1,m12-916-a-natural#1,False,19,7.7128,10.9041,5.628,1.9375
+real-game-motion,B natural vs Standard,m12-916-p2#1,m12-916-b-natural#1,False,19,7.6752,10.1458,4.2581,2.3827
+real-game-motion,310.8 (10.8.0) natural vs pinned natural,m12-base-natural#1,m12-308-a-natural#1,False,19,0.0002,10.9041,10.9041,1.0
+real-game-motion,A natural vs 310.8 (10.8.0) natural,m12-308-a-natural#1,m12-916-a-natural#1,True,19,0.0,10.9041,10.9041,1.0
+real-game-motion,pinned cinematic vs Standard,m12-base#1,m12-base-cinematic#1,False,19,5.7893,5.6006,5.628,0.9951
+real-game-motion,310.8 (10.8.0) cinematic vs Standard,m12-308-p1#1,m12-308-a-cinematic#1,False,19,5.7893,5.6006,5.628,0.9951
+real-game-motion,A cinematic vs Standard,m12-916-p1#1,m12-916-a-cinematic#1,False,19,5.7893,5.6006,5.628,0.9951
+real-game-motion,B cinematic vs Standard,m12-916-p2#1,m12-916-b-cinematic#1,False,19,3.7836,5.0866,4.2581,1.1946
+real-game-motion,310.8 (10.8.0) cinematic vs pinned cinematic,m12-base-cinematic#1,m12-308-a-cinematic#1,False,19,0.0,5.6006,5.6006,1.0
+real-game-motion,A cinematic vs 310.8 (10.8.0) cinematic,m12-308-a-cinematic#1,m12-916-a-cinematic#1,True,19,0.0,5.6006,5.6006,1.0
+real-game-motion,pinned detail001 vs Standard,m12-base#1,m12-base-detail001#1,False,19,4.805,2.571,5.628,0.4568
+real-game-motion,310.8 (10.8.0) detail001 vs Standard,m12-308-p1#1,m12-308-a-detail001#1,False,19,4.805,2.571,5.628,0.4568
+real-game-motion,A detail001 vs Standard,m12-916-p1#1,m12-916-a-detail001#1,False,19,4.805,2.571,5.628,0.4568
+real-game-motion,B detail001 vs Standard,m12-916-p2#1,m12-916-b-detail001#1,False,19,3.4013,2.5679,4.2581,0.6031
+real-game-motion,310.8 (10.8.0) detail001 vs pinned detail001,m12-base-detail001#1,m12-308-a-detail001#1,False,19,0.0,2.571,2.571,1.0
+real-game-motion,A detail001 vs 310.8 (10.8.0) detail001,m12-308-a-detail001#1,m12-916-a-detail001#1,True,19,0.0,2.571,2.571,1.0
+real-game-motion,pinned colour 0.01 vs pinned colour 0 (Detail only),m12-base-detail#1,m12-base-detail001#1,False,19,0.0683,2.571,2.5581,1.005
+real-game-motion,310.8 (10.8.0) colour 0.01 vs pinned colour 0,m12-base-detail#1,m12-308-a-detail001#1,False,19,0.0683,2.571,2.5581,1.005
+orig-faces,Pinned rendered again,m12-base#1,m12-base#2,True,26,0.0,4.0194,4.0194,1.0
+orig-faces,10.8.0 + 310.8 as written vs pinned,m12-base#1,m12-r108-308-asw#1,False,26,0.3751,3.9421,4.0194,0.9808
+orig-faces,"10.8.0 + 310.8 fixed, preset 1 vs pinned",m12-base#1,m12-308-p1#1,False,26,0.1013,3.984,4.0194,0.9912
+orig-faces,"10.8.0 + 310.8 fixed, preset 1 rendered again",m12-308-p1#1,m12-308-p1#2,True,26,0.0,3.984,3.984,1.0
+orig-faces,10.8.0 + 310.8 preset 0 vs 1,m12-308-p1#1,m12-308-p0#1,True,26,0.0,3.984,3.984,1.0
+orig-faces,10.8.0 + 310.8 preset 2 vs 1,m12-308-p1#1,m12-308-p2#1,True,26,0.0,3.984,3.984,1.0
+orig-faces,10.8.0 + 310.8 preset 3 vs 1,m12-308-p1#1,m12-308-p3#1,True,26,0.0,3.984,3.984,1.0
+orig-faces,"310.9.16 A vs 310.8 (both 10.8.0, preset 1)",m12-308-p1#1,m12-916-p1#1,True,26,0.0,3.984,3.984,1.0
+orig-faces,310.9.16 A vs pinned,m12-base#1,m12-916-p1#1,False,26,0.1013,3.984,4.0194,0.9912
+orig-faces,310.9.16 A rendered again,m12-916-p1#1,m12-916-p1#2,True,26,0.0,3.984,3.984,1.0
+orig-faces,310.9.16 B vs A,m12-916-p1#1,m12-916-p2#1,False,26,1.3979,3.4543,3.984,0.8671
+orig-faces,310.9.16 B vs pinned,m12-base#1,m12-916-p2#1,False,26,1.4243,3.4543,4.0194,0.8594
+orig-faces,310.9.16 B rendered again,m12-916-p2#1,m12-916-p2#2,True,26,0.0,3.4543,3.4543,1.0
+orig-faces,310.9.16 preset 0 vs A,m12-916-p1#1,m12-916-p0#1,False,26,1.3979,3.4543,3.984,0.8671
+orig-faces,310.9.16 preset 0 vs B,m12-916-p2#1,m12-916-p0#1,True,26,0.0,3.4543,3.4543,1.0
+orig-faces,310.9.16 preset 3 vs A,m12-916-p1#1,m12-916-p3#1,False,26,1.3979,3.4543,3.984,0.8671
+orig-faces,310.9.16 preset 3 vs B,m12-916-p2#1,m12-916-p3#1,True,26,0.0,3.4543,3.4543,1.0
+orig-faces,310.9.16 as written vs B,m12-916-p2#1,m12-r108-916-asw#1,False,26,0.2523,3.4266,3.4543,0.992
+orig-faces,"310.9.16 A, SL 2.14.16 + SR 310.9.16 vs A",m12-916-p1#1,m12-916-a-sl#1,True,26,0.0,3.984,3.984,1.0
+orig-faces,"310.9.16 B, SL 2.14.16 + SR 310.9.16 vs B",m12-916-p2#1,m12-916-b-sl#1,True,26,0.0,3.4543,3.4543,1.0
+orig-faces,"310.8, SL 2.14.16 + SR 310.9.16 vs 310.8",m12-308-p1#1,m12-308-a-sl#1,True,26,0.0,3.984,3.984,1.0
+orig-faces,pinned gentle vs Standard,m12-base#1,m12-base-gentle#1,False,26,1.9184,2.6826,4.0194,0.6674
+orig-faces,310.8 (10.8.0) gentle vs Standard,m12-308-p1#1,m12-308-a-gentle#1,False,26,1.9608,2.6631,3.984,0.6685
+orig-faces,A gentle vs Standard,m12-916-p1#1,m12-916-a-gentle#1,False,26,1.9608,2.6631,3.984,0.6685
+orig-faces,B gentle vs Standard,m12-916-p2#1,m12-916-b-gentle#1,False,26,1.531,2.5384,3.4543,0.7348
+orig-faces,310.8 (10.8.0) gentle vs pinned gentle,m12-base-gentle#1,m12-308-a-gentle#1,False,26,0.0431,2.6631,2.6826,0.9928
+orig-faces,A gentle vs 310.8 (10.8.0) gentle,m12-308-a-gentle#1,m12-916-a-gentle#1,True,26,0.0,2.6631,2.6631,1.0
+orig-faces,pinned strong vs Standard,m12-base#1,m12-base-strong#1,False,26,1.7766,4.8006,4.0194,1.1944
+orig-faces,310.8 (10.8.0) strong vs Standard,m12-308-p1#1,m12-308-a-strong#1,False,26,1.8498,4.7581,3.984,1.1943
+orig-faces,A strong vs Standard,m12-916-p1#1,m12-916-a-strong#1,False,26,1.8498,4.7581,3.984,1.1943
+orig-faces,B strong vs Standard,m12-916-p2#1,m12-916-b-strong#1,False,26,1.7729,4.1845,3.4543,1.2114
+orig-faces,310.8 (10.8.0) strong vs pinned strong,m12-base-strong#1,m12-308-a-strong#1,False,26,0.1954,4.7581,4.8006,0.9911
+orig-faces,A strong vs 310.8 (10.8.0) strong,m12-308-a-strong#1,m12-916-a-strong#1,True,26,0.0,4.7581,4.7581,1.0
+orig-faces,pinned detail vs Standard,m12-base#1,m12-base-detail#1,False,26,3.051,2.2161,4.0194,0.5514
+orig-faces,pinned tone200 vs Standard,m12-base#1,m12-base-tone200#1,False,26,1.6722,4.7657,4.0194,1.1857
+orig-faces,310.8 (10.8.0) tone200 vs Standard,m12-308-p1#1,m12-308-a-tone200#1,False,26,1.7318,4.7288,3.984,1.187
+orig-faces,A tone200 vs Standard,m12-916-p1#1,m12-916-a-tone200#1,False,26,1.7318,4.7288,3.984,1.187
+orig-faces,B tone200 vs Standard,m12-916-p2#1,m12-916-b-tone200#1,False,26,2.0027,4.6447,3.4543,1.3446
+orig-faces,310.8 (10.8.0) tone200 vs pinned tone200,m12-base-tone200#1,m12-308-a-tone200#1,False,26,0.1781,4.7288,4.7657,0.9923
+orig-faces,A tone200 vs 310.8 (10.8.0) tone200,m12-308-a-tone200#1,m12-916-a-tone200#1,True,26,0.0,4.7288,4.7288,1.0
+orig-faces,pinned int000 vs Standard,m12-base#1,m12-base-int000#1,False,26,3.051,2.2161,4.0194,0.5514
+orig-faces,310.8 (10.8.0) int000 vs Standard,m12-308-p1#1,m12-308-a-int000#1,False,26,3.1161,2.2161,3.984,0.5563
+orig-faces,A int000 vs Standard,m12-916-p1#1,m12-916-a-int000#1,False,26,3.1161,2.2161,3.984,0.5563
+orig-faces,B int000 vs Standard,m12-916-p2#1,m12-916-b-int000#1,False,26,2.4886,2.2161,3.4543,0.6415
+orig-faces,310.8 (10.8.0) int000 vs pinned int000,m12-base-int000#1,m12-308-a-int000#1,True,26,0.0,2.2161,2.2161,1.0
+orig-faces,A int000 vs 310.8 (10.8.0) int000,m12-308-a-int000#1,m12-916-a-int000#1,True,26,0.0,2.2161,2.2161,1.0
+orig-faces,pinned natural vs Standard,m12-base#1,m12-base-natural#1,False,26,3.6309,4.6307,4.0194,1.1521
+orig-faces,310.8 (10.8.0) natural vs Standard,m12-308-p1#1,m12-308-a-natural#1,False,26,3.6922,4.5866,3.984,1.1513
+orig-faces,A natural vs Standard,m12-916-p1#1,m12-916-a-natural#1,False,26,3.6922,4.5866,3.984,1.1513
+orig-faces,B natural vs Standard,m12-916-p2#1,m12-916-b-natural#1,False,26,3.2456,3.9418,3.4543,1.1411
+orig-faces,310.8 (10.8.0) natural vs pinned natural,m12-base-natural#1,m12-308-a-natural#1,False,26,0.1732,4.5866,4.6307,0.9905
+orig-faces,A natural vs 310.8 (10.8.0) natural,m12-308-a-natural#1,m12-916-a-natural#1,True,26,0.0,4.5866,4.5866,1.0
+orig-faces,pinned cinematic vs Standard,m12-base#1,m12-base-cinematic#1,False,26,3.352,4.9384,4.0194,1.2286
+orig-faces,310.8 (10.8.0) cinematic vs Standard,m12-308-p1#1,m12-308-a-cinematic#1,False,26,3.3837,4.9008,3.984,1.2301
+orig-faces,A cinematic vs Standard,m12-916-p1#1,m12-916-a-cinematic#1,False,26,3.3837,4.9008,3.984,1.2301
+orig-faces,B cinematic vs Standard,m12-916-p2#1,m12-916-b-cinematic#1,False,26,2.806,4.2188,3.4543,1.2213
+orig-faces,310.8 (10.8.0) cinematic vs pinned cinematic,m12-base-cinematic#1,m12-308-a-cinematic#1,False,26,0.108,4.9008,4.9384,0.9924
+orig-faces,A cinematic vs 310.8 (10.8.0) cinematic,m12-308-a-cinematic#1,m12-916-a-cinematic#1,True,26,0.0,4.9008,4.9008,1.0
+orig-faces,pinned detail001 vs Standard,m12-base#1,m12-base-detail001#1,False,26,3.0222,2.2243,4.0194,0.5534
+orig-faces,310.8 (10.8.0) detail001 vs Standard,m12-308-p1#1,m12-308-a-detail001#1,False,26,3.0871,2.2238,3.984,0.5582
+orig-faces,A detail001 vs Standard,m12-916-p1#1,m12-916-a-detail001#1,False,26,3.0871,2.2238,3.984,0.5582
+orig-faces,B detail001 vs Standard,m12-916-p2#1,m12-916-b-detail001#1,False,26,2.4659,2.223,3.4543,0.6435
+orig-faces,310.8 (10.8.0) detail001 vs pinned detail001,m12-base-detail001#1,m12-308-a-detail001#1,False,26,0.0012,2.2238,2.2243,0.9998
+orig-faces,A detail001 vs 310.8 (10.8.0) detail001,m12-308-a-detail001#1,m12-916-a-detail001#1,True,26,0.0,2.2238,2.2238,1.0
+orig-faces,pinned colour 0.01 vs pinned colour 0 (Detail only),m12-base-detail#1,m12-base-detail001#1,False,26,0.0439,2.2243,2.2161,1.0037
+orig-faces,310.8 (10.8.0) colour 0.01 vs pinned colour 0,m12-base-detail#1,m12-308-a-detail001#1,False,26,0.044,2.2238,2.2161,1.0035
+orig-game-motion,Pinned rendered again,m12-base#1,m12-base#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,10.8.0 + 310.8 as written vs pinned,m12-base#1,m12-r108-308-asw#1,False,17,0.3903,6.7317,6.757,0.9963
+orig-game-motion,"10.8.0 + 310.8 fixed, preset 1 vs pinned",m12-base#1,m12-308-p1#1,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,"10.8.0 + 310.8 fixed, preset 1 rendered again",m12-308-p1#1,m12-308-p1#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,10.8.0 + 310.8 preset 0 vs 1,m12-308-p1#1,m12-308-p0#1,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,10.8.0 + 310.8 preset 2 vs 1,m12-308-p1#1,m12-308-p2#1,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,10.8.0 + 310.8 preset 3 vs 1,m12-308-p1#1,m12-308-p3#1,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,"310.9.16 A vs 310.8 (both 10.8.0, preset 1)",m12-308-p1#1,m12-916-p1#1,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,310.9.16 A vs pinned,m12-base#1,m12-916-p1#1,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,310.9.16 A rendered again,m12-916-p1#1,m12-916-p1#2,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,310.9.16 B vs A,m12-916-p1#1,m12-916-p2#1,False,17,2.6334,5.1258,6.757,0.7586
+orig-game-motion,310.9.16 B vs pinned,m12-base#1,m12-916-p2#1,False,17,2.6334,5.1258,6.757,0.7586
+orig-game-motion,310.9.16 B rendered again,m12-916-p2#1,m12-916-p2#2,True,17,0.0,5.1258,5.1258,1.0
+orig-game-motion,310.9.16 preset 0 vs A,m12-916-p1#1,m12-916-p0#1,False,17,2.6334,5.1258,6.757,0.7586
+orig-game-motion,310.9.16 preset 0 vs B,m12-916-p2#1,m12-916-p0#1,True,17,0.0,5.1258,5.1258,1.0
+orig-game-motion,310.9.16 preset 3 vs A,m12-916-p1#1,m12-916-p3#1,False,17,2.6334,5.1258,6.757,0.7586
+orig-game-motion,310.9.16 preset 3 vs B,m12-916-p2#1,m12-916-p3#1,True,17,0.0,5.1258,5.1258,1.0
+orig-game-motion,310.9.16 as written vs B,m12-916-p2#1,m12-r108-916-asw#1,False,17,0.3673,5.1136,5.1258,0.9976
+orig-game-motion,"310.9.16 A, SL 2.14.16 + SR 310.9.16 vs A",m12-916-p1#1,m12-916-a-sl#1,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,"310.9.16 B, SL 2.14.16 + SR 310.9.16 vs B",m12-916-p2#1,m12-916-b-sl#1,True,17,0.0,5.1258,5.1258,1.0
+orig-game-motion,"310.8, SL 2.14.16 + SR 310.9.16 vs 310.8",m12-308-p1#1,m12-308-a-sl#1,True,17,0.0,6.757,6.757,1.0
+orig-game-motion,pinned gentle vs Standard,m12-base#1,m12-base-gentle#1,False,17,3.4974,3.8941,6.757,0.5763
+orig-game-motion,310.8 (10.8.0) gentle vs Standard,m12-308-p1#1,m12-308-a-gentle#1,False,17,3.4974,3.8941,6.757,0.5763
+orig-game-motion,A gentle vs Standard,m12-916-p1#1,m12-916-a-gentle#1,False,17,3.4974,3.8941,6.757,0.5763
+orig-game-motion,B gentle vs Standard,m12-916-p2#1,m12-916-b-gentle#1,False,17,2.6371,3.2152,5.1258,0.6272
+orig-game-motion,310.8 (10.8.0) gentle vs pinned gentle,m12-base-gentle#1,m12-308-a-gentle#1,True,17,0.0,3.8941,3.8941,1.0
+orig-game-motion,A gentle vs 310.8 (10.8.0) gentle,m12-308-a-gentle#1,m12-916-a-gentle#1,True,17,0.0,3.8941,3.8941,1.0
+orig-game-motion,pinned strong vs Standard,m12-base#1,m12-base-strong#1,False,17,2.6812,7.1319,6.757,1.0555
+orig-game-motion,310.8 (10.8.0) strong vs Standard,m12-308-p1#1,m12-308-a-strong#1,False,17,2.6812,7.1319,6.757,1.0555
+orig-game-motion,A strong vs Standard,m12-916-p1#1,m12-916-a-strong#1,False,17,2.6812,7.1319,6.757,1.0555
+orig-game-motion,B strong vs Standard,m12-916-p2#1,m12-916-b-strong#1,False,17,5.4566,7.8051,5.1258,1.5227
+orig-game-motion,310.8 (10.8.0) strong vs pinned strong,m12-base-strong#1,m12-308-a-strong#1,False,17,0.0,7.1319,7.1319,1.0
+orig-game-motion,A strong vs 310.8 (10.8.0) strong,m12-308-a-strong#1,m12-916-a-strong#1,True,17,0.0,7.1319,7.1319,1.0
+orig-game-motion,pinned detail vs Standard,m12-base#1,m12-base-detail#1,False,17,5.94,2.7034,6.757,0.4001
+orig-game-motion,pinned tone200 vs Standard,m12-base#1,m12-base-tone200#1,False,17,2.1496,7.1666,6.757,1.0606
+orig-game-motion,310.8 (10.8.0) tone200 vs Standard,m12-308-p1#1,m12-308-a-tone200#1,False,17,2.1496,7.1666,6.757,1.0606
+orig-game-motion,A tone200 vs Standard,m12-916-p1#1,m12-916-a-tone200#1,False,17,2.1496,7.1666,6.757,1.0606
+orig-game-motion,B tone200 vs Standard,m12-916-p2#1,m12-916-b-tone200#1,False,17,4.0531,7.7495,5.1258,1.5119
+orig-game-motion,310.8 (10.8.0) tone200 vs pinned tone200,m12-base-tone200#1,m12-308-a-tone200#1,False,17,0.0,7.1666,7.1666,1.0
+orig-game-motion,A tone200 vs 310.8 (10.8.0) tone200,m12-308-a-tone200#1,m12-916-a-tone200#1,True,17,0.0,7.1666,7.1666,1.0
+orig-game-motion,pinned int000 vs Standard,m12-base#1,m12-base-int000#1,False,17,5.94,2.7034,6.757,0.4001
+orig-game-motion,310.8 (10.8.0) int000 vs Standard,m12-308-p1#1,m12-308-a-int000#1,False,17,5.94,2.7034,6.757,0.4001
+orig-game-motion,A int000 vs Standard,m12-916-p1#1,m12-916-a-int000#1,False,17,5.94,2.7034,6.757,0.4001
+orig-game-motion,B int000 vs Standard,m12-916-p2#1,m12-916-b-int000#1,False,17,4.1665,2.7034,5.1258,0.5274
+orig-game-motion,310.8 (10.8.0) int000 vs pinned int000,m12-base-int000#1,m12-308-a-int000#1,True,17,0.0,2.7034,2.7034,1.0
+orig-game-motion,A int000 vs 310.8 (10.8.0) int000,m12-308-a-int000#1,m12-916-a-int000#1,True,17,0.0,2.7034,2.7034,1.0
+orig-game-motion,pinned natural vs Standard,m12-base#1,m12-base-natural#1,False,17,8.1865,12.3153,6.757,1.8226
+orig-game-motion,310.8 (10.8.0) natural vs Standard,m12-308-p1#1,m12-308-a-natural#1,False,17,8.1865,12.3153,6.757,1.8226
+orig-game-motion,A natural vs Standard,m12-916-p1#1,m12-916-a-natural#1,False,17,8.1865,12.3153,6.757,1.8226
+orig-game-motion,B natural vs Standard,m12-916-p2#1,m12-916-b-natural#1,False,17,8.4881,11.7,5.1258,2.2826
+orig-game-motion,310.8 (10.8.0) natural vs pinned natural,m12-base-natural#1,m12-308-a-natural#1,False,17,0.0,12.3153,12.3153,1.0
+orig-game-motion,A natural vs 310.8 (10.8.0) natural,m12-308-a-natural#1,m12-916-a-natural#1,True,17,0.0,12.3153,12.3153,1.0
+orig-game-motion,pinned cinematic vs Standard,m12-base#1,m12-base-cinematic#1,False,17,5.6979,6.7298,6.757,0.996
+orig-game-motion,310.8 (10.8.0) cinematic vs Standard,m12-308-p1#1,m12-308-a-cinematic#1,False,17,5.6979,6.7298,6.757,0.996
+orig-game-motion,A cinematic vs Standard,m12-916-p1#1,m12-916-a-cinematic#1,False,17,5.6979,6.7298,6.757,0.996
+orig-game-motion,B cinematic vs Standard,m12-916-p2#1,m12-916-b-cinematic#1,False,17,3.8187,6.1686,5.1258,1.2034
+orig-game-motion,310.8 (10.8.0) cinematic vs pinned cinematic,m12-base-cinematic#1,m12-308-a-cinematic#1,False,17,0.0,6.7298,6.7298,1.0
+orig-game-motion,A cinematic vs 310.8 (10.8.0) cinematic,m12-308-a-cinematic#1,m12-916-a-cinematic#1,True,17,0.0,6.7298,6.7298,1.0
+orig-game-motion,pinned detail001 vs Standard,m12-base#1,m12-base-detail001#1,False,17,5.8751,2.7226,6.757,0.4029
+orig-game-motion,310.8 (10.8.0) detail001 vs Standard,m12-308-p1#1,m12-308-a-detail001#1,False,17,5.8751,2.7226,6.757,0.4029
+orig-game-motion,A detail001 vs Standard,m12-916-p1#1,m12-916-a-detail001#1,False,17,5.8751,2.7226,6.757,0.4029
+orig-game-motion,B detail001 vs Standard,m12-916-p2#1,m12-916-b-detail001#1,False,17,4.1205,2.7191,5.1258,0.5305
+orig-game-motion,310.8 (10.8.0) detail001 vs pinned detail001,m12-base-detail001#1,m12-308-a-detail001#1,True,17,0.0,2.7226,2.7226,1.0
+orig-game-motion,A detail001 vs 310.8 (10.8.0) detail001,m12-308-a-detail001#1,m12-916-a-detail001#1,True,17,0.0,2.7226,2.7226,1.0
+orig-game-motion,pinned colour 0.01 vs pinned colour 0 (Detail only),m12-base-detail#1,m12-base-detail001#1,False,17,0.0837,2.7226,2.7034,1.0071
+orig-game-motion,310.8 (10.8.0) colour 0.01 vs pinned colour 0,m12-base-detail#1,m12-308-a-detail001#1,False,17,0.0837,2.7226,2.7034,1.0071

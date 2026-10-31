@@ -94,6 +94,9 @@ void planner_test()
     // --style reaches the player as given, like the rest of the Look group.
     CHECK((ParseLine({L"a.mp4", L"--style", L"natural"}).renderOptions ==
            std::vector<std::wstring>{L"--style", L"natural"}));
+    // --network too: the player picks the runtime, and renders a where it has no b.
+    CHECK((ParseLine({L"a.mp4", L"--network", L"b"}).renderOptions ==
+           std::vector<std::wstring>{L"--network", L"b"}));
     CHECK((ParseLine({L"a.mp4", L"--stages", L"sr", L"--sr-engine", L"dlss"}).renderOptions ==
            std::vector<std::wstring>{L"--stages", L"sr", L"--sr-engine", L"dlss"}));
     CHECK(ParseLine({}).mode == Mode::BadArguments);

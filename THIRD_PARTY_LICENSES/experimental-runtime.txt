@@ -19,8 +19,8 @@ RenoDX DLSS5 add-on (renodx-dlss5.addon64): binary from the RankFTW/rhi-repo
 Each named license file is in this folder, beside this notice.
 
 The NVIDIA, ReShade, RenoDX, Streamline, and modified neural-rendering files are
-not relicensed by DLSS Video Player. The neural DLL is modified and reports
-Authenticode HashMismatch; the ReShade proxy and RenoDX add-on are unsigned.
+not relicensed by DLSS Video Player. Both neural DLLs are modified and carry
+no valid Authenticode signature; the ReShade proxy and RenoDX add-on are unsigned.
 
 Redistribution permission for this combined supplied binary set remains
 unresolved. Review each upstream's applicable current terms before sharing or

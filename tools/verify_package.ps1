@@ -59,7 +59,7 @@ function Get-ExpectedPackageFiles {
             'DLSSVideoPlayer.exe', 'dlss5-convert.exe', 'neural-runtime/NeuralWorker.exe', 'neural-runtime/nvngx_dlss.dll', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
             'neural-runtime/dxgi.dll', 'neural-runtime/ReShade.ini', 'neural-runtime/ReShadePreset.ini', 'neural-runtime/renodx-dlss5.addon64',
             'nvngx_dlss.dll', 'nvngx_dlssg.dll',
-            'neural-runtime/nvngx_dlssnr.dll', 'neural-runtime/sl.common.dll', 'neural-runtime/sl.dlss.dll',
+            'neural-runtime/nvngx_dlssnr.dll', 'neural-runtime/310.8.SF-v2/nvngx_dlssnr.dll', 'neural-runtime/sl.common.dll', 'neural-runtime/sl.dlss.dll',
             'neural-runtime/sl.dlss_g.dll', 'neural-runtime/sl.dlss_nr.dll', 'neural-runtime/sl.interposer.dll', 'neural-runtime/sl.nis.dll',
             'neural-runtime/sl.pcl.dll', 'neural-runtime/sl.reflex.dll', 'README.md', 'LICENSE', 'SECURITY.md',
             'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',

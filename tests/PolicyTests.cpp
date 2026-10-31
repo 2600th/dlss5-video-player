@@ -62,6 +62,9 @@
 #include "CachedRenderVerdict.h"
 #include "Nv12Convert.h"
 #include "NeuralPresets.h"
+#include "NeuralPreflight.h"
+#include "NeuralReceipt.h"
+#include "RuntimeLock.h"
 #include "HexText.h"
 #include "AtomicFile.h"
 #include "MediaTools.h"
@@ -6621,6 +6624,12 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
         CHECK(styled.command.style && *styled.command.style == index);
     }
     CHECK(!plain.command.style);
+    // --network names the NR network, a or b; unset, the saved setting renders.
+    CHECK(parse({L"--render", L"a.mp4", L"--network", L"b"}).command.network ==
+          std::optional<neural_runtime::Network>(neural_runtime::Network::B));
+    CHECK(parse({L"--render", L"a.mp4", L"--network", L"A", L"--preset", L"gentle"}).command.network ==
+          std::optional<neural_runtime::Network>(neural_runtime::Network::A));
+    CHECK(!plain.command.network);
     for (const wchar_t* spelling : {L"standard", L"Standard", L"natural"}) {
         const Parsed named = parse({L"--render", L"a.mp4", L"--preset", spelling});
         CHECK(named.command.preset && *named.command.preset == neural_presets::kDefaultPresetIndex);
@@ -6661,6 +6670,10 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
              {L"--render", L"a.mp4", L"--style", L"vivid"},              // unknown style
              {L"--render", L"a.mp4", L"--style", L"natural", L"--style", L"default"},
              {L"--render", L"a.mp4", L"--stages", L"sr", L"--style", L"natural"},  // no nr
+             {L"--render", L"a.mp4", L"--network", L"0"},                // not a network: 0 is never sent
+             {L"--render", L"a.mp4", L"--network", L"c"},
+             {L"--render", L"a.mp4", L"--network", L"a", L"--network", L"b"},
+             {L"--render", L"a.mp4", L"--stages", L"sr", L"--network", L"b"},  // no nr
              {L"--render", L"a.mp4", L"--stages", L"sr", L"--preset", L"natural"},  // no nr
              {L"--render", L"a.mp4", L"--range", L"10"},                 // no end
              {L"--render", L"a.mp4", L"--range", L"-10"},
@@ -8114,7 +8127,8 @@ void neural_addon_runtime_settings_are_created_at_native_resolution_test()
         "[ADDON]\r\n"
         "DisabledAddons=\r\n"
         "[RenoDX.DLSS5]\r\n"
-        "ConfigVersion=6\r\n"
+        "ConfigVersion=10\r\n"
+        "ConfigRevision=1\r\n"
         "EnableHooks=2\r\n"
         "NeuralUplift=1\r\n"
         "NRFollowInputRes=0\r\n"
@@ -8123,18 +8137,20 @@ void neural_addon_runtime_settings_are_created_at_native_resolution_test()
     CHECK_EQ(std::string(expected), UpdateNeuralAddonIni(input, true));
 }
 
-// RenoDX 6.5.3 reads a [RenoDX.DLSS5] without ConfigVersion as schema v0 and
-// migrates it on load, adopting its own NRChainedHistory/NRCodecMode for that
-// launch. A section this player wrote - its managed keys and its overrides, and
-// nothing else - is stamped with the version the add-on stamps itself; one with
-// anybody else's key or a version of its own is left to the add-on.
+// RenoDX 6.5.3 read a [RenoDX.DLSS5] without ConfigVersion as schema v0 and
+// migrated it on load, adopting its own NRChainedHistory/NRCodecMode for that
+// launch; 10.8.0 migrates anything not stamped 10/1. A section this player
+// wrote - its managed keys and its overrides, and nothing else - is stamped
+// with the version the add-on stamps itself; one with anybody else's key or a
+// version of its own is left to the add-on. 0.28's own stamp, 6, is this
+// player's, so a 0.28 section is restamped in place.
 void neural_addon_section_this_player_writes_carries_the_addon_schema_version_test()
 {
     const std::vector<NeuralAddonOverride> overrides{{"NRChainedHistory", "0"}, {"NRPasses", "2"}};
     // Created: the version opens the section, before the managed contract.
     const std::string created = UpdateNeuralAddonIni("", true, overrides);
-    CHECK_EQ(std::string("[ADDON]\r\nDisabledAddons=\r\n[RenoDX.DLSS5]\r\nConfigVersion=6\r\n"
-                         "EnableHooks=2\r\nNeuralUplift=1\r\nNRFollowInputRes=0\r\n"
+    CHECK_EQ(std::string("[ADDON]\r\nDisabledAddons=\r\n[RenoDX.DLSS5]\r\nConfigVersion=10\r\n"
+                         "ConfigRevision=1\r\nEnableHooks=2\r\nNeuralUplift=1\r\nNRFollowInputRes=0\r\n"
                          "NRResolutionScale=1\r\nNRChainedHistory=0\r\nNRPasses=2\r\n"),
              created);
     CHECK_EQ(created, UpdateNeuralAddonIni(created, true, overrides));
@@ -8148,7 +8164,7 @@ void neural_addon_section_this_player_writes_carries_the_addon_schema_version_te
     const std::string repaired = UpdateNeuralAddonIni(unversioned, true, overrides);
     CHECK_EQ(std::string("[ADDON]\nDisabledAddons=\n[RenoDX.DLSS5]\nEnableHooks=2\nNeuralUplift=1\n"
                          "; the user's note\nNRChainedHistory=0\nNRFollowInputRes=0\nNRResolutionScale=1\n"
-                         "NRPasses=2\nConfigVersion=6\n[OVERLAY]\nWindow=x\n"),
+                         "NRPasses=2\nConfigVersion=10\nConfigRevision=1\n[OVERLAY]\nWindow=x\n"),
              repaired);
     CHECK_EQ(repaired, UpdateNeuralAddonIni(repaired, true, overrides));
     // The worker's own call writes no overrides: a section it did not write
@@ -8157,7 +8173,18 @@ void neural_addon_section_this_player_writes_carries_the_addon_schema_version_te
     CHECK_EQ(repaired, UpdateNeuralAddonIni(repaired, true));
     CHECK(UpdateNeuralAddonIni(unversioned, true).find("ConfigVersion") == std::string::npos);
     // An empty section is one this player may have created.
-    CHECK(UpdateNeuralAddonIni("[RenoDX.DLSS5]\n", true).find("ConfigVersion=6") != std::string::npos);
+    CHECK(UpdateNeuralAddonIni("[RenoDX.DLSS5]\n", true).find("ConfigVersion=10\nConfigRevision=1\n") != std::string::npos);
+
+    // 0.28's section: its stamp 6, then only this player's keys. Restamped in
+    // place, so 10.8.0 never migrates it, and stable from then on.
+    constexpr std::string_view player028 =
+        "[ADDON]\nDisabledAddons=\n[RenoDX.DLSS5]\nConfigVersion=6\nEnableHooks=2\nNeuralUplift=1\nNRChainedHistory=0\n"
+        "NRFollowInputRes=0\nNRPasses=2\nNRResolutionScale=1\n[OVERLAY]\nWindow=x\n";
+    const std::string restamped = UpdateNeuralAddonIni(player028, true, overrides);
+    CHECK_EQ(std::string("[ADDON]\nDisabledAddons=\n[RenoDX.DLSS5]\nConfigVersion=10\nEnableHooks=2\nNeuralUplift=1\nNRChainedHistory=0\n"
+                         "NRFollowInputRes=0\nNRPasses=2\nNRResolutionScale=1\nConfigRevision=1\n[OVERLAY]\nWindow=x\n"),
+             restamped);
+    CHECK_EQ(restamped, UpdateNeuralAddonIni(restamped, true, overrides));
 
     // Somebody else's keys may be pre-v6 ones: the add-on's migration is for them.
     for (const std::string_view foreign : {
@@ -8165,6 +8192,8 @@ void neural_addon_section_this_player_writes_carries_the_addon_schema_version_te
             std::string_view("[RenoDX.DLSS5]\nNRChainedHistory=0\nFutureTuning=1\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion=4\nNRChainedHistory=0\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion=7\n"),
+            std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nConfigRevision=1\nNRPasses=2\n"),
+            std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nNRDetailStability=0\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion = 6\nNRCodecMode=2\n")}) {
         const std::string updated = UpdateNeuralAddonIni(foreign, true, overrides);
         const size_t first = updated.find("ConfigVersion");
@@ -8241,7 +8270,8 @@ void configure_neural_addon_is_idempotent_test()
         "[ADDON]\n"
         "DisabledAddons=legacy.addon64\n"
         "[RenoDX.DLSS5]\n"
-        "ConfigVersion=6\n"
+        "ConfigVersion=10\n"
+        "ConfigRevision=1\n"
         "EnableHooks=2\n"
         "NeuralUplift=1\n"
         "NRFollowInputRes=0\n"
@@ -8310,7 +8340,8 @@ void configure_neural_addon_safe_then_normal_observes_reshade_state_test()
         "[ADDON]\r\n"
         "DisabledAddons=legacy.addon64\r\n"
         "[RenoDX.DLSS5]\r\n"
-        "ConfigVersion=6\r\n"
+        "ConfigVersion=10\r\n"
+        "ConfigRevision=1\r\n"
         "EnableHooks=2\r\n"
         "NeuralUplift=1\r\n"
         "NRFollowInputRes=0\r\n"
@@ -14016,7 +14047,8 @@ void neural_presets_round_trip_and_default_to_the_shipped_settings_test()
         // so a preset is exactly what loading it back from the ini gives.
         CHECK_EQ(skin_structure::Normalize(preset.settings.skinStructure), preset.settings.skinStructure);
         CHECK(preset.settings.colorStrength >= 0.0f && preset.settings.colorStrength <= 1.0f);
-        CHECK(preset.settings.preset >= 0 && preset.settings.preset <= 3);
+        // A look, not a network or a runtime: Applied keeps the user's.
+        CHECK(preset.settings.network == neural_runtime::Network::A && !preset.settings.previousRuntime);
         CHECK(preset.settings.style >= 0 && preset.settings.style <= 2);
 
         // Recognised by both lookups, and by its own key.
@@ -14040,6 +14072,138 @@ void neural_presets_round_trip_and_default_to_the_shipped_settings_test()
     CHECK_EQ(kPresetCount, IndexOf(edited));
     CHECK_EQ(kPresetCount, IndexOfKey("no-such-preset"));
     CHECK_EQ(kPresetCount, IndexOfKey(""));
+
+    // The network and the runtime are the user's, not the preset's: applying a
+    // preset keeps them, and a preset is still recognised under either.
+    NeuralSettings mine;
+    mine.network = neural_runtime::Network::B;
+    mine.previousRuntime = true;
+    mine.intensity = 0.2f;
+    for (size_t index = 0; index < kPresetCount; ++index) {
+        const NeuralSettings applied = Applied(kPresets[index].settings, mine);
+        CHECK(applied.network == neural_runtime::Network::B && applied.previousRuntime);
+        CHECK_EQ(kPresets[index].settings.intensity, applied.intensity);
+        CHECK_EQ(index, IndexOf(applied));
+    }
+}
+
+// P3.14: which NR DLL a render loads and which of its networks. 310.9.16 is
+// RTX 50's alone, every other GPU keeps 310.8.SF-v2, and the add-on is never
+// sent preset 0 - on 310.9.16 that is the runtime's own default, which is B
+// (docs/measurements/runtime-310916-20261031).
+void neural_runtime_choice_follows_the_gpu_and_never_sends_the_default_preset_test()
+{
+    using namespace neural_runtime;
+    for (const GpuGeneration gpu : {GpuGeneration::Unsupported, GpuGeneration::Rtx20Turing,
+                                    GpuGeneration::Rtx30Ampere, GpuGeneration::Rtx40Ada}) {
+        CHECK(!OffersCurrent(gpu));
+        CHECK_EQ(kPrevious.version, Select(gpu, false).version);
+        CHECK_EQ(kPrevious.version, Select(gpu, true).version);
+        // One greyed-out entry, and the dialog cannot move it.
+        CHECK_EQ(size_t{1}, ChoiceCount(gpu));
+        CHECK_EQ(size_t{0}, ChoiceIndex(gpu, Network::B, true));
+        Network network = Network::B;
+        bool previous = false;
+        ApplyChoice(gpu, 0, network, previous);
+        CHECK(network == Network::B && !previous);
+    }
+    const GpuGeneration rtx50 = GpuGeneration::Rtx50Blackwell;
+    CHECK(OffersCurrent(rtx50));
+    CHECK_EQ(kCurrent.version, Select(rtx50, false).version);
+    CHECK_EQ(kPrevious.version, Select(rtx50, true).version);
+
+    // 310.8.SF-v2 has no B: asked for, it renders A and says A.
+    CHECK(Effective(kCurrent, Network::B) == Network::B);
+    CHECK(Effective(kPrevious, Network::B) == Network::A);
+    CHECK(Describe(kCurrent, Network::B) == L"310.9.16 \u00b7 network B");
+    CHECK(Describe(kPrevious, Network::B) == L"310.8.SF-v2 \u00b7 network A");
+    CHECK_EQ(1, PresetValue(Network::A));
+    CHECK_EQ(2, PresetValue(Network::B));
+    for (const Network network : {Network::A, Network::B})
+        for (const Runtime* runtime : {&kCurrent, &kPrevious})
+            CHECK(PresetValue(Effective(*runtime, network)) != 0);
+
+    // The keys, both ways; anything else is not a network.
+    CHECK(ParseKey(L"a") == Network::A && ParseKey(L"B") == Network::B);
+    CHECK(!ParseKey(L"") && !ParseKey(L"c") && !ParseKey(L"0") && !ParseKey(L"ab"));
+    CHECK_EQ(std::string_view("a"), Key(Network::A));
+    CHECK_EQ(std::string_view("b"), Key(Network::B));
+
+    // The lock's two destinations, and the add-on's path to each from its folder.
+    CHECK(kCurrent.file == L"nvngx_dlssnr.dll" && kCurrent.addonPath == "nvngx_dlssnr.dll");
+    CHECK(kPrevious.file == L"310.8.SF-v2/nvngx_dlssnr.dll" && kPrevious.addonPath == "310.8.SF-v2\\nvngx_dlssnr.dll");
+    for (const Runtime* runtime : {&kCurrent, &kPrevious}) {
+        const bool locked = std::any_of(EmbeddedRuntimeLock().entries.begin(), EmbeddedRuntimeLock().entries.end(),
+                                        [&](const RuntimeLockEntry& entry) { return entry.destination == runtime->file; });
+        CHECK(locked);
+    }
+
+    // The dialog on RTX 50: A first and recommended, then B, then the previous
+    // runtime. Every choice round-trips, and leaving the previous runtime comes
+    // back to the network that was asked for.
+    CHECK_EQ(size_t{3}, ChoiceCount(rtx50));
+    CHECK(kNetworks[0].network == Network::A && kNetworks[1].network == Network::B);
+    CHECK(kNetworks[0].label.find(L"recommended") != std::wstring_view::npos);
+    CHECK(kNetworks[1].label.find(L"recommended") == std::wstring_view::npos);
+    for (const NetworkRung& rung : kNetworks) CHECK(rung.cost.find(L" ms") != std::wstring_view::npos);
+    for (size_t index = 0; index < ChoiceCount(rtx50); ++index) {
+        Network network = Network::B;
+        bool previous = false;
+        ApplyChoice(rtx50, index, network, previous);
+        CHECK_EQ(index, ChoiceIndex(rtx50, network, previous));
+    }
+    Network network = Network::B;
+    bool previous = false;
+    ApplyChoice(rtx50, kPreviousChoice, network, previous);
+    CHECK(previous && network == Network::B);
+    CHECK_EQ(kPreviousChoice, ChoiceIndex(rtx50, network, previous));
+    ApplyChoice(rtx50, 0, network, previous);
+    CHECK(!previous && network == Network::A);
+    CHECK(NeuralSettings{}.network == Network::A && !NeuralSettings{}.previousRuntime);
+}
+
+// The NR DLL a preflight names is checked against the one selected; the
+// add-on's log gives an absolute path, which only counts inside the runtime.
+void neural_runtime_file_is_named_from_the_addon_log_test()
+{
+    const std::filesystem::path root = L"D:\\Player\\neural-runtime";
+    CHECK_EQ(std::string("nvngx_dlssnr.dll"),
+             NeuralRuntimeFileRelativeTo("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", root));
+    CHECK_EQ(std::string("310.8.SF-v2/nvngx_dlssnr.dll"),
+             NeuralRuntimeFileRelativeTo("d:/player/NEURAL-RUNTIME/310.8.SF-v2\\nvngx_dlssnr.dll", root));
+    // The add-on's own fallback, and a neighbour that only shares a prefix.
+    CHECK(NeuralRuntimeFileRelativeTo("C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll", root).empty());
+    CHECK(NeuralRuntimeFileRelativeTo("D:\\Player\\neural-runtime2\\nvngx_dlssnr.dll", root).empty());
+    CHECK(NeuralRuntimeFileRelativeTo("", root).empty());
+    CHECK(SameNeuralRuntimeFile("310.8.sf-v2\\NVNGX_DLSSNR.dll", neural_runtime::kPrevious.file));
+    CHECK(SameNeuralRuntimeFile("nvngx_dlssnr.dll", neural_runtime::kCurrent.file));
+    CHECK(!SameNeuralRuntimeFile("nvngx_dlssnr.dll", neural_runtime::kPrevious.file));
+    CHECK(!SameNeuralRuntimeFile("", neural_runtime::kCurrent.file));
+
+    // RenoDX 10.8.0's lines; its start line names 310.8.0 whichever DLL ran.
+    constexpr std::string_view log =
+        "INFO  | [DLSS 5 Neural Rendering] DLSS5 Generic: NR runtime D:\\Program Files\\Player\\neural-runtime\\"
+        "310.8.SF-v2\\nvngx_dlssnr.dll (looked in D:\\Program Files\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll; "
+        "C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll); models=1\r\n"
+        "INFO  | [DLSS 5 Neural Rendering] DLSS5 Generic: NR runtime declares file version 310.8.2.0, GPU architecture "
+        "NVSDK_NGX_GPU_Arch_Blackwell2, minimum driver 615.00\r\n"
+        "INFO  | [DLSS 5 Neural Rendering] DLSS5 Generic: signed DLSSNR 310.8.0 D3D12 runtime initialized\r\n";
+    const NeuralRuntimeBanner banner = ParseNeuralRuntimeBanner(log);
+    CHECK_EQ(std::string("310.8.2.0"), banner.dlssnrRuntime);
+    CHECK_EQ(std::string("D:\\Program Files\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll"), banner.dlssnrFile);
+    CHECK_EQ(std::string("310.8.SF-v2/nvngx_dlssnr.dll"),
+             NeuralRuntimeFileRelativeTo(banner.dlssnrFile, L"D:\\Program Files\\Player\\neural-runtime"));
+    // 6.5.3 wrote only the start line.
+    CHECK_EQ(std::string("310.8.0"),
+             ParseNeuralRuntimeBanner("DLSS5 Generic: signed DLSSNR 310.8.0 D3D12 runtime initialized\r\n").dlssnrRuntime);
+    CHECK(ParseNeuralRuntimeBanner("DLSS5 Generic: signed DLSSNR 310.8.0 D3D12 runtime initialized\r\n").dlssnrFile.empty());
+
+    // The receipt's reader of it.
+    CHECK_EQ(std::string("310.8.SF-v2/nvngx_dlssnr.dll"),
+             PreflightNeuralRuntimeFile("{\"schema\":3,\"runtime\":{\"dlssnr\":\"310.8.2.0\","
+                                        "\"dlssnrFile\":\"310.8.SF-v2/nvngx_dlssnr.dll\",\"dlssnrSignature\":\"NotSigned\"}}"));
+    CHECK(PreflightNeuralRuntimeFile("{\"schema\":3,\"runtime\":{\"dlssnr\":\"310.8.0\"}}").empty());
+    CHECK(PreflightNeuralRuntimeFile("").empty());
 }
 
 // The comparison reference conversion runs on every presented frame once the
@@ -17535,6 +17699,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(a_probe_that_could_not_run_does_not_condemn_a_cached_render_test),
     TEST_CASE(nv12_reference_conversion_is_bit_identical_to_the_scalar_original_test),
     TEST_CASE(neural_presets_round_trip_and_default_to_the_shipped_settings_test),
+    TEST_CASE(neural_runtime_choice_follows_the_gpu_and_never_sends_the_default_preset_test),
+    TEST_CASE(neural_runtime_file_is_named_from_the_addon_log_test),
     TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
     TEST_CASE(variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test),
     TEST_CASE(variable_frame_rate_is_decided_on_b_frame_decode_order_test),

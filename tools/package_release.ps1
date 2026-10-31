@@ -133,7 +133,7 @@ function Assert-ReleaseBuild {
 $runtimeLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -Raw | ConvertFrom-Json
 
 # fetch_neural_runtime.ps1 stages each file under the lock's sourceName (the
-# universal NR runtime is nvngx_dlssnr_310.8.SF-v2.dll in external/runtime); a
+# current NR runtime is nvngx_dlssnr_310.9.16.dll in external/runtime); a
 # hand-staged tree may carry the destination name. Same rule as stage_runtime.ps1.
 function Resolve-LockedRuntimeInput {
     param([string]$Destination)
@@ -271,6 +271,7 @@ else {
         @('neural-runtime/nvngx_dlss.dll', (Resolve-LockedRuntimeInput -Destination 'nvngx_dlss.dll')),
         @('neural-runtime/NeuralWorker.exe', (Join-Path $buildRoot 'neural-runtime/NeuralWorker.exe')),
         @('neural-runtime/nvngx_dlssnr.dll', (Resolve-LockedRuntimeInput -Destination 'nvngx_dlssnr.dll')),
+        @('neural-runtime/310.8.SF-v2/nvngx_dlssnr.dll', (Resolve-LockedRuntimeInput -Destination '310.8.SF-v2/nvngx_dlssnr.dll')),
         @('neural-runtime/sl.common.dll', (Resolve-LockedRuntimeInput -Destination 'sl.common.dll')),
         @('neural-runtime/sl.dlss.dll', (Resolve-LockedRuntimeInput -Destination 'sl.dlss.dll')),
         @('neural-runtime/sl.dlss_g.dll', (Resolve-LockedRuntimeInput -Destination 'sl.dlss_g.dll')),

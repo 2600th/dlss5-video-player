@@ -100,7 +100,11 @@ function Assert-LockedFile {
 $verified = foreach ($entry in $lock.entries) {
     $matches = @(Get-ChildItem -LiteralPath $inputRoot -Recurse -File -Filter ([string]$entry.sourceName))
     if ($matches.Count -eq 0 -and [string]$entry.sourceName -cne [string]$entry.destination) {
-        $matches = @(Get-ChildItem -LiteralPath $inputRoot -Recurse -File -Filter ([string]$entry.destination))
+        # A staged tree holds it at its destination, which for the previous NR
+        # runtime is a folder below one holding the current runtime under the
+        # same file name; so the path, not a search by name.
+        $staged = Join-Path $inputRoot ([string]$entry.destination)
+        $matches = @(if (Test-Path -LiteralPath $staged -PathType Leaf) { Get-Item -LiteralPath $staged })
     }
     if ($matches.Count -ne 1) {
         throw "Expected exactly one '$($entry.sourceName)' or staged '$($entry.destination)' below '$inputRoot'; found $($matches.Count)."
@@ -111,7 +115,9 @@ $verified = foreach ($entry in $lock.entries) {
 if (-not $ValidateOnly) {
     New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
     foreach ($file in $verified) {
-        Copy-Item -LiteralPath $file.Source -Destination (Join-Path $destinationRoot $file.Destination) -Force
+        $target = Join-Path $destinationRoot $file.Destination
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+        Copy-Item -LiteralPath $file.Source -Destination $target -Force
     }
 }
 

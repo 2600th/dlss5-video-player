@@ -7,6 +7,9 @@
 #include <windows.h>
 #include <knownfolders.h>
 #include <shlobj.h>
+// WIN32_LEAN_AND_MEAN leaves the crypto headers out of windows.h.
+#include <softpub.h>
+#include <wintrust.h>
 
 #include <algorithm>
 #include <array>
@@ -27,14 +30,14 @@
 
 namespace {
 
-// The twelve lock-pinned vendor modules first, then the worker, so the pinned
-// set is this array's leading twelve entries and neither list can drift from
-// the other.
-constexpr std::array<std::wstring_view, 13> kLockedRuntimeFiles{
-    L"nvngx_dlssnr.dll", L"nvngx_dlss.dll", L"dxgi.dll", L"renodx-dlss5.addon64", L"sl.common.dll",
-    L"sl.dlss.dll", L"sl.dlss_g.dll", L"sl.dlss_nr.dll", L"sl.interposer.dll", L"sl.nis.dll", L"sl.pcl.dll",
-    L"sl.reflex.dll", L"NeuralWorker.exe"};
-constexpr size_t kLockPinnedRuntimeFileCount = 12;
+// The thirteen lock-pinned vendor modules first, then the worker, so the
+// pinned set is this array's leading thirteen entries and neither list can
+// drift from the other. Both NR DLLs: either may be the one a render loads.
+constexpr std::array<std::wstring_view, 14> kLockedRuntimeFiles{
+    L"nvngx_dlssnr.dll", L"310.8.SF-v2/nvngx_dlssnr.dll", L"nvngx_dlss.dll", L"dxgi.dll",
+    L"renodx-dlss5.addon64", L"sl.common.dll", L"sl.dlss.dll", L"sl.dlss_g.dll", L"sl.dlss_nr.dll",
+    L"sl.interposer.dll", L"sl.nis.dll", L"sl.pcl.dll", L"sl.reflex.dll", L"NeuralWorker.exe"};
+constexpr size_t kLockPinnedRuntimeFileCount = 13;
 
 // The NGX core registration the display driver writes; NGX resolves the same
 // value through NGXGetPathUsingQAI, and on this machine it reads
@@ -667,8 +670,23 @@ NeuralRuntimeBanner ParseNeuralRuntimeBanner(std::string_view reshadeLog)
         banner.renodxVersion = Between(line, "RenoDX DLSS5 Generic v", " ");
         banner.renodxBuild = Between(line, "(build ", ")");
     }
-    const size_t dlssnr = reshadeLog.find("DLSSNR ");
-    if (dlssnr != std::string_view::npos) {
+    // RenoDX 10.8.0 names the DLL it resolved and the version it declares.
+    // Its start line still reads "signed DLSSNR 310.8.0" whichever DLL ran,
+    // so that line is only read when the others are absent (6.5.3).
+    constexpr std::string_view loadedPrefix = "Generic: NR runtime ", loadedEnd = " (looked in ";
+    for (size_t at = reshadeLog.find(loadedPrefix); at != std::string_view::npos;
+         at = reshadeLog.find(loadedPrefix, at + 1)) {
+        const std::string_view line = LineContaining(reshadeLog, at);
+        const size_t start = line.find(loadedPrefix) + loadedPrefix.size();
+        const size_t end = line.find(loadedEnd, start);
+        if (end == std::string_view::npos) continue;
+        banner.dlssnrFile = std::string(line.substr(start, end - start));
+        break;
+    }
+    const std::string declared = Between(reshadeLog, "NR runtime declares file version ", ", \r\n");
+    if (!declared.empty() && declared[0] >= '0' && declared[0] <= '9') {
+        banner.dlssnrRuntime = declared;
+    } else if (const size_t dlssnr = reshadeLog.find("DLSSNR "); dlssnr != std::string_view::npos) {
         const std::string_view line = LineContaining(reshadeLog, dlssnr);
         const std::string value = Between(line, "DLSSNR ", " ");
         if (!value.empty() && value[0] >= '0' && value[0] <= '9') banner.dlssnrRuntime = value;
@@ -679,6 +697,62 @@ NeuralRuntimeBanner ParseNeuralRuntimeBanner(std::string_view reshadeLog)
         banner.activeSettings = Trim(Between(line, "active settings: ", "\r\n"));
     }
     return banner;
+}
+
+std::string NeuralRuntimeFileRelativeTo(std::string_view loaded, const std::filesystem::path& runtimeDirectory)
+{
+    const auto generic = [](std::string text) {
+        std::replace(text.begin(), text.end(), '\\', '/');
+        while (!text.empty() && text.back() == '/') text.pop_back();
+        return text;
+    };
+    if (loaded.empty()) return {};
+    const std::string file = generic(std::string(loaded));
+    const std::string root = generic(utf8_text::FromWide(runtimeDirectory.wstring()));
+    if (root.empty() || file.size() <= root.size() + 1 || file[root.size()] != '/' ||
+        LowerAscii(std::string_view(file).substr(0, root.size())) != LowerAscii(root))
+        return {};
+    return file.substr(root.size() + 1);
+}
+
+bool SameNeuralRuntimeFile(std::string_view loaded, std::wstring_view selected)
+{
+    const auto key = [](std::string text) {
+        std::replace(text.begin(), text.end(), '\\', '/');
+        return LowerAscii(text);
+    };
+    return !loaded.empty() && key(std::string(loaded)) == key(utf8_text::FromWide(std::wstring(selected)));
+}
+
+std::string AuthenticodeState(const std::filesystem::path& file)
+{
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    WINTRUST_FILE_INFO fileInfo{};
+    fileInfo.cbStruct = sizeof(fileInfo);
+    fileInfo.pcwszFilePath = file.c_str();
+    WINTRUST_DATA data{};
+    data.cbStruct = sizeof(data);
+    data.dwUIChoice = WTD_UI_NONE;
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    data.dwUnionChoice = WTD_CHOICE_FILE;
+    data.pFile = &fileInfo;
+    data.dwStateAction = WTD_STATEACTION_VERIFY;
+    data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+    const LONG status = WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+    switch (static_cast<HRESULT>(status)) {
+    case ERROR_SUCCESS: return "Valid";
+    case TRUST_E_NOSIGNATURE:
+    case TRUST_E_SUBJECT_FORM_UNKNOWN:
+    case TRUST_E_PROVIDER_UNKNOWN: return "NotSigned";
+    case TRUST_E_BAD_DIGEST: return "HashMismatch";
+    case CERT_E_UNTRUSTEDROOT:
+    case CERT_E_CHAINING:
+    case TRUST_E_EXPLICIT_DISTRUST:
+    case CRYPT_E_SECURITY_SETTINGS: return "NotTrusted";
+    default: return "UnknownError";
+    }
 }
 
 std::vector<Feature18Observation> CollectFeature18Observations(std::string_view reshadeLogSegment)

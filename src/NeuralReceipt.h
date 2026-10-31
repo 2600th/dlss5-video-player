@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct NeuralRenderReceiptInputs {
@@ -32,7 +33,11 @@ struct NeuralRenderReceiptInputs {
 // Single line, no trailing newline.
 std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs);
 
-// One log line: gpu/driver/reshade/renodx/nr/feature18 (with the feature's
+// The NR DLL a preflight receipt says the add-on loaded ("nvngx_dlssnr.dll",
+// "310.8.SF-v2/nvngx_dlssnr.dll"); empty when it names none.
+std::string PreflightNeuralRuntimeFile(std::string_view preflightJson);
+
+// One log line: gpu/driver/reshade/renodx/nr (version, file, signature)/feature18 (with the feature's
 // own NGX result and the diagnosed cause when the probe classified one) from
 // the preflight JSON plus lock status, failure kind, frame counts and the
 // scene-cut tally.

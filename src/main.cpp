@@ -2322,7 +2322,7 @@ private:
         // second player instance must not interleave with this job.
         lease_.emplace(runtimeDirectory_);
         if(!lease_->Held()){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("Neural runtime is in use by another render; refusing to share it.");return false;}
-        const auto overrides=RenderAddonOverrides(runtimeDirectory_/L"ReShade.ini",in_.settings,in_.processingScale);const auto configured=ConfigureNeuralAddon(runtimeDirectory_/L"ReShade.ini",true,overrides);
+        const auto overrides=RenderAddonOverrides(runtimeDirectory_/L"ReShade.ini",in_.settings,in_.processingScale,in_.gpu);const auto configured=ConfigureNeuralAddon(runtimeDirectory_/L"ReShade.ini",true,overrides);
         if(!configured.ok){completion_->result.detail=L"The neural settings could not be prepared.";return false;}
         std::wstring settingsError;settingsSnapshot_=ReadNeuralAddonSettingsSnapshot(runtimeDirectory_/L"ReShade.ini",&settingsError);
         if(!settingsSnapshot_){completion_->result.detail=settingsError.empty()?L"The neural settings could not be read.":settingsError;return false;}
@@ -2417,9 +2417,12 @@ private:
         // digest hashes only the locked files, so a refusal caused by
         // anything else the loader picks up from that directory stood
         // until restart even after the user removed the cause.
-        const NeuralPreflightKey runtimeKey{preflightKey.gpu,preflightKey.driver,*runtimeDigest_};
+        // The runtime digest covers both NR DLLs, so the one this job loads is
+        // named too: a probe of 310.9.16 says nothing about 310.8.SF-v2.
+        const std::string selected=*runtimeDigest_+"|nr="+std::string(neural_runtime::Select(in_.gpu,in_.settings.previousRuntime).version);
+        const NeuralPreflightKey runtimeKey{preflightKey.gpu,preflightKey.driver,selected};
         const NeuralPreflightKey failureKey{preflightKey.gpu,preflightKey.driver,
-            *runtimeDigest_+"|"+WideToUtf8(runtime_modules::ModuleListingIdentity(runtimeDirectory_))};
+            selected+"|"+WideToUtf8(runtime_modules::ModuleListingIdentity(runtimeDirectory_))};
         if(const std::wstring latched=preflightLatch->LatchedFailureDetail(failureKey);!latched.empty()){
             completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=latched;
             LOG("Neural preflight skipped; this runtime and driver already failed: "<<WideToUtf8(latched));
@@ -2455,6 +2458,11 @@ private:
             StoreNeuralPreflightReceipt(in_.cacheRoot,runtimeKey,preflight.json);
             preflightJson_=preflight.json;
         }
+        // The add-on falls back to another NR DLL when the one NRRuntimePath
+        // names will not load; a render on it would carry this one's key.
+        const neural_runtime::Runtime wanted=neural_runtime::Select(in_.gpu,in_.settings.previousRuntime);
+        const std::string loaded=PreflightNeuralRuntimeFile(preflightJson_);
+        if(!loaded.empty()&&!SameNeuralRuntimeFile(loaded,wanted.file)){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"The neural runtime loaded "+Utf8ToWide(loaded)+L" instead of "+std::wstring(wanted.file)+L" (DLSS-NR "+Utf8ToWide(std::string(wanted.version))+L").";LOG("Neural preflight refused: "<<WideToUtf8(completion_->result.detail));return false;}
         return true;
     }
 
@@ -2660,7 +2668,23 @@ class PlayerApp {
     friend struct PlayerAppTestAccess;
 #endif
 public:
-    explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){}
+    explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){
+        // Network (NeuralRuntimeChoice.h, P3.14): A, B and the previous runtime
+        // on RTX 50; elsewhere the one runtime that GPU renders with, greyed out
+        // because it is the only choice. Part of NeuralSettings, so it is saved,
+        // keyed, applied and reverted with the rest of the render.
+        m_pictureRenderRows.push_back({L"neural.settings.network",L"neural.tip.network",
+            [this]{
+                const GpuGeneration gpu=m_opt.detectedGpu.generation;
+                std::vector<std::wstring> items;
+                if(neural_runtime::OffersCurrent(gpu))
+                    for(const auto& rung:neural_runtime::kNetworks)items.emplace_back(rung.label);
+                items.push_back(T(neural_runtime::OffersCurrent(gpu)?L"neural.network.previous":L"neural.network.only_previous"));
+                return items;
+            },
+            [this]{return int(neural_runtime::ChoiceIndex(m_opt.detectedGpu.generation,m_neuralSettings.network,m_neuralSettings.previousRuntime));},
+            [this](int index){neural_runtime::ApplyChoice(m_opt.detectedGpu.generation,size_t(index),m_neuralSettings.network,m_neuralSettings.previousRuntime);}});
+    }
     ~PlayerApp(){RememberPlaybackPosition();if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_fontTitle)DeleteObject(m_fontTitle); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
 
     bool Create(HINSTANCE hi) {
@@ -3645,7 +3669,7 @@ private:
         job.sourceWidth=m_decoder.Width();job.sourceHeight=m_decoder.Height();
         job.displayAspect=ExportDisplayAspect(m_decoder.Width(),m_decoder.Height(),m_decoder.DisplayAspectRatio());
         job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
-        job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
+        job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.gpu=m_opt.detectedGpu.generation;job.processingScale=m_processingScale;
         job.upscalingHistory=m_upscalingHistory;
         job.vsrQuality=m_comparison.vsrQuality;
         job.captureDither=m_captureDither;job.quality=m_cacheQuality;job.sourceDeband=m_sourceDeband;job.suppliedExposure=m_suppliedExposure;
@@ -5290,7 +5314,19 @@ private:
     // source geometry and processing-scale rung; the record, its INI text
     // and the profiles the forecast reads are RenderPacePolicy.h's.
     void RecordPaceSample(uint32_t width,uint32_t height,double msPerFrame,uint32_t scale=kDefaultProcessingScale){
+        // A pace learned on the other network or runtime is not this one's.
+        if(PaceIdentity()!=m_paceIdentity){m_paceHistory.clear();m_paceIdentity=PaceIdentity();}
         render_pace::Record(m_paceHistory,width,height,msPerFrame,scale);
+    }
+    // Whose paces the history holds: this GPU, and the NR runtime and network
+    // it renders with - B's model time is about a third less than A's
+    // (docs/measurements/runtime-310916-20261031).
+    // "310.9.16 a|<GPU>": ASCII and never opening or ending in a space,
+    // which the ini would trim from the value it reads back.
+    std::wstring PaceIdentity()const{
+        const neural_runtime::Runtime& runtime=neural_runtime::Select(m_opt.detectedGpu.generation,m_neuralSettings.previousRuntime);
+        const std::string head=std::string(runtime.version)+" "+std::string(neural_runtime::Key(neural_runtime::Effective(runtime,m_neuralSettings.network)))+"|";
+        return std::wstring(head.begin(),head.end())+m_opt.detectedGpu.description;
     }
     void RebuildRenderPace(){render_pace::Rebuild(m_paceHistory,m_renderPace,m_reducedRenderPace);}
     // m_renderPace is the source-scale profile; the reduced rungs follow in
@@ -5308,9 +5344,9 @@ private:
         std::wstring gpu(512,L'\0');
         DWORD length=GetPrivateProfileStringW(L"NeuralPace",L"Gpu",L"",gpu.data(),static_cast<DWORD>(gpu.size()),SettingsPath().c_str());
         gpu.resize(length);
-        m_paceHistory.clear();m_renderPace={};
+        m_paceHistory.clear();m_renderPace={};m_paceIdentity=PaceIdentity();
         for(auto& profile:m_reducedRenderPace)profile={};
-        if(gpu!=m_opt.detectedGpu.description)return;
+        if(gpu!=m_paceIdentity)return;
         for(const uint32_t scale:kProcessingScaleRungs){
             std::wstring samples(2048,L'\0');
             length=GetPrivateProfileStringW(L"NeuralPace",render_pace::SamplesKey(scale).c_str(),L"",samples.data(),static_cast<DWORD>(samples.size()),SettingsPath().c_str());
@@ -5320,7 +5356,7 @@ private:
         RebuildRenderPace();
     }
     void SaveRenderPace()const{
-        WritePrivateProfileStringW(L"NeuralPace",L"Gpu",m_opt.detectedGpu.description.c_str(),SettingsPath().c_str());
+        WritePrivateProfileStringW(L"NeuralPace",L"Gpu",m_paceIdentity.c_str(),SettingsPath().c_str());
         for(const uint32_t scale:kProcessingScaleRungs){
             const std::wstring samples=render_pace::Format(m_paceHistory,scale);
             // A reduced rung nobody has measured writes no key at all, so an
@@ -5794,8 +5830,9 @@ private:
             const auto digest=Sha256Bytes(CanonicalNeuralSettings(m_cachedSettings)+"|"+CanonicalGuideControls(m_cachedGuides));
             facts.settings=digest?L"sha256:"+std::wstring(digest->begin(),digest->begin()+std::min<size_t>(16,digest->size())):std::wstring(L"unavailable");
         }else facts.settings=T(L"compare.save.no_render");
-        const std::string& runtime=EmbeddedRuntimeLock().runtimeVersion;
-        facts.runtime=runtime.empty()?std::wstring(L"unknown"):std::wstring(runtime.begin(),runtime.end());
+        // What the shown render ran on: the cache entry's settings on this GPU.
+        const NeuralSettings& ran=m_cachedPlayback?m_cachedSettings:m_neuralSettings;
+        facts.runtime=neural_runtime::Describe(neural_runtime::Select(m_opt.detectedGpu.generation,ran.previousRuntime),ran.network);
         SYSTEMTIME now{};GetLocalTime(&now);wchar_t stamp[32]{};
         swprintf_s(stamp,L"%04u-%02u-%02u %02u:%02u:%02u",now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute,now.wSecond);
         facts.saved=stamp;
@@ -7072,7 +7109,12 @@ private:
             const PictureRenderRow& row=m_pictureRenderRows[index];
             const int id=IDC_PIC_RENDER_ROW_FIRST+int(index);
             CreateNeuralCombo(h,id,row.labelKey,top+318+int(index)*kPictureRowStep,{},row.tipKey,0,230);
-            if(HWND combo=GetDlgItem(h,id))for(const std::wstring& choice:row.choices())SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(choice.c_str()));
+            if(HWND combo=GetDlgItem(h,id)){
+                const std::vector<std::wstring> choices=row.choices();
+                for(const std::wstring& choice:choices)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(choice.c_str()));
+                // One choice is a fact, not a setting: shown, greyed out.
+                EnableWindow(combo,choices.size()>1);
+            }
         }
         m_picturePipelineControls=ChildrenSince(h,beforePipeline);
         BuildViewingZone(h,viewing,top);
@@ -7159,7 +7201,7 @@ private:
     // answer rather than the label.
     void ApplyNeuralPreset(size_t index){
         if(index>=neural_presets::kPresetCount)return;
-        const NeuralSettings wanted=neural_presets::kPresets[index].settings;
+        const NeuralSettings wanted=neural_presets::Applied(neural_presets::kPresets[index].settings,m_neuralSettings);
         m_lastNeuralPreset=index;
         if(m_neuralSettings==wanted){SyncFeatureMenuState();return;}
         m_neuralSettings=wanted;
@@ -8524,6 +8566,8 @@ private:
                     :!framegen_addon::RegularFile(ExecutableDirectory()/L"nvngx_vsr.dll")?start_screen::VsrState::MissingRuntime
                     :m_playbackVsr?start_screen::VsrState::On:start_screen::VsrState::Off;
         {std::scoped_lock lock(m_startAnswers->mutex);facts.runtime=m_startAnswers->runtime;facts.runtimeVersion=m_startAnswers->runtimeVersion;}
+        // The lock pins both NR DLLs; the line names the one this GPU renders with.
+        if(!facts.runtimeVersion.empty())facts.runtimeVersion=neural_runtime::Describe(neural_runtime::Select(m_opt.detectedGpu.generation,m_neuralSettings.previousRuntime),m_neuralSettings.network);
         // The live-session forecast, which is measured on this machine once a
         // session has run and otherwise a measured prior for the generation;
         // with neither it says nothing and neither does this.
@@ -13337,6 +13381,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // m_renderPace and m_reducedRenderPace carry the median of each and are
     // what the forecast reads.
     std::vector<render_pace::History> m_paceHistory;
+    std::wstring m_paceIdentity; // PaceIdentity() the history was measured under
     // The cold start of the newest neural job, or null when no job has run.
     std::shared_ptr<NeuralColdStartRecord> m_coldStart;
     HWND m_bufferWnd=nullptr;
@@ -13629,8 +13674,8 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
             return refuse(L"the neural runtime is not installed beside the player, and the sr and nr stages run in it.");
 
         NeuralSettings neuralSettings{};
-        if(command.preset)neuralSettings=neural_presets::kPresets[*command.preset].settings;
-        else LoadNeuralSettings(settings,neuralSettings);
+        LoadNeuralSettings(settings,neuralSettings);
+        if(command.preset)neuralSettings=neural_presets::Applied(neural_presets::kPresets[*command.preset].settings,neuralSettings);
         // Each knob given on the command line wins over the preset or the
         // saved settings; the ones not given keep theirs.
         if(command.passes)neuralSettings.passes=*command.passes;
@@ -13639,6 +13684,8 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         if(command.localStructure)neuralSettings.localStructure=*command.localStructure;
         if(command.colorStrength)neuralSettings.colorStrength=*command.colorStrength;
         if(command.style)neuralSettings.style=*command.style;
+        if(command.network)neuralSettings.network=*command.network;
+        const GpuGeneration gpu=DetectHighPerformanceGpu().generation;
         NeuralCacheManager cache(RenderScratchRoot(settings));
         if(!cache.Valid())return failed(L"no writable cache directory for the intermediate passes.");
         const std::filesystem::path scratch=cache.Root()/L"export-stages";
@@ -13650,7 +13697,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         job.sourceWidth=width;job.sourceHeight=height;job.fps=fps;job.duration=duration;job.range=range;
         job.displayAspect=displayAspect;
         job.nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,settings.c_str())),1,7);
-        job.neuralSettings=neuralSettings;
+        job.neuralSettings=neuralSettings;job.gpu=gpu;
         job.processingScale=command.processingScale?*command.processingScale:ReadProcessingScale(settings);
         job.upscalingHistory=command.history?*command.history:ReadUpscalingHistory(settings);
         job.vsrQuality=vsr_policy::LoadQuality(int(GetPrivateProfileIntW(L"Comparison",L"VsrQuality",static_cast<int>(vsr_policy::kDefaultQuality),settings.c_str())));
@@ -13663,7 +13710,10 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         say(StageExportPlanSummary(plan,width,height,fps));
         // What the render will look like and how it is encoded, whichever of
         // the command line, the preset and the saved settings each came from.
-        if(plan.requireNeural)say(L"neural: "+Utf8ToWide(CanonicalNeuralSettings(neuralSettings)));
+        if(plan.requireNeural){
+            say(L"neural: "+Utf8ToWide(CanonicalNeuralSettings(neuralSettings)));
+            say(L"runtime: "+neural_runtime::Describe(neural_runtime::Select(gpu,neuralSettings.previousRuntime),neuralSettings.network));
+        }
         say(StageExportEncodeSummary(plan,width,job.quality,job.upscalingHistory));
         say(L"writing "+output.wstring());
         LOG("--render plan: upscale="<<command.selection.upscale<<" engine="<<SuperResolutionEngineName(selection.engine)<<" neural="<<command.selection.neural
