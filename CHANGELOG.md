@@ -7,6 +7,169 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## 0.30.0 - 2026-10-31
+
+One release where there would have been three. The menus, the settings and the
+toolbar are rearranged around what you do, so they are relearned once. RTX 50
+cards render with DLSS-NR 310.9.16 and can pick a lighter network. YouTube sound
+no longer stops a minute in, and yt-dlp is a stable release again past a
+certificate fix. Every earlier render is made again once, because the bundled
+neural runtime changed; the default picture is the same frames as 0.28.3's.
+
+The UI moved, so the [table below](#where-things-moved-in-0300) says where each
+0.28 menu row went. ini keys did not move.
+
+### Fixed
+
+- **YouTube sound no longer stops about a minute in.** The audio is one long
+  https download, and YouTube's servers drop the connection partway. 0.28.3
+  then went silent while the picture played on: at 62-75 s on the built-in
+  trailers, measured on 2026-10-31. The player now reconnects and carries on
+  from the byte it reached.
+- **yt-dlp is a stable release again, past certifi's critical certificate
+  fix.** [GHSA-6q48-6c7w-9gw2](https://github.com/certifi/python-certifi/security/advisories/GHSA-6q48-6c7w-9gw2)
+  (2026-10-20) left older yt-dlp builds open to man-in-the-middle attacks. The
+  player now bundles yt-dlp 2026.10.26, pinned by SHA-256, which also has the
+  YouTube fix 0.28.3 took a nightly for. The player never updates yt-dlp itself
+  (`-U`); a fix arrives only in a new release.
+- **A working neural setup no longer reads as "DLSS-NR unavailable".** On
+  drivers 617.14 and 621.01 NVIDIA's NGX reports DLSS-NR as unavailable while
+  the community runtime renders, because that report describes NVIDIA's own
+  path. The receipt now writes `null` and the log says "not reported". No
+  driver has yet reported a DLSS-NR minimum, so 0.28.3's NGX-named driver
+  message has never appeared.
+- **A keep-awake request that cannot be made is now logged.** It was silent
+  before.
+
+### Changed
+
+- **The menus are named for jobs:** File, Playback, View, Compare, Enhance,
+  Tools, Help. "Enhance" was "DLSS", and RTX VSR is not DLSS.
+- **One Picture panel.** Neural settings and Image adjustments are one panel,
+  split by what a change costs: the render zone re-renders and goes into the
+  cache and exports; the viewing zone is instant and this screen only. Revert
+  goes back to the settings the picture on screen was rendered with.
+- **The playback upscaler is one choice of three:** RTX VSR, DLSS Super
+  Resolution or none, where two checkboxes allowed a "both off" nobody could
+  pick on purpose.
+- **The toolbar reads by job.** The DLSS 5 button names the look it renders
+  with, and its arrow opens the presets. The Upscaler button says what is
+  upscaling playback. Picture and Export follow. Frame generation and the debug
+  view moved to the menus.
+- **Export opens on what you are watching,** not on whatever was ticked last.
+- **Help has About, User guide and Open log folder;** Check for updates moved
+  there.
+- **Keys match their modifiers exactly.** `Shift+S` no longer stops playback,
+  and a key with `Alt` runs nothing.
+- **DLSS-NR 310.9.16 on RTX 50, with a choice of network.** RTX 50 cards now
+  render with DLSS-NR 310.9.16. Network A, the default, is the 0.28 picture
+  exactly: byte for byte the same frames. Network B is lighter and milder,
+  nearer the source; its model time is 36 % lower, 2.4 ms against 3.8 ms a
+  1080p frame and 6.0 against 9.6 ms at 4K. Choose it in **Enhance >
+  Picture… > Render pipeline > Network**, or pass `--network b` to `--render`.
+  The previous runtime, 310.8.SF-v2, stays one choice away. Other GPUs keep
+  310.8.SF-v2, shown and greyed out
+  ([report](docs/measurements/runtime-310916-20261031/REPORT.md)).
+- **RenoDX 10.8.0.** The neural add-on moves from 6.5.3 to 10.8.0. The player
+  pins the two new settings that keep its picture within a tenth of a level of
+  0.28.3's, and restamps its own 0.28 settings instead of letting the add-on
+  migrate them. Colour strength 0 is now written as 0.01, because 10.8.0
+  refuses a session with every pass at zero; the difference is under a tenth
+  of a level.
+- **Earlier renders render again once.** The cache key now includes which NR
+  runtime and network made a render, so renders cached by 0.28 are made again
+  the first time. After that they are cached as before.
+- **The receipt names the runtime.** Preflight, receipts and export logs name
+  the NR DLL file that loaded, its version and its signature state. A render
+  that loaded a different file than the one chosen is refused instead of being
+  saved under the wrong name.
+- **Streamline 2.14.16 and DLSS Super Resolution 310.9.16.** Both carry valid
+  NVIDIA signatures. Upscaled renders are byte-identical to 0.28.3's.
+- **Still a modified, unsigned community runtime.** Both DLSS-NR builds are
+  modified and carry no valid signature; NVIDIA's signed 310.9.16 was not
+  available to this release. The docs and the notice say so, unchanged.
+- **Driver 621.01 on an RTX 50 is named.** It freezes video and blacks out the
+  screen for seconds at a time on some RTX 50 cards (NVIDIA bug 6979343). The
+  start screen and the log say so and point to hotfix 621.12, or 617.42 if the
+  freeze persists. Nothing is refused for it.
+- **dlssg_for_sm86 0.4.x:** `Engine=XeSS`, Intel's frame-generation model, is
+  named on the start screen as not NVIDIA's, and a `Preset=C` under 0.4.0's
+  old `[Compatibility]` section counts as FG Lite. 0.4.1 is recognised. Neither
+  0.4 build has been loaded on an RTX 20 or 30 here.
+
+### Added
+
+- **Every key can be changed** in `input.conf` beside the ini, as in mpv
+  (**Help > Edit key bindings…**). A line the player cannot use is logged and
+  skipped, never fatal. Menus, tooltips and the `?` sheet read the same table.
+- **Right-click the picture** for what you can do to it; every row shows its
+  key. `Shift+F10` and the menu key open it too.
+- **Re-render from here** (**Enhance**, the DLSS 5 arrow and the picture
+  menu).
+- **Pick up where you left off.** A video opens where you stopped it, YouTube
+  videos included, and a toast says where. The first 10 seconds and the end are
+  not kept, so a video you finished opens at the start. **Playback > Resume
+  where you left off** turns it off.
+- **Next and previous file in the folder.** `PgDn` and `PgUp` open the
+  neighbouring video in Explorer's name order. Subtitle and text files are
+  skipped, and there is no wrap-around.
+- **Copy the comparison image.** `Ctrl+Shift+C` (**File > Copy comparison
+  image**, also on the picture menu) puts what Save comparison image writes,
+  footer included, on the clipboard as a bitmap and as a PNG.
+- **Open from the clipboard.** `Ctrl+V` opens files copied in Explorer, a
+  YouTube link or a copied file path, or a copied picture. A link to another
+  site is refused with a message that says so.
+- **YouTube captions.** A YouTube video lists its own caption tracks under
+  **Playback > Subtitles**: written ones first, then auto-generated, in your
+  interface language and English. They start off, as on YouTube. Each is
+  fetched once from YouTube and kept in the cache.
+- **A translatable interface.** Strings come from `lang\<language>.lang`
+  beside the player when there is one, with English for every key it lacks.
+  `--lang-template` writes a file to start a translation from.
+
+### Corrections to 0.28.3
+
+- "YouTube links play again" covered resolving the links, not playing them.
+  Nobody had played a trailer in the player, and past a minute the sound
+  stopped.
+- "`powercfg /requests` names it" is still unverified: reading it needs an
+  elevated prompt. The power request is now tested to be held for exactly the
+  job's length.
+- "A hand-installed 0.4.0 loads as before" is still untested; no RTX 20 or 30
+  has loaded one.
+
+### Where things moved in 0.30.0
+
+| 0.28 | 0.30.0 |
+|---|---|
+| DLSS > Neural rendering (`D`) | Enhance > DLSS 5 neural rendering; toolbar DLSS 5 button |
+| DLSS > Neural settings (`Ctrl+N`) | Enhance > Picture… (`Ctrl+N`), render zone; toolbar Picture |
+| Image adjustments (`Ctrl+E`) | View > Viewing adjustments… (`Ctrl+E`), the same panel's viewing zone |
+| DLSS > Neural presets | Enhance > Look preset; the DLSS 5 arrow |
+| DLSS > RTX VSR Upscaling / DLSS Upscaling checkboxes | Enhance: RTX VSR, DLSS Super Resolution or No upscaler; toolbar Upscaler |
+| DLSS > Upscaling output / history | Enhance > DLSS SR output size / DLSS SR history |
+| Video > Compare > RTX VSR quality | Enhance > RTX VSR quality |
+| Video > Compare > … | Compare > … (Load mask is Compare > Mask > Load mask image…) |
+| Video > YouTube source quality | File > YouTube source quality |
+| Fit, Fill, 1:1, Fullscreen; toolbar Debug | View; View > Debug view (`1`-`4`) |
+| DLSS > Convert & export > Export with DLSS stages (`Ctrl+S`) | File > Export… (`Ctrl+S`); toolbar Export |
+| … > Save converted video | File > Save rendered video… |
+| … > Convert marked range / whole video | Enhance > Render marked range (`Ctrl+R`) / Render whole video |
+| DLSS > Generate frames, its rate submenu; toolbar Frame Generation | Enhance > Generate frames…, Enhance > Frame generation rate |
+| Show frame-generation output | File > Show last exported file |
+| DLSS > Encoder settings | Tools > Cache & encoding… (Deband and Smoothed exposure are in Picture > Render pipeline) |
+| Advanced > Clear cache, Render report, Receipt, Safe mode, Rehook | Tools |
+| Advanced > Check for updates | Help > Check for updates |
+
+### For builders and contributors
+
+- `ctest --preset network` (`PolicyTestsNetwork`) plays a built-in trailer with
+  the bundled yt-dlp, Deno and FFmpeg past the first minute, and fetches its
+  captions. It is in no other preset or CI tier.
+- `tools/benchmark/m12.py` measures the two runtimes and both networks
+  ([report](docs/measurements/runtime-310916-20261031/REPORT.md)).
+- The package is about 200 MB larger: it carries both DLSS-NR builds.
+
 ## 0.28.3 - 2026-10-16
 
 YouTube links play again, a long render no longer lets Windows sleep under it,

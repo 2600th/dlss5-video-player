@@ -233,27 +233,33 @@ published only on its
 re-uploads of DLSS 5 tools under other accounts have been reported carrying
 malware.
 
-## What's new in 0.28.3
+## What's new in 0.30.0
 
-**0.28.3** (2026-10-16). YouTube links play again, and a long render no longer
-lets Windows sleep under it. Renders made with 0.28.2 are reused: nothing here
-changes a rendered pixel.
+**0.30.0** (2026-10-31). The menus, settings and toolbar are rearranged around
+what you do, RTX 50 cards get DLSS-NR 310.9.16 with a lighter network to choose,
+and YouTube sound no longer stops a minute in. Every earlier render is made
+again once, because the neural runtime changed; the default picture is the same
+frames as 0.28.3's.
 
-- **YouTube links play again.** The bundled yt-dlp is now the official nightly
-  2026.10.10.233141, which fixes "Playback on other websites has been disabled"
-  ([yt-dlp #17497](https://github.com/yt-dlp/yt-dlp/issues/17497)).
-- **Windows stays awake while the player works.** A whole-video render, an
-  export, frame generation, `--render` and `dlss5-convert` keep the PC from
-  sleeping until they finish; the display may still turn off.
-- **A refused neural render names the driver NVIDIA asks for**, read from the
-  driver's own DLSS-NR capability, and on Windows 10 it says that drivers
-  released after October 2026 need Windows 11.
-- **dlssg_for_sm86 0.4.0 is recognised**, and the start screen says when its
-  settings make generated frames differ from NVIDIA's.
-- **Download only from the release page.** Every release now says so and links
-  its VirusTotal scans.
+- **Menus named for jobs:** File, Playback, View, Compare, Enhance, Tools, Help.
+  [Where each 0.28 row went](CHANGELOG.md#where-things-moved-in-0300).
+- **One Picture panel** (`Ctrl+N`) for Neural settings and Image adjustments,
+  split into what re-renders and what is instant.
+- **DLSS-NR 310.9.16 on RTX 50.** Network A, the default, renders 0.28.3's
+  frames exactly; network B is milder and 36 % faster. Other GPUs keep
+  310.8.SF-v2. Both are still modified, unsigned community builds.
+- **RenoDX 10.8.0**, pinned to keep the picture within a tenth of a level of
+  0.28.3's.
+- **YouTube sound keeps playing** past the first minute, YouTube's own
+  captions are listed under **Playback > Subtitles**, and yt-dlp is the stable
+  2026.10.26, past certifi's certificate fix.
+- **Resume where you left off**, `PgDn`/`PgUp` for the next file in the folder,
+  `Ctrl+Shift+C` to copy the comparison and `Ctrl+V` to open what you copied.
+- **Every key can be changed** in `input.conf`, and the interface can be
+  translated.
 
-Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.28.2 made the neural
+Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.28.3 kept Windows awake
+under a render, 0.28.2 made the neural
 settings do what they say, 0.28.1 made RTX VSR the upscaler in playback and
 exports, 0.27.2 offered the
 dlssg_sm86 add-on for Frame Generation on RTX 20 and 30, 0.27.0 added
