@@ -978,6 +978,8 @@ struct PlayerAppTestAccess {
         const wchar_t glyph = GlyphForIcon(UiIcon::Sparkles);
         struct ChipCase { status_chips::Chip chip; const wchar_t* widest; };
         const std::array chips{
+            ChipCase{status_chips::Chip::Pipeline, L"DLSS 5 \u00b7 DLSS SR"},
+            ChipCase{status_chips::Chip::Pipeline, L"DLSS 5 \u00b7 RTX VSR"},
             ChipCase{status_chips::Chip::Render, L"Render 99% · ETA 99:59:59"},
             ChipCase{status_chips::Chip::Fps, L"240 / 240 fps"},
             ChipCase{status_chips::Chip::Dropped, L"Dropped 99999"},
@@ -1016,7 +1018,7 @@ struct PlayerAppTestAccess {
         const bool loaded = app.m_loaded, hadRenderer = app.m_renderer != nullptr;
         app.m_loaded = true;
         if (!hadRenderer) app.m_renderer = MakeD3D12Renderer();
-        app.m_cachedChips = status_chips::Build(true, {true, 0.42, 75.0}, 58.6, 60.0, 2);
+        app.m_cachedChips = status_chips::Build(true, {true, 0.42, 75.0}, 58.6, 60.0, 2, L"DLSS 5 \u00b7 RTX VSR");
         app.m_cachedStatus = L"Status line";
         // An earlier case's subtitle shift may have left a toast in the slot.
         app.m_toast.Hide();
@@ -1029,10 +1031,25 @@ struct PlayerAppTestAccess {
         CHECK(Contains(L"Dropped 2"));
         CHECK(Contains(L"Status line"));
         const auto row = app.StatusRowLayout();
-        for (const RECT& chip : row.chips) {
+        for (size_t index = 0; index < row.chips.size(); ++index) {
+            const RECT& chip = row.chips[index];
+            // The pipeline chip is the first to give way, so a narrow fixture
+            // window may not have room for it; the other three always do here.
+            if (index == size_t(status_chips::Chip::Pipeline) && chip.right <= chip.left) {
+                const int needed = app.Dip(status_chips::kMinimumTextWidthDip + status_chips::kPipelineChipWidthDip + status_chips::kRenderChipWidthDip +
+                                           status_chips::kFpsChipWidthDip + status_chips::kDroppedChipWidthDip + 4 * status_chips::kChipGapDip);
+                CHECK(app.StatusRowRect().right - app.StatusRowRect().left < needed);
+                continue;
+            }
             CHECK(chip.right > chip.left);
             CHECK(chip.left >= row.text.right);
         }
+        if (const RECT& chip = row.chips[size_t(status_chips::Chip::Pipeline)]; chip.right > chip.left) CHECK(Contains(L"DLSS 5 \u00b7 RTX VSR"));
+        // And painted where it has room, whole.
+        drawnText.clear();
+        app.DrawStatusChip(dc, RECT{0, 0, app.Dip(status_chips::kPipelineChipWidthDip), app.Dip(status_chips::kChipHeightDip)},
+                           app.m_cachedChips[size_t(status_chips::Chip::Pipeline)], ui_palette::SecondaryText, 0.0);
+        CHECK(Contains(L"DLSS 5 \u00b7 RTX VSR"));
         app.m_loaded = loaded;
         app.m_neuralLifecycle = lifecycle;
         if (!hadRenderer) app.m_renderer.reset();
@@ -1941,6 +1958,47 @@ struct PlayerAppTestAccess {
         app.m_neuralSettings = settings;
         app.m_pictureRenderRows.clear();
         app.m_picturePipelinePage = false;
+    }
+
+    // The pipeline chip (X10): the stages that make the picture, named; and its
+    // tip, which carries the sizes, the settings and what the line had to cut.
+    static void pipeline_chip_names_the_stages_and_tips_the_settings_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, hadRenderer = app.m_renderer != nullptr;
+        const NeuralSettings cachedSettings = app.m_cachedSettings;
+        app.m_loaded = true;
+        if (!hadRenderer) app.m_renderer = MakeD3D12Renderer();
+        app.m_cachedPlayback = false;
+        auto chips = app.BuildStatusChips();
+        const auto& pipeline = chips[size_t(status_chips::Chip::Pipeline)];
+        CHECK(pipeline.visible);
+        CHECK_EQ(pipeline.text, app.T(L"chip.pipeline.none"));
+        app.m_cachedPlayback = true;
+        chips = app.BuildStatusChips();
+        CHECK(chips[size_t(status_chips::Chip::Pipeline)].text.starts_with(app.T(L"toolbar.neural.name")));
+        // The tip: the heading, the flow, the settings the render was made with in
+        // the panel's own words, the add-on and frame generation.
+        app.m_cachedSettings = {};
+        app.m_cachedSettings.style = 1;
+        app.m_cachedSettings.localTone = 1.5f;
+        // A chip not shown has nothing to say.
+        app.m_cachedChips = {};
+        CHECK(app.CallbackTipText(PlayerApp::kChipTipIdBase + static_cast<UINT_PTR>(status_chips::Chip::Pipeline)).empty());
+        app.m_cachedChips = chips;
+        const std::wstring shown = app.CallbackTipText(PlayerApp::kChipTipIdBase + static_cast<UINT_PTR>(status_chips::Chip::Pipeline));
+        CHECK(shown.starts_with(app.T(L"chip.pipeline.tip")));
+        CHECK(shown.find(L"\u2192 " + app.T(L"toolbar.neural.name")) != std::wstring::npos);
+        CHECK(shown.find(app.T(L"neural.settings.style") + L" " + app.T(L"neural.style.1")) != std::wstring::npos);
+        CHECK(shown.find(app.T(L"neural.settings.tone") + L" 1.50") != std::wstring::npos);
+        CHECK(shown.find(app.FrameGenerationStatus()) != std::wstring::npos);
+        // No media, no chip and no tip.
+        app.m_loaded = false;
+        CHECK(!app.BuildStatusChips()[size_t(status_chips::Chip::Pipeline)].visible);
+        CHECK(app.PipelineTipText().empty());
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_cachedSettings = cachedSettings;
+        if (!hadRenderer) app.m_renderer.reset();
+        app.m_cachedChips = {};
     }
 
     // Every settings dialog is laid out in design units at its own dpi, draws
@@ -3274,6 +3332,7 @@ struct PlayerAppTestAccess {
         UI_CASE(picture_panel_zones_pages_revert_and_rows_test),
         UI_CASE(picture_panel_layout_survives_longer_strings_test),
         UI_CASE(picture_panel_marks_resets_and_reverts_each_control_test),
+        UI_CASE(pipeline_chip_names_the_stages_and_tips_the_settings_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
         UI_CASE(dark_menu_bar_test),
         UI_CASE(media_controls_and_thumbnail_buttons_test),

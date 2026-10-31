@@ -23,18 +23,26 @@
 //
 // Pure: text, layout and the flash are decided here and tested without a
 // window; main.cpp only feeds numbers in and paints the result.
+//
+// Since 0.30.0 a fourth chip, leftmost, names the pipeline that makes the
+// picture - "DLSS 5 · RTX VSR" - and its tip carries what the line could not
+// fit: the sizes through each stage, the full settings the render was made
+// with, the add-on, and frame generation (UI proposal 3.6, X10).
 namespace status_chips {
 
-enum class Chip : size_t { Render, Fps, Dropped };
-inline constexpr size_t kChipCount = 3;
+enum class Chip : size_t { Pipeline, Render, Fps, Dropped };
+inline constexpr size_t kChipCount = 4;
 
 // Fixed widths, each the widest text its chip can print in Segoe UI at the
 // 14 px the status row draws with, plus kChipPaddingDip on either side:
+//   "DLSS 5 · RTX VSR"            105 px
 //   "Render 99% · ETA 99:59:59"   174 px
 //   "144 / 144 fps"                92 px
 //   "Dropped 99999"               107 px
 // A dropped count past five digits is a broken session rather than a number
-// anyone reads, and ellipsises instead of widening the chip.
+// anyone reads, and ellipsises instead of widening the chip; so does a
+// translation's longer stage name, whose whole text the tip still carries.
+inline constexpr int kPipelineChipWidthDip = 132;
 inline constexpr int kRenderChipWidthDip = 196;
 inline constexpr int kFpsChipWidthDip = 106;
 inline constexpr int kDroppedChipWidthDip = 121;
@@ -77,6 +85,59 @@ inline std::wstring FpsText(double renderedFps, double sourceFps)
 inline std::wstring DroppedText(uint64_t dropped)
 {
     return L"Dropped " + std::to_wstring(dropped);
+}
+
+// The stages that make the picture on screen, in the order a frame meets them.
+// RTX VSR stands aside while DLSS Super Resolution runs, so a frame never meets
+// both, and the chip never names both.
+struct Pipeline {
+    bool neural{};           // DLSS 5 frames are what plays
+    bool superResolution{};  // DLSS SR scales them to the window
+    bool rtxVsr{};           // RTX VSR does
+};
+
+// The stage names in the viewer's language (Localization.h), and what the chip
+// says when no stage runs: the decoded picture, scaled by the window.
+struct PipelineNames {
+    std::wstring neural, superResolution, rtxVsr, none;
+};
+
+inline std::wstring PipelineText(const Pipeline& pipeline, const PipelineNames& names)
+{
+    std::wstring text;
+    const auto add = [&](bool on, const std::wstring& name) {
+        if (!on) return;
+        if (!text.empty()) text += L" \u00b7 ";
+        text += name;
+    };
+    add(pipeline.neural, names.neural);
+    add(pipeline.superResolution, names.superResolution);
+    add(pipeline.rtxVsr && !pipeline.superResolution, names.rtxVsr);
+    return text.empty() ? names.none : text;
+}
+
+// "1360×696 → DLSS 5 → RTX VSR → 1628×833": the source size, each stage, and the
+// size the last stage made, the tip's first fact. Without a stage it is the
+// source and, when the window scales it, the size it is shown at.
+inline std::wstring PipelineFlow(uint32_t sourceWidth, uint32_t sourceHeight, const Pipeline& pipeline,
+                                 const PipelineNames& names, uint32_t outputWidth, uint32_t outputHeight)
+{
+    const auto size = [](uint32_t width, uint32_t height) {
+        return std::to_wstring(width) + L"\u00d7" + std::to_wstring(height);
+    };
+    std::wstring text = size(sourceWidth, sourceHeight);
+    bool stage = false;
+    const auto add = [&](bool on, const std::wstring& name) {
+        if (!on) return;
+        text += L" \u2192 " + name;
+        stage = true;
+    };
+    add(pipeline.neural, names.neural);
+    add(pipeline.superResolution, names.superResolution);
+    add(pipeline.rtxVsr && !pipeline.superResolution, names.rtxVsr);
+    if (outputWidth && outputHeight && (stage || outputWidth != sourceWidth || outputHeight != sourceHeight))
+        text += L" \u2192 " + size(outputWidth, outputHeight);
+    return text;
 }
 
 inline std::wstring RenderText(double fraction, std::optional<double> etaSeconds, bool starting = false)
@@ -150,11 +211,15 @@ struct RenderProgress {
     bool starting{};
 };
 
+// `pipeline` is PipelineText's, empty for no pipeline chip. It never flashes: the
+// chip is a name, not a meter, and the status line already says why a stage
+// stepped aside.
 inline Snapshot Build(bool mediaLoaded, RenderProgress render, double renderedFps, double sourceFps,
-                      uint64_t dropped)
+                      uint64_t dropped, std::wstring pipeline = {})
 {
     Snapshot snapshot{};
     if (!mediaLoaded) return snapshot;
+    if (!pipeline.empty()) At(snapshot, Chip::Pipeline) = Content{true, std::move(pipeline), 0, true};
     if (render.active) {
         At(snapshot, Chip::Render) = Content{true, RenderText(render.fraction, render.etaSeconds, render.starting),
                                              RenderFlashKey(render.fraction), false};
@@ -171,6 +236,7 @@ inline Snapshot Build(bool mediaLoaded, RenderProgress render, double renderedFp
 inline int WidthDip(Chip chip)
 {
     switch (chip) {
+    case Chip::Pipeline: return kPipelineChipWidthDip;
     case Chip::Render: return kRenderChipWidthDip;
     case Chip::Fps: return kFpsChipWidthDip;
     case Chip::Dropped: return kDroppedChipWidthDip;
@@ -184,11 +250,11 @@ struct RowLayout {
     std::array<RECT, kChipCount> chips{};
 };
 
-// Chips sit at the right end of `row` in a fixed order, Render then Fps then
+// Chips sit at the right end of `row` in a fixed order, Pipeline, Render, Fps,
 // Dropped, so each keeps its place whatever the others do; a chip that is not
 // shown gives its room to the line. When the row is too narrow for every chip
-// and the line's minimum, chips go from the left - the render chip first,
-// because the line still names the render - never from the middle.
+// and the line's minimum, chips go from the left - the pipeline chip first, then
+// the render chip, because the line still names both - never from the middle.
 inline RowLayout LayoutRow(RECT row, UINT dpi, const std::array<bool, kChipCount>& visible)
 {
     RowLayout layout{};
@@ -221,6 +287,9 @@ struct TipFacts {
     double renderedFps{};
     double sourceFps{};
     uint64_t dropped{};
+    // The pipeline chip's tip whole, built by the caller in the viewer's language
+    // from PipelineFlow and the settings the render was made with.
+    std::wstring pipeline;
 };
 
 inline std::wstring OneDecimal(double value)
@@ -233,6 +302,7 @@ inline std::wstring OneDecimal(double value)
 inline std::wstring TipText(Chip chip, const TipFacts& facts)
 {
     switch (chip) {
+    case Chip::Pipeline: return facts.pipeline;
     case Chip::Render: {
         const long long percent = std::llround(std::clamp(facts.render.fraction, 0.0, 1.0) * 100.0);
         const long long shown = facts.render.fraction < 1.0 ? std::min<long long>(percent, 99) : percent;

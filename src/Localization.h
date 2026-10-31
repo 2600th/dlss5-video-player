@@ -456,6 +456,18 @@ private:
             // (docs/measurements/knobs-upper-20261003): the combo shows "name · distance".
             {L"neural.style.0", L"Default"}, {L"neural.style.1", L"Natural"}, {L"neural.style.2", L"Cinematic"},
             {L"neural.style.1.measured", L"furthest from the source (+68 %)"}, {L"neural.style.2.measured", L"+34 %"},
+            // The pipeline chip (X10) and its tip.
+            {L"chip.pipeline.none", L"Original"},
+            {L"chip.pipeline.tip", L"Pipeline: what makes the picture on screen"},
+            {L"chip.pipeline.settings", L"Rendered with: %s"},
+            {L"chip.pipeline.pending", L"The Picture panel holds other settings; Apply renders with them."},
+            {L"chip.pipeline.no_guides", L"none"},
+            {L"chip.pipeline.sr_quality", L"DLSS SR quality: %s"},
+            {L"chip.pipeline.dlaa", L"DLAA (DLSS anti-aliasing at the source's own size)"},
+            {L"chip.pipeline.vsr_quality", L"RTX VSR quality: %s"},
+            {L"chip.pipeline.addon", L"Neural add-on: a modified community build, experimental"},
+            {L"chip.pipeline.safe_mode", L"DLSS SR safe mode: the neural add-on is not loaded"},
+            {L"chip.pipeline.no_addon", L"Neural add-on: not loaded, so DLSS 5 cannot render"},
             {L"neural.settings.group_source", L"What the model is given"},
             {L"encoder.settings.gpu_convert", L"GPU color conversion"},
             {L"encoder.settings.gpu_source", L"GPU source conversion"},

@@ -6029,7 +6029,8 @@ private:
         if(id>=kChipTipIdBase&&id<kChipTipIdBase+status_chips::kChipCount){
             const size_t index=size_t(id-kChipTipIdBase);
             if(!m_cachedChips[index].visible)return {};
-            status_chips::TipFacts facts{RenderChipProgress(),0.0,0.0,m_submitFps,m_decoder.FrameRate(),m_droppedFrames};
+            status_chips::TipFacts facts{RenderChipProgress(),0.0,0.0,m_submitFps,m_decoder.FrameRate(),m_droppedFrames,
+                                         index==size_t(status_chips::Chip::Pipeline)?PipelineTipText():std::wstring{}};
             if(m_liveSession&&m_liveRange.end100ns>m_liveRange.start100ns){
                 facts.rangeSeconds=double(m_liveRange.end100ns-m_liveRange.start100ns)*1e-7;
                 facts.paceRatio=LiveRealtimeRatio();
@@ -9006,7 +9007,82 @@ private:
     }
     status_chips::Snapshot BuildStatusChips()const{
         return status_chips::Build(m_loaded&&m_renderer!=nullptr,RenderChipProgress(),m_submitFps,
-                                   m_decoder.FrameRate(),m_droppedFrames);
+                                   m_decoder.FrameRate(),m_droppedFrames,
+                                   m_loaded&&m_renderer?status_chips::PipelineText(CurrentPipeline(),PipelineNames()):std::wstring{});
+    }
+    // The pipeline chip (X10): what makes the frames on screen now, not what is
+    // asked for - DLSS 5 while its frames play, and the upscaler that ran on the
+    // last present, which is the one the status line names too.
+    status_chips::Pipeline CurrentPipeline()const{
+        status_chips::Pipeline pipeline;
+        pipeline.neural=m_cachedPlayback;
+        pipeline.superResolution=UpscalingActive();
+        pipeline.rtxVsr=m_renderer&&m_renderer->PlaybackVsrShown();
+        return pipeline;
+    }
+    status_chips::PipelineNames PipelineNames()const{
+        return {T(L"toolbar.neural.name"),T(L"toolbar.upscaler.dlss_sr"),T(L"toolbar.upscaler.rtx_vsr"),T(L"chip.pipeline.none")};
+    }
+    static std::wstring WithValue(std::wstring format,const std::wstring& value){
+        if(const size_t at=format.find(L"%s");at!=std::wstring::npos)format.replace(at,2,value);
+        return format;
+    }
+    // The settings a render was made with, every one by the Picture panel's own
+    // names: the line's "NR 1.00/struct 1.00/tone 1.00" was the part it cut.
+    std::wstring RenderSettingsSummary(const NeuralSettings& neural,const GuideControls& guides,const TemporalSettings& temporal)const{
+        std::vector<std::wstring> parts;
+        const auto named=[&](const wchar_t* label,const std::wstring& value){parts.push_back(T(label)+L" "+value);};
+        named(L"neural.settings.style",T((L"neural.style."+std::to_wstring(std::clamp(neural.style,0,2))).c_str()));
+        named(L"neural.settings.tone",PlainValue(neural.localTone));
+        named(L"neural.settings.structure",PlainValue(neural.localStructure));
+        named(L"neural.settings.color",PlainValue(neural.colorStrength));
+        named(L"neural.settings.intensity",PlainValue(neural.intensity));
+        if(neural.autoMask){
+            parts.push_back(T(L"neural.settings.automask"));
+            named(L"neural.settings.skin",skin_structure::IsOff(neural.skinStructure)?T(L"neural.settings.skin_off"):PlainValue(neural.skinStructure));
+        }
+        named(L"neural.settings.passes",std::to_wstring(neural.passes));
+        if(neural.passes>1&&neural.chainedHistory)parts.push_back(T(L"neural.settings.chained"));
+        std::wstring sent;
+        if(guides.motionVectors)sent=T(L"neural.settings.guide_mv");
+        if(guides.depth)sent+=(sent.empty()?std::wstring{}:std::wstring(L", "))+T(L"neural.settings.guide_depth");
+        named(L"neural.settings.guides",sent.empty()?T(L"chip.pipeline.no_guides"):sent);
+        static constexpr std::array<const wchar_t*,4> kCuts{L"neural.scene_cuts.default",L"neural.scene_cuts.more",L"neural.scene_cuts.less",L"neural.scene_cuts.off"};
+        static constexpr std::array<const wchar_t*,4> kStability{L"neural.stability.off",L"neural.stability.low",L"neural.stability.medium",L"neural.stability.high"};
+        named(L"neural.settings.scene_cuts",T(kCuts[std::min<size_t>(size_t(temporal.sceneCuts),kCuts.size()-1)]));
+        named(L"neural.settings.stability",T(kStability[std::min<size_t>(size_t(temporal.stability),kStability.size()-1)]));
+        std::wstring text;
+        for(const auto& part:parts)text+=(text.empty()?std::wstring{}:std::wstring(L" \u00b7 "))+part;
+        return text;
+    }
+    // The chip's tip: the sizes through each stage, the settings the render on
+    // screen was made with, the upscaler's rung, the add-on and frame generation -
+    // what the status line carried before it had to be cut.
+    std::wstring PipelineTipText()const{
+        if(!m_loaded||!m_renderer)return {};
+        const status_chips::Pipeline pipeline=CurrentPipeline();
+        const bool vsr=pipeline.rtxVsr&&!pipeline.superResolution;
+        const uint32_t outputW=vsr?m_renderer->VsrOutputW():m_renderer->OutputW(),outputH=vsr?m_renderer->VsrOutputH():m_renderer->OutputH();
+        std::wstring text=T(L"chip.pipeline.tip")+L"\n"+
+            status_chips::PipelineFlow(m_decoder.NativeWidth(),m_decoder.NativeHeight(),pipeline,PipelineNames(),outputW,outputH);
+        if(pipeline.neural){
+            if(const auto applied=AppliedRenderSettings())
+                text+=L"\n"+WithValue(T(L"chip.pipeline.settings"),RenderSettingsSummary(applied->neural,applied->guides,applied->temporal));
+            if(SettingsAheadOfRender()||(m_liveSession&&CurrentRenderSettings()!=m_liveRenderSettings))text+=L"\n"+T(L"chip.pipeline.pending");
+        }
+        if(pipeline.superResolution){
+            // DLAA is the one rung whose name does not say what it does.
+            const std::wstring quality=m_activeQuality==NVSDK_NGX_PerfQuality_Value_DLAA?T(L"chip.pipeline.dlaa"):std::wstring(QualityNameW(m_activeQuality));
+            text+=L"\n"+WithValue(T(L"chip.pipeline.sr_quality"),quality);
+        }
+        if(vsr)text+=L"\n"+WithValue(T(L"chip.pipeline.vsr_quality"),
+            T((L"menu.compare_vsr_quality_"+std::to_wstring(vsr_policy::QualityIndex(EffectiveComparison().playbackVsrQuality))).c_str()));
+        switch(RuntimeStatus().configuration){
+        case PlayerRuntimeConfiguration::NeuralAddonExperimental:text+=L"\n"+T(L"chip.pipeline.addon");break;
+        case PlayerRuntimeConfiguration::DlssSrSafeMode:text+=L"\n"+T(L"chip.pipeline.safe_mode");break;
+        case PlayerRuntimeConfiguration::NeuralAddonUnavailable:text+=L"\n"+T(L"chip.pipeline.no_addon");break;
+        }
+        return text+L"\n"+FrameGenerationStatus();
     }
     // Called with the status line, which every state change and every
     // presented frame already reaches. Only a changed chip repaints, and only
@@ -9976,7 +10052,7 @@ private:
         const status_chips::RowLayout statusRow=StatusRowLayout();
         {
             const auto now=Clock::now();
-            constexpr std::array<COLORREF,status_chips::kChipCount> accents{ui_palette::NeuralCoverage,ui_palette::PrimaryBlue,ui_palette::Attention};
+            constexpr std::array<COLORREF,status_chips::kChipCount> accents{ui_palette::SecondaryText,ui_palette::NeuralCoverage,ui_palette::PrimaryBlue,ui_palette::Attention};
             const HGDIOBJ chipFont=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
             for(size_t index=0;index<status_chips::kChipCount;++index)
                 DrawStatusChip(dc,statusRow.chips[index],m_cachedChips[index],accents[index],

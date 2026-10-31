@@ -2577,33 +2577,83 @@ void status_chips_keep_fixed_places_and_give_the_line_the_rest_test()
 {
     using namespace status_chips;
     const RECT row{145, 500, 1424, 523};
-    const RowLayout all = LayoutRow(row, 96, {true, true, true});
+    const auto at = [](const RowLayout& layout, Chip chip) { return layout.chips[size_t(chip)]; };
+    const RowLayout all = LayoutRow(row, 96, {true, true, true, true});
     // Fixed order, fixed widths, right-aligned with a gap between.
-    CHECK_EQ(1424L, all.chips[2].right);
-    CHECK_EQ(LONG(kDroppedChipWidthDip), all.chips[2].right - all.chips[2].left);
-    CHECK_EQ(LONG(kFpsChipWidthDip), all.chips[1].right - all.chips[1].left);
-    CHECK_EQ(LONG(kRenderChipWidthDip), all.chips[0].right - all.chips[0].left);
-    CHECK_EQ(LONG(kChipGapDip), all.chips[2].left - all.chips[1].right);
-    CHECK_EQ(LONG(kChipGapDip), all.chips[1].left - all.chips[0].right);
-    CHECK_EQ(all.chips[0].left - LONG(kChipGapDip), all.text.right);
-    CHECK_EQ(LONG(kChipHeightDip), all.chips[0].bottom - all.chips[0].top);
+    CHECK_EQ(1424L, at(all, Chip::Dropped).right);
+    CHECK_EQ(LONG(kDroppedChipWidthDip), at(all, Chip::Dropped).right - at(all, Chip::Dropped).left);
+    CHECK_EQ(LONG(kFpsChipWidthDip), at(all, Chip::Fps).right - at(all, Chip::Fps).left);
+    CHECK_EQ(LONG(kRenderChipWidthDip), at(all, Chip::Render).right - at(all, Chip::Render).left);
+    CHECK_EQ(LONG(kPipelineChipWidthDip), at(all, Chip::Pipeline).right - at(all, Chip::Pipeline).left);
+    CHECK_EQ(LONG(kChipGapDip), at(all, Chip::Dropped).left - at(all, Chip::Fps).right);
+    CHECK_EQ(LONG(kChipGapDip), at(all, Chip::Fps).left - at(all, Chip::Render).right);
+    CHECK_EQ(LONG(kChipGapDip), at(all, Chip::Render).left - at(all, Chip::Pipeline).right);
+    CHECK_EQ(at(all, Chip::Pipeline).left - LONG(kChipGapDip), all.text.right);
+    CHECK_EQ(LONG(kChipHeightDip), at(all, Chip::Render).bottom - at(all, Chip::Render).top);
     // A chip that is not shown gives its room to the line, and the others do
     // not move.
-    const RowLayout noRender = LayoutRow(row, 96, {false, true, true});
-    CHECK(noRender.chips[0].right == noRender.chips[0].left);
-    CHECK_EQ(all.chips[1].left, noRender.chips[1].left);
-    CHECK_EQ(all.chips[1].left - LONG(kChipGapDip), noRender.text.right);
-    // Too narrow for every chip and the line's minimum: the render chip goes
-    // first, never one from the middle.
+    const RowLayout noRender = LayoutRow(row, 96, {false, false, true, true});
+    CHECK(at(noRender, Chip::Render).right == at(noRender, Chip::Render).left);
+    CHECK(at(noRender, Chip::Pipeline).right == at(noRender, Chip::Pipeline).left);
+    CHECK_EQ(at(all, Chip::Fps).left, at(noRender, Chip::Fps).left);
+    CHECK_EQ(at(all, Chip::Fps).left - LONG(kChipGapDip), noRender.text.right);
+    // Without a render the pipeline chip moves up beside the rate.
+    const RowLayout noRenderPipeline = LayoutRow(row, 96, {true, false, true, true});
+    CHECK_EQ(at(noRenderPipeline, Chip::Pipeline).right + LONG(kChipGapDip), at(all, Chip::Fps).left);
+    // Too narrow for every chip and the line's minimum: the pipeline chip goes
+    // first, then the render chip, never one from the middle.
     const RECT narrow{145, 500, 145 + kMinimumTextWidthDip + 260, 523};
-    const RowLayout squeezed = LayoutRow(narrow, 96, {true, true, true});
-    CHECK(squeezed.chips[0].right == squeezed.chips[0].left);
-    CHECK(squeezed.chips[1].right > squeezed.chips[1].left);
-    CHECK(squeezed.chips[2].right > squeezed.chips[2].left);
+    const RowLayout squeezed = LayoutRow(narrow, 96, {true, true, true, true});
+    CHECK(at(squeezed, Chip::Pipeline).right == at(squeezed, Chip::Pipeline).left);
+    CHECK(at(squeezed, Chip::Render).right == at(squeezed, Chip::Render).left);
+    CHECK(at(squeezed, Chip::Fps).right > at(squeezed, Chip::Fps).left);
+    CHECK(at(squeezed, Chip::Dropped).right > at(squeezed, Chip::Dropped).left);
     CHECK(squeezed.text.right - squeezed.text.left >= kMinimumTextWidthDip);
+    const RECT middling{145, 500, 145 + kMinimumTextWidthDip + 460, 523};
+    const RowLayout pipelineFirst = LayoutRow(middling, 96, {true, true, true, true});
+    CHECK(at(pipelineFirst, Chip::Pipeline).right == at(pipelineFirst, Chip::Pipeline).left);
+    CHECK(at(pipelineFirst, Chip::Render).right > at(pipelineFirst, Chip::Render).left);
     // Scales with dpi.
-    const RowLayout scaled = LayoutRow(RECT{218, 750, 2136, 785}, 144, {true, true, true});
-    CHECK_EQ(LONG(MulDiv(kDroppedChipWidthDip, 144, 96)), scaled.chips[2].right - scaled.chips[2].left);
+    const RowLayout scaled = LayoutRow(RECT{218, 750, 2136, 785}, 144, {true, true, true, true});
+    CHECK_EQ(LONG(MulDiv(kDroppedChipWidthDip, 144, 96)), at(scaled, Chip::Dropped).right - at(scaled, Chip::Dropped).left);
+    CHECK_EQ(LONG(MulDiv(kPipelineChipWidthDip, 144, 96)), at(scaled, Chip::Pipeline).right - at(scaled, Chip::Pipeline).left);
+}
+
+// The pipeline chip names the stages that make the picture, each once and in the
+// order a frame meets them; RTX VSR stands aside while DLSS SR runs, so the two
+// are never named together. Its tip's first fact is the sizes through them.
+void pipeline_chip_names_each_stage_once_test()
+{
+    using namespace status_chips;
+    const PipelineNames names{L"DLSS 5", L"DLSS SR", L"RTX VSR", L"Original"};
+    CHECK_EQ(std::wstring(L"Original"), PipelineText({}, names));
+    CHECK_EQ(std::wstring(L"DLSS 5"), PipelineText({true, false, false}, names));
+    CHECK_EQ(std::wstring(L"DLSS 5 \u00b7 RTX VSR"), PipelineText({true, false, true}, names));
+    CHECK_EQ(std::wstring(L"DLSS 5 \u00b7 DLSS SR"), PipelineText({true, true, true}, names));
+    CHECK_EQ(std::wstring(L"RTX VSR"), PipelineText({false, false, true}, names));
+    CHECK_EQ(std::wstring(L"1360\u00d7696 \u2192 DLSS 5 \u2192 RTX VSR \u2192 1628\u00d7833"),
+             PipelineFlow(1360, 696, {true, false, true}, names, 1628, 833));
+    CHECK_EQ(std::wstring(L"1920\u00d71080 \u2192 DLSS 5 \u2192 1920\u00d71080"), PipelineFlow(1920, 1080, {true, false, false}, names, 1920, 1080));
+    // No stage: the source, and the size the window shows it at when that differs.
+    CHECK_EQ(std::wstring(L"1920\u00d71080"), PipelineFlow(1920, 1080, {}, names, 1920, 1080));
+    CHECK_EQ(std::wstring(L"1280\u00d7720 \u2192 1920\u00d71080"), PipelineFlow(1280, 720, {}, names, 1920, 1080));
+    CHECK_EQ(std::wstring(L"1280\u00d7720 \u2192 DLSS SR"), PipelineFlow(1280, 720, {false, true, false}, names, 0, 0));
+    // The chip: shown with media, quiet, and never flashing - it is a name, not a meter.
+    const Snapshot chips = Build(true, {}, 30.0, 30.0, 0, L"DLSS 5");
+    CHECK(At(chips, Chip::Pipeline).visible);
+    CHECK(At(chips, Chip::Pipeline).quiet);
+    CHECK_EQ(uint64_t{0}, At(chips, Chip::Pipeline).flashKey);
+    CHECK(!At(Build(true, {}, 30.0, 30.0, 0), Chip::Pipeline).visible);
+    CHECK(!At(Build(false, {}, 30.0, 30.0, 0, L"DLSS 5"), Chip::Pipeline).visible);
+    Flash flash;
+    const std::chrono::steady_clock::time_point start{};
+    flash.Observe(Build(true, {}, 30.0, 30.0, 0, L"DLSS 5"), start);
+    flash.Observe(Build(true, {}, 30.0, 30.0, 0, L"DLSS 5 \u00b7 RTX VSR"), start + std::chrono::seconds(5));
+    CHECK_EQ(0.0, flash.Level(Chip::Pipeline, start + std::chrono::seconds(5)));
+    // Its tip is what the caller built, whole.
+    TipFacts facts{};
+    facts.pipeline = L"Pipeline\nfacts";
+    CHECK_EQ(facts.pipeline, TipText(Chip::Pipeline, facts));
 }
 
 void feature_pills_shrink_before_the_bar_goes_compact_test()
@@ -16806,6 +16856,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(status_chip_tips_say_what_was_measured_test),
     TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),
     TEST_CASE(status_chips_keep_fixed_places_and_give_the_line_the_rest_test),
+    TEST_CASE(pipeline_chip_names_each_stage_once_test),
     TEST_CASE(feature_pills_shrink_before_the_bar_goes_compact_test),
     TEST_CASE(timeline_reads_chapters_the_way_ffprobe_prints_them_test),
     TEST_CASE(timeline_hover_says_where_and_what_the_render_map_says_there_test),
