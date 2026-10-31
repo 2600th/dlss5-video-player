@@ -3146,6 +3146,7 @@ private:
         m_subtitleTracks.clear();m_subtitleSidecar.clear();m_subtitleOrigin=0.0;
         m_subtitleFile.clear();m_subtitleFileCodec.clear();m_subtitleFileCharenc.clear();m_subtitleProbeFile.clear();
         m_subtitleChoice={};m_subtitleDelayMs=0;m_subtitleWanted.reset();m_subtitleClock=-1.0;m_subtitleDiscovering=false;
+        m_subtitleStreamCount=0;CancelCaptionFetch();
         m_subtitles.Hide();
         if(m_renderer)m_renderer->SetSubtitleOverlay(nullptr,0,0);
         m_subtitleFrame.reset();
@@ -3154,7 +3155,7 @@ private:
             // cheaply; only a file the viewer loaded for it before comes back.
             const bool local=_wcsnicmp(source.c_str(),L"http://",7)!=0&&_wcsnicmp(source.c_str(),L"https://",8)!=0;
             if(local){m_subtitles.Discover(source,true);m_subtitleDiscovering=true;}
-            else ChooseInitialSubtitles();
+            else{AddYouTubeCaptionTracks();ChooseInitialSubtitles();}
         }
         UpdateSubtitleMenu();
     }
@@ -3181,6 +3182,9 @@ private:
             if(m_subtitleDiscovering&&found->media==m_subtitlesForPath){
                 m_subtitleDiscovering=false;
                 m_subtitleTracks=std::move(found->tracks);m_subtitleSidecar=found->sidecar;m_subtitleOrigin=found->origin;
+                // A render of a YouTube video plays the player's copy, which
+                // carries no captions; the video's own come back beside it.
+                AddYouTubeCaptionTracks();
                 ChooseInitialSubtitles();
                 UpdateSubtitleMenu();
             }else if(!m_subtitleProbeFile.empty()&&found->media==m_subtitleProbeFile){
@@ -3211,6 +3215,14 @@ private:
         const subtitle::Track& track=m_subtitleTracks[size_t(index)];
         if(track.Drawn()==subtitle::Kind::Unsupported){LOG("Subtitles: "<<subtitle::Describe(track)<<" cannot be drawn.");return;}
         m_subtitleChoice={};m_subtitleChoice.mode=subtitle::Choice::Mode::Track;m_subtitleChoice.track=index;
+        if(size_t(index)>=m_subtitleStreamCount){
+            // A YouTube caption track: a WebVTT file once it is fetched.
+            m_subtitleWanted.reset();
+            ShowYouTubeCaption(size_t(index));
+            if(remember)RememberSubtitleChoice();
+            UpdateSubtitleMenu();
+            return;
+        }
         SubtitleOverlay::Source source;
         source.path=m_path;source.stream=index;source.codec=track.codec;source.origin=m_subtitleOrigin;
         m_subtitleWanted=source;
@@ -3254,7 +3266,7 @@ private:
         std::wstring label;
         if(next==-1){SelectSubtitlesOff(true);label=T(L"menu.subtitles_off");}
         else if(next==-2){SelectSubtitleFile(true);label=std::filesystem::path(m_subtitleFile).filename().wstring();}
-        else{SelectSubtitleTrack(next,true);label=Utf8ToWide(subtitle::Describe(m_subtitleTracks[size_t(next)]));}
+        else{SelectSubtitleTrack(next,true);label=SubtitleTrackLabel(size_t(next));}
         m_sourceNotice=T(L"menu.subtitles")+L": "+label;UpdateCachedStatus();
     }
     std::wstring SubtitleDelayText()const{
@@ -3275,7 +3287,7 @@ private:
         const HMENU menu=GetMenu(m_hwnd);
         if(!menu)return;
         std::vector<std::wstring> labels;
-        for(const auto& track:m_subtitleTracks)labels.push_back(Utf8ToWide(subtitle::Describe(track)));
+        for(size_t index=0;index<m_subtitleTracks.size();++index)labels.push_back(SubtitleTrackLabel(index));
         const std::wstring file=m_subtitleFile.empty()?std::wstring{}:
             T(L"menu.subtitles_file")+std::filesystem::path(m_subtitleFile).filename().wstring();
         UINT chosen=IDM_SUBTITLE_OFF;
@@ -3295,6 +3307,7 @@ private:
     void ServiceSubtitles(){
         SyncSubtitlesToSource();
         TakeSubtitleDiscoveries();
+        TakeCaptionFetch();
         if(!m_loaded||!m_renderer)return;
         // A rebuilt renderer holds no picture of its own.
         if(m_subtitleRenderer!=m_renderer.get()){m_subtitleRenderer=m_renderer.get();m_subtitleFrame.reset();}
@@ -3421,6 +3434,154 @@ private:
         if(!next){ShowToast(T(direction>0?L"playlist.last":L"playlist.first"));return;}
         LOG("Opening the "<<(direction>0?"next":"previous")<<" file in the folder.");
         Load((*folder/ *next).wstring());
+    }
+    // ---- YouTube captions (P2.42) ---------------------------------------------------
+    //
+    // yt-dlp names the tracks when it resolves the video (YouTubeResolver.cpp:
+    // the viewer's language and English, written, recognised or translated); a
+    // chosen one is fetched as WebVTT from the host yt-dlp gave - youtube.com or
+    // googlevideo.com, nothing else (IsTrustedCaptionUrl), no redirect followed -
+    // kept in the cache folder, and drawn by the overlay like any subtitle file.
+    // They are rows after the source's own streams in Playback > Subtitles, and
+    // start off: YouTube's own player shows none until the viewer asks, and
+    // this one shows a file's track only when its author marks it default.
+    // The choice is remembered for the video like any other.
+    static constexpr size_t kMaximumCaptionBytes=4u*1024u*1024u;
+    static constexpr size_t kCaptionFilesKept=100;
+    struct CaptionFetchState{
+        std::mutex mutex;
+        bool done=false,ok=false;
+        int track=-1;
+        std::filesystem::path file;
+    };
+    std::vector<CaptionTrack> m_youtubeCaptions;
+    std::wstring m_youtubeCaptionsPage;
+    // Rows of m_subtitleTracks from here on are YouTube's captions, in m_youtubeCaptions' order.
+    size_t m_subtitleStreamCount=0;
+    std::shared_ptr<CaptionFetchState> m_captionFetch;
+    std::jthread m_captionWorker;
+    void AddYouTubeCaptionTracks(){
+        m_subtitleStreamCount=m_subtitleTracks.size();
+        if(m_youtubePageUrl.empty()||m_youtubeCaptions.empty())return;
+        const std::string page=CanonicalYouTubeVideoId(m_youtubePageUrl);
+        if(page.empty()||page!=CanonicalYouTubeVideoId(m_youtubeCaptionsPage))return;
+        for(const CaptionTrack& caption:m_youtubeCaptions){
+            if(m_subtitleTracks.size()>=IDM_SUBTITLE_TRACK_COUNT)break;
+            subtitle::Track track;
+            track.subtitleIndex=int(m_subtitleTracks.size());track.title=caption.name;track.codec="webvtt";
+            m_subtitleTracks.push_back(std::move(track));
+        }
+        LOG("Subtitles: "<<(m_subtitleTracks.size()-m_subtitleStreamCount)<<" YouTube caption track(s) listed.");
+    }
+    const CaptionTrack* CaptionForTrack(size_t index)const{
+        if(index<m_subtitleStreamCount)return nullptr;
+        const size_t caption=index-m_subtitleStreamCount;
+        return caption<m_youtubeCaptions.size()?&m_youtubeCaptions[caption]:nullptr;
+    }
+    // "3. English - YouTube, auto-generated": YouTube's name and what made it.
+    std::wstring SubtitleTrackLabel(size_t index)const{
+        if(index>=m_subtitleTracks.size())return{};
+        const CaptionTrack* caption=CaptionForTrack(index);
+        if(!caption)return Utf8ToWide(subtitle::Describe(m_subtitleTracks[index]));
+        const wchar_t* kind=caption->kind==CaptionKind::AutoGenerated?L"subtitles.youtube.auto":
+                            caption->kind==CaptionKind::AutoTranslated?L"subtitles.youtube.translated":L"subtitles.youtube.manual";
+        return std::to_wstring(index+1)+L". "+Utf8ToWide(caption->name)+L" - "+T(kind);
+    }
+    std::filesystem::path CaptionFolder()const{
+        std::error_code error;
+        return (m_cacheRoot.empty()?std::filesystem::temp_directory_path(error):m_cacheRoot)/L"captions";
+    }
+    // One file per video, track and kind: the id is eleven URL-safe characters and
+    // the key letters, digits and dashes, so the name needs no escaping.
+    std::filesystem::path CaptionFile(const CaptionTrack& caption)const{
+        const std::string id=CanonicalYouTubeVideoId(m_youtubePageUrl);
+        if(id.empty())return{};
+        const char* kind=caption.kind==CaptionKind::AutoGenerated?"auto":caption.kind==CaptionKind::AutoTranslated?"translated":"manual";
+        return CaptionFolder()/Utf8ToWide(id+"."+caption.language+"."+kind+".vtt");
+    }
+    void ShowCaptionFile(const std::filesystem::path& file){
+        SubtitleOverlay::Source source;
+        source.path=file.wstring();source.external=true;source.codec="webvtt";
+        m_subtitleWanted=source;
+    }
+    void ShowYouTubeCaption(size_t index){
+        const CaptionTrack* caption=CaptionForTrack(index);
+        if(!caption)return;
+        const std::filesystem::path file=CaptionFile(*caption);
+        if(file.empty())return;
+        std::error_code error;
+        if(std::filesystem::is_regular_file(file,error)&&std::filesystem::file_size(file,error)>0&&!error){
+            LOG("Subtitles: showing YouTube captions kept from an earlier fetch.");
+            ShowCaptionFile(file);return;
+        }
+        CancelCaptionFetch();
+        auto state=std::make_shared<CaptionFetchState>();state->track=int(index);state->file=file;
+        m_captionFetch=state;
+        const std::wstring url=caption->url;
+        LOG("Subtitles: fetching YouTube captions.");
+        try{
+            m_captionWorker=std::jthread([state,url](std::stop_token stop){
+                bool ok=false;
+                if(const auto request=CaptionRequestFor(url)){
+                    HttpsGetRequest get;
+                    get.host=request->host;get.path=request->path;get.maximumBodyBytes=kMaximumCaptionBytes;
+                    get.timeoutMilliseconds=15000;get.followRedirects=false;
+                    const HttpsGetResult got=HttpsGet(get,stop);
+                    if(got.outcome==HttpsGetResult::Outcome::Ok&&LooksLikeWebVtt(got.body)){
+                        std::error_code error;std::filesystem::create_directories(state->file.parent_path(),error);
+                        ok=static_cast<bool>(atomic_file::Replace(state->file,got.body));
+                    }else if(!stop.stop_requested()){
+                        LOG("Subtitles: the YouTube captions did not arrive as WebVTT (outcome="<<static_cast<int>(got.outcome)
+                            <<", status "<<got.status<<", "<<got.body.size()<<" bytes).");
+                    }
+                }
+                const std::lock_guard lock(state->mutex);
+                state->done=true;state->ok=ok;
+            });
+        }catch(const std::system_error&){
+            m_captionFetch.reset();
+            LOG("Subtitles: the caption fetch could not start.");
+        }
+    }
+    void CancelCaptionFetch(){
+        if(m_captionWorker.joinable()){m_captionWorker.request_stop();m_captionWorker.join();}
+        m_captionWorker=std::jthread{};
+        m_captionFetch.reset();
+    }
+    void TakeCaptionFetch(){
+        if(!m_captionFetch)return;
+        bool ok=false;
+        {
+            const std::lock_guard lock(m_captionFetch->mutex);
+            if(!m_captionFetch->done)return;
+            ok=m_captionFetch->ok;
+        }
+        const std::shared_ptr<CaptionFetchState> state=std::move(m_captionFetch);
+        if(m_captionWorker.joinable())m_captionWorker.join();
+        m_captionWorker=std::jthread{};
+        // Only the choice it was fetched for is shown; a choice made since stands.
+        if(m_subtitleChoice.mode!=subtitle::Choice::Mode::Track||m_subtitleChoice.track!=state->track)return;
+        if(!ok){
+            m_subtitleChoice={};m_subtitleChoice.mode=subtitle::Choice::Mode::Off;m_subtitleWanted.reset();
+            m_sourceNotice=T(L"subtitles.youtube.failed");UpdateCachedStatus();UpdateSubtitleMenu();
+            return;
+        }
+        LOG("Subtitles: showing YouTube captions.");
+        ShowCaptionFile(state->file);
+        PruneCaptionFiles(state->file);
+    }
+    // The newest kCaptionFilesKept stay; they are copies of what YouTube serves.
+    void PruneCaptionFiles(const std::filesystem::path& keep)const{
+        std::error_code error;
+        std::vector<std::pair<std::filesystem::file_time_type,std::filesystem::path>> files;
+        for(std::filesystem::directory_iterator it(CaptionFolder(),error),end;!error&&it!=end;it.increment(error)){
+            std::error_code itemError;
+            if(it->is_regular_file(itemError)&&it->path().extension()==L".vtt")files.emplace_back(it->last_write_time(itemError),it->path());
+        }
+        if(files.size()<=kCaptionFilesKept)return;
+        std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.first>b.first;});
+        for(size_t index=kCaptionFilesKept;index<files.size();++index)
+            if(files[index].second!=keep){std::error_code removeError;std::filesystem::remove(files[index].second,removeError);}
     }
     void RecordRecent(const NeuralJobCompletion& completion,bool preserveCache=false){
         if(!m_recent)return;
@@ -11694,7 +11855,7 @@ private:
                 StartNeuralJob(url,{},title,url,MediaSourceKind::YouTube,sourceQuality,sourceKey,0.0,{},true);return;
             }
         }
-        if(!m_youtubeResolver)m_youtubeResolver=std::make_unique<YouTubeResolver>();
+        if(!m_youtubeResolver){m_youtubeResolver=std::make_unique<YouTubeResolver>();m_youtubeResolver->SetCaptionLanguage(m_loc.Language());}
         const uint64_t generation=m_youtubeLifecycle.Begin();
         m_pendingYouTubeTitle=DisplayTitleForSource(MediaSourceKind::YouTube,displayTitle);
         SyncSourceActionAvailability();
@@ -11914,6 +12075,11 @@ private:
         // After the install, not before: committing a prepared renderer runs
         // through Unload, which clears the notice.
         if(committed)NoteResolvedSourceQuality(completion->result);
+        // A seek reopens the streams without asking yt-dlp again, so only a
+        // resolve brings caption tracks; a seek keeps the ones there are.
+        if(committed&&completion->commitKind!=NetworkCommitKind::Seek){
+            m_youtubeCaptions=completion->result.captions;m_youtubeCaptionsPage=completion->pageUrl;
+        }
     }
     PlayerRuntimeStatus RuntimeStatus()const{
         return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());

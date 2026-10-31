@@ -79,6 +79,10 @@ private:
             {L"playlist.local_only", L"Next and previous file work on a video opened from a folder"},
             {L"subtitles.dialog", L"Load a subtitle file"}, {L"subtitles.filter", L"Subtitles"},
             {L"subtitles.failed", L"The subtitle file could not be read"}, {L"subtitles.delay", L"Subtitle delay "},
+            // P2.42: YouTube's caption tracks, after the source's own in Playback > Subtitles.
+            {L"subtitles.youtube.manual", L"YouTube"}, {L"subtitles.youtube.auto", L"YouTube, auto-generated"},
+            {L"subtitles.youtube.translated", L"YouTube, auto-translated"},
+            {L"subtitles.youtube.failed", L"The YouTube captions could not be fetched. Check the connection and pick them again in Playback > Subtitles."},
             {L"menu.mark_in", L"Mark In"}, {L"menu.mark_out", L"Mark Out"}, {L"menu.clear_marks", L"Clear marks"},
             {L"menu.goto_timecode", L"Go to timecode…"}, {L"menu.pause_neural_render", L"Pause background render"},
             {L"menu.aspectfit", L"Original aspect ratio (Fit)"}, {L"menu.aspectfill", L"Fill without stretching (Crop)"}, {L"menu.aspect_pixels", L"1:1 pixels"},

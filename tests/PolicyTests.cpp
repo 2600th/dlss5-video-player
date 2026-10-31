@@ -115,6 +115,7 @@
 #include <powerbase.h>
 
 #include <filesystem>
+#include <regex>
 #include <fstream>
 #include <iterator>
 #include <algorithm>
@@ -8793,9 +8794,19 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--format-sort-force",
         L"-S",
         L"height,vbr,abr",
+        // Captions in the interface language and English: chosen and printed,
+        // never downloaded by yt-dlp (P2.42).
+        L"--write-subs",
+        L"--write-auto-subs",
+        L"--sub-langs",
+        L"en(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?",
+        L"--sub-format",
+        L"vtt",
         L"--get-url",
         L"--print",
         L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s",
+        L"--print",
+        L"captions=%(requested_subtitles)j",
         // The end of the options: nothing after it is read as one.
         L"--",
         std::wstring(url),
@@ -8803,6 +8814,182 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
 
     CHECK_EQ(expected, BuildYouTubeResolverArguments(
                            helperDirectory, url, YouTubeSourceQuality::P1080));
+    // Another interface language is asked for first, and English after it.
+    const auto german = BuildYouTubeResolverArguments(helperDirectory, url, YouTubeSourceQuality::P1080, L"de-DE");
+    const auto langs = std::find(german.begin(), german.end(), L"--sub-langs");
+    REQUIRE(langs != german.end() && langs + 1 != german.end());
+    CHECK_EQ(std::wstring(L"de(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?,en(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?"), *(langs + 1));
+    // Still nothing that updates or reconfigures the pinned helper.
+    for (const auto& argument : german) {
+        CHECK(argument != L"-U" && argument != L"--update" && argument != L"--update-to");
+        CHECK(argument != L"-o" && argument != L"--output" && argument != L"-P" && argument != L"--paths");
+    }
+}
+
+// P2.42: the --sub-langs yt-dlp is given. yt-dlp anchors each pattern at both
+// ends (re.match with '$' appended), which std::regex_match does too, so this is
+// the set of keys a resolve can return.
+void youtube_captions_are_asked_for_in_the_viewers_language_then_english_test()
+{
+    const std::wstring english = L"en(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?";
+    CHECK(YouTubeCaptionLanguages(L"en") == english);
+    CHECK(YouTubeCaptionLanguages(L"EN-gb") == english);
+    CHECK(YouTubeCaptionLanguages(L"") == english);
+    // Not a language subtag: English alone, never a pattern built from it.
+    CHECK(YouTubeCaptionLanguages(L"x-test") == english);
+    CHECK(YouTubeCaptionLanguages(L"d3") == english);
+    CHECK(YouTubeCaptionLanguages(L"de)|.*") == english);
+    const std::wstring chinese = YouTubeCaptionLanguages(L"zh-Hans");
+    CHECK(chinese == L"zh(-[A-Z]{2}|-[0-9]{3}|-[A-Z][a-z]{3}|-orig)?," + english);
+    const auto matches = [](const std::wstring& languages, const std::wstring& key) {
+        for (size_t start = 0; start <= languages.size();) {
+            const size_t comma = languages.find(L',', start);
+            const std::wstring pattern = languages.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start);
+            if (std::regex_match(key, std::wregex(pattern))) return true;
+            if (comma == std::wstring::npos) break;
+            start = comma + 1;
+        }
+        return false;
+    };
+    for (const wchar_t* key : {L"zh-Hans", L"zh-Hant", L"zh-TW", L"zh", L"en", L"en-orig", L"en-GB"})
+        CHECK(matches(chinese, key));
+    CHECK(matches(YouTubeCaptionLanguages(L"es"), L"es-419"));
+    // Read case-sensitively, the pattern leaves out translations from a third
+    // language ("en-ja" is Japanese machine-translated into English). yt-dlp
+    // matches without regard to case and sends them anyway, so the parser drops
+    // them too (the next test).
+    for (const wchar_t* key : {L"en-ja", L"en-zh-Hans", L"de-en", L"en-en", L"fr-FR", L"ja"})
+        CHECK(!matches(chinese, key));
+}
+
+// P2.42: what yt-dlp's requested_subtitles becomes - WebVTT on youtube.com or
+// googlevideo.com only, told apart by the URL, best first, and never more than
+// kMaximumCaptionTracks. The URLs are shaped like the ones 2026.10.10 printed for
+// a built-in trailer.
+void youtube_caption_tracks_are_trusted_vtt_ordered_and_capped_test()
+{
+    const std::string base = "https://www.youtube.com/api/timedtext?v=VQRLujxTm3c&caps=asr&xoaf=5&hl=en&key=yt8";
+    const auto entry = [](std::string_view key, std::string_view url, std::string_view ext = "vtt",
+                          std::string_view name = "Name") {
+        return "\"" + std::string(key) + "\": {\"ext\": \"" + std::string(ext) + "\", \"url\": \"" + std::string(url) +
+               "\", \"name\": \"" + std::string(name) + "\"}";
+    };
+    const std::string json = "{" + entry("en", base + "&lang=en&fmt=vtt", "vtt", "English") + ", " +
+                             entry("en-orig", base + "&kind=asr&lang=en&fmt=vtt", "vtt", "English (Original)") + ", " +
+                             entry("de", base + "&lang=de&fmt=vtt", "vtt", "German") + ", " +
+                             entry("de-DE", base + "&kind=asr&lang=en&tlang=de&fmt=vtt", "vtt", "German (Germany)") + ", " +
+                             entry("en-GB", base + "&lang=en-GB&fmt=vtt", "vtt", "English (United Kingdom)") + ", " +
+                             // Refused: another host, plain http, another port, a look-alike
+                             // host, a user name, another format, and a key that is not a tag.
+                             entry("fr", "https://captions.example.com/fr.vtt") + ", " +
+                             entry("it", "http://www.youtube.com/api/timedtext?lang=it&fmt=vtt") + ", " +
+                             entry("ja", "https://www.youtube.com:8443/api/timedtext?lang=ja&fmt=vtt") + ", " +
+                             entry("ko", "https://youtube.com.example.net/api/timedtext?lang=ko") + ", " +
+                             entry("pl", "https://user@www.youtube.com/api/timedtext?lang=pl") + ", " +
+                             entry("ru", base + "&lang=ru&fmt=srv3", "srv3") + ", " +
+                             entry("es\\u0000", base + "&lang=es&fmt=vtt") + ", " +
+                             // Third-language translations, as 2026.10.10 sent them for
+                             // the trailer: dropped, whatever the case of the key.
+                             entry("en-de", base + "&lang=de&tlang=en&fmt=vtt", "vtt", "English from German") + ", " +
+                             entry("en-zh-Hans", base + "&lang=zh-Hans&tlang=en&fmt=vtt") + ", " +
+                             entry("de-en", base + "&lang=en&tlang=de&fmt=vtt") + ", " +
+                             // The same recognition track under a second key is listed once.
+                             entry("en-US", base + "&kind=asr&lang=en&fmt=vtt", "vtt", "English (US)") + "}";
+
+    const std::vector<CaptionTrack> english = ParseCaptionTracks(json, L"en");
+    REQUIRE(english.size() == 5);
+    // Written first, then recognised, then translated; English before German.
+    CHECK(english[0].language == "en" && english[0].kind == CaptionKind::Manual && english[0].name == "English");
+    CHECK(english[1].language == "en-GB" && english[1].kind == CaptionKind::Manual);
+    CHECK(english[2].language == "de" && english[2].kind == CaptionKind::Manual);
+    CHECK(english[3].language == "en-orig" && english[3].kind == CaptionKind::AutoGenerated);
+    CHECK(english[4].language == "de-DE" && english[4].kind == CaptionKind::AutoTranslated);
+    for (const CaptionTrack& track : english) CHECK(IsTrustedCaptionUrl(track.url));
+
+    // A German interface puts German first within each kind.
+    const std::vector<CaptionTrack> german = ParseCaptionTracks(json, L"de-DE");
+    REQUIRE(german.size() == 5);
+    CHECK(german[0].language == "de");
+    CHECK(german[1].language == "en");
+    CHECK(german[4].language == "de-DE");
+
+    // Nothing, and anything that is not the object yt-dlp prints, is no captions.
+    for (const std::string_view none : {"", "null", "NA", "[]", "{", "\"text\"", "{\"en\": []}", "{\"en\": {\"ext\": 1}}"})
+        CHECK(ParseCaptionTracks(none, L"en").empty());
+
+    // Capped, best first.
+    std::string many = "{";
+    for (int index = 0; index < 20; ++index) {
+        if (index) many += ", ";
+        many += entry("en-" + std::string(1, char('A' + index)) + "X", base + "&lang=" + std::to_string(index) + "&fmt=vtt");
+    }
+    many += "}";
+    CHECK_EQ(kMaximumCaptionTracks, ParseCaptionTracks(many, L"en").size());
+}
+
+void youtube_caption_output_rides_beside_the_streams_without_loosening_them_test()
+{
+    const std::string metadata = "duration=167;live_status=not_live;video_available_at=0;audio_available_at=0"
+                                 ";selected_height=1440;video_kbps=7854;age_limit=0";
+    const std::string streams = "https://v.googlevideo.com/video\nhttps://a.googlevideo.com/audio\n";
+    const std::string captions =
+        "{\"en\": {\"ext\": \"vtt\", \"url\": \"https://www.youtube.com/api/timedtext?v=VQRLujxTm3c&lang=en&fmt=vtt\", \"name\": \"English\"}}";
+
+    const ResolveResult resolved = ParseResolverOutput(metadata + "\ncaptions=" + captions + "\n" + streams, 0, L"en");
+    REQUIRE(resolved.ok);
+    CHECK_EQ(1440, resolved.selectedHeight);
+    CHECK(resolved.mediaUrl == L"https://v.googlevideo.com/video");
+    CHECK(resolved.audioUrl == L"https://a.googlevideo.com/audio");
+    REQUIRE(resolved.captions.size() == 1);
+    CHECK(resolved.captions[0].language == "en" && resolved.captions[0].kind == CaptionKind::Manual);
+    // CRLF, as a console would write it.
+    CHECK_EQ(size_t{1}, ParseResolverOutput(metadata + "\r\ncaptions=" + captions + "\r\n" + "https://v.googlevideo.com/video\r\n", 0).captions.size());
+
+    // No captions, or captions that do not parse, never fail a stream that resolved.
+    for (const std::string& line : std::vector<std::string>{std::string("null"), std::string("NA"), std::string("{not json"),
+                                    "{\"en\": {\"ext\": \"vtt\", \"url\": \"https://evil.example/en.vtt\"}}",
+                                    std::string(40 * 1024, 'x')}) {
+        const ResolveResult result = ParseResolverOutput(metadata + "\ncaptions=" + line + "\n" + streams, 0);
+        CHECK(result.ok);
+        CHECK(result.captions.empty());
+        CHECK(result.mediaUrl == L"https://v.googlevideo.com/video");
+    }
+    // A captions line and nothing after it is not a stream.
+    CHECK(!ParseResolverOutput(metadata + "\ncaptions=" + captions + "\n", 0).ok);
+    CHECK(!ParseResolverOutput(metadata + "\ncaptions=" + captions, 0).ok);
+    // The streams keep their own 16 KB, captions or not.
+    const std::string longStream = "https://v.googlevideo.com/" + std::string(16 * 1024, 'a') + "\n";
+    CHECK_EQ(ResolveError::InvalidOutput, ParseResolverOutput(metadata + "\ncaptions=" + captions + "\n" + longStream, 0).error);
+    // A second captions line is a third stream line, which was never allowed.
+    CHECK(!ParseResolverOutput(metadata + "\ncaptions=" + captions + "\ncaptions=" + captions + "\n" + streams, 0).ok);
+    // The captions line is only ever the one after the metadata.
+    CHECK(!ParseResolverOutput("captions=" + captions + "\n" + metadata + "\n" + streams, 0).ok);
+}
+
+void youtube_caption_fetch_goes_only_where_yt_dlp_pointed_test()
+{
+    CHECK(IsTrustedCaptionUrl(L"https://www.youtube.com/api/timedtext?v=VQRLujxTm3c&lang=en&fmt=vtt"));
+    CHECK(IsTrustedCaptionUrl(L"https://youtube.com/api/timedtext?lang=en"));
+    CHECK(IsTrustedCaptionUrl(L"https://manifest.googlevideo.com/api/manifest/hls_timedtext_playlist/id/1"));
+    CHECK(IsTrustedCaptionUrl(L"https://www.youtube.com:443/api/timedtext?lang=en"));
+    for (const wchar_t* refused : {L"", L"http://www.youtube.com/api/timedtext", L"https://www.youtube.com:8443/api/timedtext",
+                                   L"https://youtube.com.evil.example/api/timedtext", L"https://notyoutube.com/api/timedtext",
+                                   L"https://user:pass@www.youtube.com/api/timedtext", L"https://www.youtube.com/api/timed text",
+                                   L"https://www.youtube.com/api/\"timedtext", L"ftp://www.youtube.com/a", L"file:///C:/a.vtt",
+                                   L"https://captions.example.com/en.vtt"})
+        CHECK(!IsTrustedCaptionUrl(refused));
+    const auto request = CaptionRequestFor(L"https://www.youtube.com/api/timedtext?v=VQRLujxTm3c&lang=en&fmt=vtt#t=1");
+    REQUIRE(request.has_value());
+    CHECK(request->host == L"www.youtube.com");
+    CHECK(request->path == L"/api/timedtext?v=VQRLujxTm3c&lang=en&fmt=vtt");
+    CHECK(!CaptionRequestFor(L"https://captions.example.com/en.vtt").has_value());
+
+    CHECK(LooksLikeWebVtt("WEBVTT\nKind: captions\nLanguage: en\n\n00:00:01.000 --> 00:00:02.000\nHello\n"));
+    CHECK(LooksLikeWebVtt("\xEF\xBB\xBFWEBVTT\r\n"));
+    CHECK(LooksLikeWebVtt("WEBVTT"));
+    CHECK(LooksLikeWebVtt("WEBVTT - title\n"));
+    for (const std::string_view body : {"", "<html>", "WEBVTTX\n", "webvtt\n", "#EXTM3U\n", " WEBVTT\n"})
+        CHECK(!LooksLikeWebVtt(body));
 }
 
 void youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test()
@@ -12813,7 +13000,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
             }
         }
     }
-    if (argc != 18 || std::wstring_view(argv[1]) != L"--no-config" ||
+    if (argc != 26 || std::wstring_view(argv[1]) != L"--no-config" ||
         std::wstring_view(argv[2]) != L"--no-cache-dir" ||
         std::wstring_view(argv[3]) != L"--no-plugin-dirs" ||
         std::wstring_view(argv[4]) != L"--no-playlist" ||
@@ -12825,10 +13012,18 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         std::wstring_view(argv[10]) != L"--format-sort-force" ||
         std::wstring_view(argv[11]) != L"-S" ||
         std::wstring_view(argv[12]) != L"height,vbr,abr" ||
-        std::wstring_view(argv[13]) != L"--get-url" ||
-        std::wstring_view(argv[14]) != L"--print" ||
-        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s" ||
-        std::wstring_view(argv[16]) != L"--") {
+        std::wstring_view(argv[13]) != L"--write-subs" ||
+        std::wstring_view(argv[14]) != L"--write-auto-subs" ||
+        std::wstring_view(argv[15]) != L"--sub-langs" ||
+        std::wstring_view(argv[16]) != YouTubeCaptionLanguages(L"en") ||
+        std::wstring_view(argv[17]) != L"--sub-format" ||
+        std::wstring_view(argv[18]) != L"vtt" ||
+        std::wstring_view(argv[19]) != L"--get-url" ||
+        std::wstring_view(argv[20]) != L"--print" ||
+        std::wstring_view(argv[21]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s" ||
+        std::wstring_view(argv[22]) != L"--print" ||
+        std::wstring_view(argv[23]) != L"captions=%(requested_subtitles)j" ||
+        std::wstring_view(argv[24]) != L"--") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
@@ -12840,7 +13035,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         return 92;
     }
 
-    const std::wstring_view url = argv[17];
+    const std::wstring_view url = argv[25];
     if (url.find(L"stderrnoise") != std::wstring_view::npos) {
         // What a Python interpreter prints around a run that works: warnings
         // on stderr, far more of them than stdout's whole cap, with the real
@@ -16935,6 +17130,47 @@ void youtube_bundled_helper_plays_a_built_in_trailer_past_the_first_minute_netwo
     CHECK(seconds >= 69.0);   // read for the whole minute and more, not cut short
 }
 
+// P2.42, the `network` tier: the bundled yt-dlp names the first built-in
+// trailer's caption tracks the way a resolve in the player does - the trailer
+// has a written English track and YouTube's recognition - and the written one
+// arrives from the host yt-dlp gave as WebVTT, without a redirect. Checked on
+// 2026-10-31 with yt-dlp 2026.10.10: "en" written, "en-orig" recognised.
+void youtube_captions_of_a_built_in_trailer_arrive_as_webvtt_network_test()
+{
+    const std::wstring page(kExampleVideos[0].url);
+    YouTubeResolver resolver;
+    resolver.SetCaptionLanguage(L"en");
+    const ResolveResult resolved = resolver.Resolve(page, YouTubeSourceQuality::Auto, {});
+    if (!resolved.ok) std::wcerr << L"resolve failed: error " << static_cast<int>(resolved.error) << L" " << resolved.detail << L"\n";
+    REQUIRE(resolved.ok);
+    for (const CaptionTrack& track : resolved.captions)
+        std::cerr << "caption " << track.language << " (" << track.name << ") kind " << static_cast<int>(track.kind) << '\n';
+    REQUIRE(!resolved.captions.empty());
+    CHECK(resolved.captions.size() <= kMaximumCaptionTracks);
+    CHECK(resolved.captions.front().kind == CaptionKind::Manual);
+    CHECK(resolved.captions.front().language == "en");
+    CHECK(std::any_of(resolved.captions.begin(), resolved.captions.end(),
+                      [](const CaptionTrack& track) { return track.kind == CaptionKind::AutoGenerated; }));
+    for (const CaptionTrack& track : resolved.captions) CHECK(IsTrustedCaptionUrl(track.url));
+    // yt-dlp also sends "English from German" and the like; none is listed.
+    for (const CaptionTrack& track : resolved.captions) CHECK(track.kind != CaptionKind::AutoTranslated);
+
+    const auto request = CaptionRequestFor(resolved.captions.front().url);
+    REQUIRE(request.has_value());
+    HttpsGetRequest get;
+    get.host = request->host;
+    get.path = request->path;
+    get.maximumBodyBytes = 4u * 1024u * 1024u;
+    get.timeoutMilliseconds = 15000;
+    get.followRedirects = false;
+    const HttpsGetResult fetched = HttpsGet(get, {});
+    if (fetched.outcome != HttpsGetResult::Outcome::Ok)
+        std::wcerr << L"caption fetch: outcome " << static_cast<int>(fetched.outcome) << L" status " << fetched.status << L" " << fetched.error << L"\n";
+    REQUIRE(fetched.outcome == HttpsGetResult::Outcome::Ok);
+    CHECK(LooksLikeWebVtt(fetched.body));
+    CHECK(fetched.body.find("-->") != std::string::npos);
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(runtime_shutdown_releases_player_before_media_foundation_and_com_test),
@@ -17255,6 +17491,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test),
     TEST_CASE(youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test),
     TEST_CASE(youtube_resolver_argument_vector_is_exact_and_ordered_test),
+    TEST_CASE(youtube_captions_are_asked_for_in_the_viewers_language_then_english_test),
+    TEST_CASE(youtube_caption_tracks_are_trusted_vtt_ordered_and_capped_test),
+    TEST_CASE(youtube_caption_output_rides_beside_the_streams_without_loosening_them_test),
+    TEST_CASE(youtube_caption_fetch_goes_only_where_yt_dlp_pointed_test),
     TEST_CASE(youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test),
     TEST_CASE(resolver_metadata_reports_selected_height_video_bitrate_and_age_limit_test),
     TEST_CASE(youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test),
@@ -17380,6 +17620,7 @@ constexpr test_support::TestCase kSlowCases[] = {
 // never the quick, slow, portable or hardware runs, which must pass offline.
 constexpr test_support::TestCase kNetworkCases[] = {
     TEST_CASE(youtube_bundled_helper_plays_a_built_in_trailer_past_the_first_minute_network_test),
+    TEST_CASE(youtube_captions_of_a_built_in_trailer_arrive_as_webvtt_network_test),
 };
 
 
@@ -17412,7 +17653,8 @@ int wmain(int argc, wchar_t* argv[])
     // `--only=<text>` runs the cases whose name contains the text, from either
     // offline table. `--tier=quick` runs kCases and `--tier=slow` kSlowCases;
     // with neither, every offline case runs. `--tier=network` runs
-    // kNetworkCases and nothing else.
+    // kNetworkCases and nothing else, and `--tier=network --only=<text>` the
+    // online cases whose name contains the text.
     std::string only;
     bool quick = true;
     bool slow = true;
@@ -17428,6 +17670,13 @@ int wmain(int argc, wchar_t* argv[])
     } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=slow") {
         quick = false;
     } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=network") {
+        quick = slow = false;
+        network = true;
+    } else if (argc == 3 && std::wstring_view(argv[1]) == L"--tier=network" &&
+               std::wstring_view(argv[2]).starts_with(L"--only=") && std::wstring_view(argv[2]).size() > 7) {
+        // One online case: `--tier=network --only=captions` fetches captions
+        // without also decoding the trailer.
+        for (const wchar_t character : std::wstring_view(argv[2]).substr(7)) only.push_back(static_cast<char>(character));
         quick = slow = false;
         network = true;
     } else if (argc > 1) {
