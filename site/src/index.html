@@ -584,10 +584,11 @@
     <h2 class="section__title">Keep it as a file</h2>
     <p class="section__note">
       A video, a photo or an animated GIF: whatever you watch rendered, you
-      can save. <strong>Save converted video</strong> writes the render you
-      already have without rendering again; <strong>Export with DLSS
-      stages</strong> (<kbd>Ctrl</kbd>+<kbd>S</kbd>) renders a new file. Both
-      are under <strong>DLSS &gt; Convert &amp; export</strong>.
+      can save. <strong>Save rendered video</strong> writes the render you
+      already have without rendering again; <strong>Export</strong>
+      (<kbd>Ctrl</kbd>+<kbd>S</kbd>, or Export on the toolbar) renders a new
+      file, and opens on what you are watching. Both are in the
+      <strong>File</strong> menu.
     </p>
   </div>
 
@@ -597,7 +598,7 @@
     <p class="readout__row"><span class="readout__k">Photo</span><span class="readout__v readout__v--prose">PNG, JPEG, BMP, TIFF or static WebP in; PNG or JPEG out, at the source size. The 2560×1440 screenshot <a href="#photos">above</a> took <span class="data">8&nbsp;s</span> from the command line on an RTX 4080 SUPER.</span></p>
     <p class="readout__row"><span class="readout__k">Stages</span><span class="readout__v readout__v--prose">Super Resolution, neural rendering and frame generation at 2× to 5× the frame rate, any combination, in one file and in NVIDIA&rsquo;s order. Super Resolution on its own runs on RTX VSR by default, or DLSS Super Resolution if you choose it. <span class="new" title="In main, after v0.27.2; the next release carries it">New</span></span></p>
     <p class="readout__row"><span class="readout__k">Scripted</span><span class="readout__v readout__v--prose"><code>dlss5-convert clip.mp4</code> writes <code>clip-dlss.mkv</code> without opening the player, and takes folders and wildcards too. Every stage and Neural setting is an option: <code>--preset strong --passes 3</code> stacks three passes of the strong look, <code>--stages fg --multiplier 3</code> triples the frame rate. <code>dlss5-convert probe</code> says what a file is and what this machine can run on it; the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md#from-the-command-line" rel="noopener">usage guide</a> has the rest.</span></p>
-    <p class="readout__row"><span class="readout__k">Left out</span><span class="readout__v readout__v--prose">Subtitles travel as tracks and are never burned in. Image adjustments and playback upscaling are not baked in; the stages export is how a larger size goes into the file.</span></p>
+    <p class="readout__row"><span class="readout__k">Left out</span><span class="readout__v readout__v--prose">Subtitles travel as tracks and are never burned in. Viewing adjustments and playback upscaling are not baked in; the stages export is how a larger size goes into the file.</span></p>
   </div>
 
   <figure class="screen export__figure">
@@ -682,7 +683,7 @@
         <img src="media/neural-settings.jpg" width="882" height="518" loading="lazy" decoding="async"
              alt="The Neural settings dialog at its defaults: the Look preset Standard (recommended) with its description, the Look controls led by Style, Quality and render time, Guides sent to the model, Across frames, and a line saying the neural render on screen uses these settings.">
       </picture>
-      <figcaption>Neural settings, at their defaults</figcaption>
+      <figcaption>Neural settings at their defaults, before 0.30.0 made them the Picture panel&rsquo;s render zone</figcaption>
     </figure>
     <figure class="screen">
       <picture>

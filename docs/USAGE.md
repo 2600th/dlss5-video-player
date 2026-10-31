@@ -63,12 +63,41 @@ once a copy of those exact frames is on disk, seeks use it instead. It is the
 same video either way; what changes is that seeking stops depending on the
 network.
 
-Press `D` or use **Neural Rendering** to switch views at the same timestamp.
+Press `D` or use the toolbar's **DLSS 5** pill to switch views at the same timestamp.
 Pause with `Space` and press `.` to step a cached frame. Dragging the timeline
 shows the frame under the cursor while you drag and keeps playing afterwards if
 it was playing; mouse-wheel volume works anywhere in the window (`Ctrl`+wheel over
 the picture zooms instead). An incomplete
 render is never reused.
+
+### The menus, the toolbar and the picture menu
+
+The menus are named for jobs: **File** (what comes in and goes out),
+**Playback**, **View**, **Compare**, **Enhance** (DLSS 5, the upscalers and frame
+generation), **Tools** and **Help**. Each row shows its key, and the key is
+whatever [your key file](#change-the-keys) binds.
+
+The toolbar reads left to right as the same jobs:
+
+- **Open**, **Back 10 s**, **Play**, **Stop**, **Forward 10 s** and **Mute**.
+- **DLSS 5**, a split button. The pill turns DLSS 5 on and off and names the
+  look it renders with ("DLSS 5 · On · Standard"); the chevron beside it opens
+  the look presets, Picture, Re-render from here and Preview this frame. The
+  chevron is its own stop for `Tab`, so `Enter` opens it from the keyboard.
+- **Upscaler**, which names the upscaler playing ("Upscaler · RTX VSR", "DLSS
+  SR" or "Off") and opens the three upscaler radios and RTX VSR's quality.
+- **Picture**, the one panel for the render's look and the viewing adjustments,
+  and **Export**, which reads **Cancel** while an export runs.
+- **Fit** / **Fill** and **Full**.
+
+Frame generation and the debug views are not on the toolbar: they are
+**Enhance > Generate frames** and **View > Debug view** (keys `1` to `4`).
+
+**Right-click the picture** (or press `Shift+F10` or the menu key) for what you
+can do to it: Play / Pause, DLSS 5, the compare modes, the look presets, the
+upscaler, Picture, Viewing adjustments, Re-render from here, Save comparison
+image, Fit, Fill and Fullscreen. Every row is a menu bar row, so it shows the
+same key.
 
 ### Preview first: markers, timecodes and ranges
 
@@ -83,7 +112,7 @@ Out is the exclusive end, so marking Out on the last frame means "to the end"
 and renders it. A range that names no frame is refused before a render starts.
 
 Neural rendering has two shapes. **Turn it on while watching** with the
-toolbar's Neural Rendering button, the DLSS menu entry or `D`: rendering starts
+toolbar's DLSS 5 pill, **Enhance > DLSS 5 neural rendering** or `D`: rendering starts
 at the playhead and a panel over the current frame collects a lead before
 playback resumes on the rendered frames. The lead follows the render's pace:
 four seconds while the pace is unknown or just keeps up, two seconds at 1.5
@@ -126,15 +155,17 @@ predicted rate and asks before starting. Once a session has been running for a
 few seconds the status line reports the rate it is actually achieving whenever
 that falls behind.
 
-**Convert to a file** with the DLSS menu's **Convert & export** submenu:
-`Ctrl+R` converts the marked clip, **Convert whole video** the whole source,
-and **Save converted video** writes the result out. `F` and `Shift+F` still
+**Convert to a file** from the **Enhance** menu: **Render marked range**
+(`Ctrl+R`) converts the marked clip, **Render whole video** the whole source,
+and **File > Save rendered video** writes the result out. **Re-render from
+here** restarts what the render is doing at the playhead with the settings the
+Picture panel holds now. `F` and `Shift+F` still
 render just the current frame or a four-second clip as a quick look. Each
 result opens as cached playback of that range, seeking stays inside it and the
 status line shows `Range hh:mm:ss:ff–hh:mm:ss:ff` plus a short
 `NR intensity/struct/tone` summary of the settings it was rendered with.
-**Advanced > Open render receipt** opens the entry's `receipt.json` with the
-full record. **Advanced > Render report** reads the part of it that says what
+**Tools > Open render receipt** opens the entry's `receipt.json` with the
+full record. **Tools > Render report** reads the part of it that says what
 the render did to motion, measured while it rendered, against the source and in
 8-bit codes: **flicker added** - how much more each frame changes from the one
 before, once both are moved along the video's own motion, than the source does;
@@ -145,10 +176,10 @@ before the player measured its renders says so instead of printing zeros. The
 recent-video history keeps one render per source, so a new
 preview or range render for the same file displaces the previous entry.
 
-Neural settings preview themselves. With playback paused, changing a slider in
-**Neural settings** re-renders that one frame 700 ms after the sliders settle
+The render settings preview themselves. With playback paused, changing a slider in
+the **Picture** panel's render zone re-renders that one frame 700 ms after the sliders settle
 and shows the result in place of it, so settings can be compared on the actual
-picture; the toggle reads `Neural Rendering · Settings preview` while such a
+picture; the toggle reads `DLSS 5 · Settings preview` while such a
 frame is displayed. **Apply** applies the settings to what is on screen — it
 restarts an active session at the playhead or re-previews the paused frame —
 and never starts a whole-video render. Saving a converted video refuses an
@@ -196,7 +227,7 @@ browser-recorded WebM, greys the bar out: it takes no clicks, and `Left` and
 The **compare bar** sits above the toolbar whenever a video is loaded, and works
 during cached playback on the neural view (it grays out otherwise; `D` turns the
 neural view on). It holds the mode, the Mix, the zoom and the swap, which are
-also under **Video > Compare**. In a narrower window it shortens the mode
+also under the **Compare** menu. In a narrower window it shortens the mode
 names and shows Swap and Loupe as icons (hover for their names); narrower
 still, the modes fold into one button that opens a menu of them:
 
@@ -209,14 +240,14 @@ still, the modes fold into one button that opens a menu of them:
 - **Difference** shows where the model changed the picture: the absolute
   difference between DLSS 5 (at the current Mix) and the original, computed in
   linear light and amplified 4x, as brightness. `Shift+]` and `Shift+[` step the
-  amplification through 1x, 2x, 4x, 8x, 16x and 32x, and **Video > Compare >
+  amplification through 1x, 2x, 4x, 8x, 16x and 32x, and **Compare >
   Difference as brightness only** switches between one grey value and a
   difference per color channel. The image adjustments do not apply to it, and
   its tag names the amplification and the channels, e.g. `DIFFERENCE x4 · LUMA`.
 - **Side by side** shows the original and DLSS 5 as two panes of the same
   frame - one pair, so always one timestamp - each fitted whole into its half.
   **2 × 2** adds Difference and DLSS 5 at a second Mix below them; pick that
-  Mix under **Video > Compare > 2 × 2 fourth pane Mix** (25% to 200%, 50% by
+  Mix under **Compare > 2 × 2 fourth pane Mix** (25% to 200%, 50% by
   default). Where RTX VSR can run (below), the fourth pane is **RTX VSR**
   instead, so the two engines share the right-hand column: Original | DLSS 5
   over Difference | RTX VSR. Zoom, pan and the loupe move every pane together,
@@ -230,10 +261,10 @@ still, the modes fold into one button that opens a menu of them:
   window shows the picture larger than the video, RTX VSR makes it at the size
   it is shown; otherwise it runs at the video's own size, where it cleans up
   compression. Its tag names the quality, e.g. `RTX VSR · HIGH`.
-  **Video > Compare > Compare against RTX VSR** (`Shift+R`) makes Split, Wipe,
+  **Compare > Compare against RTX VSR** (`Shift+R`) makes Split, Wipe,
   Difference, Side by side and the loupe compare the original with RTX VSR
   instead of DLSS 5 (the Mix and the mask stay DLSS 5's); press it again to go
-  back. **Video > Compare > RTX VSR quality** is a ladder of **Low**,
+  back. **Enhance > RTX VSR quality** is a ladder of **Low**,
   **Medium**, **High** (the default) and **Ultra**; on an RTX 4080 SUPER one
   frame costs about 1.0, 1.3, 3.2 and 4.3 ms of GPU time for a 1080p video and
   1.9, 2.2, 5.3 and 7.2 ms for a 1440p one, whatever size it is shown at, and a
@@ -248,8 +279,8 @@ still, the modes fold into one button that opens a menu of them:
   untouched, lower mixes back toward the original, higher extends the model's
   own change. Drag the slider or press `[` and `]` (a tenth per press). It
   costs a present, not a re-render, and it is the same value as **DLSS 5 mix**
-  in Image adjustments.
-- **A mask** limits where DLSS 5 shows. **Video > Compare > Load mask
+  in the Picture panel's viewing zone.
+- **A mask** limits where DLSS 5 shows. **Compare > Mask > Load mask
   image...** takes any PNG, BMP, JPEG, TIFF or GIF and uses its brightness,
   stretched over the frame: white keeps DLSS 5 at the Mix, black shows the
   original, grey blends. It applies wherever DLSS 5 is shown - the neural view,
@@ -269,7 +300,7 @@ To look closely:
   screen pixels per rendered pixel (a step that would not magnify in the
   current window is skipped). `Z` zooms in at the mouse and wraps back to Fit
   after 8x, `Shift+Z` zooms out, `Ctrl`+wheel over the picture zooms at the
-  pointer, and the bar's `-` and `+` zoom at the centre. **Video > Compare >
+  pointer, and the bar's `-` and `+` zoom at the centre. **Compare >
   Zoom to fit** returns to Fit. Zoom works in every view, not only while
   comparing.
 - **Pan** a zoomed picture by dragging it with the left button, or with the
@@ -280,7 +311,7 @@ To look closely:
   4x the rendered pixels (twice the view's own zoom when that is higher) and
   without smoothing, so single pixels are visible. With Swap on, the sides
   swap.
-- **Video > 1:1 pixels** sizes the picture to exactly the render's resolution,
+- **View > 1:1 pixels** sizes the picture to exactly the render's resolution,
   so one rendered pixel is one screen pixel with no scaling at all; a render
   larger than the window is cropped around the centre. `A` and the toolbar's
   Fit/Fill button go back to Fit or Fill.
@@ -318,36 +349,45 @@ window on that display, and the original of an HDR video is shown in HDR, as it
 was graded: in the original view, in Split, Wipe, Side by side and the loupe, and while
 you hold the picture. The player follows the display it is on - drag it to an
 SDR monitor and it presents SDR again - and never turns Windows HDR on or off
-itself. **Video > Compare > Compare HDR at SDR** shows the original tone mapped
+itself. **Compare > Compare HDR at SDR** shows the original tone mapped
 instead, exactly as the model saw it, for a like-for-like comparison. A Mix
 other than 100%, a mask, Difference, 2 × 2 and every view that shows RTX VSR always compare at SDR:
 they compute with both pictures, and mixing HDR light with SDR light would
 measure the tone map rather than the model. **Save comparison image**, exports
 and the cache stay SDR.
 
-**DLSS > Neural settings** (`Ctrl+N`) opens with the **Look preset**: Standard
+**Enhance > Picture** (`Ctrl+N`, or the toolbar's **Picture**) opens one panel in
+two zones, split by what a change costs. The left one, **DLSS 5 render -
+re-renders - in cache and exports**, opens with the **Look preset**: Standard
 (recommended), Detail only, Gentle or Strong, with a line saying what the chosen one
 does. Moving any control afterwards makes it **Custom**, named after the preset it
 came from ("Custom · from Strong"); picking a preset again brings its values back.
-The same presets are under **DLSS > Neural presets**. Below it the dialog exposes
+The same presets are under **Enhance > Look preset** and the chevron beside the
+toolbar's DLSS 5 pill. Below it the render zone exposes
 the neural model's style, local tone, local structure, color strength, intensity,
 skin structure and automatic mask - in that order, the order of how far each one
 measurably moves the picture - the number of neural passes and whether temporal
 history carries between them, the motion-vector and depth guide switches, how
 readily a scene cut resets the render's temporal history, and how much temporal
-stability the render gets. The controls are grouped under **Look**, **Quality and
-render time**, **Guides sent to the model** and **Across frames**, so which
-ones answer the same question is visible before you read their labels.
+stability the render gets. The look comes first; **Render pipeline ›** turns
+the zone to the rest - the passes, the guides, the scene cuts, temporal
+stability, and what the model is given (**Deband** and **Smoothed exposure**,
+the `[Encoding] SourceDeband` and `SuppliedExposure` keys, here because they
+change the render).
 
 These change the neural render itself, which is what conversions and exports
 write. A line above the buttons says what **Apply** will do to the picture on
 screen: during neural playback it restarts the render at the playhead with the new
 settings (Apply is greyed out when the render already uses them); while paused, the
 frame re-renders on its own once you stop changing a control, and the line says
-when the rest of the video is still the previous render. **Image adjustments...**
-opens the other dialog: brightness, contrast, colour and Mix are instant, change
-only what this screen shows, and are not written by conversions or exports.
-Writing a file is a separate action under **Convert & export**. The guide
+when the rest of the video is still the previous render. **Revert** goes back to
+the settings the picture on screen was rendered with; **Reset** to the defaults.
+
+The right zone, **Viewing - instant - this screen only**, is Mix and the colour
+sliders (brightness, contrast, saturation, white balance and tint): they change
+only what this screen shows and are not written by conversions or exports.
+**View > Viewing adjustments** (`Ctrl+E`) opens the same panel with Mix focused.
+Writing a file is a separate action under **File > Export**. The guide
 switches also drive the live debug views immediately. Hovering any control shows
 what it does, including which effects were measured on this runtime and what a
 change costs.
@@ -360,7 +400,7 @@ measures. Measured over a 72-frame range: two passes took 9.81 s against 8.01 s
 and wrote 932,019 bytes against 780,048. **Keep temporal history per pass** sits
 beside it and greys out at a single pass, where it has nothing to govern.
 
-**DLSS > Processing scale** sets the resolution the model runs at. **Source,
+**Enhance > Processing scale** sets the resolution the model runs at. **Source,
 100%** is the default and the recommended rung: the model sees the decoded
 frame. **75%** and **50%** show the model an area-reduced picture and let DLSS
 Super Resolution bring the result back to the source size, which renders faster
@@ -439,8 +479,61 @@ YouTube download.
 Press `?` or `F1` (or **Help > Keyboard shortcuts**) for a sheet of every
 shortcut, grouped by the menu it belongs to, plus the keys no menu names
 (`Tab`, `Enter`, `.`, `Esc`, the wheel and the `Ctrl+Alt` overlay keys). It is
-read from the menus themselves, so it always matches them. The keys keep
-working while it is up; `?`, `F1`, `Esc` or a click on it closes it.
+read from the menus themselves, so it always matches them - including keys you
+have changed. The keys keep working while it is up; `?`, `F1`, `Esc` or a click
+on it closes it.
+
+### Change the keys
+
+**Help > Edit key bindings...** opens `input.conf`, beside
+`DLSSVideoPlayer.ini`, in Notepad, writing it first if there is none. It works
+like mpv's: one binding per line, the key, then the command.
+
+```
+# Move stop from S to Q, give play a second key, and free M.
+Q        stop
+S        ignore
+K        play-pause
+M        ignore
+```
+
+Every command and its default key is in the file it writes, commented out, so
+uncommenting a line is how you start. Keys are written as they read on the
+menus: `Ctrl+Shift+S`, `F6`, `Left`, `[`, `?`. A line replaces what its key
+did and leaves the command's other keys alone, so moving a command is two
+lines; `ignore` unbinds a key; a command can have several keys. `Alt`
+combinations are left to the menu bar, and `Tab`, `Enter`, `Esc` and `F10` are
+kept for moving around the window, so the file cannot take them.
+
+The player reads the file when it starts and again whenever it becomes the
+active window, so saving in Notepad and clicking back is enough. A line it
+cannot use - an unknown command, a key it does not know, a key bound twice -
+is written to the log with its line number and skipped; it never stops the
+player starting. The menus' key columns, the toolbar's tooltips and the
+shortcut sheet all show the keys the file gives.
+
+### Translations
+
+The player reads its strings from one table; a translation replaces the ones
+it names and leaves the rest in English, so a partial translation is usable.
+None ships yet. A translation is one UTF-8 file, `lang\<tag>.lang` beside
+`DLSSVideoPlayer.exe` (`lang\de.lang`, `lang\zh-Hans.lang`), one
+`key = text` per line:
+
+```
+# German
+menu.file = Datei
+menu.rtx_vsr_unavailable = " — %s"
+```
+
+To start one, run `DLSSVideoPlayer.exe --lang-template lang\de.lang`, which
+writes every key with its English text, and translate the right-hand sides.
+`--lang de` tries it; `[Interface] Language=de` in `DLSSVideoPlayer.ini` keeps
+it; with neither, the player follows the Windows display language. Quote a
+text only to keep a space at either end; `\n` is a line break. A line the
+loader cannot use - not a `key = text`, a key English does not have, or a `%s`
+that does not match English's - is logged and skipped, and every key the file
+leaves out reads in English.
 
 The player also answers Windows' own media controls: the player card in the
 volume flyout and on the lock screen shows the video's title and position and
@@ -451,13 +544,14 @@ neural picture) - which do exactly what the matching menu commands do.
 
 ### RTX VSR upscaling
 
-**DLSS > RTX VSR Upscaling (recommended)** is on by default. Wherever the window
+**Enhance > RTX VSR (recommended)** is on by default, and the toolbar's
+**Upscaler** pill says so ("Upscaler · RTX VSR"). Wherever the window
 shows the video larger than it is - a 1080p video full screen on a 1440p or 4K
 monitor, a 720p stream in a large window - NVIDIA's RTX Video Super Resolution
 makes the picture at the size it is shown, instead of the plain scale the window
 would otherwise apply. It runs on the frame the player decodes, so it needs no
 render and no cache, and nothing it makes in playback reaches a capture or a
-cache key; an export runs it on its own (see the export's **Upscaler**). Its quality is the comparison view's: **Video > Compare > RTX VSR
+cache key; an export runs it on its own (see the export's **Upscaler**). Its quality is the comparison view's: **Enhance > RTX VSR
 quality**, High by default. The status line says `RTX VSR Upscaling on · <width>×<height>`
 while it is the upscaler.
 
@@ -471,7 +565,7 @@ Its error does change more from one frame to the next than a plain scaler's, so
 fine moving detail can shimmer slightly; turn it off from the same menu if you
 see that.
 
-It stands aside wherever it does not apply: while **DLSS Upscaling** is on, in
+It stands aside wherever it does not apply: while **DLSS Super Resolution** is on, in
 the comparison views (which show it as a member of their own), at a Mix other
 than 100% or with a mask, for an HDR video (it takes 8-bit SDR; an SDR video
 on an HDR display is upscaled as anywhere else), in a debug view, and wherever
@@ -488,13 +582,16 @@ menu item again also starts over. It needs what the **RTX VSR** view needs (see
 grey and the window scales as before. `[Playback] RtxVsr` in
 `DLSSVideoPlayer.ini` holds the setting.
 
-### DLSS Upscaling
+### DLSS Super Resolution
 
-**DLSS Upscaling** is independent and starts off on a fresh installation. Its
+**Enhance > DLSS Super Resolution** is the second of the three upscaler radios
+(RTX VSR, DLSS Super Resolution, No upscaler; the Upscaler pill opens the same
+three) and is not chosen on a fresh installation; RTX VSR stands aside while it
+runs. Its
 output is **Auto** by default: the player takes the largest rung the monitor's
 current mode can scan out - 1080p, 1440p or 2160p - and never one above it,
 because the surplus is scaled away when the frame is presented while the DLSS
-evaluate is charged per output pixel. **DLSS > Upscaling output** offers each
+evaluate is charged per output pixel. **Enhance > DLSS SR output size** offers each
 rung explicitly if you want to pin one; a pinned rung is kept between launches.
 It runs during playback on either view,
 preserves aspect ratio and does not downsample a source already at or above the
@@ -503,14 +600,14 @@ target: a 4K source reports "source meets output" and stays off, and so does a
 "display below 1080 lines", which is a different refusal from the first and says
 so. Neural rendering itself preserves source resolution.
 
-**DLSS Upscaling is off by default because, on video, it does not beat a plain
+**DLSS Super Resolution is off by default because, on video, it does not beat a plain
 scaler**, and RTX VSR does. DLSS Super Resolution is built for rendered games: jittered, aliased,
 noise-free samples. Decoded video is none of those. Measured 960x540 to 1080p on
 six clips, a bicubic upscale scored higher VMAF than DLSS on every one
 (`docs/measurements/sr-quality-20260924` and `sr-history-20260924`). Turn it on if
 you prefer its look, not because it recovers detail.
 
-**DLSS > Upscaling history** chooses how it uses earlier frames. **Per-frame
+**Enhance > DLSS SR history** chooses how it uses earlier frames. **Per-frame
 (recommended)**, the default, upscales every frame on its own. It scored 0.8 to 19
 VMAF above Temporal on five of the six clips and 1.3 below on a held frame, and its
 frame-to-frame change is no larger than the source's. **Temporal** accumulates
@@ -521,7 +618,7 @@ range. The same choice is the **History** row of **Export with DLSS stages**.
 
 ### YouTube source quality
 
-**Video > YouTube source quality** selects 1080p, 1440p or 2160p. At the selected
+**File > YouTube source quality** selects 1080p, 1440p or 2160p. At the selected
 resolution, the player chooses the highest advertised video bitrate across
 available codecs and containers, with the highest-bitrate separate audio stream
 when needed. Auto takes the tallest rung up to 1440p, then the highest bitrate
@@ -555,8 +652,8 @@ those settings and a later session may ask for them again. At startup the
 player removes published renders it can prove nothing will ask for again - ones
 made under a different NVIDIA driver or model store, or under an older render
 revision of this same installation - and, only when the disk has less than 20 GiB free,
-the least recently watched renders until it does. Otherwise **Advanced > Clear
-Neural Cache** is the only thing that removes a published entry. Local
+the least recently watched renders until it does. Otherwise **Tools > Clear
+neural cache** is the only thing that removes a published entry. Local
 originals and exported files are never deleted by any of this. Work that was
 abandoned or refused -
 a cancelled download, a render that failed its checks, a folder left by a
@@ -580,7 +677,7 @@ processed video; playback uses the original source for audio. `recent-videos.dat
 tracks history, and `staging/` holds work in progress. Local input videos remain
 at their original paths.
 
-**Advanced > Clear Neural Cache** shows its size and asks for confirmation. It
+**Tools > Clear neural cache** shows its size and asks for confirmation. It
 closes current playback and removes owned cache data, keeping recent titles and
 original-source references. Work belonging to another player that is still
 running - its live session and its unfinished renders - is kept, and so is any
@@ -590,7 +687,7 @@ export.
 ## Saved settings and reproducibility
 
 `DLSSVideoPlayer.ini` beside the executable stores volume, mute, fit/fill,
-original/neural view, RTX VSR Upscaling (`[Playback] RtxVsr`), DLSS Upscaling (`[Playback] SuperResolution`) and its output size, YouTube quality,
+original/neural view, RTX VSR Upscaling (`[Playback] RtxVsr`), DLSS Super Resolution (`[Playback] SuperResolution`) and its output size, YouTube quality,
 image adjustments, comparison mode and Mix, neural settings, processing scale and
 guide switches. It
 also keeps `[NeuralPace]`: one measured steady-state render pace per source
@@ -604,8 +701,10 @@ to fall back to the generation's prior. Keep the player in a writable folder
 to persist preferences. `[Start] ThumbnailFetch=0` stops the start screen
 fetching trailer thumbnails (see [Open, render and compare](#open-render-and-compare)).
 
-**DLSS > Encoder settings** holds the `[Encoding]` keys, kept apart from the
-model settings because they apply to the next render. Every one that changes the
+**Tools > Cache & encoding** holds the `[Encoding]` colour-conversion and cache
+keys, kept apart from the model settings because they apply to the next render.
+(**Deband** and **Smoothed exposure** moved to the Picture panel's render
+pipeline page; their keys did not move.) Every one that changes the
 written pixels is part of the render identity, so changing one re-renders
 instead of serving a cached range made under the other value. Most add nothing
 to the key at their defaults; the constant-quality Standard rung and the capture
@@ -809,14 +908,14 @@ Depth views.
 
 ## Generate frames for a higher frame rate
 
-**DLSS > Generate frames (higher frame rate)** converts what you are watching to
+**Enhance > Generate frames (higher frame rate)** converts what you are watching to
 a higher frame rate. It is an offline conversion rather than a live mode: the
 file is converted once, written into the neural cache under `frame-generation/`,
 and playback switches to that file when the conversion finishes. Nothing is
 interleaved into the playback clock, so seeking, audio sync and dropped-frame
 accounting behave as they do on any other file. While it runs the status line
 carries the multiple, the target rate and the frames written so far, and names
-the way out; **DLSS > Cancel frame generation** stops it and leaves the video you
+the way out; **Enhance > Cancel frame generation** stops it and leaves the video you
 were watching untouched.
 
 The multiple comes from the display rather than the source alone, and it is
@@ -830,8 +929,8 @@ higher one that does not. 30 fps becomes 60 on a 60 Hz panel and 120 at 4x on a
 one - held for 1 or 2 refreshes, which is the cadence the film was already shown
 with, at half the step. The confirmation says so when it applies.
 
-**Hold repeated frames (animation on twos)**, under **DLSS > Generated
-frames**, is for animation drawn on twos or threes, where every drawing is shown
+**Hold repeated frames (animation on twos)**, under **Enhance > Frame
+generation rate**, is for animation drawn on twos or threes, where every drawing is shown
 for two or three frames. With it on, a pair of source frames that is the same
 picture twice - up to codec noise - is not generated between: the frame is held
 for those slots, which is exact, instead of whatever the runtime makes between
@@ -856,12 +955,12 @@ and to, and where the result will be written, before anything starts.
 The converted file carries the source's audio, subtitle and chapter streams by
 copy. The conversion adds frames without changing the length, so those streams
 still line up with no retime; a source that had audio and came back silent is
-reported as a failure rather than opened. **DLSS > Convert & export > Save
-converted video** then writes a copy wherever you want one.
+reported as a failure rather than opened. **File > Save rendered
+video** then writes a copy wherever you want one.
 
 ## Export with the DLSS stages combined
 
-**DLSS > Convert & export > Export with DLSS stages** (`Ctrl+S`) writes one file
+**File > Export** (`Ctrl+S`, or the toolbar's **Export**) writes one file
 with any combination of Super Resolution, neural rendering and frame
 generation. Tick the stages you want, pick an output height and a frame rate,
 and the summary line reads back the geometry and frame rate the file will
@@ -890,7 +989,7 @@ Refusals are named rather than generic, and they appear as you tick:
 
 - **RTX VSR (recommended)**, the default: the playback upscaler, run in the
   player on every frame of the source or the marked range, at the quality set
-  under **Video > Compare > RTX VSR quality**. Measured 960x540 to 1080p over
+  under **Enhance > RTX VSR quality**. Measured 960x540 to 1080p over
   six clips it scored 87.5 VMAF against bicubic's 80.5 and DLSS Super
   Resolution's 74.9, and an export reproduces that: a clip that measured 81.4
   exported at 81.35. It needs an RTX GPU and the complete download; where it
@@ -900,9 +999,9 @@ Refusals are named rather than generic, and they appear as you tick:
   written if the add-on turns out to have run anyway.
 
 With Neural rendering ticked the Upscaler is greyed: the upscale is the model's
-carrier, DLSS's, and the pass uses the look set in **Neural settings**.
+carrier, DLSS's, and the pass uses the look set in the **Picture** panel.
 
-**History** (under the Upscaler) is the same choice as **DLSS > Upscaling
+**History** (under the Upscaler) is the same choice as **Enhance > DLSS SR
 history**: Temporal or Per-frame, with the measured VMAF and steadiness in its
 tooltip. It applies only to DLSS Super Resolution on its own; RTX VSR has none. With Neural rendering
 ticked it is greyed and the pass keeps Temporal, because the model runs on the same
@@ -933,8 +1032,8 @@ the new file is complete.
 While it runs, the panel over the video names the pass, the percentage, frames
 done of total, elapsed time and an ETA once enough frames have gone through for
 one to mean anything. Two passes are reported as two rather than one bar that
-jumps backwards. The export row becomes **Cancel export** while it runs, and so
-does the toolbar pill.
+jumps backwards. The export row becomes **Cancel export** while it runs, and the
+toolbar's Export button reads **Cancel**.
 
 This does not touch the neural cache. A cache entry is a playback carrier keyed
 on the source and its settings; this is a one-off at a size and a rate you
@@ -960,8 +1059,8 @@ What to render, as the dialog's ticks and settings choose it:
 - `--height` is the Super Resolution rung and `--multiplier` the frame
   generation rate, 1440 and 2 by default. Each needs its stage.
 - `--preset` is one of `standard`, `detail-only`, `gentle` or `strong`, the
-  presets in **DLSS > Neural presets** (`natural`, Standard's name before 0.28.2,
-  still works). Without it the render uses the Neural settings the player saved.
+  presets in **Enhance > Look preset** (`natural`, Standard's name before 0.28.2,
+  still works). Without it the render uses the Picture settings the player saved.
 - `--style` is **Style**: `default`, `natural` or `cinematic`, applied over
   `--preset`. Natural moves the picture furthest from the source. It also lets a
   script render twice with two looks - `dlss5-convert clip.mp4 --style natural`,
@@ -972,13 +1071,13 @@ What to render, as the dialog's ticks and settings choose it:
   many times, each pass one more model evaluation per frame. `--intensity`
   (`0` to `1`; up to `2` is accepted and renders as `1`), `--local-tone` and
   `--local-structure` (`0` to `2`) and `--color-strength` (`0` to `1`) are the
-  rest of Neural settings' **Look** group. Each needs `nr`
+  rest of the Picture panel's look. Each needs `nr`
   and applies over `--preset`; one not given keeps the preset's or the saved
   value. For example, three stacked passes of the strong look:
   `dlss5-convert clip.mp4 --preset strong --passes 3`.
-- `--processing-scale` is `100`, `75` or `50`, the rungs of **DLSS >
+- `--processing-scale` is `100`, `75` or `50`, the rungs of **Enhance >
   Processing scale**, for `nr` without `sr`. Without it, the saved rung.
-- `--encode` is the **Encoder settings** quality ladder: `standard` (8-bit
+- `--encode` is the **Cache & encoding** quality ladder: `standard` (8-bit
   HEVC), `high` (10-bit HEVC) or `lossless` (10-bit FFV1). `--sr-engine` is the
   upscaler for `sr` without `nr`: `vsr` (RTX VSR, recommended) or `dlss`.
   `--history` is DLSS Super Resolution's history, `temporal` or `per-frame`,
@@ -1076,7 +1175,7 @@ doing, and refuses after five seconds rather than interleaving with it.
 
 1. Open a photo, GIF or video and wait for validated cached playback, or
    convert a clip or the whole video first.
-2. Choose **DLSS > Convert & export > Save converted video**.
+2. Choose **File > Save rendered video**.
 3. Choose a format and a new filename. Existing files are not overwritten.
 4. Continue playback while saving runs. While it runs, the export row reads
    **Cancel export** - one row cancels whichever write is in flight.

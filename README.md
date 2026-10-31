@@ -85,7 +85,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_package.ps1
 4. Press `D`. It buffers for a few seconds, then plays the render.
 5. The compare bar under the picture switches between DLSS 5, Original, Split,
    Wipe, Difference, Side by side and 2 × 2.
-6. **DLSS > Convert & export** saves the rendered video to a file.
+6. **File > Export** (`Ctrl+S`, or **Export** on the toolbar) saves it as a file.
 
 **File > Recent videos** reopens a video with its render, if the render covers
 the whole video. Press `D` at the start to get one.
@@ -113,7 +113,7 @@ the whole video. Press `D` at the start to get one.
   SDR for the model; on an HDR display the original still shows in HDR.
 - **Keeps your renders.** A whole-video render is reused while the source,
   runtime and settings still match, at Standard, High (10-bit) or Lossless
-  quality. **Advanced > Render report** shows the flicker, grain and colour
+  quality. **Tools > Render report** shows the flicker, grain and colour
   shift a render added.
 - **Works on screenshots and GIFs.** A photo renders once and stays on its
   frame; an animated GIF renders frame by frame, keeping its timing. See
@@ -121,8 +121,8 @@ the whole video. Press `D` at the start to get one.
 - **Saves the result as a file.** MP4 or MKV for a video, GIF for an
   animation, PNG or JPEG for a photo, from the player or the command line. See
   [Save the result](#save-the-result).
-- **Tunes the model.** Change a neural setting (`Ctrl+N`) while paused and that
-  frame re-renders. **DLSS > Processing scale** runs the model at 75% or 50% of
+- **Tunes the model.** Change a setting in the Picture panel (`Ctrl+N`) while paused and that
+  frame re-renders. **Enhance > Processing scale** runs the model at 75% or 50% of
   the source, for speed. Where the window shows a video larger than it is,
   NVIDIA's RTX Video Super Resolution upscales it, on by default: it measured
   well above a plain scaler and DLSS Super Resolution on video
@@ -156,16 +156,17 @@ Everything you can watch rendered, you can keep as a file.
 | Animated GIF | GIF (default), MP4 or MKV |
 | Photo: PNG, JPEG, BMP, TIFF or static WebP | PNG (default) or JPEG, at the source size |
 
-Two ways under **DLSS > Convert & export**, and one from the command line:
+Two ways under **File**, and one from the command line:
 
-- **Save converted video** writes the render you already have, without
+- **Save rendered video** writes the render you already have, without
   rendering again. It needs a render of the whole video, or of the clip you
   marked and converted with `Ctrl+R`.
-- **Export with DLSS stages** (`Ctrl+S`) renders a new file with any of Super
+- **Export** (`Ctrl+S`) renders a new file with any of Super
   Resolution, neural rendering and frame generation (2x to 5x the frame rate),
   in NVIDIA's order. Super Resolution on its own runs on RTX VSR by default -
   the upscaler that measured best - or on DLSS Super Resolution if you choose
-  it under **Upscaler**.
+  it under **Upscaler**. It opens on what you are watching: DLSS 5 ticked if
+  it is on, and the upscaler playing, at the size it plays at.
 - **From the command line**, `dlss5-convert` runs the same export without
   opening the player, waits for it and shows its progress. Give it files,
   folders or wildcards; this writes `clip-dlss.mkv` beside the input:
@@ -266,7 +267,7 @@ subtitles, HDR, the render quality ladder and `--render`.
 | --- | --- |
 | Open a file / a YouTube URL | `Ctrl+O` / `Ctrl+L` |
 | Play or pause | `Space` |
-| Neural rendering on or off | `D` |
+| DLSS 5 on or off | `D`, or the toolbar's DLSS 5 pill |
 | Compare views | `C` / `Shift+C` step the mode; `X` swaps sides; `[` and `]` change the Mix |
 | RTX VSR view; compare against it | `R`; `Shift+R` |
 | Zoom, loupe | `Z` / `Shift+Z` zoom in and out at the pointer; `L` loupe |
@@ -276,16 +277,22 @@ subtitles, HDR, the render quality ladder and `--render`.
 | Seek ten seconds / step one frame | `Left` / `Right`; `.` |
 | Mark In / Out; clear; go to time | `I` / `O`; `Shift+I`; `Ctrl+G` |
 | Render one frame / four seconds / the marked clip | `F` / `Shift+F` / `Ctrl+R` |
-| Generate frames; cancel a conversion | **DLSS > Generate frames**; `Esc` |
-| Neural settings | `Ctrl+N` |
-| Export with DLSS stages | `Ctrl+S` |
-| Image adjustments | `Ctrl+E` |
+| Generate frames; cancel a conversion | **Enhance > Generate frames**; `Esc` |
+| Picture (the render's look) | `Ctrl+N` |
+| Viewing adjustments (instant) | `Ctrl+E` |
+| Re-render from here; pause the background render | **Enhance > Re-render from here**; `P` |
+| Export | `Ctrl+S` |
+| What you can do to the picture | Right-click it, or `Shift+F10` |
 | Volume, mute | Mouse wheel; `M` |
 | Fit or fill; fullscreen | `A`; `F11` |
 | Stop | `S` |
 
+Every key can be changed: **Help > Edit key bindings** opens `input.conf`, one
+`KEY command` per line as in mpv, and the menus, tooltips and the `?` sheet
+show the keys it gives ([USAGE.md](docs/USAGE.md#change-the-keys)).
+
 Settings persist between launches. A fresh install starts with neural rendering
-on, RTX VSR Upscaling on, DLSS Upscaling off, and DLSS's output and YouTube
+on, RTX VSR the upscaler (DLSS Super Resolution not chosen), and DLSS SR's output and YouTube
 quality on **Auto**: the
 largest resolution your monitor can show, and the best YouTube stream up to
 1440p.
@@ -318,9 +325,9 @@ The file that save wrote, footer and all:
 
 ![A subtitle drawn over the DLSS 5 frame (a test file that says what it is)](docs/screenshots/current/subtitles.jpg)
 
-![Image adjustments, with the DLSS 5 mix slider, over the DLSS 5 frame](docs/screenshots/current/neural-strength.jpg)
+![Viewing adjustments, with the DLSS 5 mix slider, over the DLSS 5 frame (taken before 0.30.0, when they were a window of their own)](docs/screenshots/current/neural-strength.jpg)
 
-![The Neural settings dialog at its defaults](docs/screenshots/current/neural-settings.jpg)
+![The neural settings at their defaults (taken before 0.30.0; they are now the Picture panel's render zone)](docs/screenshots/current/neural-settings.jpg)
 
 ### Start screen
 
@@ -387,8 +394,8 @@ how the toggle works, not what every source will gain.
 - **YouTube:** public, non-DRM videos only, no login. Age-restricted videos can
   arrive as a 640x360 stream, and the status line tells you when that happens.
 - **Disk space.** The cache keeps renders until the drive falls below 20 GB
-  free, then deletes the least recently used first. **Advanced > Clear Neural
-  Cache** shows how much it will free before it does.
+  free, then deletes the least recently used first. **Tools > Clear neural
+  cache** shows how much it will free before it does.
 - **Partial renders aren't joined.** A session started partway into a video
   leaves separate renders of the parts it covered, so reopening that video
   renders it again.

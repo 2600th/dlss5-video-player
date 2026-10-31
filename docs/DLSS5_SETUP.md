@@ -69,7 +69,7 @@ into the file). The stamp is added only to a section holding nothing but keys
 the player writes; a section with anybody else's key, or a version of its own,
 is left for the add-on to migrate.
 
-One further key is written only when **DLSS > Processing scale** asks for it:
+One further key is written only when **Enhance > Processing scale** asks for it:
 `NRPreUpscale=1` for the 75% and 50% rungs, which put the model on the reduced
 picture ahead of DLSS Super Resolution, and `NRPreUpscale=0` when a render at
 100% finds a 1 left behind. A render at 100% on a file that holds 0, or no such
@@ -97,7 +97,7 @@ starts off on a fresh install; in a build that has it, **DLSS > RTX VSR
 Upscaling** starts on. Its output target
 is Auto: the largest of the 1080p, 1440p and 2160p rungs that the monitor's
 current mode can scan out, never one above it. Any rung can be pinned from
-**DLSS > Upscaling output**. The backend selects a supported NGX
+**Enhance > DLSS SR output size**. The backend selects a supported NGX
 quality range without resizing or downsampling the decoded source.
 
 ## Verified pre-render and playback profile
