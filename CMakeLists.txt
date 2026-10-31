@@ -546,6 +546,12 @@ if(BUILD_TESTING)
     add_test(NAME PolicyTestsSlow COMMAND PolicyTests --tier=slow)
     set_tests_properties(PolicyTests PolicyTestsSlow PROPERTIES RESOURCE_LOCK PolicyTestsDirectory)
     set_tests_properties(PolicyTestsSlow PROPERTIES LABELS slow)
+    # P1.48: real YouTube through the bundled yt-dlp, Deno and FFmpeg - a trailer
+    # resolved, a frame past the first minute, a minute of audio at playback speed.
+    # Online, so labelled `network` and left out of every other tier and preset;
+    # `ctest --preset network` runs it.
+    add_test(NAME PolicyTestsNetwork COMMAND PolicyTests --tier=network)
+    set_tests_properties(PolicyTestsNetwork PROPERTIES LABELS network RESOURCE_LOCK PolicyTestsDirectory TIMEOUT 300)
 
     # dlss5-convert.exe, driven for real with the test binary standing in for
     # the player (ConvertTests.cpp).

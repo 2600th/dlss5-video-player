@@ -16017,6 +16017,83 @@ void keep_awake_holds_a_system_request_for_its_scope_and_guards_are_independent_
     if (!heldBefore) CHECK(!SystemRequiredNow());
 }
 
+// The resolved audio stream keeps the certificate check and the https-only
+// list, and reconnects within a bounded delay when googlevideo drops it
+// (P1.48). The network tier below is what shows the drop is survived.
+void youtube_audio_input_options_reconnect_and_keep_the_https_only_guard_test()
+{
+    const std::wstring options(media_tools::kNetworkAudioInputOptions);
+    CHECK(options.starts_with(L"-tls_verify 1 -protocol_whitelist https,tls,tcp "));
+    for (const wchar_t* option : {L" -reconnect 1 ", L" -reconnect_streamed 1 ", L" -reconnect_on_network_error 1 ",
+                                  L" -reconnect_delay_max 4 "})
+        CHECK(options.find(option) != std::wstring::npos);
+    // Never at EOF: a finished stream is finished, not dropped.
+    CHECK(options.find(L"reconnect_at_eof") == std::wstring::npos);
+    CHECK(options.ends_with(L" "));
+}
+
+// P1.48, the `network` tier: the bundled yt-dlp resolves a built-in trailer
+// exactly as File > Game trailers does, the video opens as PrepareYouTubeMedia
+// opens it and gives a frame past the first minute, and the audio is read at
+// playback speed with AudioPlayer's own input options for longer than a
+// minute. Online and about two minutes long, so it is in no other tier:
+// `ctest --preset network`. It is the check that catches the next YouTube
+// break before a user does; on 2026-10-31 the audio half failed at 32-46 s
+// without the reconnect options.
+void youtube_bundled_helper_plays_a_built_in_trailer_past_the_first_minute_network_test()
+{
+    using Clock = std::chrono::steady_clock;
+    const std::wstring page(kExampleVideos[0].url);
+    YouTubeResolver resolver;
+    const ResolveResult resolved = resolver.Resolve(page, YouTubeSourceQuality::Auto, {});
+    if (!resolved.ok) std::wcerr << L"resolve failed: error " << static_cast<int>(resolved.error) << L" " << resolved.detail << L"\n";
+    REQUIRE(resolved.ok);
+    CHECK(resolved.selectedHeight >= 1080);
+    CHECK(resolved.durationSeconds > 80.0);
+    CHECK_EQ(0, resolved.ageLimit);
+    REQUIRE(resolved.mediaUrl.starts_with(L"https://"));
+    REQUIRE(resolved.audioUrl.starts_with(L"https://"));
+
+    VideoDecoder decoder;
+    REQUIRE(decoder.Open(resolved.mediaUrl, MediaSourceKind::YouTube, {}, /*preferNv12=*/true));
+    CHECK(decoder.Height() >= 1080u);
+    REQUIRE(decoder.SeekSeconds(65.0));
+    VideoFrame frame;
+    VideoReadResult read = VideoReadResult::Error;
+    for (const auto deadline = Clock::now() + std::chrono::seconds(30); Clock::now() < deadline;) {
+        read = decoder.ReadNextAvailable(frame);
+        if (read == VideoReadResult::FrameReady || read == VideoReadResult::Error || read == VideoReadResult::EndOfStream ||
+            read == VideoReadResult::Stalled)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(read == VideoReadResult::FrameReady);
+    CHECK(frame.timestamp100ns >= 640000000);
+    decoder.Close();
+
+    // 70 s of audio at real time, through the ffmpeg the player stages.
+    const std::filesystem::path ffmpeg = current_test_executable().parent_path() / L"ffmpeg.exe";
+    REQUIRE(std::filesystem::exists(ffmpeg));
+    std::wstring commandLine = QuoteWindowsArgument(ffmpeg.wstring()) + L" -hide_banner -loglevel error -nostdin -re " +
+                               std::wstring(media_tools::kNetworkAudioInputOptions) + L"-i " +
+                               QuoteWindowsArgument(resolved.audioUrl) + L" -t 70 -f null -";
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    const auto started = Clock::now();
+    REQUIRE(CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
+                           &startup, &process));
+    CloseHandle(process.hThread);
+    const DWORD waited = WaitForSingleObject(process.hProcess, 150000);
+    if (waited != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 1);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hProcess);
+    const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+    CHECK_EQ(DWORD{WAIT_OBJECT_0}, waited);
+    CHECK_EQ(DWORD{0}, exitCode);
+    CHECK(seconds >= 69.0);   // read for the whole minute and more, not cut short
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(runtime_shutdown_releases_player_before_media_foundation_and_com_test),
@@ -16068,6 +16145,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(start_screen_names_driver_62101_on_rtx50_and_never_refuses_for_it_test),
     TEST_CASE(windows10_check_and_driver_notice_read_the_build_and_the_flag_test),
     TEST_CASE(keep_awake_holds_a_system_request_for_its_scope_and_guards_are_independent_test),
+    TEST_CASE(youtube_audio_input_options_reconnect_and_keep_the_https_only_guard_test),
     TEST_CASE(start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),
@@ -16437,6 +16515,13 @@ constexpr test_support::TestCase kSlowCases[] = {
     TEST_CASE(youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test),
 };
 
+// Online: real YouTube through the bundled helpers, about two minutes. Only
+// `PolicyTests --tier=network` runs it (PolicyTestsNetwork, label `network`),
+// never the quick, slow, portable or hardware runs, which must pass offline.
+constexpr test_support::TestCase kNetworkCases[] = {
+    TEST_CASE(youtube_bundled_helper_plays_a_built_in_trailer_past_the_first_minute_network_test),
+};
+
 
 } // namespace
 
@@ -16465,11 +16550,13 @@ int wmain(int argc, wchar_t* argv[])
         return test_support::failure_count == 0 ? 0 : 1;
     }
     // `--only=<text>` runs the cases whose name contains the text, from either
-    // table. `--tier=quick` runs kCases and `--tier=slow` kSlowCases; with
-    // neither, every case runs.
+    // offline table. `--tier=quick` runs kCases and `--tier=slow` kSlowCases;
+    // with neither, every offline case runs. `--tier=network` runs
+    // kNetworkCases and nothing else.
     std::string only;
     bool quick = true;
     bool slow = true;
+    bool network = false;
     if (argc == 2 && std::wstring_view(argv[1]).starts_with(L"--only=")) {
         for (const wchar_t character : std::wstring_view(argv[1]).substr(7)) only.push_back(static_cast<char>(character));
         if (only.empty()) {
@@ -16480,12 +16567,16 @@ int wmain(int argc, wchar_t* argv[])
         slow = false;
     } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=slow") {
         quick = false;
+    } else if (argc == 2 && std::wstring_view(argv[1]) == L"--tier=network") {
+        quick = slow = false;
+        network = true;
     } else if (argc > 1) {
         return run_fake_resolver_child(argc, argv);
     }
     size_t ran = 0;
     if (quick) ran += test_support::run_cases(kCases, std::size(kCases), only).ran;
     if (slow) ran += test_support::run_cases(kSlowCases, std::size(kSlowCases), only).ran;
+    if (network) ran += test_support::run_cases(kNetworkCases, std::size(kNetworkCases), only).ran;
     if (ran == 0) {
         std::cerr << "no case name contains '" << only << "'\n";
         return EXIT_FAILURE;

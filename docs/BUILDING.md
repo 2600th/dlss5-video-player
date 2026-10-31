@@ -42,13 +42,21 @@ actually provides - `Visual Studio 17 2022` or `Visual Studio 18 2026` - or omit
 ```powershell
 cmake -S . -B build-upscaling -G 'Visual Studio 18 2026' -A x64 -DBUILD_TESTING=ON
 cmake --build build-upscaling --config Release --parallel
-ctest --test-dir build-upscaling -C Release -LE "gpu|audio" --output-on-failure
+ctest --test-dir build-upscaling -C Release -LE "gpu|audio|network" --output-on-failure
 ```
 
-`-LE "gpu|audio"` excludes the hardware smokes, which need an RTX card with the
-staged neural runtime, and `AudioClockSmoke`, which needs an audio render
-endpoint. Without it a machine with neither reports skips rather than passes.
-See below for running those deliberately.
+`-LE "gpu|audio|network"` excludes the hardware smokes, which need an RTX card with the
+staged neural runtime, `AudioClockSmoke`, which needs an audio render
+endpoint, and `PolicyTestsNetwork`, which needs the internet. Without it a
+machine with neither device reports skips rather than passes. See below for
+running those deliberately.
+
+`PolicyTestsNetwork` (label `network`, `ctest --preset network`) plays YouTube
+the way the player does, with the staged yt-dlp, Deno and FFmpeg: it resolves
+the first built-in trailer, reads a video frame past the first minute and a
+minute of audio at playback speed, in about two minutes. No other preset and no
+CI tier runs it, because each would then depend on YouTube. Run it after
+changing a YouTube helper pin or the resolver, and before a release.
 
 Naming `Visual Studio 17 2022` on a machine that has only 2026 asks for the v143
 toolset that install does not carry, and MSBuild stops with MSB8020 before
@@ -135,7 +143,7 @@ it skipped. `FrameGenerationSmoke` runs on `external/test-media/dlaa-smoke.mp4`
 when that file is there; it is fetched by no script, so otherwise the test
 generates a stand-in of the same shape (1280x720, 30 fps, H.264 with audio)
 with the staged FFmpeg and runs on that.
-`ctest -LE "gpu|audio"` is the full device-free run (the `portable` preset) and
+`ctest -LE "gpu|audio|network"` is the full device-free run (the `portable` preset) and
 `ctest -L "gpu|audio"` the hardware set; the hardware set needs a tree
 configured with `DLSS_VIDEO_PLAYER_HARDWARE_TESTS` on, as `vs2022` and
 `build_windows.bat` are. `AudioClockSmoke` is the `audio` one: it asserts the

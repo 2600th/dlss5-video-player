@@ -116,7 +116,7 @@ if errorlevel 1 (
 echo [5/5] Building and testing Release...
 "%CMAKE_EXE%" --build build-upscaling --config Release --parallel
 if errorlevel 1 exit /b 1
-"%CTEST_EXE%" --test-dir build-upscaling -C Release --output-on-failure
+"%CTEST_EXE%" --test-dir build-upscaling -C Release -LE network --output-on-failure
 if errorlevel 1 exit /b 1
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\stage_runtime.ps1 -InputDirectory external\runtime -Destination build-upscaling\Release\neural-runtime
