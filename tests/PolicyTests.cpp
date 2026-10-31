@@ -19,6 +19,7 @@
 #include "ReShadeConfig.h"
 #include "Localization.h"
 #include "TranslationFile.h"
+#include "KeyBindings.h"
 #include "AppMenu.h"
 #include "UiLayout.h"
 #include "UiResources.h"
@@ -1063,7 +1064,8 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
             return row.group == group && row.action == action && row.keys == keys;
         });
     };
-    CHECK(has(L"File", L"Open file", L"Ctrl+O"));
+    CHECK(has(L"File", L"Open file…", L"Ctrl+O"));
+    CHECK(has(L"File", L"Export…", L"Ctrl+S"));
     CHECK(has(L"Playback", L"Stop", L"S"));
     CHECK(has(L"Playback", L"Mark In", L"I"));
     // The subtitle keys live in Playback > Subtitles, greyed until a source is
@@ -1074,11 +1076,18 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
     // Runs of spaces in a menu's accelerator column close up on the sheet.
     CHECK(has(L"Playback", L"Play / Pause", L"Space (Overlay: Ctrl+Alt+Space)"));
     // A submenu's commands are found, under the top-level menu they live in.
-    CHECK(has(L"Video", L"Mix less", L"["));
-    CHECK(has(L"Video", L"Next mode", L"C"));
-    CHECK(has(L"DLSS", L"Convert marked clip to neural video", L"Ctrl+R"));
-    CHECK(has(L"Advanced", L"Recreate NGX / re-hook DLSS 5", L"F6"));
+    CHECK(has(L"Compare", L"Mix less", L"["));
+    CHECK(has(L"Compare", L"Next mode", L"C"));
+    CHECK(has(L"Compare", L"Less difference gain", L"Shift+["));
+    CHECK(has(L"Enhance", L"Render marked range", L"Ctrl+R"));
+    CHECK(has(L"Enhance", L"Pause background render", L"P"));
+    CHECK(has(L"Tools", L"Recreate NGX / re-hook DLSS 5", L"F6"));
     CHECK(has(L"Help", L"Keyboard shortcuts", L"? / F1"));
+    // '.' has a row now, and A, which has none, is printed on Fit as it always was.
+    CHECK(has(L"Playback", L"Step one cached frame", L"."));
+    CHECK(has(L"View", L"Original aspect ratio (Fit)", L"A"));
+    CHECK(has(L"View", L"Final image", L"1"));
+    CHECK(has(L"View", L"Viewing adjustments…", L"Ctrl+E (Overlay: Ctrl+Alt+C)"));
     // A processing-scale rung's measured cost sits in the accelerator column; it
     // is not a key and is not listed as one.
     CHECK(std::none_of(rows.begin(), rows.end(), [](const app_menu::ShortcutRow& row) {
@@ -1089,7 +1098,7 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
     CHECK(std::none_of(rows.begin(), rows.end(), [](const app_menu::ShortcutRow& row) {
         return row.keys == L"49-80" || row.keys == L"63-94";
     }));
-    CHECK(has(localizer.Get(L"shortcuts.group.keyboard"), localizer.Get(L"shortcuts.step"), L"."));
+    CHECK(has(localizer.Get(L"shortcuts.group.keyboard"), localizer.Get(L"shortcuts.focus"), L"Tab / Shift+Tab"));
     // Groups come in menu-bar order, each one contiguous, and nothing without
     // a key is listed.
     std::vector<std::wstring> order;
@@ -1099,23 +1108,47 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
         CHECK(row.action.find(L'&') == std::wstring::npos || row.action.find(L"&&") == std::wstring::npos);
         if (order.empty() || order.back() != row.group) order.push_back(row.group);
     }
-    const std::vector<std::wstring> expected{L"File", L"Playback", L"Video", L"DLSS", L"Advanced", L"Help",
+    const std::vector<std::wstring> expected{L"File", L"Playback", L"View", L"Compare", L"Enhance", L"Tools", L"Help",
                                              localizer.Get(L"shortcuts.group.keyboard")};
     CHECK(order == expected);
-    // The drift check: every key the player maps to a menu command is printed
-    // by that command's menu item, so it reaches the sheet.
-    for (const bool control : {false, true}) {
-        for (const bool shift : {false, true}) {
-            for (UINT key = 0x08; key <= 0xFE; ++key) {
-                const auto command = app_menu::CommandForPlayerKey(key, control, shift);
-                if (!command) continue;
-                wchar_t text[256]{};
-                CHECK(GetMenuStringW(bar, *command, text, static_cast<int>(std::size(text)), MF_BYCOMMAND) > 0);
-                CHECK(std::wstring_view(text).find(L'\t') != std::wstring_view::npos);
-            }
-        }
+    // The drift check: every key in the table reaches the sheet, printed on its
+    // command's row - or, for A, which has no row, on Fit's.
+    for (const key_bindings::Binding& binding : key_bindings::Defaults().Bindings()) {
+        const UINT row = binding.command == app_menu::IDM_ASPECT_TOGGLE ? app_menu::IDM_ASPECT_FIT : binding.command;
+        wchar_t text[256]{};
+        CHECK(GetMenuStringW(bar, row, text, static_cast<int>(std::size(text)), MF_BYCOMMAND) > 0);
+        const std::wstring_view label(text);
+        const size_t tab = label.find(L'\t');
+        CHECK(tab != std::wstring_view::npos);
+        if (tab == std::wstring_view::npos) continue;
+        CHECK(label.substr(tab + 1).find(key_bindings::ChordText(binding.chord)) != std::wstring_view::npos);
     }
     DestroyMenu(bar);
+    // A rebinding is what the menus print, and so what the sheet lists.
+    const key_bindings::Loaded rebound = key_bindings::Parse("Ctrl+P picture\nF ignore\n");
+    CHECK(rebound.problems.empty());
+    const HMENU custom = app_menu::CreateMenuBar(localizer, true, rebound.table);
+    REQUIRE(custom != nullptr);
+    const auto customRows = app_menu::CollectShortcuts(custom, localizer);
+    CHECK(std::any_of(customRows.begin(), customRows.end(), [](const app_menu::ShortcutRow& row) {
+        return row.action == L"Picture…" && row.keys == L"Ctrl+N / Ctrl+P";
+    }));
+    CHECK(std::none_of(customRows.begin(), customRows.end(), [](const app_menu::ShortcutRow& row) {
+        return row.action == L"Preview this frame";
+    }));
+    wchar_t preview[256]{};
+    CHECK(GetMenuStringW(custom, app_menu::IDM_PREVIEW_FRAME, preview, static_cast<int>(std::size(preview)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(preview) == L"Preview this frame");
+    // Rebinding again rewrites the column in place rather than appending to it.
+    app_menu::ApplyKeyBindings(custom, key_bindings::Defaults(), localizer);
+    CHECK(GetMenuStringW(custom, app_menu::IDM_PREVIEW_FRAME, preview, static_cast<int>(std::size(preview)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(preview) == L"Preview this frame\tF");
+    // A relabel that names no key keeps the row's key column (Export -> Cancel export).
+    CHECK(app_menu::SetMenuCommandText(custom, app_menu::IDM_EXPORT_STAGES, L"Cancel export"));
+    wchar_t exportRow[256]{};
+    CHECK(GetMenuStringW(custom, app_menu::IDM_EXPORT_STAGES, exportRow, static_cast<int>(std::size(exportRow)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(exportRow) == L"Cancel export\tCtrl+S");
+    DestroyMenu(custom);
 }
 
 // A message that sends someone to "DLSS > Something" has to name a menu that
@@ -1161,9 +1194,26 @@ void menu_paths_named_in_text_exist_test()
     std::vector<Node> top = read(read, bar);
     DestroyMenu(bar);
     // A command that relabels itself while it runs is reachable under both labels:
-    // Generate frames becomes "Cancel frame generation" during a conversion.
-    for (Node& menu : top)
-        if (menu.label == L"DLSS") menu.children.push_back(Node{localizer.Get(L"menu.cancel_frame_generation"), {}});
+    // Generate frames becomes "Cancel frame generation" during a conversion, and
+    // Export becomes "Cancel export" during an export.
+    for (Node& menu : top) {
+        if (menu.label == L"Enhance") menu.children.push_back(Node{localizer.Get(L"menu.cancel_frame_generation"), {}});
+        if (menu.label == L"File") menu.children.push_back(Node{localizer.Get(L"menu.cancel_export_running"), {}});
+    }
+    std::wstring broken;
+    // The seven menus of 0.30.0, in order; the six-menu bar's names are gone, and
+    // a string still sending someone to one of them is a broken path even though
+    // the walk below would never start from it.
+    std::vector<std::wstring> names;
+    for (const Node& menu : top) names.push_back(menu.label);
+    CHECK(names == (std::vector<std::wstring>{L"File", L"Playback", L"View", L"Compare", L"Enhance", L"Tools", L"Help"}));
+    for (const auto& [key, text] : Localizer::All()) {
+        for (const wchar_t* gone : {L"DLSS > ", L"Video > ", L"Advanced > "}) {
+            const size_t at = text.find(gone);
+            if (at != std::wstring::npos && (at == 0 || !std::iswalpha(text[at - 1])))
+                broken += key + L": " + text.substr(at, 60) + L" | ";
+        }
+    }
     // A path may leave out an item's trailing qualifier: "RTX VSR Upscaling" names
     // "RTX VSR Upscaling (recommended)".
     const auto spelled = [](const std::wstring& label) {
@@ -1172,7 +1222,6 @@ void menu_paths_named_in_text_exist_test()
     };
 
     size_t walked = 0;
-    std::wstring broken;
     for (const auto& [key, text] : Localizer::All()) {
         for (const Node& menu : top) {
             const std::wstring start = menu.label + L" > ";
@@ -1207,7 +1256,7 @@ void menu_paths_named_in_text_exist_test()
     if (!broken.empty()) std::wcerr << L"menu paths that do not exist: " << broken << L'\n';
     CHECK(broken.empty());
     // The strings do name menu paths; a walk that found none would prove nothing.
-    CHECK(walked >= 5);
+    CHECK(walked >= 10);
 }
 
 // The contributor's format, line by line: what reads as a string, and what is
@@ -1350,6 +1399,171 @@ void shipped_translations_are_complete_test()
     // No lang folder at all is no translation yet; anything else that stops the scan is a fault.
     CHECK(!error || error == std::errc::no_such_file_or_directory);
     std::wcerr << L"shipped translations checked: " << checked << L'\n';
+}
+
+// The defaults are the keys the player had before there was a table: every one
+// of them parses, names a command that exists, and none is bound twice.
+void key_binding_defaults_are_the_players_keys_test()
+{
+    const key_bindings::Table& defaults = key_bindings::Defaults();
+    CHECK_EQ(std::size(key_bindings::kDefaults), defaults.Bindings().size());
+    for (const key_bindings::DefaultBinding& binding : key_bindings::kDefaults) {
+        const auto chord = key_bindings::ParseChord(binding.key);
+        CHECK(chord.chord.has_value());
+        CHECK(key_bindings::CommandId(binding.command).has_value());
+        // The name a menu prints reads back as the same key.
+        if (chord.chord) CHECK(key_bindings::ChordText(*chord.chord) == binding.key);
+    }
+    // Every command name is unique, and so is every id: a name is a stable
+    // promise to whoever wrote it in their file.
+    for (size_t a = 0; a < std::size(key_bindings::kCommands); ++a)
+        for (size_t b = a + 1; b < std::size(key_bindings::kCommands); ++b) {
+            CHECK(key_bindings::kCommands[a].name != key_bindings::kCommands[b].name);
+            CHECK(key_bindings::kCommands[a].id != key_bindings::kCommands[b].id);
+        }
+    CHECK(defaults.KeysFor(app_menu::IDM_KEYBOARD_SHORTCUTS) == L"? / F1");
+    CHECK(defaults.KeysFor(app_menu::IDM_CLEAR_MARKS) == L"Shift+I / Shift+O");
+    CHECK(defaults.Lookup(key_bindings::Chord{0, false, false, L'?'}) == app_menu::IDM_KEYBOARD_SHORTCUTS);
+    CHECK(defaults.LookupKey(VK_OEM_4, false, true) == app_menu::IDM_COMPARE_DIFFERENCE_LESS);
+    CHECK(defaults.LookupKey('S', true, true) == app_menu::IDM_SAVE_COMPARISON_IMAGE);
+    // Every named command is a row of the menu bar, or A's, which is printed on
+    // Fit: a command the file can bind is one a mouse can reach.
+    const Localizer localizer;
+    const HMENU bar = app_menu::CreateMenuBar(localizer, true);
+    REQUIRE(bar != nullptr);
+    for (const key_bindings::Command& command : key_bindings::kCommands) {
+        if (command.id == app_menu::IDM_ASPECT_TOGGLE) continue;
+        CHECK(GetMenuState(bar, command.id, MF_BYCOMMAND) != static_cast<UINT>(-1));
+    }
+    DestroyMenu(bar);
+}
+
+// What a key file may say, and what it is told when it says something else.
+void key_binding_file_rebinds_unbinds_and_reports_bad_lines_test()
+{
+    const key_bindings::Loaded loaded = key_bindings::Parse(
+        "\xEF\xBB\xBF# a comment\r\n"
+        "Ctrl+P   picture      # the panel on P too\r\n"
+        "F        ignore\r\n"
+        "ctrl+shift+e viewing-adjustments\r\n"
+        "PgDn     seek-forward\r\n"
+        "Shift+=  mix-more\r\n"
+        "\r\n"
+        "Q        quit\r\n"
+        "Alt+X    swap\r\n"
+        "Tab      loupe\r\n"
+        "Esc      loupe\r\n"
+        "Hyper+X  swap\r\n"
+        "Ctrl+?   shortcuts\r\n"
+        "Blorp    swap\r\n"
+        "just-one-word\r\n"
+        "M swap extra\r\n"
+        "X        loupe\r\n"
+        "X        zoom-in\r\n"
+        "\xFF\xFE bad\r\n");
+    const key_bindings::Table& table = loaded.table;
+    CHECK(table.LookupKey('P', true, false) == app_menu::IDM_NEURAL_SETTINGS);
+    CHECK(table.LookupKey('N', true, false) == app_menu::IDM_NEURAL_SETTINGS);
+    CHECK(table.KeysFor(app_menu::IDM_NEURAL_SETTINGS) == L"Ctrl+N / Ctrl+P");
+    CHECK(!table.LookupKey('F', false, false).has_value());
+    CHECK(table.KeysFor(app_menu::IDM_PREVIEW_FRAME).empty());
+    CHECK(table.LookupKey('E', true, true) == app_menu::IDM_VIDEO_ADJUSTMENTS);
+    CHECK(table.LookupKey(VK_NEXT, false, false) == app_menu::IDM_FWD10);
+    CHECK(table.LookupKey(VK_OEM_PLUS, false, true) == app_menu::IDM_COMPARE_BLEND_MORE);
+    // The last line for a key wins, and says so; X no longer swaps.
+    CHECK(table.LookupKey('X', false, false) == app_menu::IDM_COMPARE_ZOOM);
+    CHECK(table.KeysFor(app_menu::IDM_COMPARE_SWAP).empty());
+    // Nothing a bad line names changed: M still mutes, Tab and Esc are not keys here.
+    CHECK(table.LookupKey('M', false, false) == app_menu::IDM_MUTE);
+    CHECK(!table.LookupKey(VK_TAB, false, false).has_value());
+    CHECK(!table.LookupKey('Q', false, false).has_value());
+    const std::vector<std::wstring> expected{
+        L"line 8: 'quit' is not a command",
+        L"line 9: Alt opens the menu bar and cannot be bound",
+        L"line 10: Tab is kept for driving the player from the keyboard",
+        L"line 11: Esc is kept for driving the player from the keyboard",
+        L"line 12: 'Hyper' is not a modifier (Ctrl or Shift)",
+        L"line 13: ? is a character; it takes no modifier",
+        L"line 14: 'Blorp' is not a key this file can name",
+        L"line 15: a line is KEY COMMAND",
+        L"line 16: a line is KEY COMMAND",
+        L"line 18: X is bound twice; the last line is used",
+        L"line 19: not UTF-8",
+    };
+    CHECK(loaded.problems == expected);
+    for (size_t index = 0; index < std::min(expected.size(), loaded.problems.size()); ++index)
+        if (loaded.problems[index] != expected[index]) std::wcerr << loaded.problems[index] << L'\n';
+    // An empty file is the defaults, and so is a file of comments.
+    CHECK(key_bindings::Parse("").table.Bindings().size() == key_bindings::Defaults().Bindings().size());
+    CHECK(key_bindings::Parse("# nothing\n").problems.empty());
+}
+
+// The file Help > Edit key bindings writes: the defaults and every other
+// command, all commented out, so it reads back as exactly the defaults and a
+// line is changed by deleting its #.
+void key_binding_template_reads_back_as_the_defaults_test()
+{
+    const std::string text = key_bindings::TemplateText();
+    const key_bindings::Loaded loaded = key_bindings::Parse(text);
+    CHECK(loaded.problems.empty());
+    const auto bindings = loaded.table.Bindings();
+    const auto defaults = key_bindings::Defaults().Bindings();
+    CHECK(std::equal(bindings.begin(), bindings.end(), defaults.begin(), defaults.end(),
+                     [](const key_bindings::Binding& a, const key_bindings::Binding& b) {
+                         return a.chord == b.chord && a.command == b.command;
+                     }));
+    // Every command is named in it once, either with its default key or alone.
+    for (const key_bindings::Command& command : key_bindings::kCommands)
+        CHECK(text.find(utf8_text::FromWide(command.name)) != std::string::npos);
+    // Uncommenting a default line is a no-op: the file starts as the keys you have.
+    const size_t line = text.find("# Ctrl+O");
+    CHECK(line != std::string::npos);
+    if (line != std::string::npos) {
+        std::string uncommented = text;
+        uncommented.erase(line, 2);
+        CHECK(key_bindings::Parse(uncommented).problems.empty());
+        CHECK(key_bindings::Parse(uncommented).table.LookupKey('O', true, false) == app_menu::IDM_OPEN);
+    }
+    CHECK(text.find("\r\n") != std::string::npos);
+}
+
+// Enhance's three upscaler radios over the player's two settings.
+void upscaler_radios_reach_every_state_from_every_other_test()
+{
+    using upscaler_choice::Upscaler;
+    CHECK(upscaler_choice::Shown(true, true) == Upscaler::SuperResolution);
+    CHECK(upscaler_choice::Shown(true, false) == Upscaler::SuperResolution);
+    CHECK(upscaler_choice::Shown(false, true) == Upscaler::RtxVsr);
+    CHECK(upscaler_choice::Shown(false, false) == Upscaler::None);
+    for (const bool sr : {false, true}) {
+        for (const bool vsr : {false, true}) {
+            for (const Upscaler target : {Upscaler::RtxVsr, Upscaler::SuperResolution, Upscaler::None}) {
+                const auto steps = upscaler_choice::StepsTo(target, sr, vsr);
+                CHECK(upscaler_choice::Shown(sr != steps.toggleSuperResolution, vsr != steps.toggleVsr) == target);
+                // Choosing what is shown changes nothing.
+                if (upscaler_choice::Shown(sr, vsr) == target) CHECK(!steps.toggleSuperResolution && !steps.toggleVsr);
+            }
+        }
+    }
+    // Super Resolution leaves RTX VSR's own setting alone: it is back when SR goes.
+    CHECK(!upscaler_choice::StepsTo(Upscaler::SuperResolution, false, true).toggleVsr);
+    const Localizer localizer;
+    const HMENU bar = app_menu::CreateMenuBar(localizer, true);
+    REQUIRE(bar != nullptr);
+    const auto checked = [&](UINT command) { return (GetMenuState(bar, command, MF_BYCOMMAND) & MF_CHECKED) != 0; };
+    CHECK(checked(app_menu::IDM_RTX_VSR_UPSCALING));
+    CHECK(app_menu::UpdateUpscalerMenu(bar, app_menu::IDM_UPSCALER_NONE, true, true));
+    CHECK(checked(app_menu::IDM_UPSCALER_NONE));
+    CHECK(!checked(app_menu::IDM_RTX_VSR_UPSCALING));
+    CHECK(app_menu::UpdateUpscalerMenu(bar, app_menu::IDM_DLSS_UPSCALING, false, true));
+    CHECK(checked(app_menu::IDM_DLSS_UPSCALING));
+    CHECK(!checked(app_menu::IDM_UPSCALER_NONE));
+    CHECK((GetMenuState(bar, app_menu::IDM_RTX_VSR_UPSCALING, MF_BYCOMMAND) & MF_GRAYED) != 0);
+    // A radio row, so the mark is a bullet, not a tick.
+    MENUITEMINFOW item{sizeof(item)};
+    item.fMask = MIIM_FTYPE;
+    CHECK(GetMenuItemInfoW(bar, app_menu::IDM_DLSS_UPSCALING, FALSE, &item) && (item.fType & MFT_RADIOCHECK) != 0);
+    DestroyMenu(bar);
 }
 
 void keyboard_cheat_sheet_flows_whole_groups_into_columns_test()
@@ -2026,7 +2240,7 @@ void escape_leaves_fullscreen_before_it_stops_anything_test()
     // The sheet and the tooltip say the same thing.
     const Localizer localizer;
     CHECK(localizer.Get(L"shortcuts.escape").starts_with(L"Leave fullscreen"));
-    CHECK(localizer.Get(L"toolbar.tip.fullscreen").find(L"Esc or F11 leaves") != std::wstring::npos);
+    CHECK(localizer.Get(L"toolbar.tip.fullscreen").find(L"Esc leaves") != std::wstring::npos);
 }
 
 void toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test()
@@ -2041,24 +2255,22 @@ void toolbar_tips_name_every_control_and_the_key_its_menu_row_runs_test()
         if (!key) continue;
         const std::wstring tip = localizer.Get(key);
         CHECK(tip != key);
-        // A tip that names a key names the one its menu row carries; the
-        // Fullscreen tip said F, which previews a frame, while F11 is the key.
-        const wchar_t* menuKey = toolbar_tips::MenuKey(action);
+        // A tip names no key in its own text: the key comes from the key table
+        // (toolbar_tips::WithKeys), the one the menus print, so the Fullscreen
+        // tip cannot say F again while F previews a frame and F11 is the key.
         const std::wstring_view shortcut = toolbar_tips::TipShortcut(tip);
-        if (!menuKey) {
-            CHECK(shortcut.empty());
-            continue;
-        }
-        const std::wstring menu = localizer.Get(menuKey);
-        const std::wstring_view accelerator = toolbar_tips::MenuAccelerator(menu);
-        CHECK(!accelerator.empty());
-        CHECK(!shortcut.empty());
-        CHECK(shortcut.starts_with(accelerator));
+        CHECK(shortcut.empty());
+        const UINT command = toolbar_tips::Command(action);
+        if (!command) continue;
+        CHECK(!key_bindings::CommandName(command).empty());
+        const std::wstring keys = key_bindings::Defaults().KeysFor(command);
+        CHECK(!keys.empty());
+        CHECK(toolbar_tips::TipShortcut(toolbar_tips::WithKeys(tip, keys)) == keys);
     }
     CHECK(toolbar_tips::TipKey(ToolbarAction::None) == nullptr);
-    CHECK(toolbar_tips::TipShortcut(localizer.Get(L"toolbar.tip.fullscreen")) == L"F11");
-    CHECK(toolbar_tips::MenuAccelerator(L"Play / Pause\tSpace   (Overlay: Ctrl+Alt+Space)") == L"Space");
-    CHECK(toolbar_tips::MenuAccelerator(L"Exit").empty());
+    CHECK(toolbar_tips::WithKeys(localizer.Get(L"toolbar.tip.fullscreen"), L"F11").starts_with(L"Fullscreen (F11)\n"));
+    CHECK(toolbar_tips::WithKeys(L"Back 10 seconds", L"Left") == L"Back 10 seconds (Left)");
+    CHECK(toolbar_tips::WithKeys(L"Mute\nThe slider", L"") == L"Mute\nThe slider");
     CHECK(toolbar_tips::TipShortcut(L"Frame Generation\nWrites (a) file").empty());
     // Resting reveals, sweeping does not; moving along the bar is immediate.
     CHECK(toolbar_tips::kInitialDelayMs >= 400 && toolbar_tips::kInitialDelayMs <= 600);
@@ -2875,7 +3087,7 @@ void advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_t
 {
     Localizer localizer;const HMENU menu=app_menu::CreateMenuBar(localizer,true);CHECK(menu!=nullptr);
     std::vector<MenuEntry> entries;if(menu)collect_menu_entries(menu,entries);
-    CHECK(has_menu_entry(entries,L"Clear Neural Cache",app_menu::IDM_CLEAR_NEURAL_CACHE));
+    CHECK(has_menu_entry(entries,L"Clear neural cache",app_menu::IDM_CLEAR_NEURAL_CACHE));
     CHECK(!has_menu_text(entries,L"720p"));CHECK(!has_menu_text(entries,L"480p"));
     if(menu)DestroyMenu(menu);
 }
@@ -2887,8 +3099,8 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK(menu != nullptr);
     std::vector<MenuEntry> entries;
     if (menu) collect_menu_entries(menu, entries);
-    CHECK(has_menu_entry(entries, L"Neural Rendering\tD", app_menu::IDM_NEURAL_RENDERING));
-    CHECK(has_menu_entry(entries, L"DLSS Upscaling",
+    CHECK(has_menu_entry(entries, L"DLSS 5 neural rendering\tD", app_menu::IDM_NEURAL_RENDERING));
+    CHECK(has_menu_entry(entries, L"DLSS Super Resolution",
                          app_menu::IDM_DLSS_UPSCALING));
     // Frame generation is a command, not a permanently disabled label. The old
     // entry read "Unavailable in this build", which was honest while no backend
@@ -2904,7 +3116,8 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK(!has_menu_text(entries, L"Enable DLSS\tD"));
     CHECK(!has_menu_text(entries, L"Frame Generation\tUnavailable in this build"));
 
-    // The two real toggles report a mode, so they carry a checkmark. Frame
+    // DLSS 5 reports a mode, so it carries a checkmark; Super Resolution is one
+    // of the upscaler radios, whose mark UpdateUpscalerMenu sets. Frame
     // generation is an action that starts a one-shot conversion: a check on it
     // would state a mode the player never has, so it gets an enable state and
     // nothing else, whatever its arguments say.
@@ -2928,7 +3141,8 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK((enabledFrameGeneration & (MF_DISABLED | MF_GRAYED)) == 0);
     CHECK((enabledFrameGeneration & MF_CHECKED) == 0);
     CHECK((GetMenuState(menu, app_menu::IDM_NEURAL_RENDERING, MF_BYCOMMAND) & MF_CHECKED) != 0);
-    CHECK((GetMenuState(menu, app_menu::IDM_DLSS_UPSCALING, MF_BYCOMMAND) & MF_CHECKED) != 0);
+    CHECK((GetMenuState(menu, app_menu::IDM_DLSS_UPSCALING, MF_BYCOMMAND) & MF_CHECKED) == 0);
+    CHECK((GetMenuState(menu, app_menu::IDM_DLSS_UPSCALING, MF_BYCOMMAND) & (MF_DISABLED | MF_GRAYED)) == 0);
     // The converted file is unreachable until one exists: the item that opens
     // it is created greyed and only main.cpp's own state can enable it, so no
     // availability argument here may light it up.
@@ -2965,32 +3179,32 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     if (menu) collect_menu_entries(menu, entries);
     CHECK(has_menu_entry(entries, L"Mark In\tI", app_menu::IDM_MARK_IN));
     CHECK(has_menu_entry(entries, L"Mark Out\tO", app_menu::IDM_MARK_OUT));
-    CHECK(has_menu_entry(entries, L"Clear Marks\tShift+I / Shift+O", app_menu::IDM_CLEAR_MARKS));
-    CHECK(has_menu_entry(entries, L"Go to timecode...\tCtrl+G", app_menu::IDM_GOTO_TIMECODE));
-    // Space pauses a running conversion and plays/pauses otherwise; the item says
-    // which of the two it is, so the sheet listing Space twice reads as two jobs.
-    CHECK(has_menu_entry(entries, L"Pause conversion\tSpace", app_menu::IDM_PAUSE_NEURAL_RENDER));
-    CHECK(has_menu_entry(entries, L"Preview this frame (neural)\tF", app_menu::IDM_PREVIEW_FRAME));
-    CHECK(has_menu_entry(entries, L"Preview 4 s clip (neural)\tShift+F", app_menu::IDM_PREVIEW_CLIP));
-    // Conversion writes a file; it lives in its own submenu beside saving.
-    CHECK(has_menu_entry(entries, L"Convert marked clip to neural video\tCtrl+R", app_menu::IDM_RENDER_RANGE));
-    CHECK(has_menu_entry(entries, L"Convert whole video to neural video", app_menu::IDM_RENDER_WHOLE));
-    CHECK(has_menu_entry(entries, L"Save converted video...", app_menu::IDM_EXPORT_CACHED_VIDEO));
-    // Microsoft's own rule: "About, Advanced, Help, Options, Properties, and
-    // Settings must display another window when clicked, but don't require
-    // additional information from the user. Therefore they don't need
-    // ellipses." Export DOES take one - it asks which stages before it runs.
-    CHECK(has_menu_entry(entries, L"Neural settings\tCtrl+N", app_menu::IDM_NEURAL_SETTINGS));
-    CHECK(has_menu_entry(entries, L"Encoder settings", app_menu::IDM_ENCODER_SETTINGS));
+    CHECK(has_menu_entry(entries, L"Clear marks\tShift+I / Shift+O", app_menu::IDM_CLEAR_MARKS));
+    CHECK(has_menu_entry(entries, L"Go to timecode…\tCtrl+G", app_menu::IDM_GOTO_TIMECODE));
+    // Space plays and pauses, and still pauses an offline render when nothing
+    // plays (TogglePause); it is printed on one row only. P is the render's own.
+    CHECK(has_menu_entry(entries, L"Pause background render\tP", app_menu::IDM_PAUSE_NEURAL_RENDER));
+    CHECK(has_menu_entry(entries, L"Preview this frame\tF", app_menu::IDM_PREVIEW_FRAME));
+    CHECK(has_menu_entry(entries, L"Preview 4 s clip\tShift+F", app_menu::IDM_PREVIEW_CLIP));
+    CHECK(has_menu_entry(entries, L"Re-render from here", app_menu::IDM_RERENDER_HERE));
+    CHECK(has_menu_entry(entries, L"Render marked range\tCtrl+R", app_menu::IDM_RENDER_RANGE));
+    CHECK(has_menu_entry(entries, L"Render whole video", app_menu::IDM_RENDER_WHOLE));
+    CHECK(has_menu_entry(entries, L"Save rendered video…", app_menu::IDM_EXPORT_CACHED_VIDEO));
+    CHECK(has_menu_entry(entries, L"Step one cached frame\t.", app_menu::IDM_STEP_FRAME));
+    // Each of these opens a window that asks for something before anything
+    // happens - the panel, the encoding settings, the export's stages - so each
+    // carries the ellipsis (Microsoft: a command that needs more information).
+    CHECK(has_menu_entry(entries, L"Picture…\tCtrl+N", app_menu::IDM_NEURAL_SETTINGS));
+    CHECK(has_menu_entry(entries, L"Cache && encoding…", app_menu::IDM_ENCODER_SETTINGS));
     // Ctrl+S, not Ctrl+E. Ctrl+E has opened Image adjustments since long before
     // this command existed, and the label claimed it anyway - a menu that
     // advertises a key which does something else is worse than one with none.
-    CHECK(has_menu_entry(entries, L"Export with DLSS stages...\tCtrl+S", app_menu::IDM_EXPORT_STAGES));
+    CHECK(has_menu_entry(entries, L"Export…\tCtrl+S", app_menu::IDM_EXPORT_STAGES));
     // Every accelerator a label advertises must route to that command.
     CHECK(app_menu::CommandForPlayerKey('S', true, false) == app_menu::IDM_EXPORT_STAGES);
     CHECK(app_menu::CommandForPlayerKey('N', true, false) == app_menu::IDM_NEURAL_SETTINGS);
     // Bare S stops playback, so the modifier is what tells them apart.
-    CHECK(!app_menu::CommandForPlayerKey('S', false, false).has_value());
+    CHECK(app_menu::CommandForPlayerKey('S', false, false) == app_menu::IDM_STOP);
     CHECK(has_menu_entry(entries, L"Open render receipt", app_menu::IDM_OPEN_RENDER_RECEIPT));
     CHECK(has_menu_entry(entries, L"Save comparison image\u2026\tCtrl+Shift+S", app_menu::IDM_SAVE_COMPARISON_IMAGE));
     CHECK(has_menu_entry(entries, L"Zoom in (Fit, 1:1, 2x, 4x, 8x)\tZ", app_menu::IDM_COMPARE_ZOOM));
@@ -3007,11 +3221,16 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK((GetMenuState(menu, app_menu::IDM_ASPECT_ONE_TO_ONE, MF_BYCOMMAND) & MF_CHECKED) == 0);
     // Depth is a persisted guide switch in the neural settings dialog now.
     CHECK(!has_menu_text(entries, L"Estimated / flat depth proxy\tG"));
-    HMENU video = find_top_level_submenu(menu, L"Video");
-    HMENU compare = find_top_level_submenu(video, L"Compare");
+    // Compare is a top-level menu now, and RTX VSR's quality is Enhance's: it
+    // drives playback and export as well as the comparison.
+    HMENU compare = find_top_level_submenu(menu, L"Compare");
     CHECK(compare != nullptr);
     std::vector<MenuEntry> compareEntries;
     if (compare) collect_menu_entries(compare, compareEntries);
+    std::vector<MenuEntry> enhanceEntries;
+    if (HMENU enhance = find_top_level_submenu(menu, L"Enhance")) collect_menu_entries(enhance, enhanceEntries);
+    CHECK(has_menu_entry(enhanceEntries, L"High (default)", app_menu::IDM_COMPARE_VSR_QUALITY_FIRST + 2));
+    CHECK(!has_menu_text(compareEntries, L"High (default)"));
     CHECK(has_menu_entry(compareEntries, L"DLSS 5", app_menu::IDM_COMPARE_NEURAL));
     CHECK(has_menu_entry(compareEntries, L"Original", app_menu::IDM_COMPARE_ORIGINAL));
     CHECK(has_menu_entry(compareEntries, L"Split", app_menu::IDM_COMPARE_SPLIT));
@@ -3021,7 +3240,6 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(has_menu_entry(compareEntries, L"2 \u00d7 2", app_menu::IDM_COMPARE_QUAD));
     CHECK(has_menu_entry(compareEntries, L"RTX VSR\tR", app_menu::IDM_COMPARE_VSR));
     CHECK(has_menu_entry(compareEntries, L"Compare against RTX VSR\tShift+R", app_menu::IDM_COMPARE_AGAINST_VSR));
-    CHECK(has_menu_entry(compareEntries, L"High (default)", app_menu::IDM_COMPARE_VSR_QUALITY_FIRST + 2));
     CHECK(has_menu_entry(compareEntries, L"More difference gain\tShift+]", app_menu::IDM_COMPARE_DIFFERENCE_MORE));
     CHECK(has_menu_entry(compareEntries, L"Less difference gain\tShift+[", app_menu::IDM_COMPARE_DIFFERENCE_LESS));
     // Blend was the Mix under another name; its row is gone and [ and ] step the Mix.
@@ -3147,13 +3365,29 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(!CommandForPlayerKey('V', true, false).has_value());
     // Ctrl+Alt+C is the overlay hotkey for the adjustments; Ctrl+C stays unclaimed.
     CHECK(!CommandForPlayerKey('C', true, false).has_value());
-    // Existing single-letter and Ctrl accelerators keep their owners. (Bare R was
-    // listed here while only Ctrl+R had one; it is RTX VSR's now, checked above.)
-    for (const UINT key : {UINT('D'), UINT('S'), UINT('A'), UINT('M'), UINT('G'), UINT('N'), UINT(VK_SPACE), UINT(VK_F6)})
+    // The keys main.cpp used to match one by one before the table, each still
+    // with its owner. (Bare R was listed as free while only Ctrl+R had one; it
+    // is RTX VSR's now, checked above.)
+    CHECK(CommandForPlayerKey('D', false, false) == app_menu::IDM_NEURAL_RENDERING);
+    CHECK(CommandForPlayerKey('S', false, false) == app_menu::IDM_STOP);
+    CHECK(CommandForPlayerKey('A', false, false) == app_menu::IDM_ASPECT_TOGGLE);
+    CHECK(CommandForPlayerKey('M', false, false) == app_menu::IDM_MUTE);
+    CHECK(CommandForPlayerKey(VK_SPACE, false, false) == app_menu::IDM_PLAY);
+    CHECK(CommandForPlayerKey(VK_F6, false, false) == app_menu::IDM_REHOOK);
+    CHECK(CommandForPlayerKey(VK_F11, false, false) == app_menu::IDM_FULLSCREEN);
+    CHECK(CommandForPlayerKey(VK_OEM_PERIOD, false, false) == app_menu::IDM_STEP_FRAME);
+    CHECK(CommandForPlayerKey(VK_LEFT, false, false) == app_menu::IDM_BACK10);
+    CHECK(CommandForPlayerKey(VK_RIGHT, false, false) == app_menu::IDM_FWD10);
+    CHECK(CommandForPlayerKey('P', false, false) == app_menu::IDM_PAUSE_NEURAL_RENDER);
+    CHECK(CommandForPlayerKey('O', true, false) == app_menu::IDM_OPEN);
+    CHECK(CommandForPlayerKey('E', true, false) == app_menu::IDM_VIDEO_ADJUSTMENTS);
+    CHECK(CommandForPlayerKey('L', true, false) == app_menu::IDM_OPEN_YOUTUBE);
+    for (const UINT key : {UINT('G'), UINT('N')})
         CHECK(!CommandForPlayerKey(key, false, false).has_value());
-    for (const UINT key : {'O', 'E', 'L', 'I', 'F', 'Z'})
+    for (const UINT key : {'I', 'F', 'Z'})
         CHECK(!CommandForPlayerKey(key, true, false).has_value());
     CHECK(!CommandForPlayerKey('G', true, true).has_value());
+    // Modifiers match exactly: Shift+S is not S.
     CHECK(!CommandForPlayerKey('S', false, true).has_value());
     if (menu) DestroyMenu(menu);
 }
@@ -3167,14 +3401,15 @@ void player_menu_is_english_only_and_retains_advanced_commands_test()
     std::vector<MenuEntry> entries;
     if (menu) collect_menu_entries(menu, entries);
     CHECK(!has_menu_text(entries, L"Language"));
-    CHECK(has_menu_text(entries, L"Advanced"));
-    CHECK(has_menu_entry(entries, L"Open file\tCtrl+O", app_menu::IDM_OPEN));
+    CHECK(has_menu_text(entries, L"Tools"));
+    CHECK(!has_menu_text(entries, L"Advanced"));
+    CHECK(has_menu_entry(entries, L"Open file…\tCtrl+O", app_menu::IDM_OPEN));
     CHECK(has_menu_entry(entries, L"Open YouTube URL\u2026\tCtrl+L", app_menu::IDM_OPEN_YOUTUBE));
     CHECK(has_menu_entry(entries, L"Stop\tS", app_menu::IDM_STOP));
     CHECK(has_menu_entry(entries, L"Original aspect ratio (Fit)\tA", app_menu::IDM_ASPECT_FIT));
     CHECK(has_menu_entry(entries, L"Restart in DLSS SR safe mode", app_menu::IDM_ADVANCED_SAFE_MODE));
     CHECK(has_menu_entry(entries, L"Recreate NGX / re-hook DLSS 5\tF6", app_menu::IDM_REHOOK));
-    HMENU advanced = find_top_level_submenu(menu, L"Advanced");
+    HMENU advanced = find_top_level_submenu(menu, L"Tools");
     CHECK(advanced != nullptr);
     if (advanced) {
         std::vector<MenuEntry> advancedEntries;
@@ -3198,7 +3433,8 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
     Localizer localizer;
     const HMENU menu = app_menu::CreateMenuBar(localizer, true);
     CHECK(menu != nullptr);
-    HMENU video = find_top_level_submenu(menu, L"Video");
+    // Under File, beside Open YouTube URL: it is a property of opening one.
+    HMENU video = find_top_level_submenu(menu, L"File");
     HMENU quality = find_top_level_submenu(video, L"YouTube source quality");
     CHECK(video != nullptr);
     CHECK(quality != nullptr);
@@ -5698,13 +5934,14 @@ void menus_group_two_to_seven_related_items_per_block_test()
     // Every top-level menu is held to the same rule, not just the one that
     // prompted the work. `Exit` alone behind a separator is the documented
     // exception: it is the convention every Windows File menu follows, and a
-    // guideline that argues with a convention that strong loses.
-    for (const wchar_t* name : {L"File", L"Playback", L"Video", L"DLSS", L"Advanced"}) {
+    // guideline that argues with a convention that strong loses. Compare's mode
+    // radios are the other: eight, one radio set in the compare bar's order.
+    for (const wchar_t* name : {L"File", L"Playback", L"View", L"Compare", L"Enhance", L"Tools", L"Help"}) {
         HMENU top = find_top_level_submenu(menu, name);
         CHECK(top != nullptr);
         if (!top) continue;
         std::vector<UINT> sizes{0};
-        std::vector<UINT> lastOfGroup;
+        std::vector<UINT> lastOfGroup, firstOfGroup{0};
         const int items = GetMenuItemCount(top);
         UINT previous = 0;
         for (int index = 0; index < items; ++index) {
@@ -5712,7 +5949,8 @@ void menus_group_two_to_seven_related_items_per_block_test()
             entry.cbSize = sizeof(entry);
             entry.fMask = MIIM_FTYPE | MIIM_ID;
             if (!GetMenuItemInfoW(top, UINT(index), TRUE, &entry)) continue;
-            if (entry.fType & MFT_SEPARATOR) { lastOfGroup.push_back(previous); sizes.push_back(0); continue; }
+            if (entry.fType & MFT_SEPARATOR) { lastOfGroup.push_back(previous); sizes.push_back(0); firstOfGroup.push_back(0); continue; }
+            if (!sizes.back()) firstOfGroup.back() = entry.wID;
             ++sizes.back();
             previous = entry.wID;
         }
@@ -5721,16 +5959,17 @@ void menus_group_two_to_seven_related_items_per_block_test()
         for (size_t group = 0; group < sizes.size(); ++group) {
             const bool exitAlone = sizes[group] == 1 && group < lastOfGroup.size() &&
                                    lastOfGroup[group] == app_menu::IDM_EXIT;
+            const bool modeRadios = firstOfGroup[group] == app_menu::IDM_COMPARE_NEURAL && sizes[group] == 8;
             CHECK(sizes[group] >= 2 || exitAlone);
-            CHECK(sizes[group] <= 7);
+            CHECK(sizes[group] <= 7 || modeRadios);
         }
     }
 
-    HMENU dlss = find_top_level_submenu(menu, L"DLSS");
+    HMENU dlss = find_top_level_submenu(menu, L"Enhance");
     CHECK(dlss != nullptr);
     if (!dlss) { DestroyMenu(menu); return; }
 
-    // Walk the DLSS top level only: what a viewer sees when the menu opens.
+    // Walk the Enhance top level only: what a viewer sees when the menu opens.
     std::vector<UINT> groupSizes;
     std::vector<std::vector<UINT>> groups;
     groupSizes.push_back(0);
@@ -14198,7 +14437,7 @@ void audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test()
 
     // Nothing loaded: a disabled placeholder, not an empty popup a viewer
     // clicks into and out of.
-    app_menu::UpdateAudioTracks(menu, {}, 0);
+    app_menu::UpdateAudioTracks(menu, {}, 0, L"No audio tracks");
     std::vector<MenuEntry> entries;
     collect_menu_entries(menu, entries);
     CHECK(has_menu_entry(entries, L"No audio tracks", app_menu::IDM_AUDIO_TRACK_FIRST));
@@ -14208,7 +14447,7 @@ void audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test()
         L"2. English - AC3 5.1",
         L"3. French - AC3 5.1",
     };
-    app_menu::UpdateAudioTracks(menu, labels, 1);
+    app_menu::UpdateAudioTracks(menu, labels, 1, L"No audio tracks");
     entries.clear();
     collect_menu_entries(menu, entries);
     CHECK(has_menu_entry(entries, labels[0], app_menu::IDM_AUDIO_TRACK_FIRST));
@@ -14227,7 +14466,7 @@ void audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test()
     // the next letter as an accelerator. The stored string is the escaped
     // one; what a viewer sees is "1. R&B mix".
     const std::wstring ampersand[] = {L"1. R&B mix", L"2. English"};
-    app_menu::UpdateAudioTracks(menu, ampersand, 0);
+    app_menu::UpdateAudioTracks(menu, ampersand, 0, L"No audio tracks");
     entries.clear();
     collect_menu_entries(menu, entries);
     CHECK(has_menu_entry(entries, L"1. R&&B mix", app_menu::IDM_AUDIO_TRACK_FIRST));
@@ -14942,9 +15181,9 @@ void audio_menu_keeps_the_passthrough_toggle_across_track_list_rebuilds_test()
     CheckMenuItem(menu, app_menu::IDM_AUDIO_PASSTHROUGH, MF_BYCOMMAND | MF_CHECKED);
     const std::wstring labels[] = {L"1. English - AC3 5.1", L"2. French - AC3 5.1"};
     for (int round = 0; round < 3; ++round) {
-        app_menu::UpdateAudioTracks(menu, labels, 1);
-        app_menu::UpdateAudioTracks(menu, {}, 0);
-        app_menu::UpdateAudioTracks(menu, labels, 0);
+        app_menu::UpdateAudioTracks(menu, labels, 1, L"No audio tracks");
+        app_menu::UpdateAudioTracks(menu, {}, 0, L"No audio tracks");
+        app_menu::UpdateAudioTracks(menu, labels, 0, L"No audio tracks");
     }
     CHECK(GetMenuState(menu, app_menu::IDM_AUDIO_PASSTHROUGH, MF_BYCOMMAND) & MF_CHECKED);
     if (popup) {
@@ -15978,6 +16217,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(translation_files_follow_the_display_language_test),
     TEST_CASE(translation_fixture_locale_reads_over_english_test),
     TEST_CASE(shipped_translations_are_complete_test),
+    TEST_CASE(key_binding_defaults_are_the_players_keys_test),
+    TEST_CASE(key_binding_file_rebinds_unbinds_and_reports_bad_lines_test),
+    TEST_CASE(key_binding_template_reads_back_as_the_defaults_test),
+    TEST_CASE(upscaler_radios_reach_every_state_from_every_other_test),
     TEST_CASE(keyboard_cheat_sheet_flows_whole_groups_into_columns_test),
     TEST_CASE(dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test),
     TEST_CASE(media_controls_ask_for_a_state_and_push_the_timeline_sparingly_test),

@@ -254,3 +254,36 @@ inline std::optional<std::string_view> PreUpscaleOverride(uint32_t percent, std:
     if (!current.empty() && current != "0") return std::string_view("0");
     return std::nullopt;
 }
+
+// The playback upscaler as Enhance's three radios show it. The player keeps
+// two settings, as it always has - RTX VSR (ini RtxVsr) and DLSS Super
+// Resolution (ini SuperResolution) - and RTX VSR stands aside while Super
+// Resolution runs, so the two make exactly three states a viewer can see.
+namespace upscaler_choice {
+
+enum class Upscaler { RtxVsr, SuperResolution, None };
+
+inline constexpr Upscaler Shown(bool superResolutionActive, bool vsrOn) noexcept
+{
+    return superResolutionActive ? Upscaler::SuperResolution : vsrOn ? Upscaler::RtxVsr : Upscaler::None;
+}
+
+// Which of the two toggles reach `target`. Choosing Super Resolution leaves
+// RTX VSR's own setting alone: it stands aside, and is back when Super
+// Resolution is turned off from the RTX VSR radio.
+struct Steps {
+    bool toggleSuperResolution = false;
+    bool toggleVsr = false;
+};
+
+inline constexpr Steps StepsTo(Upscaler target, bool superResolutionActive, bool vsrOn) noexcept
+{
+    switch (target) {
+    case Upscaler::RtxVsr: return {superResolutionActive, !vsrOn};
+    case Upscaler::SuperResolution: return {!superResolutionActive, false};
+    case Upscaler::None: return {superResolutionActive, vsrOn};
+    }
+    return {};
+}
+
+} // namespace upscaler_choice

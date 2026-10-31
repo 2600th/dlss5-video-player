@@ -42,6 +42,7 @@
 #include "SubtitleOverlay.h"
 #include "Localization.h"
 #include "TranslationFile.h"
+#include "KeyBindings.h"
 #include "AppMenu.h"
 #include "UiLayout.h"
 #include "UiResources.h"
@@ -2656,6 +2657,7 @@ public:
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
         LoadVideoSettings();
         LoadTranslation();
+        LoadKeyBindings();
         NeuralCacheManager historyCache(m_cacheRoot);
         if(historyCache.Valid()){
             m_cacheRoot=historyCache.Root();
@@ -2714,7 +2716,7 @@ public:
             }
         }
         const std::wstring appTitle=m_loc.Get(L"app.title");
-        m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,windowX,windowY,rc.right-rc.left,rc.bottom-rc.top,nullptr,app_menu::CreateMenuBar(m_loc,YouTubePlaybackAvailable()),hi,this);
+        m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,windowX,windowY,rc.right-rc.left,rc.bottom-rc.top,nullptr,app_menu::CreateMenuBar(m_loc,YouTubePlaybackAvailable(),m_keys),hi,this);
         if(!m_hwnd) return false;
         RestoreWindowPlacement();
         ReadAnimationPreference();
@@ -3031,7 +3033,7 @@ private:
     void UpdateRecentMenu(){
         if(!m_hwnd||!m_recent)return;
         std::vector<std::wstring> titles;for(const auto& entry:m_recent->Entries())titles.push_back(entry.title.empty()?entry.source:entry.title);
-        app_menu::UpdateRecentVideos(GetMenu(m_hwnd),titles,!ActivityBusy());
+        app_menu::UpdateRecentVideos(GetMenu(m_hwnd),titles,!ActivityBusy(),T(L"menu.recent_none"));
         DrawMenuBar(m_hwnd);
     }
     void ForgetSourceDigest(){
@@ -3048,7 +3050,7 @@ private:
         std::vector<std::wstring> labels;
         for(const auto& track:Audio().AudioTracks())
             labels.push_back(Utf8ToWide(audio_track::Describe(track)));
-        app_menu::UpdateAudioTracks(GetMenu(m_hwnd),labels,Audio().SelectedAudioTrack());
+        app_menu::UpdateAudioTracks(GetMenu(m_hwnd),labels,Audio().SelectedAudioTrack(),T(L"menu.audio_none"));
         DrawMenuBar(m_hwnd);
     }
     void ChooseAudioTrack(int audioIndex){
@@ -3413,6 +3415,8 @@ private:
         // covers the video until some later export happens to finish.
         m_stageExport={};SyncActivityFeedback();if(m_hwnd&&IsWindow(m_hwnd)){SyncFeatureMenuState();UpdateCachedStatus();}}
     void CompleteExport(uint64_t token){auto completion=m_exportCompletions.Take(token);if(!completion)return;
+        // File > Show last exported file covers an export as well as a conversion.
+        if(completion->result.ok)m_frameGenLastOutput=completion->output;
         // Whatever happened, the export is over and the panel says so.
         m_stageExport={};SyncActivityFeedback();if(m_exportWorker.joinable()){m_exportWorker.join();m_exportWorker=std::jthread{};}SyncFeatureMenuState();UpdateCachedStatus();if(completion->result.ok){std::wstring message=L"Exported to:\n"+completion->output.wstring();
             // What the file left out (subtitles MP4 cannot hold) is the note a
@@ -4766,6 +4770,124 @@ private:
         m_loc=Localizer(std::move(loaded.strings),loaded.language);
     }
 
+    // input.conf beside the ini (KeyBindings.h). A missing file is the defaults;
+    // every line the file gets wrong is logged and skipped.
+    std::filesystem::path KeyBindingsPath()const{return SettingsPath().parent_path()/L"input.conf";}
+    void LoadKeyBindings(){
+        const auto path=KeyBindingsPath();
+        std::error_code error;
+        m_keysWritten=std::filesystem::last_write_time(path,error);
+        if(error){m_keysWritten={};m_keys=key_bindings::Defaults();return;}
+        const auto text=framegen_addon::ReadWholeFile(path);
+        key_bindings::Loaded loaded=key_bindings::Parse(text?*text:std::string{});
+        for(const auto& problem:loaded.problems)LOG("input.conf "<<WideToUtf8(problem)<<" (ignored).");
+        LOG("Keys: "<<WideToUtf8(path.wstring())<<", "<<loaded.table.Bindings().size()<<" bindings.");
+        m_keys=std::move(loaded.table);
+    }
+    // Saved changes apply when the player comes back to the front: the file is
+    // edited in another window, so that is the moment they can have happened.
+    void ReloadKeyBindingsIfChanged(){
+        std::error_code error;
+        const auto written=std::filesystem::last_write_time(KeyBindingsPath(),error);
+        if((error?std::filesystem::file_time_type{}:written)==m_keysWritten)return;
+        LoadKeyBindings();
+        if(HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr){app_menu::ApplyKeyBindings(menu,m_keys,m_loc);DrawMenuBar(m_hwnd);}
+        ReloadToolbarTips();
+        if(m_shortcutSheetOpen)ShowShortcutSheet();
+    }
+    // Help > Edit key bindings: the file, written from the template when there is
+    // none yet, opened in Notepad (a .conf file has no handler of its own).
+    void EditKeyBindings(){
+        const auto path=KeyBindingsPath();
+        std::error_code error;
+        if(!std::filesystem::exists(path,error)){
+            const std::string text=key_bindings::TemplateText();
+            HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+            DWORD written=0;
+            const bool ok=file!=INVALID_HANDLE_VALUE&&WriteFile(file,text.data(),DWORD(text.size()),&written,nullptr)&&written==text.size();
+            if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
+            if(!ok){
+                const std::wstring message=Format(T(L"keys.write_failed"),path.wstring().c_str());
+                MessageBoxW(m_hwnd,message.c_str(),T(L"keys.title").c_str(),MB_OK|MB_ICONINFORMATION);
+                return;
+            }
+            LOG("Wrote the key-binding template to "<<WideToUtf8(path.wstring()));
+        }
+        const std::wstring arguments=L"\""+path.wstring()+L"\"";
+        ShellExecuteW(m_hwnd,L"open",L"notepad.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+    }
+    // Help > User guide: the guide shipped beside the player, or this version's
+    // on GitHub when the folder has lost it.
+    void OpenUserGuide(){
+        const auto directory=platform_paths::ModuleDirectory();
+        const auto guide=(directory?*directory:std::filesystem::current_path())/L"docs"/L"USAGE.md";
+        std::error_code error;
+        if(std::filesystem::is_regular_file(guide,error)){
+            const std::wstring arguments=L"\""+guide.wstring()+L"\"";
+            // Markdown has no handler on a fresh Windows; Notepad reads it.
+            if(reinterpret_cast<INT_PTR>(ShellExecuteW(m_hwnd,L"open",guide.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
+                ShellExecuteW(m_hwnd,L"open",L"notepad.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+            return;
+        }
+        const std::string version=DLSS_VIDEO_PLAYER_VERSION;
+        const std::wstring url=L"https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v"+
+                               std::wstring(version.begin(),version.end())+L"/docs/USAGE.md";
+        ShellExecuteW(m_hwnd,L"open",url.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+    }
+    // Help > Open log folder, with the log selected.
+    void OpenLogFolder(){
+        const std::filesystem::path& log=Log::Path();
+        std::error_code error;
+        if(!log.empty()&&std::filesystem::is_regular_file(log,error)){
+            const std::wstring arguments=L"/select,\""+log.wstring()+L"\"";
+            ShellExecuteW(m_hwnd,L"open",L"explorer.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+            return;
+        }
+        const auto directory=platform_paths::ModuleDirectory();
+        const std::wstring folder=(directory?*directory:std::filesystem::current_path()).wstring();
+        ShellExecuteW(m_hwnd,L"open",folder.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+    }
+    // Help > About: this build, the runtime it loaded, this machine, and the
+    // notice in full - a community project on a modified, unsigned runtime.
+    void ShowAbout(){
+        const std::string version=DLSS_VIDEO_PLAYER_VERSION;
+        std::wstring runtime=T(L"about.runtime_unknown");
+        const auto directory=platform_paths::ModuleDirectory();
+        const auto logPath=ResolveNeuralRuntimeLogPath((directory?*directory:std::filesystem::current_path())/L"neural-runtime");
+        if(!logPath.empty()){
+            if(const auto log=framegen_addon::ReadWholeFile(logPath)){
+                const NeuralRuntimeBanner banner=ParseNeuralRuntimeBanner(*log);
+                const auto known=[](const std::string& text){return text.empty()?std::wstring(L"?"):Utf8ToWide(text);};
+                if(!banner.reshadeVersion.empty()||!banner.renodxVersion.empty()||!banner.dlssnrRuntime.empty())
+                    runtime=Format(T(L"about.runtime"),known(banner.reshadeVersion).c_str(),known(banner.renodxVersion).c_str(),
+                                   known(banner.dlssnrRuntime).c_str());
+            }
+        }
+        std::wstring driver=m_opt.detectedGpu.driverVersion;
+        if(const auto parsed=ParseNvidiaDriverVersion(m_opt.detectedGpu.driverVersion))driver=FormatNvidiaDriverVersion(*parsed);
+        const std::wstring gpu=m_opt.detectedGpu.description.empty()?std::wstring(L"?"):m_opt.detectedGpu.description;
+        const std::wstring text=Format(T(L"about.body"),std::wstring(version.begin(),version.end()).c_str(),
+                                       FormatNvidiaDriverVersion(kNeuralDriverFloor).c_str(),gpu.c_str(),
+                                       (driver.empty()?std::wstring(L"?"):driver).c_str(),runtime.c_str());
+        MessageBoxW(m_hwnd,text.c_str(),T(L"about.title").c_str(),MB_OK|MB_ICONINFORMATION);
+    }
+    // Enhance's upscaler radios. Three states were always there - RTX VSR,
+    // DLSS Super Resolution (RTX VSR stands aside while it runs), neither - and
+    // each is reached from any other by the two existing toggles.
+    void SelectUpscaler(upscaler_choice::Upscaler target){
+        const auto steps=upscaler_choice::StepsTo(target,UpscalingActive(),m_playbackVsr);
+        if(steps.toggleSuperResolution)ToggleUpscaling();
+        if(steps.toggleVsr)TogglePlaybackVsr();
+        else if(target==upscaler_choice::Upscaler::RtxVsr&&(m_vsrSessionOff||m_vsrSessionQuality)){
+            // RTX VSR picked while the keep-up guard has it off or lowered for this
+            // video: the choice is the user's, so what the guard did ends here.
+            m_vsrSessionOff=false;m_vsrSessionQuality.reset();m_vsrGuard.Reset();
+            LOG("RTX VSR chosen from the menu; the keep-up guard's change for this video is cleared.");
+            ApplyComparison();UpdateCachedStatus();InvalidateControls();
+        }
+        SyncFeatureMenuState();
+    }
+
     float ReadIniFloat(const wchar_t* section,const wchar_t* key,float fallback)const{
         wchar_t def[64]{},buf[128]{};swprintf_s(def,L"%.6f",fallback);
         const auto path=SettingsPath();GetPrivateProfileStringW(section,key,def,buf,static_cast<DWORD>(std::size(buf)),path.c_str());
@@ -5714,17 +5836,25 @@ private:
                     EnableMenuItem(menu,command,MF_BYCOMMAND|(admitted?MF_ENABLED:MF_GRAYED));
                 }
             }
-            // RTX VSR Upscaling: checked as set, greyed only where a renderer has said
-            // it cannot run here - nothing loaded is no reason to refuse the setting -
+            // The upscaler radios. RTX VSR is greyed only where a renderer has said it
+            // cannot run here - nothing loaded is no reason to refuse the setting -
             // and then labelled with why, as the compare segment's tooltip is.
             {
                 const bool usable=!m_renderer||VsrUsable();
                 std::wstring label=T(L"menu.rtx_vsr_upscaling");
                 if(!usable)label+=Format(T(L"menu.rtx_vsr_unavailable"),VsrReasonText().c_str());
                 app_menu::SetMenuCommandText(menu,IDM_RTX_VSR_UPSCALING,label);
-                CheckMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(m_playbackVsr?MF_CHECKED:MF_UNCHECKED));
-                EnableMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(usable?MF_ENABLED:MF_GRAYED));
+                const auto shown=upscaler_choice::Shown(UpscalingActive(),m_playbackVsr);
+                app_menu::UpdateUpscalerMenu(menu,shown==upscaler_choice::Upscaler::SuperResolution?IDM_DLSS_UPSCALING
+                                                   :shown==upscaler_choice::Upscaler::RtxVsr?IDM_RTX_VSR_UPSCALING:IDM_UPSCALER_NONE,
+                                             usable,ToolbarActionEnabled(ToolbarAction::ToggleUpscaling)||UpscalingActive());
+                // Super Resolution's own submenus mean nothing while another upscaler is chosen.
+                const UINT srState=MF_BYCOMMAND|(shown==upscaler_choice::Upscaler::SuperResolution?MF_ENABLED:MF_GRAYED);
+                for(const UINT item:{IDM_UPSCALE_HISTORY_TEMPORAL,IDM_UPSCALE_HISTORY_PER_FRAME})EnableMenuItem(menu,item,srState);
             }
+            // Re-render from here restarts what the render is doing with the settings
+            // as they are, so it needs a source and DLSS 5 on.
+            EnableMenuItem(menu,IDM_RERENDER_HERE,MF_BYCOMMAND|(m_loaded&&neuralActive&&!ActivityBusy()?MF_ENABLED:MF_GRAYED));
             // Outside the radio range above, which CheckMenuRadioItem clears:
             // this is a constraint on the multiple, not one of the choices.
             CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
@@ -5893,6 +6023,17 @@ private:
         info.lpszText=m_callbackTip.data();info.szText[0]=L'\0';info.hinst=nullptr;
         return 0;
     }
+    // The toolbar's tips name their keys, so a rebinding registers them again.
+    void ReloadToolbarTips(){
+        if(!m_hwnd||!IsWindow(m_hwnd))return;
+        if(HWND host=EnsureTipHost(m_hwnd)){
+            for(size_t index=0;index<static_cast<size_t>(ToolbarAction::None);++index){
+                TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.hwnd=m_hwnd;info.uId=index;
+                SendMessageW(host,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&info));
+            }
+        }
+        RefreshToolbarTips();
+    }
     void RefreshToolbarTips(){
         if(!m_hwnd||!IsWindow(m_hwnd))return;
         const auto items=FocusableItems();
@@ -5916,7 +6057,8 @@ private:
                 SendMessageW(host,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&info));
                 continue;
             }
-            text.push_back(std::make_unique<std::wstring>(T(key)));
+            const UINT command=toolbar_tips::Command(action);
+            text.push_back(std::make_unique<std::wstring>(toolbar_tips::WithKeys(T(key),command?m_keys.KeysFor(command):std::wstring{})));
             info.lpszText=text.back()->data();
             info.rect=bounds;
             SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
@@ -11391,9 +11533,9 @@ private:
                                            double(GetTickCount64()-m_liveStartTick)/1000.0);
     }
     std::wstring BuildStatusText()const{
-        // The menu path the hint names has to be the one the menu has: the
-        // cancel item lives under DLSS > Convert & export, not under File.
-        if(m_exportWorker.joinable())return L"Exporting processed media \u00b7 DLSS > Convert & export > Cancel export to stop";
+        // The menu path the hint names has to be the one the menu has: Export
+        // is under File, and is Cancel export while one runs.
+        if(m_exportWorker.joinable())return T(L"status.exporting");
         // The conversion is the one activity that owns the whole status line:
         // it is minutes long, it is the reason the picture is not changing, and
         // a percentage is the only thing that distinguishes progress from a
@@ -11929,10 +12071,12 @@ private:
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
         // ? is a character, not a key: it is Shift+/ on a US layout and
         // somewhere else on most others, so it is matched after translation.
-        case WM_CHAR:if(w==L'?'){ToggleShortcutSheet();return 0;}break;
+        case WM_CHAR:
+            if(const auto command=w==L'?'?m_keys.Lookup(key_bindings::Chord{0,false,false,L'?'}):std::nullopt){HandleCommand(*command);return 0;}
+            break;
+        // Saved changes to input.conf apply when the player comes back to the front.
+        case WM_ACTIVATEAPP:if(w)ReloadKeyBindingsIfChanged();break;
         case WM_KEYDOWN:
-            // F1 is Windows' help key; nothing else in the player used it.
-            if(w==VK_F1){ToggleShortcutSheet();return 0;}
             // Esc's order is escape_key::Resolve: the sheet, then fullscreen, then
             // the longest-running job. Nothing else in this handler takes Esc.
             if(w==VK_ESCAPE){
@@ -11949,7 +12093,15 @@ private:
                 }
             }
             if(w==VK_F10)RevealFullscreenControls();
-            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(const auto command=app_menu::CommandForPlayerKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_OEM_PERIOD){StepCachedFrame();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){SetAspect(m_onePixel?false:!m_fill,false);return 0;}if(w=='D'){ToggleNeuralRendering();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}break;
+            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}
+            // Everything else is the key table (KeyBindings.h), matched with its
+            // modifiers exactly: Shift+S is not S. A key held with Alt is not one
+            // of them - Alt+key is the menu bar's, and Ctrl+Alt is AltGr typing a
+            // character on many layouts.
+            if(!(GetKeyState(VK_MENU)&0x8000)){
+                if(const auto command=m_keys.LookupKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}
+            }
+            break;
         }
         return DefWindowProcW(h,m,w,l);
     }
@@ -11971,8 +12123,9 @@ private:
             SelectSubtitleTrack(int(id-IDM_SUBTITLE_TRACK_FIRST),true);return;}
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_NEURAL_RENDERING:ToggleNeuralRendering();break;
-        case IDM_DLSS_UPSCALING:ToggleUpscaling();break;
-        case IDM_RTX_VSR_UPSCALING:TogglePlaybackVsr();break;
+        case IDM_RTX_VSR_UPSCALING:SelectUpscaler(upscaler_choice::Upscaler::RtxVsr);break;
+        case IDM_DLSS_UPSCALING:SelectUpscaler(upscaler_choice::Upscaler::SuperResolution);break;
+        case IDM_UPSCALER_NONE:SelectUpscaler(upscaler_choice::Upscaler::None);break;
         case IDM_UPSCALE_AUTO:SetUpscaleTarget(0);break;
         case IDM_PROCESSING_SCALE_FIRST:case IDM_PROCESSING_SCALE_FIRST+1:case IDM_PROCESSING_SCALE_LAST:
             if(const auto percent=app_menu::ProcessingScaleForCommand(id))SetProcessingScale(*percent);
@@ -12004,6 +12157,14 @@ private:
 case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExportStages();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;case IDM_RENDER_REPORT:ShowRenderReport();break;
         case IDM_CHECK_FOR_UPDATES:MaybeStartUpdateCheck(true);break;
         case IDM_KEYBOARD_SHORTCUTS:ToggleShortcutSheet();break;
+        case IDM_HELP_KEY_BINDINGS:EditKeyBindings();break;case IDM_HELP_USER_GUIDE:OpenUserGuide();break;
+        case IDM_HELP_LOG_FOLDER:OpenLogFolder();break;case IDM_HELP_ABOUT:ShowAbout();break;
+        case IDM_STEP_FRAME:StepCachedFrame();break;
+        // A, Fit and Fill in turn; from 1:1 it goes to Fit.
+        case IDM_ASPECT_TOGGLE:SetAspect(m_onePixel?false:!m_fill,false);break;
+        // Apply's path: a running session restarts at the playhead with the
+        // settings as they are; paused, the frame under it is rendered again.
+        case IDM_RERENDER_HERE:if(m_loaded&&m_neuralRequested)ApplyNeuralSettings();break;
         case IDM_SUBTITLE_OFF:SelectSubtitlesOff(true);break;case IDM_SUBTITLE_FILE:SelectSubtitleFile(true);break;
         case IDM_SUBTITLE_LOAD:LoadSubtitleFromDialog();break;case IDM_SUBTITLE_NEXT:NextSubtitles();break;
         case IDM_SUBTITLE_EARLIER:StepSubtitleDelay(-1);break;case IDM_SUBTITLE_LATER:StepSubtitleDelay(+1);break;
@@ -12120,7 +12281,12 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // over whatever is left; a player that dies without running it is covered
     // by the kill-on-close job object instead.
     ResidentNeuralHelper m_residentHelper;
-    AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr,m_fontTitle=nullptr;
+    AppOptions m_opt;Localizer m_loc;
+    // The keys (KeyBindings.h): the defaults, with input.conf beside the ini
+    // applied over them. Read before the window exists and again whenever the
+    // player comes back to the front with the file changed.
+    key_bindings::Table m_keys=key_bindings::Defaults();std::filesystem::file_time_type m_keysWritten{};
+    UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr,m_fontTitle=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_waitingForNetworkFrame=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false,m_neuralRequested=true;
     // Timeline scrubbing: what playback was doing before the drag, and when the
     // last preview seek went out so a drag cannot queue one per mouse move.

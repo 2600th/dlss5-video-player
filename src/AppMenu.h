@@ -14,6 +14,7 @@
 
 class Localizer;
 enum class YouTubeSourceQuality;
+namespace key_bindings { class Table; }
 
 namespace app_menu {
 
@@ -59,6 +60,8 @@ inline constexpr UINT IDM_SUBTITLE_NEXT = 249;
 inline constexpr UINT IDM_SUBTITLE_EARLIER = 250;
 inline constexpr UINT IDM_SUBTITLE_LATER = 251;
 inline constexpr UINT IDM_SUBTITLE_DELAY_RESET = 252;
+// Playback > Step one cached frame: the '.' key, which had no menu row.
+inline constexpr UINT IDM_STEP_FRAME = 253;
 inline constexpr UINT IDM_NEURAL_RENDERING = 300;
 inline constexpr UINT IDM_REHOOK = 301;
 inline constexpr UINT IDM_VIEW_FINAL = 302;
@@ -71,8 +74,14 @@ inline constexpr UINT IDM_PREVIEW_FRAME = 310;
 inline constexpr UINT IDM_PREVIEW_CLIP = 311;
 inline constexpr UINT IDM_RENDER_RANGE = 312;
 inline constexpr UINT IDM_RENDER_WHOLE = 313;
+// Enhance > Picture...: the Picture panel on its render zone. Ctrl+E's
+// IDM_VIDEO_ADJUSTMENTS opens the same panel on its viewing zone.
 inline constexpr UINT IDM_NEURAL_SETTINGS = 314;
+// Tools > Cache & encoding...
 inline constexpr UINT IDM_ENCODER_SETTINGS = 315;
+// Enhance > Re-render from here: Apply's restart at the playhead with the
+// settings as they are now, offered where the render is.
+inline constexpr UINT IDM_RERENDER_HERE = 316;
 // One contiguous block: CheckMenuRadioItem clears every command in the range it
 // is given, so a rung outside it would keep a stale check.
 inline constexpr UINT IDM_UPSCALE_AUTO = 334;
@@ -104,6 +113,9 @@ inline constexpr UINT IDM_ASPECT_FILL = 401;
 inline constexpr UINT IDM_ASPECT_ONE_TO_ONE = 404;
 inline constexpr UINT IDM_FULLSCREEN = 402;
 inline constexpr UINT IDM_VIDEO_ADJUSTMENTS = 403;
+// Not on any menu: the A key, Fit and Fill in turn. Its key is printed on the
+// Fit row, which is where the sheet has always listed it.
+inline constexpr UINT IDM_ASPECT_TOGGLE = 405;
 inline constexpr UINT IDM_YOUTUBE_QUALITY_AUTO = 410;
 inline constexpr UINT IDM_YOUTUBE_QUALITY_2160 = 411;
 inline constexpr UINT IDM_YOUTUBE_QUALITY_1440 = 412;
@@ -178,8 +190,11 @@ inline constexpr UINT IDM_PROCESSING_SCALE_LAST = 482;
 // (the recommended default).
 inline constexpr UINT IDM_UPSCALE_HISTORY_TEMPORAL = 484;
 inline constexpr UINT IDM_UPSCALE_HISTORY_PER_FRAME = 485;
-// RTX VSR as the playback upscaler (VsrPolicy.h PlaybackUpscales).
+// The playback upscaler, three radios by position in Enhance and on the
+// Upscaler pill's menu: RTX VSR (VsrPolicy.h PlaybackUpscales), DLSS Super
+// Resolution (IDM_DLSS_UPSCALING), or neither - the window's own scaling.
 inline constexpr UINT IDM_RTX_VSR_UPSCALING = 486;
+inline constexpr UINT IDM_UPSCALER_NONE = 487;
 // Right-justified affordance appended to the menu bar itself, not a submenu.
 inline constexpr UINT IDM_UPDATE_AVAILABLE = 461;
 // Help > Keyboard shortcuts, the menu route to the ? / F1 cheat sheet.
@@ -191,18 +206,33 @@ inline constexpr UINT IDM_COMPARE_TOGGLE = 491;
 // as the model saw it, instead of in HDR. Live only while an HDR source is on an
 // HDR display (main.cpp SyncFeatureMenuState).
 inline constexpr UINT IDM_COMPARE_HDR_AT_SDR = 493;
+// Help: the key file (KeyBindings.h), the guide, the log folder, About.
+inline constexpr UINT IDM_HELP_KEY_BINDINGS = 495;
+inline constexpr UINT IDM_HELP_USER_GUIDE = 496;
+inline constexpr UINT IDM_HELP_LOG_FOLDER = 497;
+inline constexpr UINT IDM_HELP_ABOUT = 498;
 
 enum class PlayerCommandRoute {
     KeyDown,
     NativeMenu,
 };
 
+// The bar with the default keys, and with `keys` (KeyBindings.h): every row
+// whose command has a name prints that command's keys in its key column.
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable);
-void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled);
+HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key_bindings::Table& keys);
+// Rewrites every named command's key column from `keys`; what follows the tab
+// on a row with no command name (a measured rung) is left alone.
+void ApplyKeyBindings(HMENU menuBar, const key_bindings::Table& keys, const Localizer& localizer);
+// Enhance's upscaler radios, by position: RTX VSR, DLSS Super Resolution, none.
+// `chosen` is one of IDM_RTX_VSR_UPSCALING, IDM_DLSS_UPSCALING, IDM_UPSCALER_NONE.
+bool UpdateUpscalerMenu(HMENU menuBar, UINT chosen, bool vsrAvailable, bool superResolutionAvailable);
+// File > Recent videos; `noneLabel` is the greyed row an empty list shows.
+void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled, const std::wstring& noneLabel);
 // Playback > Audio's track list. Empty labels leave a disabled placeholder rather
 // than an empty popup; `selected` is the index of the track playing and
 // carries the only radio mark.
-void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int selected);
+void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int selected, const std::wstring& noneLabel);
 // Playback > Subtitles: rebuilds the radio group at the top of the popup - Off,
 // one row per subtitle stream, and `fileLabel`'s row when a file is loaded -
 // checks `chosen` (one of those commands), and enables the rest for `loaded`.
@@ -264,10 +294,8 @@ bool UpdateSecondMixMenu(HMENU menuBar, bool available, UINT index);
 // and `last`: with MF_BYCOMMAND Windows wants the checked id numerically between
 // them, which a group that grew an item past its original ids cannot promise.
 bool CheckRadioCommand(HMENU menuBar, UINT first, UINT last, UINT chosen);
-// Menu command for a plain-key accelerator of the range, preview, neural
-// settings, comparison and subtitle items (I, O, Shift+I/O, Ctrl+G, F, Shift+F,
-// Ctrl+R, Ctrl+N, Ctrl+Shift+S, Z, Shift+Z, [ and ], Shift+[ and Shift+], X, C,
-// Shift+C, L, R, Shift+R, V, H and J); nullopt when the key is not one of them.
+// The command a key runs with the default bindings (key_bindings::Defaults), or
+// nullopt. The player itself reads its live table, which input.conf may change.
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown);
 
 // One row of the keyboard cheat sheet: the menu it lives in (or "Keyboard"
@@ -280,8 +308,9 @@ struct ShortcutRow {
     friend bool operator==(const ShortcutRow&, const ShortcutRow&) = default;
 };
 // Read from the menu bar itself - every command whose text carries a tab and
-// an accelerator - so the sheet cannot say something the menus do not; then
-// the keys no menu command names (Tab, Enter, '.', Esc, the wheel...).
+// an accelerator, which ApplyKeyBindings wrote from the key table - so the sheet
+// cannot say something the menus do not; then the keys no menu command names
+// (Tab, Enter, Esc, the wheel...).
 std::vector<ShortcutRow> CollectShortcuts(HMENU menuBar, const Localizer& localizer);
 
 } // namespace app_menu

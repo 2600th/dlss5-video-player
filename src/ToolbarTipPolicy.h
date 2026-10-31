@@ -1,7 +1,10 @@
 #pragma once
 
+#include <algorithm>
+#include <string>
 #include <string_view>
 
+#include "AppMenu.h"
 #include "UiLayout.h"
 
 // What each toolbar control says on hover, and how soon. Every control gets a
@@ -11,8 +14,9 @@
 //
 // A tip that names a key is only as good as the key. The Fullscreen tip said
 // "Escape or F leaves" for as long as F has been "Preview this frame", which
-// starts a neural render; so each tip is tied to the menu row that owns the
-// same command, and PolicyTests checks the key in one against the other.
+// starts a neural render; so each tip is tied to the command it runs and names
+// that command's keys from the key table (KeyBindings.h), the one the menus
+// print too.
 namespace toolbar_tips {
 
 // Long enough that sweeping the cursor across the bar raises nothing; short
@@ -45,36 +49,37 @@ inline const wchar_t* TipKey(ToolbarAction action)
     return nullptr;
 }
 
-// The menu row that runs the same command, whose accelerator the tip must
-// name. Null for a control with no key of its own.
-inline const wchar_t* MenuKey(ToolbarAction action)
+// The command a control runs, whose keys its tip names; 0 for a control with
+// no key of its own. The key is not written into the tip's text: WithKeys adds
+// it from the live key table, so a key rebound in input.conf is the key the tip
+// names, and a translation never carries a key it could get wrong.
+inline UINT Command(ToolbarAction action)
 {
     switch (action) {
-    case ToolbarAction::Open: return L"menu.open";
-    case ToolbarAction::OpenYouTube: return L"menu.open_youtube";
-    case ToolbarAction::Back10: return L"menu.back10";
-    case ToolbarAction::PlayPause: return L"menu.playpause";
-    case ToolbarAction::Stop: return L"menu.stop";
-    case ToolbarAction::Forward10: return L"menu.forward10";
-    case ToolbarAction::Mute: return L"menu.mute";
-    case ToolbarAction::ToggleNeuralRendering: return L"menu.neural_rendering";
-    case ToolbarAction::Aspect: return L"menu.aspectfit";
-    case ToolbarAction::Adjustments: return L"menu.adjustments";
-    case ToolbarAction::DebugView: return L"menu.final";
-    case ToolbarAction::Fullscreen: return L"menu.fullscreen";
-    default: return nullptr;
+    case ToolbarAction::Open: return app_menu::IDM_OPEN;
+    case ToolbarAction::OpenYouTube: return app_menu::IDM_OPEN_YOUTUBE;
+    case ToolbarAction::Back10: return app_menu::IDM_BACK10;
+    case ToolbarAction::PlayPause: return app_menu::IDM_PLAY;
+    case ToolbarAction::Stop: return app_menu::IDM_STOP;
+    case ToolbarAction::Forward10: return app_menu::IDM_FWD10;
+    case ToolbarAction::Mute: return app_menu::IDM_MUTE;
+    case ToolbarAction::ToggleNeuralRendering: return app_menu::IDM_NEURAL_RENDERING;
+    case ToolbarAction::Aspect: return app_menu::IDM_ASPECT_TOGGLE;
+    case ToolbarAction::Adjustments: return app_menu::IDM_VIDEO_ADJUSTMENTS;
+    case ToolbarAction::Fullscreen: return app_menu::IDM_FULLSCREEN;
+    default: return 0;
     }
 }
 
-// "Play / Pause\tSpace   (Overlay: Ctrl+Alt+Space)" -> "Space": the text
-// after the tab, up to a run of spaces that starts a note.
-inline std::wstring_view MenuAccelerator(std::wstring_view label)
+// "Fullscreen\nEsc leaves." with "F11" -> "Fullscreen (F11)\nEsc leaves.": the
+// keys in the "Name (Key)" form the compare bar's tips use, at the end of the
+// first line. No keys, no parentheses.
+inline std::wstring WithKeys(std::wstring_view tip, std::wstring_view keys)
 {
-    const size_t tab = label.find(L'\t');
-    if (tab == std::wstring_view::npos) return {};
-    std::wstring_view accelerator = label.substr(tab + 1);
-    const size_t note = accelerator.find(L"  ");
-    return note == std::wstring_view::npos ? accelerator : accelerator.substr(0, note);
+    const size_t end = std::min(tip.size(), tip.find(L'\n'));
+    std::wstring text(tip.substr(0, end));
+    if (!keys.empty()) text.append(L" (").append(keys).append(L")");
+    return text.append(tip.substr(end));
 }
 
 // "Fullscreen (F11)\nEsc or F11 leaves." -> "F11": the parenthesised key at

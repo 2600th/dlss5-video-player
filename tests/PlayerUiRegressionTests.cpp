@@ -429,11 +429,12 @@ struct PlayerAppTestAccess {
         CHECK(app.m_neuralRequested);
         CHECK(!app.m_upscalingRequested);
         // RTX VSR upscales playback by default (docs/measurements/vsr-quality-20261002),
-        // the menu command turns it off and on, and every presentation the player
-        // pushes carries it - the capture never does, since it pushes none.
+        // Enhance's upscaler radios turn it off (No upscaler) and on, and every
+        // presentation the player pushes carries it - the capture never does,
+        // since it pushes none.
         CHECK(app.m_playbackVsr);
         CHECK(app.EffectiveComparison().playbackVsr);
-        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        app.HandleCommand(IDM_UPSCALER_NONE);
         CHECK(!app.m_playbackVsr);
         CHECK(!app.EffectiveComparison().playbackVsr);
         app.HandleCommand(IDM_RTX_VSR_UPSCALING);
@@ -445,7 +446,8 @@ struct PlayerAppTestAccess {
         CHECK(app.EffectiveComparison().vsrQuality==app.m_comparison.vsrQuality);
         app.m_vsrSessionOff=true;
         CHECK(!app.EffectiveComparison().playbackVsr);
-        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        // Picking RTX VSR while the guard has it off for this video is the
+        // user's choice, so it ends what the guard did.
         app.HandleCommand(IDM_RTX_VSR_UPSCALING);
         CHECK(app.EffectiveComparison().playbackVsr);
         CHECK(!app.m_vsrSessionQuality.has_value());
