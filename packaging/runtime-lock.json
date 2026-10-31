@@ -54,7 +54,7 @@
       "fileVersion": "0.2026.1020.1459",
       "signatureStatus": "NotSigned",
       "signerContains": "",
-      "provenance": "RenoDX DLSS 5 add-on 10.8.0 from the RankFTW/rhi-repo release renodx-dlss5-10.8.0, archive digest faba7814fa90b6b21786c98a45732dbe80f01fa36745c46324472e14ac0f440d verified before extraction. Replaces 6.5.3 (archive 553b1619..., file 342341F6...). 10.8.0 drives both NR runtimes - it reads NRRuntimePath and the network choice NRPreset - and its config is ConfigVersion 10 / ConfigRevision 1, which the player stamps so the add-on never migrates the file; with NRDetailStability and NRSkinIndependent pinned off it renders 310.8.SF-v2 as 6.5.3 did, within 0.03 of a code value (docs/measurements/runtime-310916-20261031).",
+      "provenance": "RenoDX DLSS 5 add-on 10.8.0 from the RankFTW/rhi-repo release renodx-dlss5-10.8.0, archive digest faba7814fa90b6b21786c98a45732dbe80f01fa36745c46324472e14ac0f440d verified before extraction. Replaces 6.5.3 (archive 553b1619..., file 342341F6...). 10.8.0 drives both NR runtimes - it reads NRRuntimePath and the network choice NRPreset - and its config is ConfigVersion 10 / ConfigRevision 1, which the player stamps so the add-on never migrates the file; with NRDetailStability and NRSkinIndependent pinned off it renders 310.8.SF-v2 as 6.5.3 did, within 0.1 of an 8-bit level on average and byte-identical on one clip of five (docs/measurements/runtime-310916-20261031).",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#renodx--experimental-dlss-5-runtime"
     },
     {

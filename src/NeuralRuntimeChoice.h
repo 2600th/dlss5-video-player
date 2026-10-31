@@ -24,7 +24,7 @@
 // sends it; A is 1 and B is 2.
 //
 // The default is A because it is the picture 0.28 made. B is a milder picture:
-// on all five clips it lands nearer the source (the knobs distance 79-93 % of
+// on all five clips it lands nearer the source (the knobs distance 76-93 % of
 // A's; VMAF v1 82.1 against 78.8 and ColorVideoVDP 8.90 against 8.74 JOD, both
 // scored against the source) without freezing (lost share 0.130 against
 // 0.140). Nearer the source is not better by itself - the model's change is the
