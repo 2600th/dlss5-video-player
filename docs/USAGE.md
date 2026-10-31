@@ -2,7 +2,7 @@
 
 _Verified against 0.28.0 (4f3150a) on 2026-10-02._
 
-The interface is English-only. It does not load external language packs.
+The interface is in English or Simplified Chinese; see [Language](#language).
 
 ## Open, render and compare
 
@@ -552,11 +552,39 @@ is written to the log with its line number and skipped; it never stops the
 player starting. The menus' key columns, the toolbar's tooltips and the
 shortcut sheet all show the keys the file gives.
 
+### Language
+
+The interface is in English or Simplified Chinese (`lang\zh-Hans.lang`). The
+docs stay in English.
+
+The player follows the Windows display language (Settings > Time & language >
+Language & region), most preferred first. Chinese (China), Chinese
+(Singapore) and any `zh-Hans` tag get Simplified Chinese. Chinese (Taiwan),
+Chinese (Hong Kong SAR), Chinese (Macao SAR) and any `zh-Hant` tag stay in
+English: no Traditional Chinese translation ships yet. If English comes first
+in the list, the player is in English.
+
+To pick a language yourself, start the player with `--lang zh-Hans` or
+`--lang en`. To keep the choice, set it in `DLSSVideoPlayer.ini`:
+
+```ini
+[Interface]
+Language=en
+```
+
+`--lang` wins over the ini, and the ini wins over Windows. Changes apply the
+next time the player starts.
+
+The Simplified Chinese text was drafted with an AI model and has not yet been
+reviewed by a native speaker. To correct a string, open an issue or a pull
+request against `lang/zh-Hans.lang`; the line to change is the one whose key
+is beside the English text in `src/Localization.h`.
+
 ### Translations
 
 The player reads its strings from one table; a translation replaces the ones
 it names and leaves the rest in English, so a partial translation is usable.
-None ships yet. A translation is one UTF-8 file, `lang\<tag>.lang` beside
+A translation is one UTF-8 file, `lang\<tag>.lang` beside
 `DLSSVideoPlayer.exe` (`lang\de.lang`, `lang\zh-Hans.lang`), one
 `key = text` per line:
 
@@ -573,7 +601,10 @@ it; with neither, the player follows the Windows display language. Quote a
 text only to keep a space at either end; `\n` is a line break. A line the
 loader cannot use - not a `key = text`, a key English does not have, or a `%s`
 that does not match English's - is logged and skipped, and every key the file
-leaves out reads in English.
+leaves out reads in English. A file that ships in `lang\` has to carry every
+English key and every placeholder; `tools\lang_keys.ps1 zh-Hans` lists the
+keys a file is missing, with their English text, and any it has that English
+does not.
 
 The player also answers Windows' own media controls: the player card in the
 volume flyout and on the lock screen shows the video's title and position and
