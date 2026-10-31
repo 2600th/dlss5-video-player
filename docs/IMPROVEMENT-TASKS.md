@@ -21,13 +21,18 @@ interrupt rule. M1.1, M1.2 and M2 ship together as 0.30.0, and M3 follows as
 0.31.0. P0.20, P1.49-P1.51, P2.61-P2.66 and
 P3.21 are new._
 
+_Re-checked against 0.30.0 on 2026-10-31: M1.1, M1.2 and M2 landed, and
+their tasks are removed. What they left open is P1.52-P1.54 and P2.67-P2.69,
+and P3.5 keeps only its signed-build and other-generation half. P1.54, the
+0.30.0 hands-on checks, opens M3._
+
 Open work only, highest priority first. Completed items are removed rather
 than ticked; what shipped is in `CHANGELOG.md` and git history. When a task
 lands, delete it from this file in the same change.
 
 **IDs are never reused.** Source comments cite them (`P2.8`, `P3.7`), so a
 new task takes the next free number in its tier even when lower numbers are
-free. Next free: **P0.21, P1.52, P2.67, P3.22**.
+free. Next free: **P0.21, P1.55, P2.70, P3.22**.
 
 Sources: three code audits (neural helper/cache/runtime; decode, playback,
 audio and export; app shell, build, CI and release) and two web surveys of the
@@ -78,13 +83,11 @@ clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
 | ID | Task | Effort | Impact | Milestone |
 | --- | --- | :---: | --- | :---: |
 | **P0** | **Fix before the next release** | | | |
-| [P0.20](#p020) | yt-dlp back to a stable release, past certifi's critical CA fix | S | Release | M1.1 |
+| | _None open_ | | | |
 | **P1** | **Next** | | | |
-| [P1.45](#p145) | Prove the keep-awake request | S | Pipeline | M1.1 |
-| [P1.46](#p146) | dlssg_for_sm86 0.4.0: settings tests and a real load | S | Pipeline | M1.1 |
-| [P1.47](#p147) | Driver messages: an honest NGX capability, a tested Windows 10 check | S | Pipeline, Player | M1.1 |
-| [P1.48](#p148) | YouTube through the player, against the old yt-dlp | S | Player, Release | M1.1 |
-| [P1.49](#p149) | Driver 621.01 is a known-bad version | S | Docs, Player | M1.1 |
+| [P1.54](#p154) | 0.30.0 hands-on checks | S | Player | M3 |
+| [P1.52](#p152) | RenoDX 10.8.0 and 310.8.SF-v2 on RTX 20, 30 and 40, and the driver floor | S | Pipeline, Docs | M5 |
+| [P1.53](#p153) | dlssg_for_sm86 0.4.x: a real load on an RTX 20 or 30 | S | Pipeline | M5 |
 | [P1.44](#p144) | Reconcile the two brightness instruments | S | Pipeline | M3 |
 | [P1.51](#p151) | Keep a DirectX dump file when the GPU hangs | S-M | Pipeline | M5 |
 | [P1.50](#p150) | List the core zip on WinGet | S | Release | M6 |
@@ -117,23 +120,20 @@ clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
 | [P2.51](#p251) | Deinterlace interlaced sources before the model | M | Pipeline | M5 |
 | [P2.53](#p253) | Say a long job finished, outside the window | S | Player | M5 |
 | [P2.64](#p264) | Measure, then reuse exact-duplicate source frames | S-M | Pipeline | M5 |
+| [P2.68](#p268) | One cache entry for the previous runtime's two networks | S | Pipeline | M5 |
 | [P2.65](#p265) | Say in the exported file how it was made | S | Pipeline | M6 |
 | [P2.40](#p240) | Opt-in subtitle burn-in for MP4 and GIF | M | Pipeline | M6 |
 | [P2.38](#p238) | Measure DLSS SR presets L and M | S | Pipeline | M8 |
 | [P2.39](#p239) | RTX VSR on the neural render | M | Player, Pipeline | M8 |
 | | _Interface, input and convenience_ | | | |
-| [P2.54](#p254) | The UI restructure, in one release | L | Player, Docs | M2 |
-| [P2.55](#p255) | UI small wins, and rebindable keys | S-M | Player | M2 |
-| [P2.63](#p263) | A translatable UI, Simplified Chinese first | S-M | Player, Docs | M2 |
-| [P2.52](#p252) | Resume where you left off; next file in the folder | S | Player | M2 |
-| [P2.41](#p241) | Clipboard copy and paste | S | Player | M2 |
-| [P2.42](#p242) | YouTube captions | S | Player | M2 |
+| [P2.67](#p267) | A native speaker's review of the Simplified Chinese text; more languages | S | Player, Docs | M8 |
 | | _HDR_ | | | |
 | [P2.56](#p256) | Try an FP16 scRGB swap chain for HDR presentation | S-M | Player | M7 |
+| | _Tests_ | | | |
+| [P2.69](#p269) | A YouTube resolver test that fails under load | S | Release | M3 |
 | | _Carried over_ | | | |
 | [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | M8 |
 | **P3** | **Strategic or large** | | | |
-| [P3.14](#p314) | Runtime refresh: DLSS-NR 310.9.16, its two networks, RenoDX 10.8 | M-L | Pipeline, Release | M1.2 |
 | [P3.9](#p39) | HDR output of the render | L | Pipeline | M7 |
 | [P3.18](#p318) | A measured HDR→SDR peak for the model's input | M | Pipeline | M7 |
 | [P3.15](#p315) | NVIDIA Video Effects SDK: frame generation and VSR modes | M-L | Pipeline | M8 |
@@ -145,7 +145,7 @@ clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
 | [P3.11](#p311) | Compare against an external file | M-L | Player | M8 |
 | [P3.12](#p312) | Network sources beyond YouTube | M | Player | M8 |
 | [P3.13](#p313) | Render queue (owner's decision) | M | Pipeline | M8 |
-| [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | M1.2 (DLL), M8 (rest) |
+| [P3.5](#p35) | NVIDIA's signed DLSS-NR runtime, and 310.9.16 beyond RTX 50 | M | Pipeline, Release | M8 |
 | [P3.21](#p321) | Opt-in C2PA content credentials on exports | M | Pipeline, Release | M8 |
 | [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | M8 |
 | [P3.8](#p38) | Repository media hygiene | S | Release | M8 |
@@ -163,15 +163,13 @@ L one to two weeks.
 | | Release | Theme | Tasks | Size | Needs first |
 | --- | --- | --- | --- | :---: | --- |
 | **M0, M1** | 0.28.3 | Shipped on 2026-10-16: YouTube, provenance, runtime readiness, seven measurements | - | - | - |
-| **M1.1** | 0.30.0 | Prove what 0.28.3 claims; a security pin | P0.20, P1.45, P1.46, P1.47, P1.48, P1.49 | ~3 days | - |
-| **M1.2** | 0.30.0 | The October model: runtime refresh | P3.14, P3.5 (the RTX 50 DLL) | ~1-2 weeks | M1.1 |
-| **M2** | 0.30.0 | One relearn: the UI restructure, translatable | P2.54, P2.55, P2.52, P2.41, P2.42, P2.63 | ~2-3 weeks | beside M1.2 |
-| **M3** | 0.31.0 | Judge it: the review loop | P2.31, P2.29, P2.30, P2.28, P1.44, P2.61, P2.62 | ~3 weeks | M2 (compare-bar slots), M1.2 (judge the new model with it) |
-| **M4** | 0.32.0 | Fix it: faces, flicker and colour | P2.43, P2.36, P2.45, P2.37, P2.46 | ~3 weeks | M2 (Picture panel zones), M3 (tools to judge it) |
-| **M5** | 0.33.0 | Never lose work, never wait | P2.35, P2.47, P2.48, P2.49, P2.51, P2.53, P2.59, P2.60, P2.64, P1.51 | ~3 weeks | runs beside M3-M4 |
+| **M1.1, M1.2, M2** | 0.30.0 | Shipped on 2026-10-31: 0.28.3's claims proved or corrected, a stable yt-dlp, DLSS-NR 310.9.16 on RTX 50 with two networks, RenoDX 10.8.0, the UI restructure, translatable | - | - | - |
+| **M3** | 0.31.0 | Judge it: the review loop | P1.54 (first), P2.31, P2.29, P2.30, P2.28, P1.44, P2.61, P2.62, P2.69 | ~3 weeks | P1.54; M2's compare-bar slots are in 0.30.0 |
+| **M4** | 0.32.0 | Fix it: faces, flicker and colour | P2.43, P2.36, P2.45, P2.37, P2.46 | ~3 weeks | M3 (tools to judge it); M2's Picture panel slot is in 0.30.0 |
+| **M5** | 0.33.0 | Never lose work, never wait | P2.35, P2.47, P2.48, P2.49, P2.51, P2.53, P2.59, P2.60, P2.64, P2.68, P1.51, P1.52, P1.53 | ~3 weeks | runs beside M3-M4; RTX 20-40 cards for P1.52 and P1.53 |
 | **M6** | 0.34.0 | Share and inspect | P2.27, P2.33, P2.32, P2.34, P2.40, P2.65, P1.50 | ~2 weeks | M3 (worst frames feed the frame pack) |
 | **M7** | 0.35.0 | HDR end to end | P3.9, P3.18, P2.56 | ~3 weeks | - |
-| **M8** | - | Gated or strategic | P3.15, P3.16, P3.17, P3.19, P3.20, P2.38, P2.39, P2.4, P2.66, P3.5 (the rest), P3.6, P3.8, P3.10-P3.13, P3.21 | - | each item's blocker |
+| **M8** | - | Gated or strategic | P3.15, P3.16, P3.17, P3.19, P3.20, P2.38, P2.39, P2.4, P2.66, P2.67, P3.5, P3.6, P3.8, P3.10-P3.13, P3.21 | - | each item's blocker |
 
 **M0 and M1 shipped together as 0.28.3** (2026-10-16), a patch because nothing
 in them changes a rendered pixel. The measurements decided four later designs.
@@ -182,46 +180,29 @@ correction. RenoDX 8.5 is adoptable with three config changes (P3.14). Owner
 actions still open: close #15, fixed in 0.28.2 and answered on 10-04; decide on
 #3, which has waited on its reporter since 09-09.
 
-**0.30.0 is one release: M1.1, M1.2 and M2 (owner's decision, 2026-10-31).**
-There is no 0.28.4 or 0.29.0: everything up to M2 ships together as 0.30.0,
-in about 4-5 weeks, and M3 follows. Inside the branch the order still
-matters. M1.1 lands first, because the M1.2 and M2 branches are built on it.
-M1.2 and M2 are built side by side in separate worktrees: M1.2 is in the
-worker and runtime, M2 in the shell. The one control they share, M1.2's A/B
-network choice, goes straight into M2's Picture panel. Because the new model
-and the new UI reach users together, the CHANGELOG keeps them in separate
-sections. P3.14's selectable old runtime is how a "looks different" report is
-told apart from a UI change. The cost of one release: the yt-dlp certificate
-fix (P0.20) and the 621.01 warning (P1.49) wait for it.
+**M1.1, M1.2 and M2 shipped together as 0.30.0** (2026-10-31), one release
+where there would have been three. M1.1 proved or corrected 0.28.3's claims,
+and its CHANGELOG lists the corrections. M1.2 brought the October model, with
+four decisions that still hold
+([runtime-310916-20261031](measurements/runtime-310916-20261031/REPORT.md)).
+Network A is the default: it renders the same frames as 0.28.3, and B is an
+opt-in rung. 310.9.16 runs only on RTX 50, the only generation measured; other
+GPUs keep 310.8.SF-v2. The player pins `NRDetailStability=1` and
+`NRSkinIndependent=0`, which keep RenoDX 10.8.0 within 0.1 level of 6.5.3. It
+writes colour strength 0 as 0.01, because 10.8.0 refuses a session with every
+pass at zero. M2 restructured the UI and made it translatable; a Simplified
+Chinese file ships unreviewed (P2.67). What 0.30.0 left untested by hand is
+P1.54, and what needs other cards is P1.52 and P1.53.
 
-**M1.1 proves what 0.28.3 claims.** A check after the release found
-Test steps that 0.28.3 skipped. Nobody read `powercfg /requests` during a job
-(P1.39), and nobody loaded a real 0.4.0 (P1.40): both are claims in its
-CHANGELOG. On driver 617.14 NGX reports nothing useful, so P1.38's message has
-never fired. The trailers were resolved on the command line, not in the player
-(P0.19). Each task either proves its claim or corrects it in 0.30.0's
-CHANGELOG. The measurement gaps go with the work they inform: AQ at 4K (P2.59)
-and the RTX 4080 SUPER timings (P2.60) in M5, the drift run's sixth clip in
-P1.44, and RenoDX 8.5's leftovers in P3.14. The 2026-10-31 refresh adds two
-items to it. P0.20: the bundled yt-dlp nightly predates certifi's critical CA
-fix. P1.49: driver 621.01 freezes video on RTX 50.
-
-**Interrupt rule.** When NVIDIA's October model is obtainable, P3.14 pre-empts
-the running milestone and ships as its own minor release: it re-keys every
-cache entry, changes the pace forecasts, and may raise the driver floor.
-**It fired on 2026-10-26.** `dlssnr-310.9.16` is on the mirror the player pins
-from, with `renodx-dlss5-10.8.0` since 10-27. P3.14 is milestone M1.2. The
-owner chose to ship it inside 0.30.0 rather than as its own release. It still
-pre-empts everything after 0.30.0.
-
-**M2 before M3 and M4.** The UI proposal's restructure creates the places the
-next controls go: compare-bar contextual controls for the loop, speed and
-flicker map, and the Picture panel's "instant" zone for the protections and
-grain. Restructuring first means users relearn once and the docs are rewritten
-once. The 2026-10-31 refresh briefly put M3 first, because Visual Enhancer
-v20.0 (2026-10-30) shipped split, cycle, a difference heatmap and saved
-sessions. The owner kept M2 first. M3 is what remains the player's alone: the
-review loop on a progressive render. It ships next, as 0.31.0.
+**M2 before M3 and M4.** The UI proposal's restructure made the places the
+next controls go, so users relearned once and the docs were rewritten once.
+M2 left marked slots for M3 in the Compare menu (`AppMenu.cpp`) and before `⋯`
+on the compare bar, for the loop, speed and flicker map. It left one for M4
+under Tint in the Picture panel's viewing zone, for the protections and grain.
+The 2026-10-31 refresh briefly put M3 first, because Visual Enhancer v20.0
+(2026-10-30) shipped split, cycle, a difference heatmap and saved sessions.
+The owner kept M2 first. M3 is what remains the player's alone: the review
+loop on a progressive render. It ships next, as 0.31.0.
 
 **M5 runs beside M3 and M4.** It touches the worker, cache, decode child and
 NVENC; M3 and M4 touch the player shell, the compare views and the present
@@ -238,32 +219,9 @@ size), each is a cache- or export-key term, and each is scored with P1.42.
 # P0 — Fix before the next release
 
 P0.11-P0.18 landed on 2026-09-25 (branch `fix/p0-all`). P0.19 landed in 0.28.3
-(2026-10-16): the yt-dlp nightly 2026.10.10.233141, pinned by SHA-256.
-
-<a id="p020"></a>
-### P0.20 · yt-dlp back to a stable release, past certifi's critical CA fix
-
-`S` · **Release** · _quality-neutral; replaces P0.19's nightly_
-
-- **Problem.** certifi's
-  [GHSA-6q48-6c7w-9gw2](https://github.com/certifi/python-certifi/security/advisories/GHSA-6q48-6c7w-9gw2)
-  (critical, 2026-10-20) removes the emSign root certificates.
-  [yt-dlp 2026.10.21](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.21)
-  says older executables are open to man-in-the-middle attacks and must be
-  replaced by hand, not through `-U`. The player bundles nightly
-  2026.10.10.233141, which predates the fix. The same stable release makes
-  `tv_samsung` a default client. That client was P0.19's only reason for a
-  nightly.
-- **Where.** `tools/fetch_youtube_helpers.ps1` (URL, version, SHA-256),
-  `THIRD_PARTY.md`, `CHANGELOG.md`.
-- **Fix.** Pin [2026.10.26](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.26)
-  or a later stable release from `yt-dlp/yt-dlp`, by SHA-256, as before. It
-  needs Windows 10 or later, which the player already requires. The CHANGELOG
-  names the advisory and says the helper is never self-updated. Watch
-  [#17812](https://github.com/yt-dlp/yt-dlp/issues/17812), where some
-  `tv_samsung` formats are flagged as DRM.
-- **Test.** P1.48's in-player check (two trailers, one pasted link, each past
-  the first minute) on the new pin. The fetch script's version check.
+(2026-10-16): the yt-dlp nightly 2026.10.10.233141, pinned by SHA-256. P0.20
+landed in 0.30.0 (2026-10-31): yt-dlp 2026.10.26, a stable release past
+certifi's critical certificate fix, pinned by SHA-256. No P0 task is open.
 
 ---
 
@@ -289,120 +247,102 @@ P1.41 was measured in the same release and needs no correction
 to four passes the mean luma moves −1.10 to +1.74 codes, in both directions;
 each pass compounds the model's own change, faces cool, and flicker rises.
 
-<a id="p145"></a>
-### P1.45 · Prove the keep-awake request
+P1.45-P1.49 landed in 0.30.0 (2026-10-31), milestone M1.1. Each proved its
+claim or corrected it in 0.30.0's CHANGELOG. One step stays with the owner:
+reading `powercfg /requests` during a job needs an elevated prompt, so that
+claim is still unverified. The keep-awake request is now tested to be held for
+exactly the job's length, and a request that cannot be made is logged. Read
+`powercfg` in the same sitting as P1.54. P1.46's real load of a 0.4 build is
+P1.53.
 
-`S` · **Pipeline** · _quality-neutral; follow-up to P1.39_
+<a id="p154"></a>
+### P1.54 · 0.30.0 hands-on checks
 
-- **Problem.** 0.28.3 holds a `PowerRequestSystemRequired` request through
-  renders, exports, frame generation and `--render` (`KeepAwake.h`). Its
-  CHANGELOG says `powercfg /requests` names the request, but nobody looked, and
-  the guard has no test. A request created but not set, or closed early, would
-  let the PC sleep as before, and a failure is silent: the guard does not log.
-- **Where.** `KeepAwake.h`, the five guarded jobs in `main.cpp`, `tests/`.
-- **Fix.** Read `powercfg /requests` from an elevated prompt during a
-  `dlss5-convert` run and again after it ends. The reason string should be
-  listed under SYSTEM while the job runs and be gone afterwards. Add a unit test
-  that `Active()` is true inside the scope and that a second guard is
-  independent. Log when the request cannot be created. If the request does not
-  show, fix it and say so in 0.30.0's CHANGELOG.
-- **Test.** The unit test; the two `powercfg` readings in the PR.
+`S` · **Player** · _the first thing in M3; needs a person at the machine_
 
-<a id="p146"></a>
-### P1.46 · dlssg_for_sm86 0.4.0: settings tests and a real load
+- **Problem.** 0.30.0's new player features have unit tests and smokes, but
+  several were never tried by hand. M1.1 showed what that costs: 0.28.3's
+  trailers were resolved but never played, and past a minute the sound
+  stopped. Not yet tried in 0.30.0:
+  - a real clipboard copy and paste;
+  - a real resume seek, including YouTube's, cached neural playback and a
+    rendered range;
+  - YouTube captions drawn on screen;
+  - a real double-click on Mix;
+  - the pop-up menus, `Shift+F10`, and the `input.conf` re-read when the
+    window is activated;
+  - the toolbar's look at each DPI.
+- **Where.** The packaged 0.30.0 player. `main.cpp`, `AppMenu.cpp`,
+  `RecentMedia.cpp`, `YouTubeResolver.cpp`, `SubtitleOverlay.cpp`,
+  `UiLayout.cpp`.
+- **Fix.** In the package, by hand:
+  - `Ctrl+Shift+C`, then paste into another app. `Ctrl+V` with a file copied
+    in Explorer, a YouTube link, a file path and a picture; a link to another
+    site must be refused.
+  - Stop a local video, a YouTube video, a video in cached neural playback and
+    one inside a rendered range partway. Reopen each: it opens where it
+    stopped, and the toast says where.
+  - Turn on a written and an auto-generated track under **Playback >
+    Subtitles** and watch them drawn.
+  - Double-click Mix in the Picture panel and check the result against
+    `docs/USAGE.md`.
+  - Open the picture menu by right-click, `Shift+F10` and the menu key. Edit
+    `input.conf` while the player is in the background, switch back, and use
+    the new key.
+  - Look at the toolbar at 100 % and at each higher display scale.
 
-`S` · **Pipeline** · _follow-up to P1.40; a real load needs an RTX 20 or 30_
+  Anything that fails is fixed in the next patch and named in its CHANGELOG.
+- **Test.** The notes in the PR, with screenshots of the captions and of the
+  toolbar at each scale.
 
-- **Problem.** 0.28.3 reads `Optimized` and `Preset` from `dlssg_sm86.ini` and
-  names a lossy value (`FrameGenAddon.h` `ReadSettings`, `LossyNote`), but no
-  test covers that parsing. Its CHANGELOG says a hand-installed 0.4.0 "loads as
-  before". That rests on the `version.dll` proxy pick tested since 0.27.2: no
-  real 0.4.0 was loaded. 0.4.0 crashes on some older drivers
+<a id="p152"></a>
+### P1.52 · RenoDX 10.8.0 and 310.8.SF-v2 on RTX 20, 30 and 40, and the driver floor
+
+`S` · **Pipeline, Docs** · _every user without an RTX 50 gets this pair; needs the cards_
+
+- **Problem.** 0.30.0 moves every GPU to RenoDX 10.8.0, and RTX 20, 30 and 40
+  run it over 310.8.SF-v2. No RTX 20, 30 or 40 card has run that pair. The two
+  pinned keys (`NRDetailStability=1`, `NRSkinIndependent=0`) keep it within
+  0.1 level of 6.5.3, but that was measured only on an RTX 5090
+  ([runtime-310916-20261031](measurements/runtime-310916-20261031/REPORT.md)).
+  Both NR DLLs also declare a minimum driver of 615.00. The docs say 610.47,
+  the lowest driver the project has rendered on, on an RTX 4080 SUPER with
+  310.8. Nobody has rendered with 10.8.0 on a driver below 615.00.
+- **Where.** `tools/benchmark/m12.py`, the runtime smokes,
+  `RuntimePolicy.h` (`kNeuralDriverFloor`), the docs that name 610.47
+  (README, `docs/DLSS5_SETUP.md`, `docs/TROUBLESHOOTING.md`,
+  `docs/USAGE.md`), `docs/measurements/`.
+- **Fix.** On an RTX 40 card and on an RTX 20 or 30 card, run every runtime
+  smoke, and `m12.py`'s comparison of 10.8.0 with the pinned keys against
+  6.5.3 on the five clips. On the RTX 4080 SUPER, render with 10.8.0 on
+  610.47. If it renders, the docs keep 610.47 and say that the DLLs' 615.00
+  did not stop it. If it does not, the documented floor and
+  `kNeuralDriverFloor` rise to the lowest driver that renders, and the
+  CHANGELOG says so. If the picture moves more than 0.1 level on a card, find
+  out why before the next release.
+- **Test.** A measurement report with the distance per clip and card, the
+  smoke logs, and the 610.47 render log.
+
+<a id="p153"></a>
+### P1.53 · dlssg_for_sm86 0.4.x: a real load on an RTX 20 or 30
+
+`S` · **Pipeline** · _what P1.46 left; needs an RTX 20 or 30_
+
+- **Problem.** 0.30.0 tests how 0.4.0 and 0.4.1's settings are read, and
+  recognises 0.4.1. No real 0.4.0 or 0.4.1 has been loaded on an RTX 20 or 30,
+  and the CHANGELOG says so. 0.4.0 crashes on some older drivers
   ([#640](https://github.com/sdli1995/dlssg_for_sm86/issues/640),
-  [#642](https://github.com/sdli1995/dlssg_for_sm86/issues/642)).
-- **Where.** `FrameGenAddon.h`, `tests/PolicyTests.cpp`, the frame generation
-  smokes.
-- **Fix.** Fixture tests:
-  - `Optimized` under `[DLSSG]`, under the older `[FrameGeneration]`, absent,
-    padded with spaces, and at 0, 1 and 2;
-  - `Preset=C`;
-  - no ini at all;
-  - the `dlssg_sm86\` directory present or missing.
-
-  Then download 0.4.0 into a new empty folder, check it against the release's
-  digest, install it beside a build, and run `DlssgProbeSmoke`,
+  [#642](https://github.com/sdli1995/dlssg_for_sm86/issues/642)), and 0.4.1
+  makes R580 a hard floor.
+- **Where.** `FrameGenAddon.h`, the frame generation smokes.
+- **Fix.** Download each build into a new empty folder, check it against the
+  release's digest, install it beside a build, and run `DlssgProbeSmoke`,
   `DlssgEvaluateSmoke` and `FrameGenerationSmoke` on an RTX 20 or 30 card. It
-  must load, and the start screen and log must name `Optimized=2` as lossy. If
-  no such card is available, say that the load is untested. If it does not load,
-  0.30.0 corrects the claim.
-- **Test.** The fixture tests; the smoke logs from the real load.
-
-<a id="p147"></a>
-### P1.47 · Driver messages: an honest NGX capability, a tested Windows 10 check
-
-`S` · **Pipeline, Player** · _follow-up to P1.38 and P1.37_
-
-- **Problem.** On driver 617.14 both the player and the helper read
-  `DLSSNR.Available=0` and `NeedsUpdatedDriver=0` with no minimum. That was in
-  every hardware-suite log on 2026-10-16, while the community runtime rendered.
-  NGX's capability block describes NVIDIA's own NR path, not the feature RenoDX
-  creates. So the preflight receipt records `"dlssnrAvailable":false` on a
-  working setup, and the NGX-named floor P1.38 added has never fired. The
-  Windows 10 note's wording is tested, but `RunningOnWindows10()` and
-  `NeuralDriverNoticeText` are not.
-- **Where.** `DLSSBackend.cpp`, `NeuralPreflight.cpp` (`NgxNeuralCapabilityJson`),
-  `RuntimePolicy.cpp`, `main.cpp`.
-- **Fix.** Treat `Available=0` with no minimum as not reported: write `null` in
-  the receipt and "not reported" in the log, so a working setup never reads as
-  unavailable. Keep the floor message for a driver that reports a minimum, and
-  find out whether any driver does for this path (dxvk-remix
-  [ec31464](https://github.com/NVIDIAGameWorks/dxvk-remix/commit/ec31464) reads
-  the same keys). If none does, say in `docs/ARCHITECTURE.md` that the floor is
-  a fallback for a future runtime. Split the version check into a pure
-  `IsWindows10Build(major, build)` and test it (19045 yes; 22000 and 26300 no),
-  and test the notice text with the flag set and clear.
-- **Test.** Unit tests for the receipt values and the Windows 10 check.
-
-<a id="p148"></a>
-### P1.48 · YouTube through the player, against the old yt-dlp
-
-`S` · **Player, Release** · _follow-up to P0.19_
-
-- **Problem.** 0.28.3's yt-dlp nightly was checked by resolving three built-in
-  trailers on the command line (all at 2160p). Nobody opened one through
-  **File > Game trailers** in the packaged player, or showed a link failing on
-  2026.08.19, so the fix is inferred from yt-dlp's issue thread.
-- **Where.** `YouTubeResolver.cpp`, the packaged player.
-- **Fix.** In the 0.28.3 package, open two trailers from **File > Game
-  trailers** and one pasted link, and play each past the first minute. Run the
-  same links through 2026.08.19 and record which fail. Consider a
-  `network`-labelled CTest, outside the hardware and CI tiers, that resolves one
-  public trailer with the bundled yt-dlp. It would catch the next YouTube break
-  before a user does.
-- **Test.** The playback notes in the PR; the network test if added.
-
-<a id="p149"></a>
-### P1.49 · Driver 621.01 is a known-bad version
-
-`S` · **Docs, Player** · _quality-neutral; never a refusal_
-
-- **Problem.** Game Ready 621.01 (2026-10-21) freezes video playback and shows
-  black screens for seconds at a time on some RTX 50 cards. NVIDIA tracks it as
-  bug 6979343. Hotfix
-  [621.12](https://nvidia.custhelp.com/app/answers/detail/a_id/5938/)
-  (2026-10-27) is meant to fix it, and users in NVIDIA's feedback thread say it
-  does not fix every machine (unverified). On 621.01 a frozen picture looks
-  exactly like a player bug, and nothing in the player or its docs says
-  otherwise.
-- **Where.** `docs/TROUBLESHOOTING.md`, `RuntimePolicy.cpp` (the driver
-  notice), the start screen's readiness line.
-- **Fix.** Add a TROUBLESHOOTING entry quoting NVIDIA's bug and pointing to
-  621.12, or to 617.42 if the freeze persists. On an RTX 50 card with exactly
-  621.01, the readiness line says the same. Never refuse a render for it: the
-  freeze is in presentation, not in the model. Remove the notice when a later
-  driver supersedes both.
-- **Test.** A policy test on the version and generation match (621.01 on
-  RTX 50 yes; 621.12, 617.42, and 621.01 on RTX 40 no).
+  must load, and the start screen and log must name a lossy `Optimized` and
+  `Engine=XeSS` as they do in the tests. If a build does not load, the next
+  CHANGELOG and `docs/TROUBLESHOOTING.md` say so. The one-click pin stays on
+  0.3.5.
+- **Test.** The smoke logs from both real loads.
 
 <a id="p144"></a>
 ### P1.44 · Reconcile the two brightness instruments
@@ -484,6 +424,10 @@ changing, flicker, and colour shift**
 [Held Games](https://heldgames.com/guides/dlss-5-official-vs-mod),
 [Visual Enhancer #53](https://github.com/Merserk/dlss5-visual-enhancer/issues/53));
 the comparison features below are aimed at making those visible.
+
+P2.52, P2.41, P2.42, P2.54, P2.55 and P2.63 landed in 0.30.0 (2026-10-31),
+milestone M2, with the UI proposal's compare-bar controls (X6), the pipeline
+chip (X10) and the Picture panel's marks and resets (X2's remainders).
 
 ## Comparison and review
 
@@ -757,8 +701,8 @@ see Parked.
   numbers). NVIDIA's dxvk-remix now always passes `pInControlMask`, with
   `InMaskBlendMode=Min` under the auto mask
   ([09808cc](https://github.com/NVIDIAGameWorks/dxvk-remix/commit/09808cc)).
-  If RenoDX 10.8.0 forwards it (P3.14 checks), protection can happen inside the
-  model rather than as a blend after it. The face tracks are shared with P2.61.
+  If RenoDX 10.8.0 forwards it (0.30.0's runtime report does not say),
+  protection can happen inside the model rather than as a blend after it. The face tracks are shared with P2.61.
 
 <a id="p237"></a>
 ### P2.37 · Opt-in: bake the Mix, mask and adjustments into exports
@@ -888,7 +832,8 @@ see Parked.
 
 - **What.** Run the timing halves of M1 on the RTX 4080 SUPER, as M1 planned:
   the 4K NV12 transport share (P2.57), the cost per neural pass (P1.41), and
-  RenoDX 8.5's model time (P3.14). Every M1 run was on the RTX 5090.
+  the model time on RenoDX 10.8.0 and 310.8.SF-v2, what 0.30.0 runs on an
+  RTX 40 (P1.52 checks its picture). Every M1 and M1.2 run was on the RTX 5090.
 - **Why.** At the 4080 SUPER's 4K pace (14.8 fps) the transport share should be
   smaller still. The cost per pass and its VRAM, about +505 MiB a pass on the
   5090, are what those users meet, and the pass ladder's descriptions quote them.
@@ -950,13 +895,29 @@ see Parked.
   see the same history it would have seen. Check the frame after each run of
   duplicates, not only the duplicates.
 
+<a id="p268"></a>
+### P2.68 · One cache entry for the previous runtime's two networks
+
+`S` · **Pipeline** · _quality-neutral; a known inefficiency from 0.30.0_
+
+- **What.** On the previous runtime (310.8.SF-v2), key network B the same as
+  network A. Every preset value renders the same picture there, but the
+  settings digest adds `network=a|b`, so B is cached apart from A's identical
+  pixels and the same range renders twice
+  ([runtime-310916-20261031](measurements/runtime-310916-20261031/REPORT.md)).
+  The receipt still names the network the user chose.
+- **Why.** A render is never made again for a choice that changes no pixel.
+- **Where.** `NeuralCache.cpp`, the settings digest (`NeuralSettings.h`).
+- **Test.** On the previous runtime, A then B on one range renders once. On
+  310.9.16, A and B still key apart.
+
 <a id="p265"></a>
 ### P2.65 · Say in the exported file how it was made
 
 `S` · **Pipeline** · _metadata only; no pixel changes_
 
 - **What.** Write the tool and version, the runtime digest, the neural preset
-  and network (P3.14's A or B), the processing scale, and an "AI-modified"
+  and network (A or B, since 0.30.0), the processing scale, and an "AI-modified"
   marker into exported MP4 and MKV metadata and PNG text chunks. The values
   come from the receipt the player already keeps. Source metadata is still
   copied (`-map_metadata`); these tags are added beside it.
@@ -1022,98 +983,24 @@ see Parked.
 
 ## Interface, input and convenience
 
-<a id="p254"></a>
-### P2.54 · The UI restructure, in one release
+<a id="p267"></a>
+### P2.67 · A native speaker's review of the Simplified Chinese text; more languages
 
-`L` · **Player, Docs** · _from the 2026-10-04 UI proposal_
+`S` · **Player, Docs** · _takes contributions; answers P2.63's owner decision_
 
-- **What.** Items X1-X4 and X6 of the UI proposal
-  (`reports/ui-review/PROPOSAL.md` §3 and §6, not committed): the new menu bar;
-  the Picture panel, with Neural settings and Image adjustments in one surface
-  split into "re-renders" and "instant" zones; the toolbar re-slot (a DLSS 5
-  split button carrying the preset, an Upscaler pill, Export); the upscaler as
-  radios; and Compare at the top level with contextual controls on the compare
-  bar.
-- **Why.** 0.28.2 shipped the proposal's "Now" list inside the old structure.
-  Moving menus, panel and toolbar together means users relearn once and the
-  docs are rewritten once, and it makes the places M3 and M4's controls go
-  into.
-- **Where.** `AppMenu.cpp`, `main.cpp`, `UiLayout.cpp`, `CompareBarPolicy.h`,
-  `ToolbarTipPolicy.h`, `Localization.h`, `docs/USAGE.md`, README, `site/`.
-- **Risk.** About 28 "DLSS > …" paths in the docs and strings; ship a "where
-  things moved" table in the CHANGELOG. ini keys stay where they are.
-
-<a id="p255"></a>
-### P2.55 · UI small wins
-
-`S-M` · **Player**
-
-- **What.** From the same proposal: a right-click menu on the picture (X5), the
-  export dialog defaulting to what you are watching (X7), Help > About, User
-  guide and Open log folder, with Check for updates moved there (X8), Re-render
-  from here (X9), and the pipeline chip with the full settings summary in its
-  tooltip (X10). Since 2026-10-31, also **rebindable keys**: a plain-text key
-  file beside the ini, in the style of mpv's `input.conf`. The restructure moves
-  shortcuts anyway, so this is the cheap moment, and the shortcut sheet reads
-  from the same table.
-- **Where.** `AppMenu.cpp`, `main.cpp`, `StatusChipPolicy.h`, `StageExport.cpp`.
-
-<a id="p252"></a>
-### P2.52 · Resume where you left off; next file in the folder
-
-`S` · **Player**
-
-- **What.** Remember the position per video in the per-source store, beside
-  the subtitle delay and mask; open the next or previous file in the folder.
-- **Why.** mpv's `save-position-on-quit` and `autocreate-playlist`; Veyra
-  shipped a playlist in 2.0.7 after
-  [#21](https://github.com/Likely7/Veyra-NRVideo/issues/21). Neither exists in
-  `src/`.
-- **Where.** `RecentMedia.cpp`, `main.cpp`, `AppMenu.cpp`,
-  `DroppedFilesPolicy.h`.
-
-<a id="p241"></a>
-### P2.41 · Clipboard copy and paste
-
-`S` · **Player**
-
-- **What.** `Ctrl+Shift+C` copies the comparison image with its footer;
-  `Ctrl+V` opens a pasted image, file or YouTube link.
-- **Why.** Visual Enhancer and DLSS5-Image-Converter both paste; here the
-  clipboard is read only inside the YouTube dialog (`main.cpp:468`).
-- **Where.** `main.cpp`, `CompareImageIO.h`, `DroppedFilesPolicy.h`.
-
-<a id="p242"></a>
-### P2.42 · YouTube captions
-
-`S` · **Player**
-
-- **What.** Ask yt-dlp for the caption track URLs and draw them with the
-  existing WebVTT overlay.
-- **Why.** A pasted link is one of the three ways to open media and gets no
-  subtitles; the resolver never requests captions
-  (`YouTubeResolver.cpp:888`).
-- **Where.** `YouTubeResolver.cpp`, `SubtitleOverlay.cpp`, `SubtitlePolicy.h`.
-
-<a id="p263"></a>
-### P2.63 · A translatable UI, Simplified Chinese first
-
-`S-M` · **Player, Docs** · _ships with P2.54, which rewrites the strings anyway_
-
-- **What.** Load the UI's strings from a translation file chosen by the Windows
-  display language, with English as the fallback for any missing key. Ship
-  Simplified Chinese first, then take contributions. The docs stay English.
-- **Why.** Every DLSS 5 competitor ships a translated UI: Visual Enhancer
-  (11 languages in v20.0), NeuralScreen (12), Veyra, DLSS5Tool and Lunarc. Much
-  of the community is Chinese-speaking. `Localization.h` already uses keyed
-  strings, but it has only `EnglishDefaults()`.
-- **Where.** `Localization.h`, a translation-file loader, `AppMenu.cpp`,
-  `UiLayout.cpp` (text that does not fit), packaging (the file allowlist).
-- **Test.** No translation file may lack a key or carry one English lacks.
-  Every format placeholder survives translation. A layout smoke at the
-  longest strings.
-- **Owner decision.** Who reviews text in a language the maintainer may not
-  read.
+- **What.** 0.30.0 ships `lang/zh-Hans.lang`, drafted by an AI model and not
+  yet reviewed by a native speaker. Ask for that review in an issue, take
+  fixes and new languages as pull requests (`--lang-template` writes the file
+  to start from), and say in `CONTRIBUTING.md` how. Until a review lands, the
+  docs call the file unreviewed.
+- **Why.** P2.63 left one owner decision: who reviews text in a language the
+  maintainer may not read. The answer is a native speaker, through a pull
+  request.
+- **Where.** `lang/zh-Hans.lang`, `TranslationFile.h`, `CONTRIBUTING.md`,
+  README.
+- **Test.** No contributed file lacks a key or carries one English lacks, and
+  every format placeholder survives. A layout smoke at the file's longest
+  strings.
 
 ## HDR
 
@@ -1129,6 +1016,21 @@ see Parked.
   ([HDR swap-chain capture](https://github.com/yadonpapa/20260830_HDR-Swapchain-Capture)).
   One source and one GPU generation, so measure first.
 - **Where.** `D3D12Renderer.cpp`, `HdrPolicy.h`.
+
+## Tests
+
+<a id="p269"></a>
+### P2.69 · A YouTube resolver test that fails under load
+
+`S` · **Release** · _a flaky test; no product change_
+
+- **What.** `youtube_resolver_repeated_runs_leave_process_handle_count_stable_test`
+  failed 1 in 4 direct runs under load during 0.30.0. It gives each resolve
+  500 ms. Wait for each resolve to end, with a bound that holds on a busy
+  machine, and keep the handle-count check.
+- **Why.** A test that fails at random teaches people to re-run failures.
+- **Where.** `tests/PolicyTests.cpp`.
+- **Test.** Twenty direct runs pass while another build loads the machine.
 
 ## Carried over
 
@@ -1154,104 +1056,11 @@ more promising guide (P3.6).
 
 # P3 — Strategic or large
 
-<a id="p314"></a>
-### P3.14 · Runtime refresh: DLSS-NR 310.9.16, its two networks, RenoDX 10.8
-
-`M-L` · **Pipeline, Release** · _milestone M1.2; a runtime change re-keys every cache entry_
-
-**Unblocked on 2026-10-26.** The mirror the player pins from
-([RankFTW/rhi-repo](https://github.com/RankFTW/rhi-repo/releases)) published
-`dlssnr-310.9.16`, `renodx-dlss-SF-26.1016.1304` and `streamline-2.14.16.0-v2`
-on 10-26, and `renodx-dlss5-10.8.0` on 10-27. None has release notes. RenoDX
-went from 8.5.0-rc10 to 10.8.0 with no final 8.5. NVIDIA's public DLSS SDK
-310.9.16 and Streamline 2.14.16 (10-16) still ship no NR DLL or header. Under
-the interrupt rule this pre-empts M3-M8. It ships in 0.30.0 with M1.1 and M2.
-
-- **The DLL holds two networks, and the player must pick one.**
-  - dxvk-remix
-    [09808cc](https://github.com/NVIDIAGameWorks/dxvk-remix/commit/09808cc)
-    (10-16, read) sets `NVSDK_NGX_Parameter_DLSSNR_Hint_Render_Preset` to
-    `Preset_B`, "the lightweight network independently of the appearance
-    model".
-  - A static analysis of the signed DLL
-    ([Magpie #73](https://github.com/SAOG0721/Magpie/issues/73), unverified)
-    reports that preset 1 (A) is byte-identical to 310.8's weights, preset 2
-    (B) is a new 114 MB FP8 network, and preset 0 falls back to a "shipping
-    default" that changed between 310.8 and 310.9.16.
-  - The player writes `NRPreset` and defaults it to 0 (`NeuralSettings.h`).
-    On 310.9.16 that would make its picture whatever NVIDIA's default is.
-  - **Fix:** never send 0. Find out whether RenoDX 10.8.0 forwards `NRPreset`
-    to NGX's render-preset hint, and with which values. **Default A**, which
-    keeps "same look as the last version" measurable, if the analysis holds.
-    Offer **B** as a named rung with its measured pace and quality printed
-    beside it. B becomes the default only if it scores equal on the P1.42
-    yardstick. Show A or B in the receipt, the comparison footer, the cache
-    key and P2.65's export tags.
-- **What B is worth here.** Veyra 2.1 measures NR GPU time −45 % on an RTX
-  5070: 1080p 5.87 → 3.20 ms, 4K about 21.3 → 11.8 ms (author's numbers; "the
-  picture may differ"). The player's fit puts about a quarter of each frame in
-  the model (7.35 ms fixed plus 2.50 ms per megapixel), so the wall-clock gain
-  is smaller. Measure it on the per-GPU pace tables. The case that matters
-  most: an RTX 4080 SUPER does 14.8 fps at 4K and cannot keep up with 4K30.
-- **The runtime depends on the GPU generation.** The official DLL fails
-  feature creation on an RTX 3060 Ti with `0xBAD00002`
-  ([NeuralScreen v2.6.1](https://github.com/perseval-BLR/NeuralScreen/releases/tag/v2.6.1)).
-  - RTX 50: NVIDIA's signed 310.9.16. Check its Authenticode signature, as
-    NeuralScreen now does. This is P3.5's RTX 50 half.
-  - RTX 20-40: stay on 310.8.SF-v2, or take the SF 26.1016 build after it
-    passes the same gate.
-  - The preflight and the receipt name the file, its version and its
-    signature state.
-- **NVIDIA's call shape changed** (09808cc):
-  - `pInControlMask` is always passed;
-  - `InMaskBlendMode=Min` under the auto mask;
-  - `InGlobalToneStrength` is no longer set;
-  - `useAutoMask` defaults to true;
-  - VRAM is read through `DLSSNRGetStatsCallback`.
-
-  Check which of these RenoDX 10.8.0 does. If it forwards the control mask,
-  P2.36 and P2.45 can protect inside the model. Report NR VRAM in the receipt
-  if the stats callback is reachable.
-- **The new look.** Visual Enhancer's author calls local tone "more
-  aggressive" on the new model
-  ([VE #118](https://github.com/Merserk/dlss5-visual-enhancer/issues/118)), so
-  re-run the knobs measurement and re-check every preset's distance from the
-  source on both networks. [Magpie #72](https://github.com/SAOG0721/Magpie/issues/72)
-  (unverified) reports the picture staying darker and desaturated after a
-  dark screen until restart, on 310.9.16 only. Add a fade-to-black clip to the
-  quality gate. If it reproduces, reset history on a fade as well as a cut
-  (`SceneCut.h`).
-- **Take the rest of 10-16's SDKs.** Streamline 2.14.16 and DLSS SR/FG
-  310.9.16 change no header (`sl_version.h` only). dlssg_for_sm86 0.4.1
-  (10-27) makes R580 a hard floor and drops `[XeSSFG] Model`. Extend P1.46's
-  fixtures to it; the one-click pin stays on 0.3.5.
-- **RenoDX 8.5, measured in M1; repeat on 10.8.0.** renodx-dlss5 8.5.0-rc10 (2026-09-26) and dlssnr 310.8.Lecram
-  (2026-09-24) are on the mirror the player pins from
-  ([RankFTW/rhi-repo](https://github.com/RankFTW/rhi-repo/releases)); the
-  player pins 6.5.3 and 310.8.SF-v2 (`tools/fetch_neural_runtime.ps1`).
-  Measured in M1 ([renodx-85-20261016](measurements/renodx-85-20261016/REPORT.md)):
-  it loads on the pinned ReShade and DLSS-NR and renders at the same pace, but
-  not the same picture. To adopt it, stamp `kNeuralConfigVersion` "7" (8.5
-  migrates 6 and leaves a `.bak`). Also write `NRDetailStability=1`, since Auto
-  filters the model's edit and moves every render 0.33 codes, and
-  `NRSkinIndependent=0`, since the default caps Local structure at 1 and
-  silently drops Strong's 1.50. It does not expose the control mask. There is
-  no final 8.5: the next release is 10.8.0. On 10.8.0, re-check the config
-  version it migrates to, both keys, the control mask and `NRPreset` before
-  writing anything. Still not done for this half: the quality gate, and which
-  controls Visual Enhancer v15 dropped with its runtime path.
-- **The October model.** NVIDIA's
-  [2026-10-13 announcement](https://www.nvidia.com/en-us/geforce/news/dlss-5-faster-ai-model-hogwarts-legacy-rtx-spark-laptops/)
-  claims twice the speed, 20 % less VRAM at 4K and comparable fidelity. RTX
-  Remix 1.6.1 shipped it on 10-23, with the driver floor still 616.92. Re-run
-  knobs, the per-GPU pace tables, VRAM and the quality gate on both networks.
-  The CHANGELOG says earlier renders render again once, and P1.38 catches a
-  higher driver floor. Hogwarts Legacy (11-05) may carry a later DLL; take it
-  only through the same gate.
-- Keep the old runtime selectable until the new one passes, so "same look as
-  the last version" can be shown, not claimed.
-- **Test.** Every runtime smoke on RTX 50 and on one RTX 20-40 card, the
-  fade-to-black clip, the P1.42 score per network, and the paces in the PR.
+P3.14 landed in 0.30.0 (2026-10-31), milestone M1.2, with P3.5's RTX 50 half:
+DLSS-NR 310.9.16 on RTX 50 with networks A and B, RenoDX 10.8.0 everywhere,
+and the previous runtime one choice away
+([runtime-310916-20261031](measurements/runtime-310916-20261031/REPORT.md)).
+What it left open is P1.52, P2.68 and the rest of P3.5.
 
 <a id="p39"></a>
 ### P3.9 · HDR output of the render
@@ -1377,7 +1186,7 @@ Since 2026-10-31: there is still no decision. A yt-dlp contributor says Deno
 stays recommended "until new announcements", and that logged-out extraction
 currently needs no runtime at all
 ([#17904](https://github.com/yt-dlp/yt-dlp/issues/17904)). Deno 2.9.8 shipped
-on 10-21. Take it with P0.20 if its digest is pinned in the same change.
+on 10-21. 0.30.0 took the new yt-dlp (P0.20) but still bundles Deno 2.9.5.
 
 <a id="p319"></a>
 ### P3.19 · Overlap the per-frame stages
@@ -1394,7 +1203,7 @@ Since 2026-10-31: MPCVR-Plus 2.5 made NR and its renderer wait on each other on
 the GPU instead of on the CPU, and went from 26.2 to 19.6 ms a frame
 ([MPCVR-Plus](https://github.com/HumbleUser33/MPCVR-Plus/releases), author's
 numbers). It is the same kind of change, and evidence that it pays. Re-fit the
-fixed term on 310.9.16 (P3.14) first, since a faster model makes the
+fixed term on 310.9.16 (in 0.30.0) first, since a faster model makes the
 fixed overhead a larger share of each frame.
 
 <a id="p320"></a>
@@ -1436,33 +1245,44 @@ with anything.
 ---
 
 <a id="p35"></a>
-### P3.5 · Prefer NVIDIA's signed runtime on RTX 50
+### P3.5 · NVIDIA's signed DLSS-NR runtime, and 310.9.16 beyond RTX 50
 
-`M` · **Pipeline, Release** · unverified
+`M` · **Pipeline, Release** · _the RTX 50 half shipped in 0.30.0, unsigned_
 
-**Blocker:** nobody has confirmed the signed DLL is usable this way; that
-needs an RTX 50 card.
+**Blocker:** NVIDIA's signed DLSS-NR 310.9.16 is not available from the
+approved sources, and the licence under which it may be redistributed is
+unknown.
 
-Driver 616.64 enables DLSS 5 officially on RTX 50 and downloads its models to
-`%ProgramData%\NVIDIA\NGX\models`. If a usable signed neural-rendering DLL can
-be found there for an app that is not on NVIDIA's list, preferring it on RTX
-50 would remove the "modified, unsigned" warning for those users. Record
-which runtime ran in the receipt. Keep the community build for RTX 20-40.
+**What 0.30.0 found**
+([runtime-310916-20261031](measurements/runtime-310916-20261031/REPORT.md)):
 
-**Since 2026-10-16.** RTX Remix with DLSS 5 ships on 2026-10-23 with NVIDIA's
-own NR integration (headers from the `ngx_sdk_dlnr` packman package). Check
-whether it distributes a signed `nvngx_dlssnr.dll`, under what licence, and
-whether that settles the redistribution question in `THIRD_PARTY.md`.
+- The mirror's `nvngx_dlssnr.dll` 310.9.16 is not NVIDIA's signed build. It is
+  modified and NotSigned, with an added `.nrcubin` section (sm_75, sm_86 and
+  sm_89 kernels). RTX 50 ships that build. The "modified, unsigned" notice is
+  unchanged.
+- NVIDIA's official DLL fails feature creation on an RTX 3060 Ti with
+  `0xBAD00002`
+  ([NeuralScreen v2.6.1](https://github.com/perseval-BLR/NeuralScreen/releases/tag/v2.6.1)).
+  RTX 20-40 keep 310.8.SF-v2 (P1.52).
 
-**Since 2026-10-31.** The RTX 50 half moves into P3.14 (M1.2). An official
-signed `nvngx_dlssnr.dll` 310.9.16 is on the mirror, and NeuralScreen v2.6
-accepts only NVIDIA-signed NR DLLs. Since dxvk-remix 09808cc (10-16), the Remix
-build installs `nvngx_dlssnr.dll` from the packman package `ngx_sdk_dlnr` v2.
-So the public Remix 1.6.1 zip should carry it, though its version is unread.
-The RenoDX add-on that drives it stays unsigned, so the "modified, unsigned"
-notice narrows on RTX 50 but does not go away. What stays here: the licence
-under which that DLL may be redistributed, and whether the driver's
-`%ProgramData%\NVIDIA\NGX\models` copy can be used instead of shipping one.
+**What stays open**
+
+- **The signed build.** Find a signed `nvngx_dlssnr.dll` 310.9.16 from a
+  source that can be approved, and its licence. Candidates: the public RTX
+  Remix 1.6.1 zip, which should carry one from the packman package
+  `ngx_sdk_dlnr` v2 (dxvk-remix 09808cc; its version is unread), and the
+  driver's `%ProgramData%\NVIDIA\NGX\models` copy (driver 616.64 and later),
+  which might be used instead of shipping one. Check its Authenticode
+  signature, as NeuralScreen v2.6 does, and prefer it on RTX 50 only if it
+  renders the same networks. The RenoDX add-on that drives it stays unsigned,
+  so the notice narrows but does not go away.
+- **Other generations.** Whether the mirror's 310.9.16 renders on RTX 20, 30
+  or 40, as its sm_75/86/89 kernels suggest, and with what picture. It goes
+  through the same gate as 0.30.0's RTX 50 run before any generation moves off
+  310.8.SF-v2.
+- **Test.** The runtime smokes and `tools/benchmark/m12.py` per generation;
+  the preflight and receipt name the file, its version and its signature
+  state, as they do since 0.30.0.
 
 ---
 
