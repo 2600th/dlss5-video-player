@@ -4903,8 +4903,12 @@ private:
     // Whose paces the history holds: this GPU, and the NR runtime and network
     // it renders with - B's model time is about a third less than A's
     // (docs/measurements/runtime-310916-20261031).
+    // "310.9.16 a|<GPU>": ASCII and never opening or ending in a space,
+    // which the ini would trim from the value it reads back.
     std::wstring PaceIdentity()const{
-        return m_opt.detectedGpu.description+L" | "+neural_runtime::Describe(neural_runtime::Select(m_opt.detectedGpu.generation,m_neuralSettings.previousRuntime),m_neuralSettings.network);
+        const neural_runtime::Runtime& runtime=neural_runtime::Select(m_opt.detectedGpu.generation,m_neuralSettings.previousRuntime);
+        const std::string head=std::string(runtime.version)+" "+std::string(neural_runtime::Key(neural_runtime::Effective(runtime,m_neuralSettings.network)))+"|";
+        return std::wstring(head.begin(),head.end())+m_opt.detectedGpu.description;
     }
     void RebuildRenderPace(){render_pace::Rebuild(m_paceHistory,m_renderPace,m_reducedRenderPace);}
     // m_renderPace is the source-scale profile; the reduced rungs follow in

@@ -3969,6 +3969,18 @@ struct PlayerAppTestAccess {
         CHECK_EQ(20.0, playback_timing::PredictRenderMs(app.RenderPaceAt(50), 1920, 1080, 0.0));
         CHECK_EQ(40.0, playback_timing::PredictRenderMs(app.RenderPaceAt(100), 1920, 1080, 0.0));
         CHECK(app.RenderPaceAt(75).samples.empty());
+        // A pace measured on one network is not read for the other; on a GPU
+        // that renders A whatever is asked, it is the same pace.
+        {
+            const NeuralSettings saved = app.m_neuralSettings;
+            app.m_neuralSettings.network = neural_runtime::Network::B;
+            app.LoadRenderPace();
+            const bool other = neural_runtime::OffersCurrent(app.m_opt.detectedGpu.generation);
+            CHECK_EQ(other ? 0.0 : 40.0, playback_timing::PredictRenderMs(app.RenderPaceAt(100), 1920, 1080, 0.0));
+            app.m_neuralSettings = saved;
+            app.LoadRenderPace();
+            CHECK_EQ(40.0, playback_timing::PredictRenderMs(app.RenderPaceAt(100), 1920, 1080, 0.0));
+        }
 
         app.m_paceHistory.clear(); app.SaveRenderPace();
         app.m_paceHistory = history; app.RebuildRenderPace();
