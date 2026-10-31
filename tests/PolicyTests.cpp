@@ -1527,6 +1527,18 @@ void key_binding_template_reads_back_as_the_defaults_test()
     CHECK(text.find("\r\n") != std::string::npos);
 }
 
+// A settings panel's label column grows for a longer translation, by what the
+// widest label needs, and stops growing where the label should wrap instead.
+void label_column_grows_for_longer_labels_and_stops_test()
+{
+    CHECK_EQ(0, LabelColumnGrowth(60));
+    CHECK_EQ(0, LabelColumnGrowth(112));
+    CHECK_EQ(1, LabelColumnGrowth(113));
+    CHECK_EQ(40, LabelColumnGrowth(152));
+    CHECK_EQ(84, LabelColumnGrowth(400));
+    CHECK_EQ(10, LabelColumnGrowth(106, 100, 50));
+}
+
 // Enhance's three upscaler radios over the player's two settings.
 void upscaler_radios_reach_every_state_from_every_other_test()
 {
@@ -16221,6 +16233,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(key_binding_file_rebinds_unbinds_and_reports_bad_lines_test),
     TEST_CASE(key_binding_template_reads_back_as_the_defaults_test),
     TEST_CASE(upscaler_radios_reach_every_state_from_every_other_test),
+    TEST_CASE(label_column_grows_for_longer_labels_and_stops_test),
     TEST_CASE(keyboard_cheat_sheet_flows_whole_groups_into_columns_test),
     TEST_CASE(dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test),
     TEST_CASE(media_controls_ask_for_a_state_and_push_the_timeline_sparingly_test),

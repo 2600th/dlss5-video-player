@@ -213,3 +213,15 @@ void ExecuteYouTubeCancellationSequence(const std::function<void()>& requestStop
                                         const std::function<void()>& cancelResolver,
                                         const std::function<void()>& joinWorker);
 bool YouTubePlaybackAvailable();
+
+// How far a settings panel's label column grows for the widest label it shows,
+// in design units. The columns were drawn for 116 dip of label, which English
+// fits; a translation that runs longer pushes its track or combo right by the
+// difference instead of clipping the label, up to `maxGrowth`, past which the
+// label wraps rather than squeezing the control it names to nothing. Four dip
+// of slack keeps a label from touching its control.
+inline int LabelColumnGrowth(int widestLabelDip, int designColumn = 116, int maxGrowth = 84)
+{
+    const int needed = widestLabelDip + 4 - designColumn;
+    return needed <= 0 ? 0 : (needed < maxGrowth ? needed : maxGrowth);
+}
