@@ -28,7 +28,7 @@ not (see the table). The nearest are Lunarc, which keeps ranges you choose to
 pre-render and marks them on its timeline, and DLSS5Tool, whose preview can
 pre-render the frames that follow; neither renders the whole video while it
 plays. Frame generation here is a separate conversion
-(**DLSS > Generate frames** writes a new file); it is not part of live
+(**Enhance > Generate frames** writes a new file); it is not part of live
 playback.
 
 ## The landscape on 2026-10-16

@@ -11,7 +11,7 @@ runtime in `neural-runtime/` beside the player. A root-level `dxgi.dll` belongs 
 an older layout; do not mix files from different packages. A source/core build
 does not supply the experimental runtime automatically.
 
-Choose **Advanced > Restart in DLSS SR safe mode** to skip the neural helper
+Choose **Tools > Restart in DLSS SR safe mode** to skip the neural helper
 for that launch while retaining optional runtime Super Resolution.
 
 ## Neural rendering is refused because the driver is too old
@@ -105,7 +105,7 @@ at launch and cannot be changed by a running process.
 
 `↑ Update <version>` right-justified in the menu bar means a newer release
 exists; opening it goes to the GitHub releases page and retires that
-version until the next one ships. **Advanced > Check for updates** asks
+version until the next one ships. **Help > Check for updates** asks
 immediately and answers either way. The check runs at most once a day, ignores
 drafts (every published release is a pre-release, so those count), and stores its state in `[Updates]` in
 `DLSSVideoPlayer.ini` beside the executable; `Enabled=0` turns it off. When
@@ -199,7 +199,7 @@ a slightly longer audio tail does not count as missing neural video.
 
 ## Export is unavailable or fails
 
-**DLSS > Convert & export > Save converted video** becomes available after validated neural playback
+**File > Save rendered video** becomes available after validated neural playback
 opens. Select a new filename: existing destinations are never overwritten.
 Export needs the cached neural file, its original source and FFmpeg.
 
@@ -221,10 +221,10 @@ are supported. Live/upcoming streams, private, paid, age-gated and
 cookie-dependent media are outside the resolver contract.
 Availability and regional access can change; local playback remains available.
 
-Choose **Video > YouTube source quality**. Auto takes the tallest rung up to
+Choose **File > YouTube source quality**. Auto takes the tallest rung up to
 1440p, then the highest bitrate inside it, falling back to a rung up to 2160p
 only when the source offers nothing lower. Manual choices are 1080p,
-1440p and 2160p. Source quality is separate from **DLSS > Upscaling output**.
+1440p and 2160p. Source quality is separate from **Enhance > DLSS SR output size**.
 At the chosen resolution, the resolver prefers the highest advertised video
 bitrate across codecs. That estimate can differ from the downloaded file's
 average bitrate; bitrate alone is not a cross-codec quality score.
@@ -261,7 +261,7 @@ quality**, or turning it off in the DLSS menu, settles it for good.
 
 DLSS Upscaling starts off on a fresh installation and then follows the saved
 preference. Enable it from the DLSS menu or bottom bar. The output rung is Auto
-by default and follows the monitor's current mode; **DLSS > Upscaling output**
+by default and follows the monitor's current mode; **Enhance > DLSS SR output size**
 pins 1080p, 1440p or 2160p instead. Two different refusals are reported and are
 not the same problem: "source meets output" means the source already meets or
 exceeds the rung, which a 4K source does everywhere and a 1080p source does on a
@@ -291,7 +291,7 @@ and the notice `R` shows, name the one that is missing:
   line with what NGX answered, and the create's result.
 
 Like every compare mode, the RTX VSR view is live only during cached playback on
-the neural view (`D`). As the playback upscaler (**DLSS > RTX VSR Upscaling**) it
+the neural view (`D`). As the playback upscaler (**Enhance > RTX VSR**) it
 runs whenever the window shows the video larger than it is; the reasons listed
 above grey that menu item too, and its label names the one that applies. Its cost is logged every 300 frames as `RTX VSR GPU:`; if
 playback drops frames with it on, pick a lower rung under **Video > Compare >
@@ -299,7 +299,7 @@ RTX VSR quality**, or turn **RTX VSR Upscaling** off.
 
 ## Generate frames is unavailable, or refuses
 
-**DLSS > Generate frames** converts a video to a higher frame rate and writes a
+**Enhance > Generate frames** converts a video to a higher frame rate and writes a
 new file; it does not run during playback. The pill and the status line always
 name the reason rather than only saying "Unavailable", and the reasons fall into
 four groups.

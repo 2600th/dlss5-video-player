@@ -520,7 +520,7 @@ preroll and every encoder attempt included - and a re-evaluated frame counts
 once, so they are not bounded by `historyResets`.
 
 And it records what the render did to motion (`TemporalMetrics.h`), which is what
-**Advanced > Render report** reads back. The job reduces each captured frame and
+**Tools > Render report** reads back. The job reduces each captured frame and
 its source to the guide generator's analysis grid - the source when it is
 submitted, the capture when it comes back - and accumulates, in 8-bit codes of
 full-range BT.709 Y'CbCr whatever layout either side arrived in: the warping
