@@ -399,6 +399,9 @@ static constexpr int IDC_NS_PRESET = 7342;
 static constexpr int IDC_NS_PRESET_NOTE = 7343;
 static constexpr int IDC_NS_STATE = 7344;
 static constexpr int IDC_NS_OPEN_ADJUST = 7345;
+// The NR network and runtime (NeuralRuntimeChoice.h, P3.14): one combo, built
+// and read by the three NetworkChoice* members below and nothing else.
+static constexpr int IDC_NS_NETWORK = 7346;
 static constexpr int IDC_NS_RESET = 7320;
 static constexpr int IDC_NS_APPLY = 7321;
 static constexpr int IDC_NS_CLOSE = 7322;
@@ -6291,6 +6294,7 @@ private:
         // The combo lists the rungs in the enum's own order, so the index IS the rung.
         select(IDC_NS_SCENE_CUTS,static_cast<int>(m_temporalSettings.sceneCuts));
         select(IDC_NS_STABILITY,static_cast<int>(m_temporalSettings.stability));
+        SyncNetworkChoice(h);
         const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         check(IDC_NS_CHAINED,m_neuralSettings.chainedHistory);
@@ -6314,6 +6318,7 @@ private:
         m_neuralSettings.autoMask=checked(IDC_NS_AUTOMASK);
         m_neuralSettings.passes=std::clamp(sel(IDC_NS_PASSES,m_neuralSettings.passes-1)+1,1,4);
         m_neuralSettings.chainedHistory=checked(IDC_NS_CHAINED);
+        ReadNetworkChoice(h);
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
         EnableDependentNeuralControls(h);
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
@@ -6343,6 +6348,30 @@ private:
         HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132+x,y-3,width,200,id);
         for(const wchar_t* item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item));
         AddTip(h,label,tipKey);AddTip(h,combo,tipKey);
+    }
+
+    // The Network control (NeuralRuntimeChoice.h): its rungs, which one the
+    // settings name, and reading it back. A GPU that is not offered 310.9.16
+    // sees the previous runtime alone, greyed out.
+    void BuildNetworkChoice(HWND h,int y,int x){
+        const GpuGeneration gpu=m_opt.detectedGpu.generation;
+        std::vector<std::wstring> items;
+        if(neural_runtime::OffersCurrent(gpu))
+            for(const auto& rung:neural_runtime::kNetworks)items.emplace_back(rung.label);
+        items.push_back(T(neural_runtime::OffersCurrent(gpu)?L"neural.network.previous":L"neural.network.only_previous"));
+        CreateNeuralCombo(h,IDC_NS_NETWORK,L"neural.settings.network",y,{},L"neural.tip.network",x,284);
+        HWND combo=GetDlgItem(h,IDC_NS_NETWORK);
+        for(const auto& item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item.c_str()));
+        EnableWindow(combo,neural_runtime::ChoiceCount(gpu)>1);
+    }
+    void SyncNetworkChoice(HWND h){
+        if(HWND combo=GetDlgItem(h,IDC_NS_NETWORK))
+            SendMessageW(combo,CB_SETCURSEL,neural_runtime::ChoiceIndex(m_opt.detectedGpu.generation,m_neuralSettings.network,m_neuralSettings.previousRuntime),0);
+    }
+    void ReadNetworkChoice(HWND h){
+        HWND combo=GetDlgItem(h,IDC_NS_NETWORK);
+        const LRESULT index=combo?SendMessageW(combo,CB_GETCURSEL,0,0):CB_ERR;
+        if(index!=CB_ERR)neural_runtime::ApplyChoice(m_opt.detectedGpu.generation,size_t(index),m_neuralSettings.network,m_neuralSettings.previousRuntime);
     }
 
     HWND CreateNeuralCheck(HWND h,int id,const wchar_t* labelKey,int x,int y,int width,const wchar_t* tipKey=nullptr){
@@ -6426,24 +6455,25 @@ private:
         CreateSettingsGroupHeading(h,L"neural.settings.group_cost",12+top,right,400);
         CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",40+top,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",right);
         CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+right,74+top,284,L"neural.tip.chained");
-        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",112+top,right,400);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+right,138+top,116,L"neural.tip.guide_mv");
-        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+right,138+top,80,L"neural.tip.guide_depth");
+        BuildNetworkChoice(h,108+top,right);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",146+top,right,400);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+right,172+top,116,L"neural.tip.guide_mv");
+        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+right,172+top,80,L"neural.tip.guide_depth");
         // What the render does across time rather than to one frame: when a cut
         // resets the history. A ladder, not a slider - every rung is a measured
         // point (SceneCut.h), and Default is the one labelled recommended.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",176+top,right,400);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",210+top,right,400);
         {
             const std::wstring cuts[]={T(L"neural.scene_cuts.default"),T(L"neural.scene_cuts.more"),
                                        T(L"neural.scene_cuts.less"),T(L"neural.scene_cuts.off")};
-            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",204+top,
+            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",238+top,
                               {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts",right);
             // A ladder with Off first and the default, for the reason the policy
             // header gives: it trades detail in motion for steadiness, and a
             // default never moves down a ladder to buy something else.
             const std::wstring stability[]={T(L"neural.stability.off"),T(L"neural.stability.low"),
                                             T(L"neural.stability.medium"),T(L"neural.stability.high")};
-            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",238+top,
+            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",272+top,
                               {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability",right);
         }
         // What Apply will do to the picture on screen right now (issue #15:
@@ -6611,7 +6641,7 @@ private:
             // it back, and the setting the user thinks they picked never
             // reaches the render. Adding a control without adding it to this
             // line is the one mistake this dialog invites, and it is silent.
-            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY)&&code==CBN_SELCHANGE)||
+            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_NETWORK||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY)&&code==CBN_SELCHANGE)||
                ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
         }

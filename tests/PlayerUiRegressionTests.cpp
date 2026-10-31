@@ -4458,6 +4458,28 @@ struct PlayerAppTestAccess {
         SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_SETCURSEL, 2, 0);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STABILITY, CBN_SELCHANGE), 0);
         CHECK(app.m_temporalSettings.stability == TemporalStability::Medium);
+        // The network (P3.14): A first and selected; on RTX 50 B and the previous
+        // runtime follow, elsewhere the one runtime that GPU renders with is
+        // shown and cannot be changed.
+        {
+            const GpuGeneration gpu = app.m_opt.detectedGpu.generation;
+            const HWND network = GetDlgItem(dialog, IDC_NS_NETWORK);
+            CHECK(network != nullptr);
+            CHECK_EQ(int(SendMessageW(network, CB_GETCOUNT, 0, 0)), int(neural_runtime::ChoiceCount(gpu)));
+            CHECK_EQ(int(SendMessageW(network, CB_GETCURSEL, 0, 0)), 0);
+            CHECK((IsWindowEnabled(network) != FALSE) == neural_runtime::OffersCurrent(gpu));
+            if (neural_runtime::OffersCurrent(gpu)) {
+                SendMessageW(network, CB_SETCURSEL, 1, 0);
+                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_NETWORK, CBN_SELCHANGE), 0);
+                CHECK(app.m_neuralSettings.network == neural_runtime::Network::B && !app.m_neuralSettings.previousRuntime);
+                SendMessageW(network, CB_SETCURSEL, neural_runtime::kPreviousChoice, 0);
+                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_NETWORK, CBN_SELCHANGE), 0);
+                CHECK(app.m_neuralSettings.network == neural_runtime::Network::B && app.m_neuralSettings.previousRuntime);
+            } else {
+                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_NETWORK, CBN_SELCHANGE), 0);
+                CHECK(app.m_neuralSettings.network == neural_runtime::Network::A && !app.m_neuralSettings.previousRuntime);
+            }
+        }
         // Every control the dialog offers carries help text, and the text is the
         // localized tip rather than an empty tool.
         const auto tipHost = app.m_tipHosts.find(dialog);
@@ -4467,8 +4489,8 @@ struct PlayerAppTestAccess {
             CHECK(tools >= 12);
             for (const int id : {IDC_NS_INTENSITY, IDC_NS_STRUCTURE, IDC_NS_TONE, IDC_NS_SKIN,
                                  IDC_NS_STYLE, IDC_NS_AUTOMASK, IDC_NS_GUIDE_MV, IDC_NS_GUIDE_DEPTH,
-                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_NS_SCENE_CUTS, IDC_NS_STABILITY,
-                                 IDC_NS_APPLY, IDC_NS_RESET}) {
+                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_NS_NETWORK, IDC_NS_SCENE_CUTS,
+                                 IDC_NS_STABILITY, IDC_NS_APPLY, IDC_NS_RESET}) {
                 wchar_t text[512] = {};
                 TTTOOLINFOW info{};
                 info.cbSize = TTTOOLINFOW_V2_SIZE;
@@ -4508,6 +4530,7 @@ struct PlayerAppTestAccess {
         CHECK(app.m_guides.SceneCutSensitivity() == scene_cut::Sensitivity::Default);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_SCENE_CUTS), CB_GETCURSEL, 0, 0)), 0);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_GETCURSEL, 0, 0)), 0);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_NETWORK), CB_GETCURSEL, 0, 0)), 0);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_INTENSITY), TBM_GETPOS, 0, 0)), 100);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_GETCHECK, 0, 0)), BST_CHECKED);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
