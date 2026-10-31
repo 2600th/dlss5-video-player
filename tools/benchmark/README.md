@@ -22,6 +22,7 @@ python tools/benchmark/analyze.py --match "real-*__knob-*" --vmaf-v1   # a subse
 python tools/benchmark/quality.py fetch                # the pinned VMAF v1 models, hash-verified
 python tools/benchmark/blind.py --pairs-per-clip 3     # sealed A/B pairs for one-pass vs two-pass
 python tools/benchmark/knobs.py --clips real-film-cuts real-game-cuts  # which settings change the image
+python tools/benchmark/m12.py render --corpus build-upscaling/benchmark-corpus-m1  # 310.9.16, its networks, RenoDX 10.8.0
 python tools/benchmark/guidefiles.py truth             # true depth/motion of the near/far clips
 python tools/benchmark/guidefiles.py prove             # guide files render byte-identically to the estimator
 ```
@@ -46,6 +47,7 @@ directory holding `ffmpeg.exe` and `ffprobe.exe`.
 | `cutlab.py` | Scores the cut criterion itself against the manifest's labelled cuts and sweeps it; `--ladder` scores the four Scene cuts rungs the player offers; needs no GPU, no worker and no render |
 | `duplab.py` | Scores `scene_cut::IsDuplicateDecodedPair` - frame generation's hold-a-repeat test - on corpus clips re-timed onto twos through libx264, against the real pairs of the same files and a small object crossing a still frame; needs no GPU |
 | `knobs.py` | Renders one control at a time from the player's shipped state and reports bytes differing, mean and max absolute delta, and how much of the change lands on detected faces; the table in `docs/BENCHMARK.md` is its output |
+| `m12.py` | The DLSS-NR 310.9.16 / RenoDX 10.8.0 session (P3.14): swaps the candidate add-on, NR DLL, Streamline and DLSS SR into each profile's clone only, from `external/runtime-staging/<tag>/extracted/`; `render`, `pace`, `fade` (fade-to-black clips from the M1 corpus with the bundled FFmpeg), `fadecheck`, `looks` (the knobs method) and `timing`. `docs/measurements/runtime-310916-20261031` is its output |
 | `governor.py` | Renders the shipped settings at each `NRNormGovernor` value, repeated, and scores reproducibility, flicker+, sigma+ and whole-frame brightness pumping, with a mean-luma-over-time plot per clip; builds `real-lighting` (real footage under an exposure schedule) for it |
 | `guidefiles.py` | The `depth=file:` / `mv=file:` layout (PFM read/write, area average), `truth` for the near/far clips, `convert` for offline depth maps, `compare`, and `prove` - the byte-identical round trip |
 | `roundtrip.profile.json` | The four arms `guidefiles.py prove` renders |
