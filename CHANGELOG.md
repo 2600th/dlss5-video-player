@@ -106,6 +106,22 @@ The UI moved, so the [table below](#where-things-moved-in-0300) says where each
   key. `Shift+F10` and the menu key open it too.
 - **Re-render from here** (**Enhance**, the DLSS 5 arrow and the picture
   menu).
+- **The compare bar holds the chosen view's own settings.** Difference adds its
+  amplification (`×4`, a menu of the six steps) and **Luma | Color**. 2 × 2
+  adds the fourth pane's Mix when that pane is DLSS 5. A **⋯** button at the end
+  of the bar opens the whole **Compare** menu. Double-click the Mix to put it
+  back to 100 %.
+- **A pipeline chip names what makes the picture:** `DLSS 5 · RTX VSR`,
+  `DLSS 5 · DLSS SR`, `Original` and so on. Its tooltip has the sizes through
+  each stage, every setting the render on screen was made with, the upscaler's
+  quality, the neural add-on and frame generation: the part the status line
+  used to cut.
+- **The Picture panel shows what you changed.** A blue dot marks each setting
+  that is not at its default; double-click a setting's name to put it back.
+  `Ctrl+Z` in the panel, or **Enhance > Revert Picture changes**, goes back to
+  the settings the picture on screen was rendered with. **Style** lists how far
+  each look moved the test clips from the source: Natural +68 %, Cinematic
+  +34 %.
 - **Pick up where you left off.** A video opens where you stopped it, YouTube
   videos included, and a toast says where. The first 10 seconds and the end are
   not kept, so a video you finished opens at the start. **Playback > Resume
