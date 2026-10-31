@@ -418,9 +418,10 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     if (seekSeconds > 0.0) args << L"-ss " << std::fixed << std::setprecision(6) << seekSeconds << L" ";
     // A resolved YouTube audio stream is https and nothing else: verify the
     // certificate explicitly and refuse every protocol the URL cannot need,
-    // the same input options VideoDecoder and MediaPipeline put ahead of theirs.
+    // the same input options VideoDecoder and MediaPipeline put ahead of theirs,
+    // and reconnect when googlevideo drops the connection (MediaTools.h).
     if (_wcsnicmp(m_path.c_str(), L"https://", 8) == 0 || _wcsnicmp(m_path.c_str(), L"http://", 7) == 0)
-        args << L"-tls_verify 1 -protocol_whitelist https,tls,tcp ";
+        args << media_tools::kNetworkAudioInputOptions;
     else args << media_tools::LocalInputOptions(m_path);
     // Matching the endpoint's mix format means neither ffmpeg nor the Windows
     // mixer resamples or requantizes: the samples the decoder produces are the

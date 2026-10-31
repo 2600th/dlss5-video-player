@@ -172,7 +172,7 @@ opened as a local file (on the player's command line, after the start screen
 had been captured, so no local name reached a Recent tile) in the 1902x1023
 window and rendered whole, because the compare views need a render (render key
 `fad0ab4556db0e4d…`, 5,784 / 5,784 verified). Then, paused on frame 1122:
-**Wipe** and **Video > Compare > Compare against RTX VSR** (`Shift+R`'s
+**Wipe** and **Compare > Compare against RTX VSR** (`Shift+R`'s
 command), the divider still at 60.8%.
 
 The picture is 1449x815: **1.51x** the video. RTX VSR runs at High, its

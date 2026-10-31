@@ -169,15 +169,18 @@ OpenSSL and the rest), which ask for them to travel with a binary copy.
 
 ## yt-dlp
 
-Source: https://github.com/yt-dlp/yt-dlp/tree/897341241f2bfb2439fe0367f4c7c9ccd29a3828,
-the commit the official nightly build 2026.10.10.233141 was generated from
-(https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/tag/2026.10.10.233141).
-The player ships a nightly because the latest stable release, 2026.08.19,
-cannot play many YouTube videos.
+Source: https://github.com/yt-dlp/yt-dlp/tree/f264a6cbd1f630894da0f368df00f8aae50140e0,
+the commit of the official stable release 2026.10.26
+(https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.26). It is the first
+stable release with both the YouTube fix the player took a nightly for in
+0.28.3 and certifi's critical CA fix
+([GHSA-6q48-6c7w-9gw2](https://github.com/certifi/python-certifi/security/advisories/GHSA-6q48-6c7w-9gw2)).
+The player never updates it with `-U`: a new yt-dlp arrives only as a new
+pin, checked against its SHA-256.
 
 The official Windows executable is a PyInstaller bundle containing GPLv3+
 components. Its complete bundled notices at that commit are included as
-`THIRD_PARTY_LICENSES/yt-dlp-2026.10.10.233141.txt`; it is not described as
+`THIRD_PARTY_LICENSES/yt-dlp-2026.10.26.txt`; it is not described as
 Unlicense-only.
 
 ## Deno

@@ -63,11 +63,23 @@ std::wstring ProxyToLoad(IsFileBeside&& isFileBeside)
 // Preset=C` is "FG Lite", faster with slightly lower quality. The player pins
 // 0.3.5, whose factory level is 1, and only reports what a hand-installed
 // build is set to.
+//
+// 0.4.0 still read the old places, [FrameGeneration] Optimized and
+// [Compatibility] Preset, and added `[FrameGeneration] Engine=XeSS`, Intel's
+// XeSS-FG model, which ignores every [DLSSG] key. 0.4.1 (2026-10-27) keeps the
+// layout, stops reading the old places, puts the factory `Optimized` back to 1,
+// drops `[XeSSFG] Model` and makes R580 a hard driver floor. Nothing on disk
+// tells 0.4.0 from 0.4.1, so the old places are still read in the 0.4 layout:
+// a value only one of them obeys is named rather than missed. An unset level
+// is reported as unset, though 0.4.0 runs 2 and 0.4.1 runs 1.
 struct Settings {
     bool directoryLayout{};          // 0.4.0 and later: dlssg_sm86\ beside the proxy
-    std::optional<int> optimized;    // empty when the ini does not set it
-    std::wstring preset;             // [DLSSG] Preset, empty when unset
+    std::optional<int> optimized;    // empty when the ini does not set it, or Engine=XeSS
+    std::wstring preset;             // [DLSSG] Preset, empty when unset or Engine=XeSS
+    std::wstring engine;             // [FrameGeneration] Engine, 0.4 layout only; empty when unset
 };
+
+inline bool XessEngine(const Settings& settings) { return _wcsicmp(settings.engine.c_str(), L"XeSS") == 0; }
 
 inline std::wstring TrimIniValue(std::wstring value)
 {
@@ -97,6 +109,13 @@ inline Settings ReadSettings(const std::filesystem::path& directory)
         }
     }
     settings.preset = readString(L"DLSSG", L"Preset");
+    if (!settings.directoryLayout) return settings;
+    if (settings.preset.empty()) settings.preset = readString(L"Compatibility", L"Preset");
+    settings.engine = readString(L"FrameGeneration", L"Engine");
+    if (XessEngine(settings)) {
+        settings.optimized.reset();
+        settings.preset.clear();
+    }
     return settings;
 }
 
@@ -104,6 +123,7 @@ inline Settings ReadSettings(const std::filesystem::path& directory)
 // generated frames differ from NVIDIA's; empty when nothing does.
 inline std::wstring LossyNote(const Settings& settings)
 {
+    if (XessEngine(settings)) return L"Engine=XeSS generates frames with Intel's XeSS-FG model, not NVIDIA's";
     std::wstring note;
     if (settings.optimized && *settings.optimized >= 2)
         note = L"Optimized=" + std::to_wstring(*settings.optimized) + L" uses lossy kernels (1 matches NVIDIA's output)";

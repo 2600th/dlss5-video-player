@@ -29,35 +29,31 @@ constexpr std::array kToolbarDefinitions{
     ToolbarDefinition{ToolbarAction::Stop, 48, 0, false},
     ToolbarDefinition{ToolbarAction::Forward10, 44, 0, false},
     ToolbarDefinition{ToolbarAction::Mute, 54, 0, true},
-    ToolbarDefinition{ToolbarAction::ToggleNeuralRendering, 270, 1, true, kFeaturePillNarrowWidthDip},
-    // 270 dip, the same as the neural pill beside it and for the same kind of
-    // measurement: the widest arm is now a reason rather than "Unavailable".
-    // "DLSS Upscaling · Panel too small" is 225 dip in Segoe UI 16, plus the
-    // 17 dip icon, the 7 dip gap and both 10 dip insets. At 230 the reason was
-    // drawn as "DLSS Upscaling · Source mee..." in the DEFAULT 1440 dip window
-    // - verified on screen - which is a truncated explanation, the one thing
-    // worse than none.
-    ToolbarDefinition{ToolbarAction::ToggleUpscaling, 270, 1, true, kFeaturePillNarrowWidthDip},
-    // 264 dip = the widest arm, "Frame Generation · Unavailable" (217 dip in
-    // Segoe UI 16), plus the 17 dip icon, the 7 dip gap and both 10 dip insets.
-    // 320 was budgeted for no arm that exists: "· Generate" needs 243.
+    // The 0.30.0 bar, every control a job rather than a technology (UI
+    // proposal 3.2): the DLSS 5 split button - the pill toggles, the chevron
+    // beside it opens the look presets, Picture and Re-render from here - then
+    // the Upscaler pill, then Picture and Export, then the view.
     //
-    // Required, like the other two feature pills, and that is a measurement
-    // rather than symmetry: with it optional the full bar no longer fits the
-    // DEFAULT 1440 dip window, so the layout fell back to the required set and
-    // the only toolbar control for a shipped feature disappeared at the size
-    // the player opens at - verified on screen.
-    //
-    // The cost used to be the minimum window width: three full pills held it
-    // at 1114 dip at 96 dpi. They now shrink to kFeaturePillNarrowWidthDip
-    // before anything goes compact, and a pill too narrow for its whole label
-    // keeps the state and drops the feature name (FeaturePillStateLabel) - the
-    // icon and the tooltip still name it - so the floor is 850 dip.
-    ToolbarDefinition{ToolbarAction::ToggleFrameGeneration, 264, 1, true, kFeaturePillNarrowWidthDip},
-    ToolbarDefinition{ToolbarAction::Aspect, 72, 1, false},
-    ToolbarDefinition{ToolbarAction::Adjustments, 66, 1, false},
-    ToolbarDefinition{ToolbarAction::DebugView, 72, 2, false},
-    ToolbarDefinition{ToolbarAction::Fullscreen, 54, 2, true},
+    // 232 dip: the widest arm, "DLSS 5 · Queued for the seek", was 270 when
+    // the name was "Neural Rendering", 60 dip longer; on, the pill names the
+    // preset by its short name ("On · Standard"). 220 clipped it by 8 dip at
+    // 144 dpi: the UI regression test measures every arm against this width
+    // at 96 to 192 dpi.
+    ToolbarDefinition{ToolbarAction::ToggleNeuralRendering, 232, 1, true, kFeaturePillNarrowWidthDip},
+    // Its own control so Tab reaches it and Enter opens it: a split button
+    // whose menu half is only a mouse target is not operable from the keyboard.
+    ToolbarDefinition{ToolbarAction::NeuralMenu, 36, 1, true},
+    // "Upscaler · RTX VSR" names what is upscaling playback, where "DLSS
+    // Upscaling · Off" sat beside a status line saying RTX VSR was on. Fixed:
+    // its widest arm, "Upscaler · DLSS SR", already fits the narrow width.
+    ToolbarDefinition{ToolbarAction::Upscaler, kFeaturePillNarrowWidthDip, 1, true},
+    // Frame Generation left the bar: a minutes-long conversion is not a toggle,
+    // and it stays in Enhance and its running state owns the status line. The
+    // Debug views button left too: View > Debug view and 1-4 remain.
+    ToolbarDefinition{ToolbarAction::Adjustments, 92, 2, false},
+    ToolbarDefinition{ToolbarAction::Export, 92, 2, false},
+    ToolbarDefinition{ToolbarAction::Aspect, 72, 3, false},
+    ToolbarDefinition{ToolbarAction::Fullscreen, 54, 3, true},
 };
 
 constexpr size_t RequiredToolbarItemCount()
@@ -486,9 +482,17 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
         // to be separate facts.
         return availability.mediaLoaded &&
                (availability.frameGenerationAvailable || availability.frameGenerationConverting);
-    case ToolbarAction::Adjustments:
     case ToolbarAction::DebugView:
         return availability.mediaLoaded && availability.rendererReady;
+    // The presets, the panel and the upscaler choice are settings, live with or
+    // without a video, as Enhance > Picture is; what in them needs one is
+    // greyed inside the menu or the panel.
+    case ToolbarAction::Adjustments:
+    case ToolbarAction::NeuralMenu:
+    case ToolbarAction::Upscaler:
+        return true;
+    case ToolbarAction::Export:
+        return availability.mediaLoaded && !availability.seeking;
     case ToolbarAction::None:
         return false;
     }

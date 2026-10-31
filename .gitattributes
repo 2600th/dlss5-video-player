@@ -4,6 +4,8 @@
 *.md text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# Translations (src/TranslationFile.h) are packaged and hashed as committed.
+*.lang text eol=lf
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 # tools/package_release.ps1 copies these as-is and hashes them into

@@ -474,5 +474,5 @@ bool RunningOnWindows10()
     OSVERSIONINFOW info{};
     info.dwOSVersionInfoSize = sizeof(info);
     if (rtlGetVersion(&info) != 0) return false;
-    return info.dwMajorVersion == 10 && info.dwBuildNumber < 22000;
+    return IsWindows10Build(info.dwMajorVersion, info.dwBuildNumber);
 }

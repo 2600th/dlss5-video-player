@@ -21,6 +21,8 @@ enum class UiIcon {
     YouTube,
     Warning,
     Compare,
+    Export,
+    ChevronDown,
 };
 
 namespace ui_palette {

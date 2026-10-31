@@ -421,21 +421,31 @@ struct PlayerAppTestAccess {
 
         // This must remain a synchronized neural/original comparison, never an
         // ambiguous label for runtime Super Resolution.
+        // It is "DLSS 5", the neural renderer, and never says Super Resolution
+        // or upscaling: that is the Upscaler pill beside it.
         const auto comparisonContent = app.ButtonContent(ToolbarAction::ToggleNeuralRendering);
-        CHECK(comparisonContent.label.find(L"Neural Rendering") != std::wstring::npos);
-        CHECK(comparisonContent.label.find(L"DLSS") == std::wstring::npos);
+        CHECK(comparisonContent.label.rfind(L"DLSS 5 · ", 0) == 0);
+        CHECK(comparisonContent.label.find(L"Super Resolution") == std::wstring::npos);
+        CHECK(comparisonContent.label.find(L"Upscal") == std::wstring::npos);
         CHECK(!comparisonContent.enabled);
         CHECK(!comparisonContent.active);
         CHECK(app.m_neuralRequested);
         CHECK(!app.m_upscalingRequested);
         // RTX VSR upscales playback by default (docs/measurements/vsr-quality-20261002),
-        // the menu command turns it off and on, and every presentation the player
-        // pushes carries it - the capture never does, since it pushes none.
+        // Enhance's upscaler radios turn it off (No upscaler) and on, and every
+        // presentation the player pushes carries it - the capture never does,
+        // since it pushes none.
         CHECK(app.m_playbackVsr);
         CHECK(app.EffectiveComparison().playbackVsr);
-        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        // The Upscaler pill names the upscaler playing, live with nothing loaded.
+        CHECK_EQ(std::wstring(L"Upscaler · RTX VSR"), app.ButtonContent(ToolbarAction::Upscaler).label);
+        CHECK(app.ButtonContent(ToolbarAction::Upscaler).enabled);
+        CHECK(app.ButtonContent(ToolbarAction::Upscaler).active);
+        app.HandleCommand(IDM_UPSCALER_NONE);
         CHECK(!app.m_playbackVsr);
         CHECK(!app.EffectiveComparison().playbackVsr);
+        CHECK_EQ(std::wstring(L"Upscaler · Off"), app.ButtonContent(ToolbarAction::Upscaler).label);
+        CHECK(!app.ButtonContent(ToolbarAction::Upscaler).active);
         app.HandleCommand(IDM_RTX_VSR_UPSCALING);
         CHECK(app.m_playbackVsr);
         // The keep-up guard lowers playback's quality for one video and never the
@@ -445,7 +455,8 @@ struct PlayerAppTestAccess {
         CHECK(app.EffectiveComparison().vsrQuality==app.m_comparison.vsrQuality);
         app.m_vsrSessionOff=true;
         CHECK(!app.EffectiveComparison().playbackVsr);
-        app.HandleCommand(IDM_RTX_VSR_UPSCALING);
+        // Picking RTX VSR while the guard has it off for this video is the
+        // user's choice, so it ends what the guard did.
         app.HandleCommand(IDM_RTX_VSR_UPSCALING);
         CHECK(app.EffectiveComparison().playbackVsr);
         CHECK(!app.m_vsrSessionQuality.has_value());
@@ -723,8 +734,6 @@ struct PlayerAppTestAccess {
     static void toolbar_pills_and_progress_panel_test()
     {
         PlayerApp& app = fixture->app;
-        PlayerApp::ToolbarButtonContent& upscalingContent = fixture->upscalingContent;
-        PlayerApp::ToolbarButtonContent& frameGenerationContent = fixture->frameGenerationContent;
         HMENU& featureMenu = fixture->featureMenu;
 
         app.m_seeking = false;
@@ -787,17 +796,38 @@ struct PlayerAppTestAccess {
                        ? 0
                        : static_cast<int>(found->bounds.right - found->bounds.left);
         };
-        struct FeatureLabel { UiIcon icon; const std::wstring& label; int widthDip; };
-        const std::array featureLabels{
+        // Every arm of the two pills, at the width the bar gives them: the two
+        // states read back above, and the rest built from the same keys.
+        struct FeatureLabel { UiIcon icon; std::wstring label; int widthDip; };
+        std::vector<FeatureLabel> featureLabels{
             FeatureLabel{preparingContent.icon, preparingContent.label,
                          pillWidthDip(ToolbarAction::ToggleNeuralRendering)},
             FeatureLabel{seekingOffContent.icon, seekingOffContent.label,
                          pillWidthDip(ToolbarAction::ToggleNeuralRendering)},
-            FeatureLabel{upscalingContent.icon, upscalingContent.label,
-                         pillWidthDip(ToolbarAction::ToggleUpscaling)},
-            FeatureLabel{frameGenerationContent.icon, frameGenerationContent.label,
-                         pillWidthDip(ToolbarAction::ToggleFrameGeneration)},
         };
+        const std::wstring dot = L" \u00b7 ";
+        const std::wstring neuralName = app.T(L"toolbar.neural.name");
+        const int neuralWidth = pillWidthDip(ToolbarAction::ToggleNeuralRendering);
+        for (const wchar_t* key : {L"toolbar.neural.queued", L"toolbar.neural.starting", L"toolbar.neural.previewing",
+                                   L"toolbar.neural.preview_shown", L"toolbar.neural.preparing", L"toolbar.neural.no_cache"})
+            featureLabels.push_back(FeatureLabel{UiIcon::Sparkles, neuralName + dot + app.T(key), neuralWidth});
+        featureLabels.push_back(FeatureLabel{UiIcon::Sparkles,
+            neuralName + dot + app.T(L"toolbar.neural.seeking") + dot + app.T(L"toolbar.state.off"), neuralWidth});
+        featureLabels.push_back(FeatureLabel{UiIcon::Sparkles,
+            neuralName + dot + app.T(L"toolbar.state.on") + dot + app.T(L"toolbar.neural.custom"), neuralWidth});
+        for (const auto& preset : neural_presets::kPresets) {
+            const auto name = neural_presets::ShortLabel(preset.label);
+            featureLabels.push_back(FeatureLabel{UiIcon::Sparkles,
+                neuralName + dot + app.T(L"toolbar.state.on") + dot + std::wstring(name.begin(), name.end()), neuralWidth});
+        }
+        for (const wchar_t* key : {L"toolbar.upscaler.rtx_vsr", L"toolbar.upscaler.dlss_sr", L"toolbar.state.off"})
+            featureLabels.push_back(FeatureLabel{UiIcon::Upscaling, app.T(L"toolbar.upscaler.name") + dot + app.T(key),
+                                                 pillWidthDip(ToolbarAction::Upscaler)});
+        // Picture and Export show their words too: a button that drops its label
+        // for want of room is an icon nobody has learnt yet.
+        featureLabels.push_back(FeatureLabel{UiIcon::Adjustments, app.T(L"toolbar.picture"), pillWidthDip(ToolbarAction::Adjustments)});
+        featureLabels.push_back(FeatureLabel{UiIcon::Export, app.T(L"toolbar.export"), pillWidthDip(ToolbarAction::Export)});
+        featureLabels.push_back(FeatureLabel{UiIcon::Stop, app.T(L"toolbar.export.cancel"), pillWidthDip(ToolbarAction::Export)});
         for (const UINT dpi : {96u, 120u, 144u, 192u}) {
             app.UpdateFontsForDpi(dpi);
             for (const auto& feature : featureLabels) {
@@ -1375,6 +1405,12 @@ struct PlayerAppTestAccess {
         const float volume = app.m_volume;
         const bool muted = app.m_muted;
         app.m_loaded = true;
+        // The slider sits right of the bar and shows only where the bar leaves
+        // it room: at the 800 px fixture window the 0.30.0 bar is at full
+        // width, not compact, and fills it.
+        RECT window{};
+        GetWindowRect(app.m_hwnd, &window);
+        SetWindowPos(app.m_hwnd, nullptr, 0, 0, 1460, 1000, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
         app.ResetHoverFades();
         for (const bool animated : {true, false}) {
             app.m_activityMotionEnabled = animated;
@@ -1408,6 +1444,8 @@ struct PlayerAppTestAccess {
         app.m_volume = volume; app.m_muted = muted;
         app.m_activityMotionEnabled = motion;
         app.m_loaded = loaded;
+        SetWindowPos(app.m_hwnd, nullptr, 0, 0, window.right - window.left, window.bottom - window.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
     }
 
     // A greyed compare mode says what would make it work; a live one names
@@ -1419,7 +1457,7 @@ struct PlayerAppTestAccess {
         app.m_loaded = true;
         app.m_cachedPlayback = false;
         const std::wstring greyed = app.CallbackTipText(PlayerApp::kCompareModeTipIdBase);
-        CHECK(greyed.find(L"Neural Rendering (D)") != std::wstring::npos);
+        CHECK(greyed.find(L"Turn on DLSS 5") != std::wstring::npos);
         app.m_cachedPlayback = true;
         app.m_neuralRequested = true;
         const std::wstring live = app.CallbackTipText(PlayerApp::kCompareModeTipIdBase + 1);
@@ -1573,6 +1611,166 @@ struct PlayerAppTestAccess {
         CHECK_EQ(fullscreen, app.m_fullscreen);
     }
 
+    // The Picture panel: one window, the render zone's two pages, Revert to what
+    // rendered the picture, the source switches moved in from Encoder settings,
+    // and a table-driven render row built, synced and read like the rest.
+    static void picture_panel_zones_pages_revert_and_rows_test()
+    {
+        PlayerApp& app = fixture->app;
+        int chosen = 1;
+        app.m_pictureRenderRows.push_back(PlayerApp::PictureRenderRow{
+            L"neural.settings.passes", nullptr,
+            [] { return std::vector<std::wstring>{L"A", L"B", L"C"}; },
+            [&chosen] { return chosen; }, [&chosen](int index) { chosen = index; }});
+        app.m_picturePipelinePage = false;
+        app.ShowNeuralSettings();
+        const HWND dialog = app.m_neuralWnd;
+        REQUIRE(dialog != nullptr);
+        const auto visible = [&](int id) { const HWND control = GetDlgItem(dialog, id); return control && IsWindowVisible(control) != FALSE; };
+        // Both zones are there at once; the render zone opens on its look.
+        CHECK(visible(IDC_NS_STYLE));
+        CHECK(visible(IDC_ADJ_NEURAL_STRENGTH));
+        CHECK(visible(IDC_ADJ_BRIGHTNESS));
+        CHECK(!visible(IDC_NS_PASSES));
+        CHECK(!visible(IDC_PIC_DEBAND));
+        // The page switch is a button, so Tab reaches it and Space presses it.
+        const HWND page = GetDlgItem(dialog, IDC_PIC_PAGE);
+        REQUIRE(page != nullptr);
+        CHECK((GetWindowLongPtrW(page, GWL_STYLE) & WS_TABSTOP) != 0);
+        SetFocus(GetDlgItem(dialog, IDC_NS_STYLE));
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_PAGE, BN_CLICKED), reinterpret_cast<LPARAM>(page));
+        CHECK(app.m_picturePipelinePage);
+        CHECK(!visible(IDC_NS_STYLE));
+        CHECK(visible(IDC_NS_PASSES));
+        CHECK(visible(IDC_PIC_DEBAND));
+        CHECK(visible(IDC_ADJ_NEURAL_STRENGTH));
+        // The page that hid the focused control handed the focus to the switch.
+        CHECK(GetFocus() == page);
+        CHECK_EQ(app.T(L"picture.page.look"), ReadText(page));
+        // The table-driven row, after the built-in Network row: its choices, its
+        // current one, and a pick read back.
+        CHECK(visible(IDC_PIC_RENDER_ROW_FIRST));
+        const HWND row = GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST + 1);
+        REQUIRE(row != nullptr);
+        CHECK(visible(IDC_PIC_RENDER_ROW_FIRST + 1));
+        CHECK_EQ(int(SendMessageW(row, CB_GETCOUNT, 0, 0)), 3);
+        CHECK_EQ(int(SendMessageW(row, CB_GETCURSEL, 0, 0)), 1);
+        SendMessageW(row, CB_SETCURSEL, 2, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST + 1, CBN_SELCHANGE), reinterpret_cast<LPARAM>(row));
+        CHECK_EQ(chosen, 2);
+        chosen = 0;
+        app.SyncNeuralSettingControls(dialog);
+        CHECK_EQ(int(SendMessageW(row, CB_GETCURSEL, 0, 0)), 0);
+        // Deband and smoothed exposure: read back and saved under [Encoding], as they were.
+        const bool deband = app.m_sourceDeband, exposure = app.m_suppliedExposure;
+        SendMessageW(GetDlgItem(dialog, IDC_PIC_DEBAND), BM_SETCHECK, BST_CHECKED, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_DEBAND, BN_CLICKED), 0);
+        CHECK(app.m_sourceDeband);
+        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"SourceDeband", 0, app.SettingsPath().c_str()), UINT{1});
+        SendMessageW(GetDlgItem(dialog, IDC_PIC_EXPOSURE), BM_SETCHECK, BST_CHECKED, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_EXPOSURE, BN_CLICKED), 0);
+        CHECK(app.m_suppliedExposure);
+        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"SuppliedExposure", 0, app.SettingsPath().c_str()), UINT{1});
+        // The render zone's Reset puts them back with the rest of the render.
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_RESET, BN_CLICKED), 0);
+        CHECK(!app.m_sourceDeband);
+        CHECK(!app.m_suppliedExposure);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_PIC_DEBAND), BM_GETCHECK, 0, 0)), BST_UNCHECKED);
+        // Revert goes back to what rendered the picture, not to the defaults, and is
+        // live only while the panel differs from it.
+        const bool live = app.m_liveSession, cached = app.m_cachedPlayback, loaded = app.m_loaded;
+        const NeuralSettings settings = app.m_neuralSettings;
+        app.m_loaded = true; app.m_liveSession = false; app.m_cachedPlayback = true;
+        app.m_cachedSettings = {}; app.m_cachedSettings.localTone = 1.4f;
+        app.m_cachedGuides = app.m_renderGuides; app.m_cachedTemporal = app.m_temporalSettings;
+        app.RefreshNeuralApplyState(dialog);
+        const HWND revert = GetDlgItem(dialog, IDC_PIC_REVERT);
+        REQUIRE(revert != nullptr);
+        CHECK(IsWindowEnabled(revert) != FALSE);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_REVERT, BN_CLICKED), reinterpret_cast<LPARAM>(revert));
+        CHECK_EQ(app.m_neuralSettings.localTone, 1.4f);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_TONE), TBM_GETPOS, 0, 0)), 140);
+        CHECK(IsWindowEnabled(revert) == FALSE);
+        // Nothing neural on screen: nothing to revert to.
+        app.m_cachedPlayback = false;
+        app.m_neuralSettings.localTone = 0.5f;
+        app.RefreshNeuralApplyState(dialog);
+        CHECK(IsWindowEnabled(revert) == FALSE);
+        app.m_liveSession = live; app.m_cachedPlayback = cached; app.m_loaded = loaded; app.m_neuralSettings = settings;
+        app.m_sourceDeband = deband; app.m_suppliedExposure = exposure;
+        app.SaveVideoSettings();
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
+        CHECK(app.m_neuralWnd == nullptr);
+        app.m_pictureRenderRows.pop_back();
+        app.m_picturePipelinePage = false;
+    }
+
+    // Every string the panel shows, 40 % longer and bracketed (translation::Pseudo):
+    // each label still fits its control, the label column grows instead of the
+    // label clipping, and no two controls of a page overlap or leave the window.
+    static void picture_panel_layout_survives_longer_strings_test()
+    {
+        PlayerApp& app = fixture->app;
+        const Localizer english = app.m_loc;
+        Localizer::Map pseudo;
+        for (const auto& [key, text] : Localizer::All()) pseudo[key] = translation::Pseudo(text, 0.4);
+        app.m_loc = Localizer(std::move(pseudo), L"x-pseudo");
+        for (const bool pipeline : {false, true}) {
+            app.m_picturePipelinePage = pipeline;
+            app.ShowNeuralSettings();
+            const HWND dialog = app.m_neuralWnd;
+            REQUIRE(dialog != nullptr);
+            RECT client{};
+            GetClientRect(dialog, &client);
+            struct Child { HWND window; RECT rect; std::wstring className; LONG_PTR style; };
+            std::vector<Child> children;
+            for (HWND child = GetWindow(dialog, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+                if (!IsWindowVisible(child)) continue;
+                RECT rect{};
+                GetWindowRect(child, &rect);
+                MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&rect), 2);
+                wchar_t name[64]{};
+                GetClassNameW(child, name, 64);
+                children.push_back(Child{child, rect, name, GetWindowLongPtrW(child, GWL_STYLE)});
+            }
+            CHECK(children.size() > 20);
+            HDC dc = GetDC(dialog);
+            for (const Child& child : children) {
+                // Inside the window.
+                CHECK(child.rect.left >= 0 && child.rect.top >= 0 && child.rect.right <= client.right && child.rect.bottom <= client.bottom);
+                // A one-line label shows its whole text.
+                const bool label = child.className == L"Static" && (child.style & SS_TYPEMASK) == SS_LEFT &&
+                                   child.rect.bottom - child.rect.top < MulDiv(30, int(ActiveWindowDpi(dialog)), 96);
+                if (label) {
+                    const std::wstring text = ReadText(child.window);
+                    const HGDIOBJ previous = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(child.window, WM_GETFONT, 0, 0)));
+                    SIZE size{};
+                    GetTextExtentPoint32W(dc, text.c_str(), int(text.size()), &size);
+                    SelectObject(dc, previous);
+                    if (size.cx > child.rect.right - child.rect.left + 1)
+                        std::wcerr << L"clipped label: " << text << L" (" << size.cx << L" > " << (child.rect.right - child.rect.left) << L")\n";
+                    // The label column grows by at most 84 dip; a label longer than that wraps
+                    // instead, and none of the English ones, 40 % longer, needs to.
+                    CHECK(size.cx <= child.rect.right - child.rect.left + 1);
+                }
+            }
+            ReleaseDC(dialog, dc);
+            for (size_t a = 0; a < children.size(); ++a) {
+                for (size_t b = a + 1; b < children.size(); ++b) {
+                    RECT overlap{};
+                    if (IntersectRect(&overlap, &children[a].rect, &children[b].rect)) {
+                        std::wcerr << L"overlap: " << ReadText(children[a].window) << L" / " << ReadText(children[b].window) << L'\n';
+                        CHECK(false);
+                    }
+                }
+            }
+            DestroyWindow(dialog);
+            CHECK(app.m_neuralWnd == nullptr);
+        }
+        app.m_loc = english;
+        app.m_picturePipelinePage = false;
+    }
+
     // Every settings dialog is laid out in design units at its own dpi, draws
     // in its own dialog font, is dark, and follows a move to another dpi.
     static void settings_dialogs_are_dpi_scaled_and_dark_test()
@@ -1580,7 +1778,6 @@ struct PlayerAppTestAccess {
         PlayerApp& app = fixture->app;
         struct DialogCase { void (PlayerApp::*show)(); HWND PlayerApp::*window; int designW, designH; int button; int defaultButton; };
         const std::array cases{
-            DialogCase{&PlayerApp::ShowAdjustments, &PlayerApp::m_adjustWnd, PlayerApp::kAdjustDesignW, PlayerApp::kAdjustDesignH, IDC_ADJ_RESET, IDC_ADJ_CLOSE},
             DialogCase{&PlayerApp::ShowNeuralSettings, &PlayerApp::m_neuralWnd, PlayerApp::kNeuralDesignW, PlayerApp::kNeuralDesignH, IDC_NS_RESET, IDC_NS_APPLY},
             DialogCase{&PlayerApp::ShowEncoderSettings, &PlayerApp::m_encoderWnd, PlayerApp::kEncoderDesignW, PlayerApp::kEncoderDesignH, IDC_ES_RESET, IDC_ES_CLOSE},
             DialogCase{&PlayerApp::ShowExportStages, &PlayerApp::m_exportStagesWnd, PlayerApp::kExportDesignW, PlayerApp::kExportDesignH, IDC_EX_CLOSE, IDC_EX_RUN},
@@ -2902,6 +3099,8 @@ struct PlayerAppTestAccess {
         UI_CASE(window_placement_is_saved_and_restored_onto_real_screens_test),
         UI_CASE(keyboard_cheat_sheet_test),
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
+        UI_CASE(picture_panel_zones_pages_revert_and_rows_test),
+        UI_CASE(picture_panel_layout_survives_longer_strings_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
         UI_CASE(dark_menu_bar_test),
         UI_CASE(media_controls_and_thumbnail_buttons_test),
@@ -4137,20 +4336,23 @@ struct PlayerAppTestAccess {
         CHECK_EQ(ComparisonSettings{}.ratioGuard, 2.0f);
         const bool cachedPlayback = app.m_cachedPlayback;
         app.m_comparison = {}; app.m_cachedPlayback = true; app.m_neuralRequested = true;
+        // Ctrl+E's command opens the Picture panel with Mix, the viewing zone's
+        // first control, focused.
         app.ShowAdjustments();
-        CHECK(app.m_adjustWnd != nullptr);
-        if (!app.m_adjustWnd) return;
-        const HWND dialog = app.m_adjustWnd;
+        CHECK(app.m_neuralWnd != nullptr);
+        if (!app.m_neuralWnd) return;
+        const HWND dialog = app.m_neuralWnd;
         const HWND track = GetDlgItem(dialog, IDC_ADJ_NEURAL_STRENGTH);
         CHECK(track != nullptr);
         if (!track) return;
+        CHECK(GetFocus() == track);
         // The extra row must not push the note or the buttons out of the client area.
         RECT client{};
         CHECK(GetClientRect(dialog, &client) != FALSE);
-        CHECK_EQ(int(client.bottom), PlayerApp::kAdjustDesignH);
+        CHECK_EQ(int(client.bottom), MulDiv(PlayerApp::kNeuralDesignH, int(ActiveWindowDpi(dialog)), 96));
         CHECK_EQ(int(SendMessageW(track, TBM_GETPOS, 0, 0)), 100);
         SendMessageW(track, TBM_SETPOS, TRUE, 160);
-        app.AdjustWndProc(dialog, WM_HSCROLL, 0, 0);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, reinterpret_cast<LPARAM>(track));
         CHECK(std::abs(app.m_comparison.strength - 1.6f) < 0.001f);
         CHECK(std::abs(app.m_renderer->GetComparison().strength - 1.6f) < 0.001f);
         // A percentage, as the compare bar's Mix shows the same value.
@@ -4158,10 +4360,10 @@ struct PlayerAppTestAccess {
         // The control cannot ask for a strength outside the range the shader composites
         // over: the trackbar clamps both ends to 0..2.
         SendMessageW(track, TBM_SETPOS, TRUE, 900);
-        app.AdjustWndProc(dialog, WM_HSCROLL, 0, 0);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, reinterpret_cast<LPARAM>(track));
         CHECK_EQ(app.m_comparison.strength, 2.0f);
         SendMessageW(track, TBM_SETPOS, TRUE, -400);
-        app.AdjustWndProc(dialog, WM_HSCROLL, 0, 0);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, reinterpret_cast<LPARAM>(track));
         CHECK_EQ(app.m_comparison.strength, 0.0f);
         // Without a resident original the composite has nothing to mix against, so the
         // effective strength falls back to 1 and the picture stays what it is today.
@@ -4183,18 +4385,22 @@ struct PlayerAppTestAccess {
             SendMessageW(tipHost->second, TTM_GETTEXTW, UINT_PTR{512}, reinterpret_cast<LPARAM>(&info));
             CHECK(wcslen(text) > 20);
         }
-        // One reset restores every adjustment, the dial included, without disturbing the
-        // comparison mode it shares a struct with, and saves through the same path.
+        // Reset viewing restores every adjustment, the dial included, without disturbing
+        // the comparison mode it shares a struct with or the render zone's settings, and
+        // saves through the same path.
         app.m_comparison.mode = ComparisonMode::Wipe;
         app.m_colorSettings.saturation = 2.0f;
-        app.AdjustWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ADJ_RESET, BN_CLICKED), 0);
+        app.m_neuralSettings.localTone = 1.5f;
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ADJ_RESET, BN_CLICKED), 0);
+        CHECK_EQ(app.m_neuralSettings.localTone, 1.5f);
+        app.m_neuralSettings = {};
         CHECK_EQ(app.m_comparison.strength, 1.0f);
         CHECK_EQ(app.m_colorSettings.saturation, 1.0f);
         CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
         CHECK_EQ(int(SendMessageW(track, TBM_GETPOS, 0, 0)), 100);
         CHECK_EQ(app.ReadIniFloat(L"VideoAdjustments", L"NeuralStrength", -1.0f), 1.0f);
-        app.AdjustWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ADJ_CLOSE, BN_CLICKED), 0);
-        CHECK(app.m_adjustWnd == nullptr);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
+        CHECK(app.m_neuralWnd == nullptr);
         CHECK(!IsWindow(dialog));
         app.m_comparison = {}; app.m_cachedPlayback = cachedPlayback;
     }
@@ -4207,10 +4413,35 @@ struct PlayerAppTestAccess {
     // neural settings dialog, and was invisible until a test pressed it.
     static void CheckExportStagesDialog(PlayerApp& app)
     {
+        // A fresh dialog opens on what is being watched (UI proposal X7): with
+        // DLSS 5 requested the neural stage is ticked, and frame generation,
+        // which nothing on screen asked for, is not.
+        const bool requested = app.m_neuralRequested;
         app.m_exportSelection = {};
+        app.m_exportSelection.frameGeneration = true;
+        app.m_neuralRequested = true;
         app.ShowExportStages();
         CHECK(app.m_exportStagesWnd != nullptr);
+        if (!app.m_exportStagesWnd) { app.m_neuralRequested = requested; return; }
+        CHECK(app.m_exportSelection.neural);
+        CHECK(!app.m_exportSelection.frameGeneration);
+        CHECK_EQ(LRESULT{BST_CHECKED}, SendMessageW(GetDlgItem(app.m_exportStagesWnd, IDC_EX_NEURAL), BM_GETCHECK, 0, 0));
+        // An open dialog keeps what the viewer ticks: opening it again changes nothing.
+        // DLSS 5 neither requested nor on screen: the neural stage is not ticked.
+        DestroyWindow(app.m_exportStagesWnd);
+        const bool cached = app.m_cachedPlayback;
+        app.m_neuralRequested = false;
+        app.m_cachedPlayback = false;
+        app.ShowExportStages();
+        app.m_neuralRequested = requested;
+        app.m_cachedPlayback = cached;
+        CHECK(app.m_exportStagesWnd != nullptr);
         if (!app.m_exportStagesWnd) return;
+        CHECK(!app.m_exportSelection.neural);
+        app.m_exportSelection = {};
+        app.SyncExportStageControls(app.m_exportStagesWnd);
+        app.ShowExportStages();
+        CHECK(!app.m_exportSelection.neural);
         const HWND dialog = app.m_exportStagesWnd;
         const auto click = [&](int id) {
             HWND box = GetDlgItem(dialog, id);
@@ -4342,14 +4573,12 @@ struct PlayerAppTestAccess {
         app.m_liveSession = live; app.m_loaded = loaded; app.m_cachedPlayback = cached;
         app.TakeLiveRenderSettings();
 
-        // Each dialog opens the other.
-        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_OPEN_ADJUST, BN_CLICKED), 0);
-        CHECK(app.m_adjustWnd != nullptr);
-        if (app.m_adjustWnd) {
-            app.AdjustWndProc(app.m_adjustWnd, WM_COMMAND, MAKEWPARAM(IDC_ADJ_OPEN_NEURAL, BN_CLICKED), 0);
-            CHECK(app.m_neuralWnd == dialog);
-            DestroyWindow(app.m_adjustWnd);
-        }
+        // Both commands open the one panel; Ctrl+E lands on the viewing zone.
+        app.ShowAdjustments();
+        CHECK(app.m_neuralWnd == dialog);
+        CHECK(GetFocus() == GetDlgItem(dialog, IDC_ADJ_NEURAL_STRENGTH));
+        app.ShowNeuralSettings();
+        CHECK(GetFocus() == GetDlgItem(dialog, IDC_NS_PRESET));
         DestroyWindow(dialog);
         app.m_neuralSettings = {};
         app.m_lastNeuralPreset = neural_presets::kPresetCount;
@@ -4470,25 +4699,25 @@ struct PlayerAppTestAccess {
         SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_SETCURSEL, 2, 0);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STABILITY, CBN_SELCHANGE), 0);
         CHECK(app.m_temporalSettings.stability == TemporalStability::Medium);
-        // The network (P3.14): A first and selected; on RTX 50 B and the previous
-        // runtime follow, elsewhere the one runtime that GPU renders with is
-        // shown and cannot be changed.
+        // The network (P3.14), the Picture panel's first render row: A first and
+        // selected; on RTX 50 B and the previous runtime follow, elsewhere the one
+        // runtime that GPU renders with is shown and cannot be changed.
         {
             const GpuGeneration gpu = app.m_opt.detectedGpu.generation;
-            const HWND network = GetDlgItem(dialog, IDC_NS_NETWORK);
+            const HWND network = GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST);
             CHECK(network != nullptr);
             CHECK_EQ(int(SendMessageW(network, CB_GETCOUNT, 0, 0)), int(neural_runtime::ChoiceCount(gpu)));
             CHECK_EQ(int(SendMessageW(network, CB_GETCURSEL, 0, 0)), 0);
             CHECK((IsWindowEnabled(network) != FALSE) == neural_runtime::OffersCurrent(gpu));
             if (neural_runtime::OffersCurrent(gpu)) {
                 SendMessageW(network, CB_SETCURSEL, 1, 0);
-                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_NETWORK, CBN_SELCHANGE), 0);
+                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST, CBN_SELCHANGE), 0);
                 CHECK(app.m_neuralSettings.network == neural_runtime::Network::B && !app.m_neuralSettings.previousRuntime);
                 SendMessageW(network, CB_SETCURSEL, neural_runtime::kPreviousChoice, 0);
-                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_NETWORK, CBN_SELCHANGE), 0);
+                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST, CBN_SELCHANGE), 0);
                 CHECK(app.m_neuralSettings.network == neural_runtime::Network::B && app.m_neuralSettings.previousRuntime);
             } else {
-                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_NETWORK, CBN_SELCHANGE), 0);
+                app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIC_RENDER_ROW_FIRST, CBN_SELCHANGE), 0);
                 CHECK(app.m_neuralSettings.network == neural_runtime::Network::A && !app.m_neuralSettings.previousRuntime);
             }
         }
@@ -4501,7 +4730,7 @@ struct PlayerAppTestAccess {
             CHECK(tools >= 12);
             for (const int id : {IDC_NS_INTENSITY, IDC_NS_STRUCTURE, IDC_NS_TONE, IDC_NS_SKIN,
                                  IDC_NS_STYLE, IDC_NS_AUTOMASK, IDC_NS_GUIDE_MV, IDC_NS_GUIDE_DEPTH,
-                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_NS_NETWORK, IDC_NS_SCENE_CUTS,
+                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_PIC_RENDER_ROW_FIRST, IDC_NS_SCENE_CUTS,
                                  IDC_NS_STABILITY, IDC_NS_APPLY, IDC_NS_RESET}) {
                 wchar_t text[512] = {};
                 TTTOOLINFOW info{};
@@ -4542,7 +4771,7 @@ struct PlayerAppTestAccess {
         CHECK(app.m_guides.SceneCutSensitivity() == scene_cut::Sensitivity::Default);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_SCENE_CUTS), CB_GETCURSEL, 0, 0)), 0);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_STABILITY), CB_GETCURSEL, 0, 0)), 0);
-        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_NETWORK), CB_GETCURSEL, 0, 0)), 0);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST), CB_GETCURSEL, 0, 0)), 0);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_INTENSITY), TBM_GETPOS, 0, 0)), 100);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_GETCHECK, 0, 0)), BST_CHECKED);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
@@ -4672,20 +4901,13 @@ struct PlayerAppTestAccess {
             CHECK_EQ(std::wstring(L"lossless"), std::wstring(rung));
         }
         CHECK(!IsWindowEnabled(GetDlgItem(dialog, IDC_ES_CAPTURE_DITHER)));
-        // The deband pre-pass is a checkbox read back and saved like the others.
-        CHECK(GetDlgItem(dialog, IDC_ES_DEBAND) != nullptr);
-        SendMessageW(GetDlgItem(dialog, IDC_ES_DEBAND), BM_SETCHECK, BST_CHECKED, 0);
-        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_DEBAND, BN_CLICKED), 0);
-        CHECK(app.m_sourceDeband);
-        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"SourceDeband", 0, app.SettingsPath().c_str()), UINT{1});
-        CHECK(GetDlgItem(dialog, IDC_ES_EXPOSURE) != nullptr);
-        SendMessageW(GetDlgItem(dialog, IDC_ES_EXPOSURE), BM_SETCHECK, BST_CHECKED, 0);
-        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_EXPOSURE, BN_CLICKED), 0);
-        CHECK(app.m_suppliedExposure);
-        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"SuppliedExposure", 0, app.SettingsPath().c_str()), UINT{1});
+        // What the model is given moved to the Picture panel's render pipeline; the
+        // ini keys stayed under [Encoding], and Cache & encoding's Reset leaves them.
+        app.m_sourceDeband = true; app.m_suppliedExposure = true;
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_RESET, BN_CLICKED), 0);
-        CHECK(!app.m_suppliedExposure);
-        CHECK(!app.m_sourceDeband);
+        CHECK(app.m_suppliedExposure);
+        CHECK(app.m_sourceDeband);
+        app.m_sourceDeband = false; app.m_suppliedExposure = false;
         CHECK(app.m_cacheQuality == EncoderQuality::Standard);
         CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_ES_CAPTURE_DITHER)));
         // Reset returns it to its default, on.
@@ -4958,11 +5180,11 @@ struct PlayerAppTestAccess {
         EnableWindow(app.m_hwnd,FALSE);
         ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
         EnableWindow(app.m_hwnd,TRUE);
-        app.m_adjustWnd=CreateWindowExW(0,L"STATIC",L"Adjustment regression",WS_POPUP,
+        app.m_encoderWnd=CreateWindowExW(0,L"STATIC",L"Settings regression",WS_POPUP,
             -30000,-30000,10,10,app.m_hwnd,nullptr,instance,nullptr);
-        ShowWindow(app.m_adjustWnd,SW_SHOWNOACTIVATE);
+        ShowWindow(app.m_encoderWnd,SW_SHOWNOACTIVATE);
         ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
-        CHECK(DestroyWindow(app.m_adjustWnd));app.m_adjustWnd=nullptr;
+        CHECK(DestroyWindow(app.m_encoderWnd));app.m_encoderWnd=nullptr;
         ExpireFullscreenIdle(app);CHECK(GetMenu(app.m_hwnd)==nullptr);
         SendMessageW(app.m_renderWnd,WM_KEYDOWN,VK_TAB,0);
         CHECK_EQ(GetMenu(app.m_hwnd),menu);

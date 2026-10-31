@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <iterator>
 
+#include "KeyBindings.h"
 #include "Localization.h"
 #include "YouTubeResolver.h"
 
@@ -34,11 +35,14 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
 {
     HMENU menu = CreatePopupMenu();
     if (!menu) return nullptr;
-    // The same names as Video > Final image and the rest: one name per view.
-    AppendMenuW(menu, MF_STRING, IDM_VIEW_FINAL, L"Final image\t1");
-    AppendMenuW(menu, MF_STRING, IDM_VIEW_INPUT, L"DLSS input\t2");
-    AppendMenuW(menu, MF_STRING, IDM_VIEW_MV, L"Motion vectors\t3");
-    AppendMenuW(menu, MF_STRING, IDM_VIEW_DEPTH, L"Depth\t4");
+    // The same names and keys as View > Debug view: one name per view.
+    const Localizer english;
+    const key_bindings::Table& keys = key_bindings::Defaults();
+    for (const auto& [command, key] : {std::pair{IDM_VIEW_FINAL, L"menu.final"}, std::pair{IDM_VIEW_INPUT, L"menu.input"},
+                                       std::pair{IDM_VIEW_MV, L"menu.mv"}, std::pair{IDM_VIEW_DEPTH, L"menu.depth"}}) {
+        const std::wstring text = english.Get(key) + L"\t" + keys.KeysFor(command);
+        AppendMenuW(menu, MF_STRING, command, text.c_str());
+    }
     if (selectedCommand < IDM_VIEW_FINAL || selectedCommand > IDM_VIEW_DEPTH) {
         selectedCommand = IDM_VIEW_FINAL;
     }
@@ -46,304 +50,435 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
     return menu;
 }
 
+HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& localizer, const key_bindings::Table& keys)
+{
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return nullptr;
+    const auto heading = [&](const wchar_t* key) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, localizer.Get(key).c_str());
+    };
+    const auto mirror = [&](UINT command, const wchar_t* fallbackKey) {
+        const HMENU source = find_menu_containing_command(menuBar, command);
+        wchar_t text[256]{};
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_STATE | MIIM_FTYPE | MIIM_STRING;
+        item.dwTypeData = text;
+        item.cch = static_cast<UINT>(std::size(text));
+        if (source && GetMenuItemInfoW(source, command, FALSE, &item)) {
+            MENUITEMINFOW copy{sizeof(copy)};
+            copy.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_STRING;
+            copy.wID = command;
+            copy.fType = item.fType & MFT_RADIOCHECK;
+            copy.fState = item.fState & (MFS_CHECKED | MFS_DISABLED);
+            copy.dwTypeData = text;
+            InsertMenuItemW(menu, static_cast<UINT>(GetMenuItemCount(menu)), TRUE, &copy);
+            return;
+        }
+        std::wstring label = fallbackKey ? localizer.Get(fallbackKey) : std::wstring{};
+        if (const std::wstring bound = keys.KeysFor(command); !bound.empty()) label += L"\t" + bound;
+        AppendMenuW(menu, MF_STRING, command, label.c_str());
+    };
+    const auto submenu = [&](ToolbarMenu child, const wchar_t* key) {
+        if (HMENU nested = CreateToolbarMenu(child, menuBar, localizer, keys))
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(nested), localizer.Get(key).c_str());
+    };
+    switch (which) {
+    case ToolbarMenu::Picture: {
+        mirror(IDM_PLAY, L"menu.playpause");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        mirror(IDM_NEURAL_RENDERING, L"menu.neural_rendering");
+        HMENU modes = CreatePopupMenu();
+        if (modes) {
+            // The Compare menu's mode radios, in its order, checks copied.
+            const HMENU saved = menu;
+            menu = modes;
+            for (const UINT command : {IDM_COMPARE_NEURAL, IDM_COMPARE_ORIGINAL, IDM_COMPARE_VSR, IDM_COMPARE_SPLIT,
+                                       IDM_COMPARE_WIPE, IDM_COMPARE_DIFFERENCE, IDM_COMPARE_SIDE_BY_SIDE, IDM_COMPARE_QUAD})
+                mirror(command, nullptr);
+            menu = saved;
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(modes), localizer.Get(L"menu.compare").c_str());
+        }
+        submenu(ToolbarMenu::Neural, L"menu.neural_presets");
+        submenu(ToolbarMenu::Upscaler, L"menu.picture_upscaler");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        mirror(IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+        mirror(IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments");
+        mirror(IDM_RERENDER_HERE, L"menu.rerender_here");
+        mirror(IDM_SAVE_COMPARISON_IMAGE, L"menu.save_comparison");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        mirror(IDM_ASPECT_FIT, L"menu.aspectfit");
+        mirror(IDM_ASPECT_FILL, L"menu.aspectfill");
+        mirror(IDM_FULLSCREEN, L"menu.fullscreen");
+        break;
+    }
+    case ToolbarMenu::Neural:
+        heading(L"menu.neural_presets");
+        for (UINT index = 0; index < neural_presets::kPresetCount; ++index) mirror(IDM_NEURAL_PRESET_FIRST + index, nullptr);
+        mirror(IDM_NEURAL_PRESET_CUSTOM, L"menu.neural_preset_custom");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        mirror(IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+        mirror(IDM_RERENDER_HERE, L"menu.rerender_here");
+        mirror(IDM_PREVIEW_FRAME, L"menu.preview_frame");
+        break;
+    case ToolbarMenu::Upscaler:
+        mirror(IDM_RTX_VSR_UPSCALING, L"menu.rtx_vsr_upscaling");
+        mirror(IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
+        mirror(IDM_UPSCALER_NONE, L"menu.upscaler_none");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        heading(L"menu.compare_vsr_quality");
+        for (UINT index = 0; index < IDM_COMPARE_VSR_QUALITY_COUNT; ++index) mirror(IDM_COMPARE_VSR_QUALITY_FIRST + index, nullptr);
+        break;
+    }
+    return menu;
+}
+
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
 {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), recent = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), compare = CreatePopupMenu(), dlss = CreatePopupMenu(), convert = CreatePopupMenu(), presets = CreatePopupMenu(), advanced = CreatePopupMenu();
-    const auto add = [&](HMENU menu, UINT command, const wchar_t* key) {
+    return CreateMenuBar(localizer, youtubeAvailable, key_bindings::Defaults());
+}
+
+// File · Playback · View · Compare · Enhance · Tools · Help: the UI proposal's
+// §3.1 (2026-10-04), which every row below follows. The menus are named for
+// jobs, not technologies: "Enhance" was "DLSS", and RTX VSR is not DLSS; the
+// DLSS names stay on the items. Nothing was removed - every command of the
+// six-menu bar is a row here, most of them where a viewer would look first.
+//
+// Microsoft's menu guidance is still the measure: separators between logical
+// groups, no more than six of them, two to seven items per group. NN/g's is
+// the reason it matters - "groups of unrelated options reduce clarity,
+// decrease findability, hinder spatial memorability, and increase cognitive
+// load". The one group past seven is Compare's mode radios, which are one
+// radio set in the compare bar's own order.
+//
+// No label carries its key. ApplyKeyBindings writes the key column from the
+// key table (KeyBindings.h), so a key rebound in input.conf is the key the
+// menu prints and the shortcut sheet lists.
+HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key_bindings::Table& keys)
+{
+    HMENU bar = CreateMenu();
+    const auto add = [&](HMENU menu, UINT command, const wchar_t* key, UINT flags = 0) {
         const std::wstring text = localizer.Get(key);
-        AppendMenuW(menu, MF_STRING, command, text.c_str());
+        AppendMenuW(menu, MF_STRING | flags, command, text.c_str());
     };
+    const auto popup = [&](HMENU menu, HMENU child, const wchar_t* key) {
+        const std::wstring text = localizer.Get(key);
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(child), text.c_str());
+    };
+    const auto separator = [](HMENU menu) { AppendMenuW(menu, MF_SEPARATOR, 0, nullptr); };
+
+    // --- File: what comes in, what goes out. -------------------------------
+    HMENU file = CreatePopupMenu();
     add(file, IDM_OPEN, L"menu.open");
-    const std::wstring youtubeName = localizer.Get(L"menu.open_youtube");
-    AppendMenuW(file, MF_STRING | (youtubeAvailable ? 0 : MF_GRAYED), IDM_OPEN_YOUTUBE, youtubeName.c_str());
+    add(file, IDM_OPEN_YOUTUBE, L"menu.open_youtube", youtubeAvailable ? 0 : MF_GRAYED);
+    // The resolution a YouTube source is fetched at is a property of opening it,
+    // so it sits under Open YouTube URL rather than among the view settings.
+    HMENU youtubeQuality = CreatePopupMenu();
+    add(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, L"menu.youtube_quality_auto");
+    add(youtubeQuality, IDM_YOUTUBE_QUALITY_2160, L"menu.youtube_quality_2160");
+    add(youtubeQuality, IDM_YOUTUBE_QUALITY_1440, L"menu.youtube_quality_1440");
+    add(youtubeQuality, IDM_YOUTUBE_QUALITY_1080, L"menu.youtube_quality_1080");
+    CheckMenuRadioItem(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, IDM_YOUTUBE_QUALITY_1080, IDM_YOUTUBE_QUALITY_AUTO, MF_BYCOMMAND);
+    popup(file, youtubeQuality, L"menu.youtube_quality");
+    HMENU examples = CreatePopupMenu();
     for (size_t index = 0; index < kExampleVideos.size(); ++index) {
         const ExampleVideo& example = kExampleVideos[index];
         AppendMenuW(examples, MF_STRING | (youtubeAvailable ? 0 : MF_GRAYED),
                     IDM_EXAMPLE_VIDEO_FIRST + static_cast<UINT>(index), example.title.data());
     }
-    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), L"Game trailers");
-    AppendMenuW(recent, MF_STRING | MF_GRAYED, IDM_RECENT_VIDEO_FIRST, L"No recent videos");
-    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent videos");
-    // A picture of what is on screen: the one thing File writes rather than opens, kept
-    // in the file group because a group of one breaks the menu's own rule (only Exit
-    // may stand alone).
-    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_SAVE_COMPARISON_IMAGE, localizer.Get(L"menu.save_comparison").c_str());
-    AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
-    // Transport, and the audio track is part of it: which track is playing is a
-    // property of playback, and alone behind its own separator it was a group of
-    // one - below the two-to-seven Microsoft's guidance asks for, and a rule this
-    // menu broke twice.
+    popup(file, examples, L"menu.game_trailers");
+    HMENU recent = CreatePopupMenu();
+    add(recent, IDM_RECENT_VIDEO_FIRST, L"menu.recent_none", MF_GRAYED);
+    popup(file, recent, L"menu.recent");
+    separator(file);
+    // Everything that writes a file. Export leads: it answers "give me a file of
+    // what I am watching". It becomes Cancel export while one runs.
+    add(file, IDM_EXPORT_STAGES, L"menu.export_stages");
+    add(file, IDM_EXPORT_CACHED_VIDEO, L"menu.export_cached", MF_GRAYED);
+    add(file, IDM_SAVE_COMPARISON_IMAGE, L"menu.save_comparison", MF_GRAYED);
+    // Grayed on creation: main.cpp enables it once an export or a frame
+    // generation has written a file, which is otherwise unreachable once its
+    // confirmation closes.
+    add(file, IDM_SHOW_FRAMEGEN_OUTPUT, L"menu.show_framegen_output", MF_GRAYED);
+    separator(file);
+    add(file, IDM_EXIT, L"menu.exit");
+
+    // --- Playback: transport, then sound and words, then the range. ---------
+    HMENU play = CreatePopupMenu();
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop");
     add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10");
+    // The '.' key had no row and was found only on the shortcut sheet.
+    add(play, IDM_STEP_FRAME, L"menu.step_frame");
+    add(play, IDM_GOTO_TIMECODE, L"menu.goto_timecode");
+    separator(play);
     add(play, IDM_MUTE, L"menu.mute");
     // Which track, then how it leaves the machine. UpdateAudioTracks rebuilds
     // only the rows above the separator, so the passthrough check survives
     // every media load.
     HMENU audioTracks = CreatePopupMenu();
-    AppendMenuW(audioTracks, MF_STRING | MF_GRAYED, IDM_AUDIO_TRACK_FIRST, L"No audio tracks");
-    AppendMenuW(audioTracks, MF_SEPARATOR, 0, nullptr);
+    add(audioTracks, IDM_AUDIO_TRACK_FIRST, L"menu.audio_none", MF_GRAYED);
+    separator(audioTracks);
     add(audioTracks, IDM_AUDIO_PASSTHROUGH, L"menu.audio_passthrough");
-    AppendMenuW(play, MF_POPUP, reinterpret_cast<UINT_PTR>(audioTracks),
-                localizer.Get(L"menu.audio").c_str());
-    // Subtitles beside Audio, for the same reason: which ones are up
-    // is a property of playback. The choices first (UpdateSubtitles fills them),
-    // then loading a file, then the timing.
-    // Greyed until something is loaded; UpdateSubtitles enables them.
+    popup(play, audioTracks, L"menu.audio");
+    // The choices first (UpdateSubtitles fills them), then loading a file, then
+    // the timing. Greyed until something is loaded; UpdateSubtitles enables them.
     HMENU subtitles = CreatePopupMenu();
-    const auto addGrayed = [&](UINT command, const wchar_t* key) {
-        AppendMenuW(subtitles, MF_STRING | MF_GRAYED, command, localizer.Get(key).c_str());
-    };
-    addGrayed(IDM_SUBTITLE_OFF, L"menu.subtitles_off");
-    AppendMenuW(subtitles, MF_SEPARATOR, 0, nullptr);
-    addGrayed(IDM_SUBTITLE_NEXT, L"menu.subtitles_next");
-    addGrayed(IDM_SUBTITLE_LOAD, L"menu.subtitles_load");
-    AppendMenuW(subtitles, MF_SEPARATOR, 0, nullptr);
-    addGrayed(IDM_SUBTITLE_EARLIER, L"menu.subtitles_earlier");
-    addGrayed(IDM_SUBTITLE_LATER, L"menu.subtitles_later");
-    addGrayed(IDM_SUBTITLE_DELAY_RESET, L"menu.subtitles_delay_reset");
+    add(subtitles, IDM_SUBTITLE_OFF, L"menu.subtitles_off", MF_GRAYED);
+    separator(subtitles);
+    add(subtitles, IDM_SUBTITLE_NEXT, L"menu.subtitles_next", MF_GRAYED);
+    add(subtitles, IDM_SUBTITLE_LOAD, L"menu.subtitles_load", MF_GRAYED);
+    separator(subtitles);
+    add(subtitles, IDM_SUBTITLE_EARLIER, L"menu.subtitles_earlier", MF_GRAYED);
+    add(subtitles, IDM_SUBTITLE_LATER, L"menu.subtitles_later", MF_GRAYED);
+    add(subtitles, IDM_SUBTITLE_DELAY_RESET, L"menu.subtitles_delay_reset", MF_GRAYED);
     CheckMenuRadioItem(subtitles, 0, 0, 0, MF_BYPOSITION);
-    AppendMenuW(play, MF_POPUP, reinterpret_cast<UINT_PTR>(subtitles),
-                localizer.Get(L"menu.subtitles").c_str());
-    AppendMenuW(play, MF_SEPARATOR, 0, nullptr);
-    // The range tools. IDM_PAUSE_NEURAL_RENDER used to sit alone below these:
-    // it is a control over the neural RENDER, not over playback, and it now
-    // lives in the DLSS menu beside the rest of neural rendering.
+    popup(play, subtitles, L"menu.subtitles");
+    separator(play);
     add(play, IDM_MARK_IN, L"menu.mark_in"); add(play, IDM_MARK_OUT, L"menu.mark_out");
-    add(play, IDM_CLEAR_MARKS, L"menu.clear_marks"); add(play, IDM_GOTO_TIMECODE, L"menu.goto_timecode");
-    add(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, L"menu.youtube_quality_auto"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_2160, L"menu.youtube_quality_2160"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1440, L"menu.youtube_quality_1440"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1080, L"menu.youtube_quality_1080"); CheckMenuRadioItem(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, IDM_YOUTUBE_QUALITY_1080, IDM_YOUTUBE_QUALITY_AUTO, MF_BYCOMMAND);
-    // How the picture sits in the window. Fullscreen belongs here rather than
-    // alone at the bottom: it is the third answer to the same question the two
-    // aspect commands answer.
-    add(video, IDM_ASPECT_FIT, L"menu.aspectfit"); add(video, IDM_ASPECT_FILL, L"menu.aspectfill"); add(video, IDM_ASPECT_ONE_TO_ONE, L"menu.aspect_pixels");
-    add(video, IDM_FULLSCREEN, L"menu.fullscreen");
-    AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
-    // What the picture is made of: the resolution it was fetched at, and the
-    // colour controls applied to it.
-    const std::wstring youtubeQualityName = localizer.Get(L"menu.youtube_quality");
-    AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(youtubeQuality), youtubeQualityName.c_str());
-    add(video, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments");
-    AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
-    // The modes, in the compare bar's order, then the Mix and the view. One radio
-    // group from IDM_COMPARE_NEURAL to kLastComparisonModeCommand, by position.
-    add(compare, IDM_COMPARE_NEURAL, L"menu.compare_neural"); add(compare, IDM_COMPARE_ORIGINAL, L"menu.compare_original"); add(compare, IDM_COMPARE_VSR, L"menu.compare_vsr"); add(compare, IDM_COMPARE_SPLIT, L"menu.compare_split"); add(compare, IDM_COMPARE_WIPE, L"menu.compare_wipe"); add(compare, IDM_COMPARE_DIFFERENCE, L"menu.compare_difference"); add(compare, IDM_COMPARE_SIDE_BY_SIDE, L"menu.compare_side_by_side"); add(compare, IDM_COMPARE_QUAD, L"menu.compare_quad"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
-    // C and Shift+C walk the modes; listed so the keys reach the shortcut sheet.
+    add(play, IDM_CLEAR_MARKS, L"menu.clear_marks");
+
+    // --- View: how the picture sits on this screen. -------------------------
+    HMENU view = CreatePopupMenu();
+    add(view, IDM_ASPECT_FIT, L"menu.aspectfit"); add(view, IDM_ASPECT_FILL, L"menu.aspectfill");
+    add(view, IDM_ASPECT_ONE_TO_ONE, L"menu.aspect_pixels"); add(view, IDM_FULLSCREEN, L"menu.fullscreen");
+    separator(view);
+    // The Picture panel on its viewing zone: instant, this screen only.
+    add(view, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments");
+    // A developer's view of what the model is given, one submenu rather than four
+    // top-level rows.
+    HMENU debugView = CreatePopupMenu();
+    add(debugView, IDM_VIEW_FINAL, L"menu.final"); add(debugView, IDM_VIEW_INPUT, L"menu.input");
+    add(debugView, IDM_VIEW_MV, L"menu.mv"); add(debugView, IDM_VIEW_DEPTH, L"menu.depth");
+    popup(view, debugView, L"menu.debug_view");
+
+    // --- Compare: promoted from Video > Compare. ----------------------------
+    // The modes, in the compare bar's order: one radio group from
+    // IDM_COMPARE_NEURAL to kLastComparisonModeCommand, by position.
+    HMENU compare = CreatePopupMenu();
+    add(compare, IDM_COMPARE_NEURAL, L"menu.compare_neural"); add(compare, IDM_COMPARE_ORIGINAL, L"menu.compare_original");
+    add(compare, IDM_COMPARE_VSR, L"menu.compare_vsr"); add(compare, IDM_COMPARE_SPLIT, L"menu.compare_split");
+    add(compare, IDM_COMPARE_WIPE, L"menu.compare_wipe"); add(compare, IDM_COMPARE_DIFFERENCE, L"menu.compare_difference");
+    add(compare, IDM_COMPARE_SIDE_BY_SIDE, L"menu.compare_side_by_side"); add(compare, IDM_COMPARE_QUAD, L"menu.compare_quad");
+    separator(compare);
     add(compare, IDM_COMPARE_NEXT_MODE, L"menu.compare_next_mode"); add(compare, IDM_COMPARE_PREVIOUS_MODE, L"menu.compare_previous_mode");
-    add(compare, IDM_COMPARE_BLEND_LESS, L"menu.compare_blend_less"); add(compare, IDM_COMPARE_BLEND_MORE, L"menu.compare_blend_more"); add(compare, IDM_COMPARE_SWAP, L"menu.compare_swap");
+    add(compare, IDM_COMPARE_BLEND_LESS, L"menu.compare_blend_less"); add(compare, IDM_COMPARE_BLEND_MORE, L"menu.compare_blend_more");
+    add(compare, IDM_COMPARE_SWAP, L"menu.compare_swap");
+    separator(compare);
+    add(compare, IDM_COMPARE_ZOOM, L"menu.compare_zoom"); add(compare, IDM_COMPARE_ZOOM_OUT, L"menu.compare_zoom_out");
+    add(compare, IDM_COMPARE_ZOOM_FIT, L"menu.compare_zoom_fit"); add(compare, IDM_COMPARE_LOUPE, L"menu.compare_loupe");
+    separator(compare);
+    // What the other modes compare against, then one submenu per view that has
+    // settings of its own. M3's loop, speed and flicker-map rows go in this
+    // group, one submenu per feature, as the compare bar's contextual part does.
+    add(compare, IDM_COMPARE_AGAINST_VSR, L"menu.compare_against_vsr");
+    HMENU difference = CreatePopupMenu();
+    add(difference, IDM_COMPARE_DIFFERENCE_LESS, L"menu.compare_difference_less");
+    add(difference, IDM_COMPARE_DIFFERENCE_MORE, L"menu.compare_difference_more");
+    add(difference, IDM_COMPARE_DIFFERENCE_LUMA, L"menu.compare_difference_luma");
+    popup(compare, difference, L"menu.compare_difference_view");
     HMENU secondMix = CreatePopupMenu();
     for (UINT index = 0; index < IDM_COMPARE_SECOND_MIX_COUNT; ++index) {
         const std::wstring key = L"menu.compare_second_mix_" + std::to_wstring(index);
         add(secondMix, IDM_COMPARE_SECOND_MIX_FIRST + index, key.c_str());
     }
-    AppendMenuW(compare, MF_POPUP, reinterpret_cast<UINT_PTR>(secondMix), localizer.Get(L"menu.compare_second_mix").c_str());
-    AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
-    // RTX VSR: what the other modes compare against, and how hard it works.
-    add(compare, IDM_COMPARE_AGAINST_VSR, L"menu.compare_against_vsr");
-    HMENU vsrQuality = CreatePopupMenu();
-    for (UINT index = 0; index < IDM_COMPARE_VSR_QUALITY_COUNT; ++index) {
-        const std::wstring key = L"menu.compare_vsr_quality_" + std::to_wstring(index);
-        add(vsrQuality, IDM_COMPARE_VSR_QUALITY_FIRST + index, key.c_str());
-    }
-    AppendMenuW(compare, MF_POPUP, reinterpret_cast<UINT_PTR>(vsrQuality), localizer.Get(L"menu.compare_vsr_quality").c_str());
-    AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
+    popup(compare, secondMix, L"menu.compare_second_mix");
     // The spatial mask on the Mix: load, how soft its edge is, which way round, gone.
-    add(compare, IDM_COMPARE_MASK_LOAD, L"menu.compare_mask_load");
+    HMENU mask = CreatePopupMenu();
+    add(mask, IDM_COMPARE_MASK_LOAD, L"menu.compare_mask_load");
     HMENU feather = CreatePopupMenu();
     for (UINT index = 0; index < IDM_COMPARE_MASK_FEATHER_COUNT; ++index) {
         const std::wstring key = L"menu.compare_mask_feather_" + std::to_wstring(index);
         add(feather, IDM_COMPARE_MASK_FEATHER_FIRST + index, key.c_str());
     }
-    AppendMenuW(compare, MF_POPUP, reinterpret_cast<UINT_PTR>(feather), localizer.Get(L"menu.compare_mask_feather").c_str());
-    add(compare, IDM_COMPARE_MASK_INVERT, L"menu.compare_mask_invert"); add(compare, IDM_COMPARE_MASK_CLEAR, L"menu.compare_mask_clear"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
-    // How the Difference view is drawn.
-    add(compare, IDM_COMPARE_DIFFERENCE_LESS, L"menu.compare_difference_less"); add(compare, IDM_COMPARE_DIFFERENCE_MORE, L"menu.compare_difference_more"); add(compare, IDM_COMPARE_DIFFERENCE_LUMA, L"menu.compare_difference_luma"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
-    add(compare, IDM_COMPARE_ZOOM, L"menu.compare_zoom"); add(compare, IDM_COMPARE_ZOOM_OUT, L"menu.compare_zoom_out"); add(compare, IDM_COMPARE_ZOOM_FIT, L"menu.compare_zoom_fit"); add(compare, IDM_COMPARE_LOUPE, L"menu.compare_loupe");
-    AppendMenuW(compare, MF_SEPARATOR, 0, nullptr); add(compare, IDM_COMPARE_HDR_AT_SDR, L"menu.compare_hdr_at_sdr");
-    // Which image is on screen: the comparison modes and the four debug views
-    // are the same question asked two ways, so they are one group.
-    const std::wstring compareName = localizer.Get(L"menu.compare");
-    AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(compare), compareName.c_str());
-    add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input");
-    add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth");
-    // The DLSS menu, grouped one feature per block.
-    //
-    // Microsoft's own menu guidance is the measure here: separators between
-    // logical groups, no more than six of them, two to seven items per group.
-    // NN/g's is the reason it matters - "groups of unrelated options reduce
-    // clarity, decrease findability, hinder spatial memorability, and increase
-    // cognitive load" - and that is exactly what this menu used to be. Neural
-    // Rendering was the first row and its presets and settings were rows ten
-    // and eleven, with all of upscaling and all of frame generation in between,
-    // so the one feature a viewer touches most was split across the full height
-    // of the menu by two features they may never touch.
-    //
-    // Now: neural, then upscaling, then frame generation, then the two preview
-    // commands, then everything that writes a file. Each block is one feature
-    // and holds its own toggle, its own submenu and its own settings, so a
-    // viewer who wants one thing reads one block and stops.
+    popup(mask, feather, L"menu.compare_mask_feather");
+    add(mask, IDM_COMPARE_MASK_INVERT, L"menu.compare_mask_invert"); add(mask, IDM_COMPARE_MASK_CLEAR, L"menu.compare_mask_clear");
+    popup(compare, mask, L"menu.compare_mask");
+    add(compare, IDM_COMPARE_HDR_AT_SDR, L"menu.compare_hdr_at_sdr");
 
-    // --- Neural rendering: the toggle, its looks, its controls. ------------
-    add(dlss, IDM_NEURAL_RENDERING, L"menu.neural_rendering");
-    // Pausing the background render is a neural command, so it belongs to the
-    // neural block. In Playback it was a group of one under a separator, and it
-    // asked the viewer to look for a render control in the transport menu.
-    add(dlss, IDM_PAUSE_NEURAL_RENDER, L"menu.pause_neural_render");
-    // Presets before the controls they set: six sliders with measured tooltips
-    // are the right surface for an expert and the wrong first contact. Every
-    // preset is one neural evaluation at the same resolution, so this is a
-    // choice of look, not a speed trade - that one lives in Encoder settings.
-    // The measured cost, stated where the choice is made. The project's rule
-    // is that a quality ladder prints what each rung costs; here the measured
-    // answer is that they all cost the same, and that is precisely the answer
-    // worth printing - without it "Strong" reads as the expensive one and
-    // nobody picks it. Disabled, because it is a statement and not a choice.
-    // The numbers and how to reproduce them are in NeuralPresets.h.
-    AppendMenuW(presets, MF_STRING | MF_GRAYED, 0,
-                L"All four render in the same time (6.3 s measured) - they change the look");
-    AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
+    // --- Enhance: was "DLSS". One feature per block. ------------------------
+    HMENU enhance = CreatePopupMenu();
+    // DLSS 5: the toggle, the panel, the look, and the render's own pace.
+    add(enhance, IDM_NEURAL_RENDERING, L"menu.neural_rendering");
+    add(enhance, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+    // Every preset is one neural evaluation at the same resolution, so this is a
+    // choice of look, not a speed trade, and the menu says so where the choice is
+    // made. Disabled, because it is a statement and not a choice. The numbers and
+    // how to reproduce them are in NeuralPresets.h.
+    HMENU presets = CreatePopupMenu();
+    add(presets, 0, L"menu.neural_presets_measured", MF_GRAYED);
+    separator(presets);
     for (size_t index = 0; index < neural_presets::kPresetCount; ++index) {
         const std::wstring label(neural_presets::kPresets[index].label.begin(),
                                  neural_presets::kPresets[index].label.end());
         AppendMenuW(presets, MF_STRING, IDM_NEURAL_PRESET_FIRST + index, label.c_str());
     }
     // Ends the radio block and is never selectable: it reports that a control
-    // has been moved off every preset, which is the expected path once someone
-    // starts from one and edits it.
-    AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(presets, MF_STRING | MF_GRAYED, IDM_NEURAL_PRESET_CUSTOM,
-                localizer.Get(L"menu.neural_preset_custom").c_str());
+    // has been moved off every preset.
+    separator(presets);
+    add(presets, IDM_NEURAL_PRESET_CUSTOM, L"menu.neural_preset_custom", MF_GRAYED);
     CheckMenuRadioItem(presets, IDM_NEURAL_PRESET_FIRST, IDM_NEURAL_PRESET_CUSTOM,
-                       IDM_NEURAL_PRESET_FIRST + UINT(neural_presets::kDefaultPresetIndex),
-                       MF_BYCOMMAND);
-    const std::wstring presetsName = localizer.Get(L"menu.neural_presets");
-    AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(presets), presetsName.c_str());
-    add(dlss, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
-    // The resolution the model runs at. The one neural choice that trades
-    // picture for speed, so it follows the project's ladder rule to the letter:
-    // the default is the top rung and says so, and every rung carries the rate
-    // it measured, so the trade is read before the render rather than after.
-    // Numbers and method in UpscalingPolicy.h.
+                       IDM_NEURAL_PRESET_FIRST + UINT(neural_presets::kDefaultPresetIndex), MF_BYCOMMAND);
+    popup(enhance, presets, L"menu.neural_presets");
+    // The one neural choice that trades picture for speed, so every rung carries
+    // the rate it measured and the default is the top rung. UpscalingPolicy.h.
     HMENU processingScale = CreatePopupMenu();
-    AppendMenuW(processingScale, MF_STRING | MF_GRAYED, 0,
-                localizer.Get(L"menu.processing_scale_measured").c_str());
-    AppendMenuW(processingScale, MF_SEPARATOR, 0, nullptr);
+    add(processingScale, 0, L"menu.processing_scale_measured", MF_GRAYED);
+    separator(processingScale);
     add(processingScale, IDM_PROCESSING_SCALE_FIRST, L"menu.processing_scale_100");
     add(processingScale, IDM_PROCESSING_SCALE_FIRST + 1, L"menu.processing_scale_75");
     add(processingScale, IDM_PROCESSING_SCALE_FIRST + 2, L"menu.processing_scale_50");
     CheckMenuRadioItem(processingScale, IDM_PROCESSING_SCALE_FIRST, IDM_PROCESSING_SCALE_LAST,
                        CommandForProcessingScale(kDefaultProcessingScale), MF_BYCOMMAND);
-    AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(processingScale),
-                localizer.Get(L"menu.processing_scale").c_str());
-    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
-
-    // --- RTX VSR: the playback upscaler, on by default. ---------------------
-    // It replaces the compositor's scale wherever the window shows the video
-    // larger than it is, and stands aside while DLSS Upscaling is on. Its quality
-    // is the comparison view's (Video > Compare > RTX VSR quality).
-    add(dlss, IDM_RTX_VSR_UPSCALING, L"menu.rtx_vsr_upscaling");
-    // --- DLSS Super Resolution: the toggle and the size it targets. --------
-    add(dlss, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
-    HMENU upscaleOutput=CreatePopupMenu();
+    popup(enhance, processingScale, L"menu.processing_scale");
+    add(enhance, IDM_PAUSE_NEURAL_RENDER, L"menu.pause_neural_render");
+    separator(enhance);
+    // Look before you commit, then commit.
+    add(enhance, IDM_PREVIEW_FRAME, L"menu.preview_frame");
+    add(enhance, IDM_PREVIEW_CLIP, L"menu.preview_clip");
+    add(enhance, IDM_RERENDER_HERE, L"menu.rerender_here");
+    add(enhance, IDM_RENDER_RANGE, L"menu.render_range");
+    add(enhance, IDM_RENDER_WHOLE, L"menu.render_whole");
+    separator(enhance);
+    // The playback upscaler: three radios by position where two checkboxes were,
+    // because there were only ever three states - RTX VSR, DLSS Super
+    // Resolution (RTX VSR stands aside while it runs), or the window's own
+    // scaling - and "both off" was not a state a viewer could pick.
+    add(enhance, IDM_RTX_VSR_UPSCALING, L"menu.rtx_vsr_upscaling");
+    add(enhance, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
+    add(enhance, IDM_UPSCALER_NONE, L"menu.upscaler_none");
+    // RTX VSR's ladder drives playback and export as well as the comparison view.
+    HMENU vsrQuality = CreatePopupMenu();
+    for (UINT index = 0; index < IDM_COMPARE_VSR_QUALITY_COUNT; ++index) {
+        const std::wstring key = L"menu.compare_vsr_quality_" + std::to_wstring(index);
+        add(vsrQuality, IDM_COMPARE_VSR_QUALITY_FIRST + index, key.c_str());
+    }
+    popup(enhance, vsrQuality, L"menu.compare_vsr_quality");
+    HMENU upscaleOutput = CreatePopupMenu();
     add(upscaleOutput, IDM_UPSCALE_AUTO, L"menu.upscale_auto");
     add(upscaleOutput, IDM_UPSCALE_1080, L"menu.upscale_1080");
     add(upscaleOutput, IDM_UPSCALE_1440, L"menu.upscale_1440");
     add(upscaleOutput, IDM_UPSCALE_2160, L"menu.upscale_2160");
-    CheckMenuRadioItem(upscaleOutput,IDM_UPSCALE_AUTO,IDM_UPSCALE_2160,IDM_UPSCALE_AUTO,MF_BYCOMMAND);
-    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),localizer.Get(L"menu.upscale_output").c_str());
+    CheckMenuRadioItem(upscaleOutput, IDM_UPSCALE_AUTO, IDM_UPSCALE_2160, IDM_UPSCALE_AUTO, MF_BYCOMMAND);
+    popup(enhance, upscaleOutput, L"menu.upscale_output");
     // Whether Super Resolution accumulates over frames or upscales each one on its
-    // own. Neither beats a plain scaler on decoded video, and which of the two does
-    // better depends on the clip, so the choice carries what it measured in the
-    // same greyed-statement form the processing scale uses. Numbers and method in
-    // UpscalingPolicy.h and docs/measurements/sr-history-20260924.
-    HMENU upscaleHistory=CreatePopupMenu();
-    AppendMenuW(upscaleHistory, MF_STRING | MF_GRAYED, 0,
-                localizer.Get(L"menu.upscale_history_measured").c_str());
-    AppendMenuW(upscaleHistory, MF_SEPARATOR, 0, nullptr);
+    // own, with what each measured. UpscalingPolicy.h, docs/measurements/sr-history-20260924.
+    HMENU upscaleHistory = CreatePopupMenu();
+    add(upscaleHistory, 0, L"menu.upscale_history_measured", MF_GRAYED);
+    separator(upscaleHistory);
     add(upscaleHistory, IDM_UPSCALE_HISTORY_TEMPORAL, L"menu.upscale_history_temporal");
     add(upscaleHistory, IDM_UPSCALE_HISTORY_PER_FRAME, L"menu.upscale_history_per_frame");
-    CheckMenuRadioItem(upscaleHistory,IDM_UPSCALE_HISTORY_TEMPORAL,IDM_UPSCALE_HISTORY_PER_FRAME,
-                       IDM_UPSCALE_HISTORY_TEMPORAL,MF_BYCOMMAND);
-    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleHistory),localizer.Get(L"menu.upscale_history").c_str());
-    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
-
-    // --- Frame generation: the verb and the rate it targets. ---------------
-    //
-    // IDM_FRAME_GENERATION's label swaps to "Cancel frame generation" while a
-    // conversion runs, which is what the toolbar pill has always done. A
-    // separate permanently-greyed cancel row was two rows of dead menu and one
-    // more place for the two surfaces to disagree.
-    add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation");
-    // The multiple is a preference, not an automatic maximum: a conversion is
-    // minutes of GPU work and a large file, so the default doubles the rate and
-    // anything beyond that is asked for. "As many as the display allows" is the
-    // old behaviour, kept for whoever wants it.
-    HMENU framegenMultiple=CreatePopupMenu();
+    CheckMenuRadioItem(upscaleHistory, IDM_UPSCALE_HISTORY_TEMPORAL, IDM_UPSCALE_HISTORY_PER_FRAME,
+                       IDM_UPSCALE_HISTORY_TEMPORAL, MF_BYCOMMAND);
+    popup(enhance, upscaleHistory, L"menu.upscale_history");
+    separator(enhance);
+    // Frame generation: the verb, which becomes Cancel frame generation while a
+    // conversion runs, and the rate it targets. The multiple is a preference, not
+    // an automatic maximum: the default doubles the rate and the rest is asked for.
+    add(enhance, IDM_FRAME_GENERATION, L"menu.frame_generation");
+    HMENU framegenMultiple = CreatePopupMenu();
     add(framegenMultiple, IDM_FRAMEGEN_2X, L"menu.framegen_2x");
     add(framegenMultiple, IDM_FRAMEGEN_3X, L"menu.framegen_3x");
     add(framegenMultiple, IDM_FRAMEGEN_4X, L"menu.framegen_4x");
     add(framegenMultiple, IDM_FRAMEGEN_5X, L"menu.framegen_5x");
     add(framegenMultiple, IDM_FRAMEGEN_MAX, L"menu.framegen_max");
-    CheckMenuRadioItem(framegenMultiple,IDM_FRAMEGEN_2X,IDM_FRAMEGEN_MAX,IDM_FRAMEGEN_2X,MF_BYCOMMAND);
-    AppendMenuW(framegenMultiple, MF_SEPARATOR, 0, nullptr);
-    // A constraint on the multiple, not a choice of one: with it on, nothing is
-    // generated unless the generated rate divides the display's refresh.
+    CheckMenuRadioItem(framegenMultiple, IDM_FRAMEGEN_2X, IDM_FRAMEGEN_MAX, IDM_FRAMEGEN_2X, MF_BYCOMMAND);
+    separator(framegenMultiple);
+    // Constraints on the multiple rather than choices of one.
     add(framegenMultiple, IDM_FRAMEGEN_EVEN_ONLY, L"menu.framegen_even_only");
-    // Also a constraint rather than a multiple: which source pairs are generated
-    // between at all. For animation drawn on twos and threes.
     add(framegenMultiple, IDM_FRAMEGEN_HOLD_DUPLICATES, L"menu.framegen_hold_duplicates");
-    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(framegenMultiple),
-                localizer.Get(L"menu.framegen_multiple").c_str());
-    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    popup(enhance, framegenMultiple, L"menu.framegen_multiple");
 
-    // --- Look before you commit. ------------------------------------------
-    add(dlss, IDM_PREVIEW_FRAME, L"menu.preview_frame");
-    add(dlss, IDM_PREVIEW_CLIP, L"menu.preview_clip");
-    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    // --- Tools: was "Advanced". What the render leaves behind. ------------
+    HMENU tools = CreatePopupMenu();
+    add(tools, IDM_ENCODER_SETTINGS, L"menu.encoder_settings");
+    add(tools, IDM_CLEAR_NEURAL_CACHE, L"menu.clear_neural_cache");
+    separator(tools);
+    add(tools, IDM_RENDER_REPORT, L"menu.render_report");
+    add(tools, IDM_OPEN_RENDER_RECEIPT, L"menu.open_receipt");
+    separator(tools);
+    add(tools, IDM_ADVANCED_SAFE_MODE, L"menu.safe_mode");
+    add(tools, IDM_REHOOK, L"menu.rehook");
 
-    // --- Everything that writes a file, plus how it is encoded. ------------
-    //
-    // The combined export leads because it is the one that answers "give me a
-    // file with the stages I picked"; the two cache conversions below it are
-    // about what PLAYBACK will use, which is a different question wearing
-    // similar words.
-    add(convert, IDM_EXPORT_STAGES, L"menu.export_stages");
-    AppendMenuW(convert, MF_SEPARATOR, 0, nullptr);
-    // Conversion writes a neural video to disk with the settings in the neural
-    // settings dialog; it is deliberately separate from watching with the
-    // rendering turned on.
-    add(convert, IDM_RENDER_RANGE, L"menu.render_range");
-    add(convert, IDM_RENDER_WHOLE, L"menu.render_whole");
-    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, localizer.Get(L"menu.export_cached").c_str());
-    AppendMenuW(convert, MF_SEPARATOR, 0, nullptr);
-    // Grayed on creation: main.cpp enables it once a converted file exists.
-    // Without it the output is unreachable after the confirmation dialog
-    // closes - the export item above it is gated on a neural cache path a
-    // frame-generation output never has.
-    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_SHOW_FRAMEGEN_OUTPUT,
-                localizer.Get(L"menu.show_framegen_output").c_str());
-    const std::wstring convertName = localizer.Get(L"menu.convert");
-    AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(convert), convertName.c_str());
-    add(dlss, IDM_ENCODER_SETTINGS, L"menu.encoder_settings");
-    // What this render left behind, and what it reported.
-    add(advanced, IDM_CLEAR_NEURAL_CACHE, L"menu.clear_neural_cache");
-    add(advanced, IDM_OPEN_RENDER_RECEIPT, L"menu.open_receipt");
-    add(advanced, IDM_RENDER_REPORT, L"menu.render_report");
-    AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr);
-    // Getting the runtime and the app back into a known state. Three separators
-    // for five items made four groups, three of them a single row each.
-    add(advanced, IDM_ADVANCED_SAFE_MODE, L"menu.safe_mode");
-    add(advanced, IDM_REHOOK, L"menu.rehook");
-    add(advanced, IDM_CHECK_FOR_UPDATES, L"menu.check_updates");
-    const std::wstring fileName = localizer.Get(L"menu.file"), playName = localizer.Get(L"menu.playback"), videoName = localizer.Get(L"menu.video"), dlssName = localizer.Get(L"menu.dlss"), advancedName = localizer.Get(L"menu.advanced");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(play), playName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(video), videoName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(dlss), dlssName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(advanced), advancedName.c_str());
-    // Where a viewer looks for "what are the keys". About 30 shortcuts over
-    // five menus were findable only by opening each menu in turn.
+    // --- Help: the keys, the guide, the log, and what this build is. -------
     HMENU help = CreatePopupMenu();
     add(help, IDM_KEYBOARD_SHORTCUTS, L"menu.keyboard_shortcuts");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), localizer.Get(L"menu.help").c_str());
+    add(help, IDM_HELP_KEY_BINDINGS, L"menu.key_bindings");
+    add(help, IDM_HELP_USER_GUIDE, L"menu.user_guide");
+    add(help, IDM_HELP_LOG_FOLDER, L"menu.log_folder");
+    separator(help);
+    add(help, IDM_CHECK_FOR_UPDATES, L"menu.check_updates");
+    add(help, IDM_HELP_ABOUT, L"menu.about");
+
+    popup(bar, file, L"menu.file"); popup(bar, play, L"menu.playback"); popup(bar, view, L"menu.view");
+    popup(bar, compare, L"menu.compare"); popup(bar, enhance, L"menu.enhance"); popup(bar, tools, L"menu.tools");
+    popup(bar, help, L"menu.help");
+    ApplyKeyBindings(bar, keys, localizer);
+    UpdateUpscalerMenu(bar, IDM_RTX_VSR_UPSCALING, true, false);
     UpdateFeatureAvailability(bar, true, false, false, false, false, false, false);
     UpdateRenderActionAvailability(bar, false, false, false, false, false);
     UpdateComparisonMenu(bar, false, false, IDM_COMPARE_NEURAL, false);
     return bar;
+}
+
+namespace {
+
+// The keys a row prints: its command's own, and, for Fit, the keys of the
+// command that has no row of its own and has always been printed there (A,
+// which flips Fit and Fill).
+std::wstring RowKeys(const key_bindings::Table& keys, UINT command)
+{
+    std::wstring text = keys.KeysFor(command);
+    if (command == IDM_ASPECT_FIT) {
+        const std::wstring toggle = keys.KeysFor(IDM_ASPECT_TOGGLE);
+        if (!toggle.empty()) text = text.empty() ? toggle : toggle + L" / " + text;
+    }
+    return text;
+}
+
+void ApplyKeyBindingsTo(HMENU menu, const key_bindings::Table& keys, const Localizer& localizer)
+{
+    const int count = GetMenuItemCount(menu);
+    for (int index = 0; index < count; ++index) {
+        wchar_t text[256]{};
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_FTYPE | MIIM_SUBMENU | MIIM_STRING | MIIM_ID;
+        item.dwTypeData = text;
+        item.cch = static_cast<UINT>(std::size(text));
+        if (!GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item) || (item.fType & MFT_SEPARATOR)) continue;
+        if (item.hSubMenu) { ApplyKeyBindingsTo(item.hSubMenu, keys, localizer); continue; }
+        // A row with no command name keeps its text: the measured rungs use the
+        // key column for what each one measured.
+        if (key_bindings::CommandName(item.wID).empty()) continue;
+        std::wstring label(text);
+        label = label.substr(0, label.find(L'\t'));
+        std::wstring column = RowKeys(keys, item.wID);
+        // The two overlay hotkeys are registered with Windows, not read from the
+        // key table, and are printed after the row's own keys.
+        const wchar_t* overlay = item.wID == IDM_PLAY ? L"menu.playpause_overlay"
+                               : item.wID == IDM_VIDEO_ADJUSTMENTS ? L"menu.adjustments_overlay" : nullptr;
+        if (overlay) column += (column.empty() ? L"" : L"   ") + localizer.Get(overlay);
+        if (!column.empty()) label += L"\t" + column;
+        MENUITEMINFOW update{sizeof(update)};
+        update.fMask = MIIM_STRING;
+        update.dwTypeData = label.data();
+        SetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &update);
+    }
+}
+
+} // namespace
+
+void ApplyKeyBindings(HMENU menuBar, const key_bindings::Table& keys, const Localizer& localizer)
+{
+    if (menuBar) ApplyKeyBindingsTo(menuBar, keys, localizer);
+}
+
+bool UpdateUpscalerMenu(HMENU menuBar, UINT chosen, bool vsrAvailable, bool superResolutionAvailable)
+{
+    const HMENU menu = find_menu_containing_command(menuBar, IDM_RTX_VSR_UPSCALING);
+    if (!menu) return false;
+    bool ok = EnableMenuItem(menu, IDM_RTX_VSR_UPSCALING, MF_BYCOMMAND | (vsrAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1);
+    ok = EnableMenuItem(menu, IDM_DLSS_UPSCALING, MF_BYCOMMAND | (superResolutionAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
+    if (chosen != IDM_DLSS_UPSCALING && chosen != IDM_UPSCALER_NONE) chosen = IDM_RTX_VSR_UPSCALING;
+    return CheckRadioCommand(menu, IDM_RTX_VSR_UPSCALING, IDM_UPSCALER_NONE, chosen) && ok;
 }
 
 bool SetUpdateBadge(HMENU menuBar, std::wstring_view label)
@@ -375,12 +510,12 @@ bool SetUpdateBadge(HMENU menuBar, std::wstring_view label)
     return AppendMenuW(menuBar, flags, IDM_UPDATE_AVAILABLE, text.c_str()) != FALSE;
 }
 
-void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled)
+void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled, const std::wstring& noneLabel)
 {
     HMENU recent=find_menu_containing_command(menuBar,IDM_RECENT_VIDEO_FIRST);
     if(!recent)return;
     while(GetMenuItemCount(recent)>0)DeleteMenu(recent,0,MF_BYPOSITION);
-    if(titles.empty())AppendMenuW(recent,MF_STRING|MF_GRAYED,IDM_RECENT_VIDEO_FIRST,L"No recent videos");
+    if(titles.empty())AppendMenuW(recent,MF_STRING|MF_GRAYED,IDM_RECENT_VIDEO_FIRST,noneLabel.c_str());
     for(size_t index=0;index<titles.size()&&index<5;++index){
         std::wstring label=std::to_wstring(index+1)+L". ";
         for(wchar_t c:titles[index].substr(0,120)){
@@ -391,7 +526,7 @@ void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, boo
     }
 }
 
-void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int selected)
+void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int selected, const std::wstring& noneLabel)
 {
     HMENU tracks=find_menu_containing_command(menuBar,IDM_AUDIO_TRACK_FIRST);
     if(!tracks)return;
@@ -406,7 +541,7 @@ void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int 
     // does not build a list for it, so the placeholder covers both that and
     // nothing being loaded.
     if(labels.empty()){
-        InsertMenuW(tracks,0,MF_BYPOSITION|MF_STRING|MF_GRAYED,IDM_AUDIO_TRACK_FIRST,L"No audio tracks");
+        InsertMenuW(tracks,0,MF_BYPOSITION|MF_STRING|MF_GRAYED,IDM_AUDIO_TRACK_FIRST,noneLabel.c_str());
         return;
     }
     const size_t shown=std::min<size_t>(labels.size(),IDM_AUDIO_TRACK_COUNT);
@@ -468,13 +603,13 @@ void UpdateSubtitles(HMENU menuBar, const std::wstring& offLabel, std::span<cons
 
 bool RoutesToRehook(PlayerCommandRoute route, UINT value)
 {
-    return route == PlayerCommandRoute::KeyDown ? value == VK_F6 : value == IDM_REHOOK;
+    return route == PlayerCommandRoute::KeyDown ? CommandForPlayerKey(value, false, false) == IDM_REHOOK : value == IDM_REHOOK;
 }
 
 bool RoutesToOpenYouTube(PlayerCommandRoute route, UINT value, bool controlDown)
 {
     if (route == PlayerCommandRoute::NativeMenu) return value == IDM_OPEN_YOUTUBE;
-    return controlDown && value == 'L';
+    return CommandForPlayerKey(value, controlDown, false) == IDM_OPEN_YOUTUBE;
 }
 
 const ExampleVideo* ExampleVideoForCommand(UINT command)
@@ -555,7 +690,7 @@ bool UpdateYouTubeQualitySelection(HMENU menuBar, YouTubeSourceQuality quality)
 
 bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                                bool neuralAvailable, bool neuralActive,
-                               bool upscalingAvailable, bool upscalingActive,
+                               bool upscalingAvailable, bool /*upscalingActive*/,
                                bool frameGenerationAvailable, bool frameGenerationRunning)
 {
     const auto update = [&](UINT command, bool available, bool checked) {
@@ -576,7 +711,10 @@ bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
     // two surfaces to disagree. The two real toggles keep their checkmarks.
     const HMENU frameGeneration = find_menu_containing_command(menuBar, IDM_FRAME_GENERATION);
     return update(IDM_NEURAL_RENDERING, neuralAvailable, neuralActive) &&
-           update(IDM_DLSS_UPSCALING, upscalingAvailable, upscalingActive) &&
+           // Super Resolution is one of the upscaler radios (UpdateUpscalerMenu),
+           // which carry its mark; a checkbox mark on a radio row would be a second.
+           EnableMenuItem(menuBar, IDM_DLSS_UPSCALING, MF_BYCOMMAND | (upscalingAvailable ? MF_ENABLED : MF_GRAYED)) !=
+               static_cast<UINT>(-1) &&
            frameGeneration &&
            EnableMenuItem(frameGeneration, IDM_FRAME_GENERATION,
                MF_BYCOMMAND | ((frameGenerationAvailable || frameGenerationRunning) ? MF_ENABLED : MF_GRAYED)) !=
@@ -594,10 +732,19 @@ HMENU FindMenuContainingCommand(HMENU menuBar, UINT command)
 // when it was relabelled would be worse than the dead row this replaced.
 bool SetMenuCommandText(HMENU menu, UINT command, const std::wstring& text)
 {
+    // A label without a tab keeps the row's key column: the keys are the key
+    // table's (ApplyKeyBindings), and Export's Ctrl+S is still Ctrl+S while the
+    // row reads Cancel export.
+    std::wstring labelled = text;
+    if (text.find(L'\t') == std::wstring::npos) {
+        wchar_t current[256]{};
+        if (GetMenuStringW(menu, command, current, static_cast<int>(std::size(current)), MF_BYCOMMAND) > 0)
+            if (const wchar_t* tab = wcschr(current, L'\t')) labelled += tab;
+    }
     MENUITEMINFOW info{};
     info.cbSize = sizeof(info);
     info.fMask = MIIM_STRING;
-    info.dwTypeData = const_cast<wchar_t*>(text.c_str());
+    info.dwTypeData = labelled.data();
     return SetMenuItemInfoW(menu, command, FALSE, &info) != FALSE;
 }
 
@@ -764,7 +911,6 @@ struct KeyboardOnlyShortcut {
 constexpr KeyboardOnlyShortcut kKeyboardOnlyShortcuts[] = {
     {L"shortcuts.focus", L"Tab / Shift+Tab"},
     {L"shortcuts.activate", L"Enter"},
-    {L"shortcuts.step", L"."},
     {L"shortcuts.escape", L"Esc"},
     {L"shortcuts.reveal", L"F10 / Alt"},
     {L"shortcuts.volume", L"Mouse wheel"},
@@ -794,39 +940,7 @@ std::vector<ShortcutRow> CollectShortcuts(HMENU menuBar, const Localizer& locali
 
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown)
 {
-    if (controlDown) {
-        // Ctrl+Shift+S beside Ctrl+S: both write a file of what is loaded.
-        if (shiftDown) return key == 'S' ? std::optional<UINT>(IDM_SAVE_COMPARISON_IMAGE) : std::nullopt;
-        switch (key) {
-        case 'G': return IDM_GOTO_TIMECODE;
-        case 'R': return IDM_RENDER_RANGE;
-        case 'N': return IDM_NEURAL_SETTINGS;
-        // Ctrl+S, not Ctrl+E: Ctrl+E has opened Image adjustments since long
-        // before this command existed, and the menu label claimed it anyway.
-        // Bare S stops playback and is matched later, without the modifier.
-        case 'S': return IDM_EXPORT_STAGES;
-        default: return std::nullopt;
-        }
-    }
-    switch (key) {
-    case 'I': return shiftDown ? IDM_CLEAR_MARKS : IDM_MARK_IN;
-    case 'O': return shiftDown ? IDM_CLEAR_MARKS : IDM_MARK_OUT;
-    case 'F': return shiftDown ? IDM_PREVIEW_CLIP : IDM_PREVIEW_FRAME;
-    case 'Z': return shiftDown ? IDM_COMPARE_ZOOM_OUT : IDM_COMPARE_ZOOM;
-    case 'L': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_LOUPE);
-    case 'X': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_SWAP);
-    case 'C': return shiftDown ? IDM_COMPARE_PREVIOUS_MODE : IDM_COMPARE_NEXT_MODE;
-    // R for RTX VSR; Ctrl+R, the conversion, is matched above with its modifier.
-    case 'R': return shiftDown ? IDM_COMPARE_AGAINST_VSR : IDM_COMPARE_VSR;
-    // V steps through the subtitles as it does in VLC and mpv; H and J sit
-    // side by side for earlier and later, since G belongs to Ctrl+G's go-to.
-    case 'V': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_SUBTITLE_NEXT);
-    case 'H': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_SUBTITLE_EARLIER);
-    case 'J': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_SUBTITLE_LATER);
-    case VK_OEM_4: return shiftDown ? IDM_COMPARE_DIFFERENCE_LESS : IDM_COMPARE_BLEND_LESS;
-    case VK_OEM_6: return shiftDown ? IDM_COMPARE_DIFFERENCE_MORE : IDM_COMPARE_BLEND_MORE;
-    default: return std::nullopt;
-    }
+    return key_bindings::Defaults().LookupKey(key, controlDown, shiftDown);
 }
 
 } // namespace app_menu

@@ -11,7 +11,7 @@ runtime in `neural-runtime/` beside the player. A root-level `dxgi.dll` belongs 
 an older layout; do not mix files from different packages. A source/core build
 does not supply the experimental runtime automatically.
 
-Choose **Advanced > Restart in DLSS SR safe mode** to skip the neural helper
+Choose **Tools > Restart in DLSS SR safe mode** to skip the neural helper
 for that launch while retaining optional runtime Super Resolution.
 
 ## Neural rendering is refused because the driver is too old
@@ -45,6 +45,21 @@ resolution or close other GPU applications.
 One failing probe is remembered per GPU, driver and runtime, so a doomed
 preflight is not re-run on every play and seek. Updating the driver or the
 runtime clears it.
+
+## Video freezes or goes black for seconds on driver 621.01
+
+Game Ready driver 621.01 (2026-10-21) freezes video playback and shows black
+screens for seconds at a time on some RTX 50 cards. NVIDIA tracks it as bug
+6979343, and on that driver a frozen picture looks exactly like a player bug.
+Hotfix [621.12](https://nvidia.custhelp.com/app/answers/detail/a_id/5938/)
+(2026-10-27) is meant to fix it; users in NVIDIA's feedback thread report that
+it does not fix every machine (unverified). If the freeze persists on 621.12,
+go back to 617.42.
+
+On an RTX 50 with exactly 621.01, the start screen's **Driver** line says so
+and the log carries `NVIDIA driver 621.01 freezes video on some RTX 50 cards`.
+Nothing is refused for it: the freeze is in presentation, not in the model, so
+renders, exports and frame generation run as usual.
 
 ## The render ran on the wrong GPU on a hybrid laptop
 
@@ -90,7 +105,7 @@ at launch and cannot be changed by a running process.
 
 `↑ Update <version>` right-justified in the menu bar means a newer release
 exists; opening it goes to the GitHub releases page and retires that
-version until the next one ships. **Advanced > Check for updates** asks
+version until the next one ships. **Help > Check for updates** asks
 immediately and answers either way. The check runs at most once a day, ignores
 drafts (every published release is a pre-release, so those count), and stores its state in `[Updates]` in
 `DLSSVideoPlayer.ini` beside the executable; `Enabled=0` turns it off. When
@@ -184,7 +199,7 @@ a slightly longer audio tail does not count as missing neural video.
 
 ## Export is unavailable or fails
 
-**DLSS > Convert & export > Save converted video** becomes available after validated neural playback
+**File > Save rendered video** becomes available after validated neural playback
 opens. Select a new filename: existing destinations are never overwritten.
 Export needs the cached neural file, its original source and FFmpeg.
 
@@ -206,10 +221,10 @@ are supported. Live/upcoming streams, private, paid, age-gated and
 cookie-dependent media are outside the resolver contract.
 Availability and regional access can change; local playback remains available.
 
-Choose **Video > YouTube source quality**. Auto takes the tallest rung up to
+Choose **File > YouTube source quality**. Auto takes the tallest rung up to
 1440p, then the highest bitrate inside it, falling back to a rung up to 2160p
 only when the source offers nothing lower. Manual choices are 1080p,
-1440p and 2160p. Source quality is separate from **DLSS > Upscaling output**.
+1440p and 2160p. Source quality is separate from **Enhance > DLSS SR output size**.
 At the chosen resolution, the resolver prefers the highest advertised video
 bitrate across codecs. That estimate can differ from the downloaded file's
 average bitrate; bitrate alone is not a cross-codec quality score.
@@ -246,7 +261,7 @@ quality**, or turning it off in the DLSS menu, settles it for good.
 
 DLSS Upscaling starts off on a fresh installation and then follows the saved
 preference. Enable it from the DLSS menu or bottom bar. The output rung is Auto
-by default and follows the monitor's current mode; **DLSS > Upscaling output**
+by default and follows the monitor's current mode; **Enhance > DLSS SR output size**
 pins 1080p, 1440p or 2160p instead. Two different refusals are reported and are
 not the same problem: "source meets output" means the source already meets or
 exceeds the rung, which a 4K source does everywhere and a 1080p source does on a
@@ -276,7 +291,7 @@ and the notice `R` shows, name the one that is missing:
   line with what NGX answered, and the create's result.
 
 Like every compare mode, the RTX VSR view is live only during cached playback on
-the neural view (`D`). As the playback upscaler (**DLSS > RTX VSR Upscaling**) it
+the neural view (`D`). As the playback upscaler (**Enhance > RTX VSR**) it
 runs whenever the window shows the video larger than it is; the reasons listed
 above grey that menu item too, and its label names the one that applies. Its cost is logged every 300 frames as `RTX VSR GPU:`; if
 playback drops frames with it on, pick a lower rung under **Video > Compare >
@@ -284,7 +299,7 @@ RTX VSR quality**, or turn **RTX VSR Upscaling** off.
 
 ## Generate frames is unavailable, or refuses
 
-**DLSS > Generate frames** converts a video to a higher frame rate and writes a
+**Enhance > Generate frames** converts a video to a higher frame rate and writes a
 new file; it does not run during playback. The pill and the status line always
 name the reason rather than only saying "Unavailable", and the reasons fall into
 four groups.
@@ -346,7 +361,18 @@ beside it, and nothing is loaded in safe mode. `dlss5-convert probe <file>
 If Frame Generation is still refused with the add-on loaded, the status line
 reads "refused with the dlssg_sm86 add-on". The add-on's own log is in the
 `dlssg_sm86` folder beside the player, and `DLSSVideoPlayer.log` records the
-load (`dlssg_sm86 add-on loaded for Frame Generation`).
+load (`dlssg_sm86 add-on loaded for Frame Generation`) with the layout and the
+`Optimized`, `Preset` and `Engine` it read. 0.4.1 refuses drivers older than
+R580 outright.
+
+The one-click download installs 0.3.5. A hand-installed 0.4.0 or 0.4.1 loads
+the same way, but some of its settings make generated frames differ from
+NVIDIA's, and the start screen names them: `Optimized=2` or `3` (lossy
+kernels; 0.4.0 ships with 2), `Preset=C` (FG Lite), and `Engine=XeSS`, which
+uses Intel's XeSS-FG model instead of NVIDIA's. Set `[DLSSG] Optimized=1`, a `Preset`
+other than C and `[FrameGeneration] Engine=DLSS` in `dlssg_sm86.ini` for output
+identical to NVIDIA's. These 0.4 builds are not tested here: no RTX 20 or 30 card has loaded
+one.
 
 0.27.0 loads its imports from System32 only, which kept this add-on out of the
 player entirely (issue #14). The automatic load above replaces that. To remove

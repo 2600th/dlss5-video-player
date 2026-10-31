@@ -65,7 +65,7 @@
       "configurePreset": "vs2022",
       "configuration": "Release",
       "output": { "outputOnFailure": true },
-      "filter": { "exclude": { "label": "gpu|audio" } }
+      "filter": { "exclude": { "label": "gpu|audio|network" } }
     },
     {
       "name": "quick",
@@ -74,7 +74,7 @@
       "configurePreset": "ci",
       "configuration": "Release",
       "output": { "outputOnFailure": true },
-      "filter": { "exclude": { "label": "gpu|audio|slow" } }
+      "filter": { "exclude": { "label": "gpu|audio|slow|network" } }
     },
     {
       "name": "hardware",
@@ -85,12 +85,21 @@
       "filter": { "include": { "label": "gpu|audio" } }
     },
     {
+      "name": "network",
+      "displayName": "Online YouTube check",
+      "description": "PolicyTestsNetwork: a built-in trailer through the bundled yt-dlp, Deno and FFmpeg, past the first minute. Needs the internet, so no other preset or CI tier runs it.",
+      "configurePreset": "ci",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "label": "network" } }
+    },
+    {
       "name": "asan",
       "displayName": "Device-free suites under AddressSanitizer",
       "configurePreset": "asan",
       "configuration": "Release",
       "output": { "outputOnFailure": true },
-      "filter": { "exclude": { "label": "gpu|audio" } }
+      "filter": { "exclude": { "label": "gpu|audio|network" } }
     }
   ]
 }

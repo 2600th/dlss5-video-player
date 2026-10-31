@@ -286,7 +286,7 @@ else {
         @('CONTRIBUTING.md', (Join-Path $repositoryRoot 'CONTRIBUTING.md')),
         @('CHANGELOG.md', (Join-Path $repositoryRoot 'CHANGELOG.md')),
         @('THIRD_PARTY.md', (Join-Path $repositoryRoot 'THIRD_PARTY.md')),
-        @('THIRD_PARTY_LICENSES/yt-dlp-2026.10.10.233141.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\yt-dlp-2026.10.10.233141.txt')),
+        @('THIRD_PARTY_LICENSES/yt-dlp-2026.10.26.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\yt-dlp-2026.10.26.txt')),
         @('THIRD_PARTY_LICENSES/deno-2.9.5.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\deno-2.9.5.txt')),
         @('THIRD_PARTY_LICENSES/ffmpeg.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\ffmpeg.txt')),
         # The licence ffmpeg.exe and ffprobe.exe are conveyed under (GPLv3
@@ -327,6 +327,16 @@ $sources += @(
     @('docs/USAGE.md', (Join-Path $repositoryRoot 'docs\USAGE.md')),
     @('docs/EXAMPLE_VIDEOS.md', (Join-Path $repositoryRoot 'docs\EXAMPLE_VIDEOS.md'))
 )
+
+# The translations (src/TranslationFile.h): every lang\<tag>.lang the tree has,
+# in both variants, copied as committed (UTF-8, LF, pinned in .gitattributes).
+# PolicyTests' shipped_translations_are_complete_test is what lets one in.
+$languageRoot = Join-Path $repositoryRoot 'lang'
+if (Test-Path -LiteralPath $languageRoot -PathType Container) {
+    foreach ($language in @(Get-ChildItem -LiteralPath $languageRoot -Filter '*.lang' -File | Sort-Object Name)) {
+        $sources += ,@("lang/$($language.Name)", $language.FullName)
+    }
+}
 
 # RTX Video Super Resolution's feature DLL is optional: CMake stages it beside the
 # player only in a build configured with -DRTX_VIDEO_SDK (docs/BUILDING.md), the

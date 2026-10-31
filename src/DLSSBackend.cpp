@@ -140,16 +140,24 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
             !NVSDK_NGX_FAILED(NVSDK_NGX_Parameter_GetUI(m_params, "DLSSNR.MinDriverVersionMinor", &minor)) &&
             major != 0)
             m_neuralCapability.minimumDriver = NvidiaDriverVersion{major, minor};
-        const auto flag = [](const std::optional<bool>& v) { return v ? (*v ? "1" : "0") : "unreported"; };
-        std::string minimum = "unreported";
+        // FeatureInitResult is what NVIDIA's own RTX Remix logs beside an
+        // Available=0; it says why the core's DLSS-NR path is down.
+        int initResult = 0;
+        const bool initRead = !NVSDK_NGX_FAILED(NVSDK_NGX_Parameter_GetI(m_params, "DLSSNR.FeatureInitResult", &initResult));
+        const bool readZero = m_neuralCapability.available == false;
+        m_neuralCapability = ReportedNgxNeuralCapability(m_neuralCapability);
+        const auto flag = [](const std::optional<bool>& v) { return v ? (*v ? "1" : "0") : "not reported"; };
+        std::string minimum = "not reported";
         if (m_neuralCapability.minimumDriver) {
             minimum.clear();
             for (const wchar_t c : FormatNvidiaDriverVersion(*m_neuralCapability.minimumDriver))
                 minimum.push_back(static_cast<char>(c));  // digits and a dot
         }
         LOG("NGX capability: DLSSNR.Available=" << flag(m_neuralCapability.available)
+            << (readZero && !m_neuralCapability.available ? " (0 with no minimum: NVIDIA's own DLSS-NR path, not this runtime's)" : "")
             << " DLSSNR.NeedsUpdatedDriver=" << flag(m_neuralCapability.needsUpdatedDriver)
-            << " DLSSNR.MinDriverVersion=" << minimum);
+            << " DLSSNR.MinDriverVersion=" << minimum
+            << " DLSSNR.FeatureInitResult=" << (initRead ? HexText(static_cast<uint32_t>(initResult)) : std::string("not reported")));
     }
 
     float sharpness=0.0f;

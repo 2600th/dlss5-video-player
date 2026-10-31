@@ -7,11 +7,13 @@ Set-StrictMode -Version Latest
 # reads, which made the download many times slower than the transfer itself.
 $ProgressPreference = 'SilentlyContinue'
 
-$ytDlpVersion = '2026.10.10.233141'
-# A nightly: the stable 2026.08.19 cannot play many YouTube videos (yt-dlp #17497),
-# and the fix (the tv_samsung client, yt-dlp PR #17723) is not in a stable release yet.
-$ytDlpUrl = 'https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/download/2026.10.10.233141/yt-dlp.exe'
-$ytDlpSha256 = 'E7CAFC44DB8AA433DA8DD78303B9157F2C1DD509C4CBFCD8418081B7E1D26A7A'
+$ytDlpVersion = '2026.10.26'
+# Stable again (P0.20): 2026.10.21 made tv_samsung a default client, the fix for
+# yt-dlp #17497 that P0.19 took a nightly for, and 2026.10.26 bundles a certifi
+# and curl-cffi past GHSA-6q48-6c7w-9gw2. An older executable stays exposed, and
+# the player never runs -U, so the pin is the only way a fix arrives.
+$ytDlpUrl = 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp.exe'
+$ytDlpSha256 = 'F5389D3698ECDE4EF06F4E6B1CE0294FE9AC1396228C8990B8D3416D6D177A7D'
 $denoVersion = '2.9.5'
 $denoUrl = 'https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip'
 $denoSha256 = '171EFAB55AC6B9881FD53EE4C20F8BF3BB1340FFC618483746909014DB12216A'

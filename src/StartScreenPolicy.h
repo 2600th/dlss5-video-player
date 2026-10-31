@@ -85,10 +85,14 @@ inline std::vector<Line> CapabilityLines(const Facts& facts)
     const std::wstring floor = FormatNvidiaDriverVersion(kNeuralDriverFloor);
     if (const auto version = ParseNvidiaDriverVersion(facts.driverVersion)) {
         const bool meets = !(*version < kNeuralDriverFloor);
+        // 621.01 on an RTX 50 (P1.49): Info, never Fail - the freeze is in
+        // presentation, so nothing is refused and safe mode would not help.
+        const bool freezes = KnownFreezingDriver(facts.generation, facts.driverVersion);
         lines.push_back(Line{L"Driver", FormatNvidiaDriverVersion(*version) +
-                             (meets ? L" · meets the " + floor + L" minimum"
-                                    : L" · neural rendering needs " + floor + L" or newer"),
-                             meets ? Mark::Pass : Mark::Fail});
+                             (freezes ? L" · " + std::wstring(kFreezingDriverNote)
+                              : meets ? L" · meets the " + floor + L" minimum"
+                                      : L" · neural rendering needs " + floor + L" or newer"),
+                             freezes ? Mark::Info : meets ? Mark::Pass : Mark::Fail});
     } else {
         lines.push_back(Line{L"Driver", L"Version not reported · " + floor + L" or newer is needed", Mark::Info});
     }
@@ -106,7 +110,7 @@ inline std::vector<Line> CapabilityLines(const Facts& facts)
     switch (facts.rtxVsr) {
     case VsrState::Unknown: break;
     case VsrState::On: lines.push_back(Line{L"RTX VSR", L"Upscales playback shown larger than the video", Mark::Pass}); break;
-    case VsrState::Off: lines.push_back(Line{L"RTX VSR", L"Off · DLSS > RTX VSR Upscaling turns it on", Mark::Info}); break;
+    case VsrState::Off: lines.push_back(Line{L"RTX VSR", L"Off · Enhance > RTX VSR (recommended) turns it on", Mark::Info}); break;
     case VsrState::NotInBuild: lines.push_back(Line{L"RTX VSR", L"Not in this build · the complete download has it", Mark::Info}); break;
     case VsrState::MissingRuntime: lines.push_back(Line{L"RTX VSR", L"nvngx_vsr.dll is missing beside the player", Mark::Info}); break;
     }

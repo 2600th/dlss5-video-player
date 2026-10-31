@@ -63,7 +63,7 @@ function Get-ExpectedPackageFiles {
             'neural-runtime/sl.dlss_g.dll', 'neural-runtime/sl.dlss_nr.dll', 'neural-runtime/sl.interposer.dll', 'neural-runtime/sl.nis.dll',
             'neural-runtime/sl.pcl.dll', 'neural-runtime/sl.reflex.dll', 'README.md', 'LICENSE', 'SECURITY.md',
             'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
-            'THIRD_PARTY_LICENSES/yt-dlp-2026.10.10.233141.txt',
+            'THIRD_PARTY_LICENSES/yt-dlp-2026.10.26.txt',
             'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
             'THIRD_PARTY_LICENSES/ffmpeg-GPL-3.0.txt',
             'THIRD_PARTY_LICENSES/ffmpeg-bundled-notices.txt',
@@ -368,6 +368,9 @@ function Assert-Stage {
     # (docs/BUILDING.md), so it is allowed at the root and never required.
     $allowed = @($expected)
     if ($actual -ccontains $optionalVsrRuntime) { $allowed += $optionalVsrRuntime }
+    # A translation is lang\<language tag>.lang (src/TranslationFile.h); the
+    # packager ships whichever the tree has, so each is allowed and none required.
+    $allowed += @($actual | Where-Object { $_ -cmatch '^lang/[a-z]{2,3}(-[A-Za-z0-9]{2,8})*\.lang$' })
     $expectedSorted = @(Sort-PackagePathsOrdinal -Paths $allowed)
     if ([string]::Join("`n", $actual) -cne [string]::Join("`n", $expectedSorted)) {
         $missing = @($expectedSorted | Where-Object { $_ -cnotin $actual })

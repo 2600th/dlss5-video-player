@@ -520,7 +520,7 @@ preroll and every encoder attempt included - and a re-evaluated frame counts
 once, so they are not bounded by `historyResets`.
 
 And it records what the render did to motion (`TemporalMetrics.h`), which is what
-**Advanced > Render report** reads back. The job reduces each captured frame and
+**Tools > Render report** reads back. The job reduces each captured frame and
 its source to the guide generator's analysis grid - the source when it is
 submitted, the capture when it comes back - and accumulates, in 8-bit codes of
 full-range BT.709 Y'CbCr whatever layout either side arrived in: the warping
@@ -973,6 +973,19 @@ repeat of a setting is a cache hit.
 ## NGX integration
 
 `DLSSBackend` initializes NGX, queries DLSS settings, creates the Super Sampling feature and evaluates it through the D3D12 `_C` entry point used by NVIDIA's helper path.
+
+It also reads NGX's DLSS-NR capability block (`DLSSNR.Available`,
+`NeedsUpdatedDriver`, `MinDriverVersionMajor/Minor`, `FeatureInitResult`), the
+keys NVIDIA's RTX Remix reads for its own DLSS-NR. That block describes
+NVIDIA's DLSS-NR path, not the feature the community runtime creates. On every
+driver measured here, 617.14 and 621.01, it reads `Available=0`,
+`NeedsUpdatedDriver=0`, no minimum and `FeatureInitResult=0xbad00004`
+(feature not found) while the runtime renders. So `Available=0` without a
+minimum is logged and receipted as not reported (`ReportedNgxNeuralCapability`,
+P1.47). No driver has yet reported a DLSS-NR minimum, so the NGX-named floor
+in `DiagnoseNeuralPreflight` has never fired: it is a fallback for a future
+runtime that NGX itself serves, and it only explains a probe that failed. The
+probe stays the verdict.
 
 The default performance/quality value is DLAA. That keeps input and output at
 native 1:1 resolution while preserving a real NGX feature creation/evaluation

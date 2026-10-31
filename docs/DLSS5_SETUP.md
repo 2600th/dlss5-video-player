@@ -38,7 +38,7 @@ extra section and its signature removed; 310.8.SF-v2 extends the leaked
 310.8.0 runtime from Blackwell to Turing, Ampere and Ada. 310.9.16 is sent
 to RTX 50 only, because no RTX 20-40 card has run it here. Network A on
 310.9.16 renders byte-identical to 310.8.SF-v2, so an RTX 50 render keeps
-0.28's picture by default; **DLSS > Neural settings > Network** offers B,
+0.28's picture by default; **Enhance > Picture… > Render pipeline > Network** offers B,
 NVIDIA's lighter network (about 36 % less model time, and a milder picture that
 stays nearer the source), and
 the previous runtime. `dlss5-convert --network a|b` does the same for a
@@ -86,7 +86,7 @@ to a section holding nothing but keys the player writes - including a 0.28
 section, whose stamp 6 is restamped in place - and a section with anybody
 else's key, or another version, is left for the add-on to migrate.
 
-One further key is written only when **DLSS > Processing scale** asks for it:
+One further key is written only when **Enhance > Processing scale** asks for it:
 `NRPreUpscale=1` for the 75% and 50% rungs, which put the model on the reduced
 picture ahead of DLSS Super Resolution, and `NRPreUpscale=0` when a render at
 100% finds a 1 left behind. A render at 100% on a file that holds 0, or no such
@@ -124,7 +124,7 @@ starts off on a fresh install; in a build that has it, **DLSS > RTX VSR
 Upscaling** starts on. Its output target
 is Auto: the largest of the 1080p, 1440p and 2160p rungs that the monitor's
 current mode can scan out, never one above it. Any rung can be pinned from
-**DLSS > Upscaling output**. The backend selects a supported NGX
+**Enhance > DLSS SR output size**. The backend selects a supported NGX
 quality range without resizing or downsampling the decoded source.
 
 ## Verified pre-render and playback profile

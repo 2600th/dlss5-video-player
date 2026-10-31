@@ -41,6 +41,8 @@
 #include "AudioPlayer.h"
 #include "SubtitleOverlay.h"
 #include "Localization.h"
+#include "TranslationFile.h"
+#include "KeyBindings.h"
 #include "AppMenu.h"
 #include "UiLayout.h"
 #include "UiResources.h"
@@ -370,10 +372,9 @@ static constexpr int IDC_ADJ_GAMMA = 7104;
 static constexpr int IDC_ADJ_TEMPERATURE = 7105;
 static constexpr int IDC_ADJ_TINT = 7106;
 static constexpr int IDC_ADJ_NEURAL_STRENGTH = 7107;
+// The Picture panel's viewing zone (the IDC_ADJ_ sliders above) has its own
+// reset; the panel's Close is IDC_NS_CLOSE.
 static constexpr int IDC_ADJ_RESET = 7110;
-static constexpr int IDC_ADJ_CLOSE = 7111;
-// Opens Neural settings: the other half of "how the picture looks".
-static constexpr int IDC_ADJ_OPEN_NEURAL = 7112;
 
 static constexpr int IDC_NS_INTENSITY = 7301;
 static constexpr int IDC_NS_STRUCTURE = 7302;
@@ -398,10 +399,15 @@ static constexpr int IDC_NS_STABILITY = 7341;
 static constexpr int IDC_NS_PRESET = 7342;
 static constexpr int IDC_NS_PRESET_NOTE = 7343;
 static constexpr int IDC_NS_STATE = 7344;
-static constexpr int IDC_NS_OPEN_ADJUST = 7345;
-// The NR network and runtime (NeuralRuntimeChoice.h, P3.14): one combo, built
-// and read by the three NetworkChoice* members below and nothing else.
-static constexpr int IDC_NS_NETWORK = 7346;
+// The Picture panel: the page switch of its render zone, Revert, what the
+// model is given (moved from Encoder settings, now Cache & encoding), and the
+// render zone's table-driven rows (PictureRenderRow), one id each from 7360.
+static constexpr int IDC_PIC_PAGE = 7346;
+static constexpr int IDC_PIC_REVERT = 7347;
+static constexpr int IDC_PIC_DEBAND = 7348;
+static constexpr int IDC_PIC_EXPOSURE = 7349;
+static constexpr int IDC_PIC_RENDER_ROW_FIRST = 7360;
+static constexpr int IDC_PIC_RENDER_ROW_COUNT = 10;
 static constexpr int IDC_NS_RESET = 7320;
 static constexpr int IDC_NS_APPLY = 7321;
 static constexpr int IDC_NS_CLOSE = 7322;
@@ -413,8 +419,6 @@ static constexpr int IDC_ES_RESET = 7404;
 static constexpr int IDC_ES_CLOSE = 7405;
 static constexpr int IDC_ES_CAPTURE_DITHER = 7406;
 static constexpr int IDC_ES_CACHE_QUALITY = 7407;
-static constexpr int IDC_ES_DEBAND = 7408;
-static constexpr int IDC_ES_EXPOSURE = 7409;
 static constexpr int IDC_EX_UPSCALE = 7501;
 static constexpr int IDC_EX_NEURAL = 7502;
 static constexpr int IDC_EX_FRAMEGEN = 7503;
@@ -1265,6 +1269,7 @@ struct AppOptions {
     std::vector<std::wstring> userArguments;
     std::wstring argumentError;
     std::wstring file;
+    std::wstring language,languageTemplate;
 };
 
 static AppOptions ParseArgs() {
@@ -1277,6 +1282,7 @@ static AppOptions ParseArgs() {
     o.userArguments=runtimeArguments.userArguments;
     const player_command_line::Parsed parsed=player_command_line::Parse(o.userArguments);
     o.maxW=parsed.maxWidth;o.maxH=parsed.maxHeight;o.outputExplicit=parsed.outputExplicit;o.file=parsed.file;
+    o.language=parsed.language;o.languageTemplate=parsed.languageTemplate;
     if(!parsed.error.empty()){o.argumentsOk=false;o.argumentError=parsed.error;}
     return o;
 }
@@ -1311,7 +1317,8 @@ static void LoadFrameGenAddon(bool safeMode) {
                         <<" sha256="<<addon.sha256<<(addon.pinned?" (the pinned 0.3.5 build)":" (not the build the player installs)")
                         <<" layout="<<(addon.settings.directoryLayout?"0.4":"0.3")
                         <<" Optimized="<<(addon.settings.optimized?std::to_string(*addon.settings.optimized):std::string("unset"))
-                        <<" Preset="<<(addon.settings.preset.empty()?std::string("unset"):WideToUtf8(addon.settings.preset)));
+                        <<" Preset="<<(addon.settings.preset.empty()?std::string("unset"):WideToUtf8(addon.settings.preset))
+                        <<" Engine="<<(addon.settings.engine.empty()?std::string("unset"):WideToUtf8(addon.settings.engine)));
     else LOG("dlssg_sm86 add-on found but its "<<WideToUtf8(addon.proxy)<<" did not load: error "<<addon.error);
 }
 
@@ -1363,6 +1370,11 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
     if(!CurrentExecutablePath(executable,pathError)) return FailBootstrap(pathError);
 
     options.detectedGpu=DetectHighPerformanceGpu();
+    // Before the runtime checks, so a player without the runtime says it too:
+    // on 621.01 a frozen picture is the first thing a report will describe.
+    if(KnownFreezingDriver(options.detectedGpu.generation,options.detectedGpu.driverVersion))
+        LOG("NVIDIA driver "<<WideToUtf8(FormatNvidiaDriverVersion(kFreezingDriver))<<" "<<WideToUtf8(kFreezingDriverNote)
+            <<". A frozen or black picture on this driver is the driver's; nothing is refused for it.");
     if(std::filesystem::exists(executable.parent_path()/L"dxgi.dll"))
         return FailBootstrap(L"Old runtime layout: extract the new build to a separate folder; dxgi.dll must only be inside neural-runtime.");
     const std::filesystem::path runtimeDirectory=executable.parent_path()/L"neural-runtime";
@@ -2657,12 +2669,30 @@ class PlayerApp {
     friend struct PlayerAppTestAccess;
 #endif
 public:
-    explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){}
-    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_fontTitle)DeleteObject(m_fontTitle); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
+    explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){
+        // Network (NeuralRuntimeChoice.h, P3.14): A, B and the previous runtime
+        // on RTX 50; elsewhere the one runtime that GPU renders with, greyed out
+        // because it is the only choice. Part of NeuralSettings, so it is saved,
+        // keyed, applied and reverted with the rest of the render.
+        m_pictureRenderRows.push_back({L"neural.settings.network",L"neural.tip.network",
+            [this]{
+                const GpuGeneration gpu=m_opt.detectedGpu.generation;
+                std::vector<std::wstring> items;
+                if(neural_runtime::OffersCurrent(gpu))
+                    for(const auto& rung:neural_runtime::kNetworks)items.emplace_back(rung.label);
+                items.push_back(T(neural_runtime::OffersCurrent(gpu)?L"neural.network.previous":L"neural.network.only_previous"));
+                return items;
+            },
+            [this]{return int(neural_runtime::ChoiceIndex(m_opt.detectedGpu.generation,m_neuralSettings.network,m_neuralSettings.previousRuntime));},
+            [this](int index){neural_runtime::ApplyChoice(m_opt.detectedGpu.generation,size_t(index),m_neuralSettings.network,m_neuralSettings.previousRuntime);}});
+    }
+    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_fontTitle)DeleteObject(m_fontTitle); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);for(const auto& icon:m_thumbIcons)DestroyIcon(icon.second);}
 
     bool Create(HINSTANCE hi) {
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
         LoadVideoSettings();
+        LoadTranslation();
+        LoadKeyBindings();
         NeuralCacheManager historyCache(m_cacheRoot);
         if(historyCache.Valid()){
             m_cacheRoot=historyCache.Root();
@@ -2721,7 +2751,7 @@ public:
             }
         }
         const std::wstring appTitle=m_loc.Get(L"app.title");
-        m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,windowX,windowY,rc.right-rc.left,rc.bottom-rc.top,nullptr,app_menu::CreateMenuBar(m_loc,YouTubePlaybackAvailable()),hi,this);
+        m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,windowX,windowY,rc.right-rc.left,rc.bottom-rc.top,nullptr,app_menu::CreateMenuBar(m_loc,YouTubePlaybackAvailable(),m_keys),hi,this);
         if(!m_hwnd) return false;
         RestoreWindowPlacement();
         ReadAnimationPreference();
@@ -3038,7 +3068,7 @@ private:
     void UpdateRecentMenu(){
         if(!m_hwnd||!m_recent)return;
         std::vector<std::wstring> titles;for(const auto& entry:m_recent->Entries())titles.push_back(entry.title.empty()?entry.source:entry.title);
-        app_menu::UpdateRecentVideos(GetMenu(m_hwnd),titles,!ActivityBusy());
+        app_menu::UpdateRecentVideos(GetMenu(m_hwnd),titles,!ActivityBusy(),T(L"menu.recent_none"));
         DrawMenuBar(m_hwnd);
     }
     void ForgetSourceDigest(){
@@ -3055,7 +3085,7 @@ private:
         std::vector<std::wstring> labels;
         for(const auto& track:Audio().AudioTracks())
             labels.push_back(Utf8ToWide(audio_track::Describe(track)));
-        app_menu::UpdateAudioTracks(GetMenu(m_hwnd),labels,Audio().SelectedAudioTrack());
+        app_menu::UpdateAudioTracks(GetMenu(m_hwnd),labels,Audio().SelectedAudioTrack(),T(L"menu.audio_none"));
         DrawMenuBar(m_hwnd);
     }
     void ChooseAudioTrack(int audioIndex){
@@ -3420,6 +3450,8 @@ private:
         // covers the video until some later export happens to finish.
         m_stageExport={};SyncActivityFeedback();if(m_hwnd&&IsWindow(m_hwnd)){SyncFeatureMenuState();UpdateCachedStatus();}}
     void CompleteExport(uint64_t token){auto completion=m_exportCompletions.Take(token);if(!completion)return;
+        // File > Show last exported file covers an export as well as a conversion.
+        if(completion->result.ok)m_frameGenLastOutput=completion->output;
         // Whatever happened, the export is over and the panel says so.
         m_stageExport={};SyncActivityFeedback();if(m_exportWorker.joinable()){m_exportWorker.join();m_exportWorker=std::jthread{};}SyncFeatureMenuState();UpdateCachedStatus();if(completion->result.ok){std::wstring message=L"Exported to:\n"+completion->output.wstring();
             // What the file left out (subtitles MP4 cannot hold) is the note a
@@ -4435,13 +4467,8 @@ private:
     // Empty unless this machine's driver is below the neural floor. Built here
     // so the render thread never touches the localizer.
     std::wstring NeuralDriverNoticeText()const{
-        if(ClassifyNeuralDriver(m_opt.detectedGpu.driverVersion)!=NeuralDriverSupport::BelowFloor)return {};
-        std::wstring detected=m_opt.detectedGpu.driverVersion;
-        if(const auto parsed=ParseNvidiaDriverVersion(m_opt.detectedGpu.driverVersion))detected=FormatNvidiaDriverVersion(*parsed);
-        return T(L"driver.below_floor")+L"\n\n"+T(L"driver.detected")+detected+L"\n"+
-               T(L"driver.minimum")+FormatNvidiaDriverVersion(kNeuralDriverFloor)+L"\n"+
-               T(L"driver.verified")+FormatNvidiaDriverVersion(kNeuralDriverRecommended)+
-               (RunningOnWindows10()?L"\n\n"+std::wstring(kWindows10DriverNote):std::wstring());
+        const std::wstring belowFloor=T(L"driver.below_floor"),detected=T(L"driver.detected"),minimum=T(L"driver.minimum"),verified=T(L"driver.verified");
+        return NeuralDriverNotice(m_opt.detectedGpu.driverVersion,RunningOnWindows10(),{belowFloor,detected,minimum,verified});
     }
     // Built on this thread for the same reason as the driver notice above.
     NeuralCacheFailureText CacheFailureText()const{
@@ -4754,6 +4781,141 @@ private:
         // located: the settings file is not worth refusing to start over.
         const auto directory=platform_paths::ModuleDirectory();
         return (directory?*directory:std::filesystem::current_path())/L"DLSSVideoPlayer.ini";
+    }
+
+    // The strings the player shows (TranslationFile.h): --lang, then [Interface]
+    // Language, then the Windows display language; English for whatever the
+    // file leaves out. Before the window exists, so its title and menus are in it.
+    void LoadTranslation(){
+        std::wstring requested=m_opt.language;
+        if(requested.empty()){
+            wchar_t language[64]{};
+            GetPrivateProfileStringW(L"Interface",L"Language",L"",language,static_cast<DWORD>(std::size(language)),SettingsPath().c_str());
+            requested=language;
+        }
+        const auto directory=platform_paths::ModuleDirectory();
+        translation::Loaded loaded=translation::Load((directory?*directory:std::filesystem::current_path())/translation::kDirectory,requested,Localizer::All());
+        for(const auto& problem:loaded.problems)LOG("Translation "<<WideToUtf8(loaded.file.filename().wstring())<<": "<<WideToUtf8(problem)<<" (ignored).");
+        if(!loaded.file.empty())LOG("Strings: "<<WideToUtf8(loaded.file.wstring())<<", "<<loaded.strings.size()<<" of "<<Localizer::All().size()<<" translated; the rest in English.");
+        m_loc=Localizer(std::move(loaded.strings),loaded.language);
+    }
+
+    // input.conf beside the ini (KeyBindings.h). A missing file is the defaults;
+    // every line the file gets wrong is logged and skipped.
+    std::filesystem::path KeyBindingsPath()const{return SettingsPath().parent_path()/L"input.conf";}
+    void LoadKeyBindings(){
+        const auto path=KeyBindingsPath();
+        std::error_code error;
+        m_keysWritten=std::filesystem::last_write_time(path,error);
+        if(error){m_keysWritten={};m_keys=key_bindings::Defaults();return;}
+        const auto text=framegen_addon::ReadWholeFile(path);
+        key_bindings::Loaded loaded=key_bindings::Parse(text?*text:std::string{});
+        for(const auto& problem:loaded.problems)LOG("input.conf "<<WideToUtf8(problem)<<" (ignored).");
+        LOG("Keys: "<<WideToUtf8(path.wstring())<<", "<<loaded.table.Bindings().size()<<" bindings.");
+        m_keys=std::move(loaded.table);
+    }
+    // Saved changes apply when the player comes back to the front: the file is
+    // edited in another window, so that is the moment they can have happened.
+    void ReloadKeyBindingsIfChanged(){
+        std::error_code error;
+        const auto written=std::filesystem::last_write_time(KeyBindingsPath(),error);
+        if((error?std::filesystem::file_time_type{}:written)==m_keysWritten)return;
+        LoadKeyBindings();
+        if(HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr){app_menu::ApplyKeyBindings(menu,m_keys,m_loc);DrawMenuBar(m_hwnd);}
+        ReloadToolbarTips();
+        if(m_shortcutSheetOpen)ShowShortcutSheet();
+    }
+    // Help > Edit key bindings: the file, written from the template when there is
+    // none yet, opened in Notepad (a .conf file has no handler of its own).
+    void EditKeyBindings(){
+        const auto path=KeyBindingsPath();
+        std::error_code error;
+        if(!std::filesystem::exists(path,error)){
+            const std::string text=key_bindings::TemplateText();
+            HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+            DWORD written=0;
+            const bool ok=file!=INVALID_HANDLE_VALUE&&WriteFile(file,text.data(),DWORD(text.size()),&written,nullptr)&&written==text.size();
+            if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
+            if(!ok){
+                const std::wstring message=Format(T(L"keys.write_failed"),path.wstring().c_str());
+                MessageBoxW(m_hwnd,message.c_str(),T(L"keys.title").c_str(),MB_OK|MB_ICONINFORMATION);
+                return;
+            }
+            LOG("Wrote the key-binding template to "<<WideToUtf8(path.wstring()));
+        }
+        const std::wstring arguments=L"\""+path.wstring()+L"\"";
+        ShellExecuteW(m_hwnd,L"open",L"notepad.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+    }
+    // Help > User guide: the guide shipped beside the player, or this version's
+    // on GitHub when the folder has lost it.
+    void OpenUserGuide(){
+        const auto directory=platform_paths::ModuleDirectory();
+        const auto guide=(directory?*directory:std::filesystem::current_path())/L"docs"/L"USAGE.md";
+        std::error_code error;
+        if(std::filesystem::is_regular_file(guide,error)){
+            const std::wstring arguments=L"\""+guide.wstring()+L"\"";
+            // Markdown has no handler on a fresh Windows; Notepad reads it.
+            if(reinterpret_cast<INT_PTR>(ShellExecuteW(m_hwnd,L"open",guide.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
+                ShellExecuteW(m_hwnd,L"open",L"notepad.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+            return;
+        }
+        const std::string version=DLSS_VIDEO_PLAYER_VERSION;
+        const std::wstring url=L"https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v"+
+                               std::wstring(version.begin(),version.end())+L"/docs/USAGE.md";
+        ShellExecuteW(m_hwnd,L"open",url.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+    }
+    // Help > Open log folder, with the log selected.
+    void OpenLogFolder(){
+        const std::filesystem::path& log=Log::Path();
+        std::error_code error;
+        if(!log.empty()&&std::filesystem::is_regular_file(log,error)){
+            const std::wstring arguments=L"/select,\""+log.wstring()+L"\"";
+            ShellExecuteW(m_hwnd,L"open",L"explorer.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+            return;
+        }
+        const auto directory=platform_paths::ModuleDirectory();
+        const std::wstring folder=(directory?*directory:std::filesystem::current_path()).wstring();
+        ShellExecuteW(m_hwnd,L"open",folder.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+    }
+    // Help > About: this build, the runtime it loaded, this machine, and the
+    // notice in full - a community project on a modified, unsigned runtime.
+    void ShowAbout(){
+        const std::string version=DLSS_VIDEO_PLAYER_VERSION;
+        std::wstring runtime=T(L"about.runtime_unknown");
+        const auto directory=platform_paths::ModuleDirectory();
+        const auto logPath=ResolveNeuralRuntimeLogPath((directory?*directory:std::filesystem::current_path())/L"neural-runtime");
+        if(!logPath.empty()){
+            if(const auto log=framegen_addon::ReadWholeFile(logPath)){
+                const NeuralRuntimeBanner banner=ParseNeuralRuntimeBanner(*log);
+                const auto known=[](const std::string& text){return text.empty()?std::wstring(L"?"):Utf8ToWide(text);};
+                if(!banner.reshadeVersion.empty()||!banner.renodxVersion.empty()||!banner.dlssnrRuntime.empty())
+                    runtime=Format(T(L"about.runtime"),known(banner.reshadeVersion).c_str(),known(banner.renodxVersion).c_str(),
+                                   known(banner.dlssnrRuntime).c_str());
+            }
+        }
+        std::wstring driver=m_opt.detectedGpu.driverVersion;
+        if(const auto parsed=ParseNvidiaDriverVersion(m_opt.detectedGpu.driverVersion))driver=FormatNvidiaDriverVersion(*parsed);
+        const std::wstring gpu=m_opt.detectedGpu.description.empty()?std::wstring(L"?"):m_opt.detectedGpu.description;
+        const std::wstring text=Format(T(L"about.body"),std::wstring(version.begin(),version.end()).c_str(),
+                                       FormatNvidiaDriverVersion(kNeuralDriverFloor).c_str(),gpu.c_str(),
+                                       (driver.empty()?std::wstring(L"?"):driver).c_str(),runtime.c_str());
+        MessageBoxW(m_hwnd,text.c_str(),T(L"about.title").c_str(),MB_OK|MB_ICONINFORMATION);
+    }
+    // Enhance's upscaler radios. Three states were always there - RTX VSR,
+    // DLSS Super Resolution (RTX VSR stands aside while it runs), neither - and
+    // each is reached from any other by the two existing toggles.
+    void SelectUpscaler(upscaler_choice::Upscaler target){
+        const auto steps=upscaler_choice::StepsTo(target,UpscalingActive(),m_playbackVsr);
+        if(steps.toggleSuperResolution)ToggleUpscaling();
+        if(steps.toggleVsr)TogglePlaybackVsr();
+        else if(target==upscaler_choice::Upscaler::RtxVsr&&(m_vsrSessionOff||m_vsrSessionQuality)){
+            // RTX VSR picked while the keep-up guard has it off or lowered for this
+            // video: the choice is the user's, so what the guard did ends here.
+            m_vsrSessionOff=false;m_vsrSessionQuality.reset();m_vsrGuard.Reset();
+            LOG("RTX VSR chosen from the menu; the keep-up guard's change for this video is cleared.");
+            ApplyComparison();UpdateCachedStatus();InvalidateControls();
+        }
+        SyncFeatureMenuState();
     }
 
     float ReadIniFloat(const wchar_t* section,const wchar_t* key,float fallback)const{
@@ -5240,7 +5402,7 @@ private:
         if(!ComparisonModesAvailable())return;
         const float clamped=std::clamp(mix,0.0f,2.0f);if(clamped==m_comparison.strength)return;
         m_comparison.strength=clamped;ApplyComparison();
-        if(m_adjustWnd)SyncAdjustmentControls(m_adjustWnd);
+        if(m_neuralWnd)SyncAdjustmentControls(m_neuralWnd);
     }
     void AdjustMix(float delta){SetMix(compare_settings::StepMix(m_comparison.strength,delta));}
     void ToggleSwap(){if(!ComparisonModesAvailable())return;m_comparison.swap=!m_comparison.swap;ApplyComparison();}
@@ -5717,17 +5879,25 @@ private:
                     EnableMenuItem(menu,command,MF_BYCOMMAND|(admitted?MF_ENABLED:MF_GRAYED));
                 }
             }
-            // RTX VSR Upscaling: checked as set, greyed only where a renderer has said
-            // it cannot run here - nothing loaded is no reason to refuse the setting -
+            // The upscaler radios. RTX VSR is greyed only where a renderer has said it
+            // cannot run here - nothing loaded is no reason to refuse the setting -
             // and then labelled with why, as the compare segment's tooltip is.
             {
                 const bool usable=!m_renderer||VsrUsable();
                 std::wstring label=T(L"menu.rtx_vsr_upscaling");
                 if(!usable)label+=Format(T(L"menu.rtx_vsr_unavailable"),VsrReasonText().c_str());
                 app_menu::SetMenuCommandText(menu,IDM_RTX_VSR_UPSCALING,label);
-                CheckMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(m_playbackVsr?MF_CHECKED:MF_UNCHECKED));
-                EnableMenuItem(menu,IDM_RTX_VSR_UPSCALING,MF_BYCOMMAND|(usable?MF_ENABLED:MF_GRAYED));
+                const auto shown=upscaler_choice::Shown(UpscalingActive(),m_playbackVsr);
+                app_menu::UpdateUpscalerMenu(menu,shown==upscaler_choice::Upscaler::SuperResolution?IDM_DLSS_UPSCALING
+                                                   :shown==upscaler_choice::Upscaler::RtxVsr?IDM_RTX_VSR_UPSCALING:IDM_UPSCALER_NONE,
+                                             usable,ToolbarActionEnabled(ToolbarAction::ToggleUpscaling)||UpscalingActive());
+                // Super Resolution's own submenus mean nothing while another upscaler is chosen.
+                const UINT srState=MF_BYCOMMAND|(shown==upscaler_choice::Upscaler::SuperResolution?MF_ENABLED:MF_GRAYED);
+                for(const UINT item:{IDM_UPSCALE_HISTORY_TEMPORAL,IDM_UPSCALE_HISTORY_PER_FRAME})EnableMenuItem(menu,item,srState);
             }
+            // Re-render from here restarts what the render is doing with the settings
+            // as they are, so it needs a source and DLSS 5 on.
+            EnableMenuItem(menu,IDM_RERENDER_HERE,MF_BYCOMMAND|(m_loaded&&neuralActive&&!ActivityBusy()?MF_ENABLED:MF_GRAYED));
             // Outside the radio range above, which CheckMenuRadioItem clears:
             // this is a constraint on the multiple, not one of the choices.
             CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
@@ -5896,6 +6066,17 @@ private:
         info.lpszText=m_callbackTip.data();info.szText[0]=L'\0';info.hinst=nullptr;
         return 0;
     }
+    // The toolbar's tips name their keys, so a rebinding registers them again.
+    void ReloadToolbarTips(){
+        if(!m_hwnd||!IsWindow(m_hwnd))return;
+        if(HWND host=EnsureTipHost(m_hwnd)){
+            for(size_t index=0;index<static_cast<size_t>(ToolbarAction::None);++index){
+                TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.hwnd=m_hwnd;info.uId=index;
+                SendMessageW(host,TTM_DELTOOLW,0,reinterpret_cast<LPARAM>(&info));
+            }
+        }
+        RefreshToolbarTips();
+    }
     void RefreshToolbarTips(){
         if(!m_hwnd||!IsWindow(m_hwnd))return;
         const auto items=FocusableItems();
@@ -5919,7 +6100,8 @@ private:
                 SendMessageW(host,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&info));
                 continue;
             }
-            text.push_back(std::make_unique<std::wstring>(T(key)));
+            const UINT command=toolbar_tips::Command(action);
+            text.push_back(std::make_unique<std::wstring>(toolbar_tips::WithKeys(T(key),command?m_keys.KeysFor(command):std::wstring{})));
             info.lpszText=text.back()->data();
             info.rect=bounds;
             SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
@@ -6022,8 +6204,10 @@ private:
     // its size when the dialog is resized, so it never grows into its neighbour.
     void CreateAdjustmentRow(HWND h,int id,const wchar_t* labelKey,int y,const wchar_t* tipKey=nullptr,int origin=-1,int x=0,bool columned=false){
         const bool column=columned||x!=0;
-        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116,20);
-        HWND track=DialogControl(h,TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS,132+x,y-6,column?218:236,30,id,column?DialogAnchor::Fixed:DialogAnchor::StretchTrack);
+        // m_dialogLabelExtra: the label column grown for a longer translation.
+        const int grow=m_dialogLabelExtra;
+        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116+grow,20);
+        HWND track=DialogControl(h,TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS,132+x+grow,y-6,(column?218:236)-grow,30,id,column?DialogAnchor::Fixed:DialogAnchor::StretchTrack);
         HWND value=DialogControl(h,L"STATIC",L"",SS_RIGHT,(column?352:370)+x,y,64,20,id+100,column?DialogAnchor::Fixed:DialogAnchor::RightValue);
         if(track&&origin>=0)SetPropW(track,kSliderOriginProperty,reinterpret_cast<HANDLE>(static_cast<INT_PTR>(origin+1)));
         AddTip(h,label,tipKey);AddTip(h,track,tipKey);AddTip(h,value,tipKey);
@@ -6139,66 +6323,65 @@ private:
         AdjustWindowRectForDpi(rc,style,FALSE,exStyle,dpi);return rc;
     }
 
-    // Each row's origin is its neutral position (SyncAdjustmentControls'
+    // ---- The Picture panel (P2.54 X2) ----------------------------------------
+    //
+    // Neural settings and Image adjustments as one surface, split by what a
+    // change costs: the render zone on the left re-renders and is written by
+    // conversions and exports; the viewing zone on the right is instant and
+    // this screen only. Two windows that each opened the other were one
+    // question asked in two places (UI proposal, section 2), and the split by
+    // cost is the thing a viewer has to know before touching either.
+    enum class PictureZone{Render,Viewing};
+    PictureZone m_pictureZone=PictureZone::Render;
+    // The render zone shows its look, or its pipeline (passes, guides, history,
+    // what the model is given). Kept between openings.
+    bool m_picturePipelinePage=false;
+    std::vector<HWND> m_pictureLookControls,m_picturePipelineControls;
+    // How far the panel's label column grew for the strings it is showing, in
+    // design units (LabelColumnGrowth, UiLayout.h): a translation longer than
+    // the 116 the columns were drawn for pushes its track or combo right
+    // instead of clipping its own label. Zero outside the panel's build.
+    int m_dialogLabelExtra=0;
+
+    // The render zone's rows after its fixed controls, one combo each, built,
+    // synced and read from this list. A control that changes the render and is
+    // a choice between named options - the Network A/B the neural runtime work
+    // brings first - is one entry here and nothing else in the panel: the row
+    // is laid out under "What the model is given" on the pipeline page, read
+    // on CBN_SELCHANGE (a change previews like every render control) and
+    // re-synced whenever the other controls are.
+    struct PictureRenderRow{
+        const wchar_t* labelKey;const wchar_t* tipKey;
+        std::function<std::vector<std::wstring>()> choices;
+        std::function<int()> selected;
+        std::function<void(int)> choose;
+    };
+    std::vector<PictureRenderRow> m_pictureRenderRows;
+
+    void ShowAdjustments(){ShowPicture(PictureZone::Viewing);}
+
+    // The viewing zone at `x`. Mix first: it is the one viewing control that
+    // answers "how much DLSS 5", and it is the compare bar's Mix by another
+    // route. Each row's origin is its neutral position (SyncAdjustmentControls'
     // mapping of the default ColorSettings), so a row at its default shows no
     // fill and a changed one shows how far it moved and which way.
-    void BuildAdjustmentControls(HWND h){
-        CreateSettingsGroupHeading(h,L"adjustments.group_picture",12);
-        CreateAdjustmentRow(h,IDC_ADJ_BRIGHTNESS,L"adjustments.brightness",40,nullptr,200);
-        CreateAdjustmentRow(h,IDC_ADJ_CONTRAST,L"adjustments.contrast",82,nullptr,100);
-        CreateAdjustmentRow(h,IDC_ADJ_SATURATION,L"adjustments.saturation",124,nullptr,100);
-        CreateAdjustmentRow(h,IDC_ADJ_GAMMA,L"adjustments.gamma",166,nullptr,100);
-        CreateAdjustmentRow(h,IDC_ADJ_TEMPERATURE,L"adjustments.temperature",208,nullptr,100);
-        CreateAdjustmentRow(h,IDC_ADJ_TINT,L"adjustments.tint",250,nullptr,100);
-        CreateSettingsGroupHeading(h,L"adjustments.group_compare",292);
-        CreateAdjustmentRow(h,IDC_ADJ_NEURAL_STRENGTH,L"adjustments.neural_strength",320,L"adjustments.neural_strength.tip",100);
-        DialogControl(h,L"STATIC",T(L"adjustments.note").c_str(),SS_LEFT,16,360,418,38,0,DialogAnchor::StretchNote);
-        HWND neural=DialogControl(h,L"BUTTON",T(L"adjustments.open_neural").c_str(),WS_TABSTOP|BS_OWNERDRAW,16,404,150,30,IDC_ADJ_OPEN_NEURAL,DialogAnchor::BottomLeft);
-        AddTip(h,neural,L"adjustments.tip.open_neural");
-        DialogButton(h,L"adjustments.reset",IDC_ADJ_RESET,252,404,86,30);
-        DialogButton(h,L"adjustments.close",IDC_ADJ_CLOSE,348,404,86,30,true);
+    void BuildViewingZone(HWND h,int x,int top){
+        CreateAdjustmentRow(h,IDC_ADJ_NEURAL_STRENGTH,L"adjustments.neural_strength",top,L"adjustments.neural_strength.tip",100,x);
+        CreateSettingsGroupHeading(h,L"adjustments.group_picture",top+34,x,428);
+        CreateAdjustmentRow(h,IDC_ADJ_BRIGHTNESS,L"adjustments.brightness",top+60,nullptr,200,x);
+        CreateAdjustmentRow(h,IDC_ADJ_CONTRAST,L"adjustments.contrast",top+100,nullptr,100,x);
+        CreateAdjustmentRow(h,IDC_ADJ_SATURATION,L"adjustments.saturation",top+140,nullptr,100,x);
+        CreateAdjustmentRow(h,IDC_ADJ_GAMMA,L"adjustments.gamma",top+180,nullptr,100,x);
+        CreateAdjustmentRow(h,IDC_ADJ_TEMPERATURE,L"adjustments.temperature",top+220,nullptr,100,x);
+        CreateAdjustmentRow(h,IDC_ADJ_TINT,L"adjustments.tint",top+260,nullptr,100,x);
+        // M4's instant controls - the source-colour and grain protections, once
+        // measured - are rows of this zone, from top+300 with the note and
+        // Reset viewing moving down under them: instant, this screen only, and
+        // never part of a render's cache key, which is what this zone promises.
+        DialogControl(h,L"STATIC",T(L"adjustments.note").c_str(),SS_LEFT,16+x,top+296,326,46);
+        HWND reset=DialogControl(h,L"BUTTON",T(L"adjustments.reset").c_str(),WS_TABSTOP|BS_OWNERDRAW,346+x,top+300,98,30,IDC_ADJ_RESET);
+        AddTip(h,reset,L"adjustments.tip.reset");
         SyncAdjustmentControls(h);
-        CaptureSettingsDesignLayout(h);
-    }
-
-    static constexpr int kAdjustDesignW=466,kAdjustDesignH=448;
-
-    void ShowAdjustments(){
-        if(m_adjustWnd&&IsWindow(m_adjustWnd)){ShowWindow(m_adjustWnd,SW_SHOWNORMAL);SetForegroundWindow(m_adjustWnd);return;}
-        // Registered here, next to the only CreateWindowExW that names it, exactly like
-        // the neural and encoder dialogs: the startup registration this replaced still
-        // named the class V11 while this call asked for V12, so the window was never
-        // created and the whole dialog was unreachable.
-        static constexpr const wchar_t* kClassName=L"DLSSVideoAdjustmentsClassV12";
-        WNDCLASSW a{};a.lpfnWndProc=AdjustWndProcStatic;a.hInstance=GetModuleHandleW(nullptr);a.lpszClassName=kClassName;a.hCursor=LoadCursor(nullptr,IDC_ARROW);a.hbrBackground=DarkDialogBrush();
-        if(!RegisterClassW(&a)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
-        constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
-        const RECT wr=SettingsWindowRect(kAdjustDesignW,kAdjustDesignH,style,WS_EX_TOOLWINDOW,ActiveWindowDpi(m_hwnd));
-        const int w=int(wr.right-wr.left),h=int(wr.bottom-wr.top);
-        RECT pr{};GetWindowRect(m_hwnd,&pr);const int pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
-        m_adjustWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"adjustments.title").c_str(),
-            style,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
-    }
-
-    LRESULT AdjustWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
-        if(LRESULT result=0;SettingsDialogChrome(h,m,w,l,result))return result;
-        switch(m){
-        case WM_CREATE:ApplyDarkTitleBar(h);BuildAdjustmentControls(h);return 0;
-        case WM_HSCROLL:ReadAdjustmentControls(h);return 0;
-        case WM_GETMINMAXINFO:{
-            const RECT wr=SettingsWindowRect(kAdjustDesignW,kAdjustDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)),ActiveWindowDpi(h));
-            auto* mmi=reinterpret_cast<MINMAXINFO*>(l);mmi->ptMinTrackSize={wr.right-wr.left,wr.bottom-wr.top};return 0;
-        }
-        case WM_SIZE:ResizeSettingsChildren(h,kAdjustDesignW,kAdjustDesignH);return 0;
-        case WM_COMMAND:
-            if(LOWORD(w)==IDC_ADJ_RESET){m_colorSettings={};m_comparison.strength=1.0f;SyncAdjustmentControls(h);ApplyVideoAdjustments(false);ApplyComparison(true);SaveVideoSettings();return 0;}
-            if(LOWORD(w)==IDC_ADJ_CLOSE){DestroyWindow(h);return 0;}
-            if(LOWORD(w)==IDC_ADJ_OPEN_NEURAL&&HIWORD(w)==BN_CLICKED){ShowNeuralSettings();return 0;}
-            break;
-        case WM_CLOSE:DestroyWindow(h);return 0;
-        case WM_DESTROY:SaveVideoSettings();m_settingsDesignLayout.erase(h);ReleaseDialogTips(h);if(h==m_adjustWnd)m_adjustWnd=nullptr;return 0;
-        }
-        return DefWindowProcW(h,m,w,l);
     }
 
     void UpdateNeuralSettingValueLabels(HWND h){
@@ -6282,6 +6465,7 @@ private:
         wchar_t shown[512]{};GetDlgItemTextW(dialog,IDC_NS_STATE,shown,int(std::size(shown)));
         if(state.text!=shown)SetDlgItemTextW(dialog,IDC_NS_STATE,state.text.c_str());
         if(HWND apply=GetDlgItem(dialog,IDC_NS_APPLY);apply&&(IsWindowEnabled(apply)!=FALSE)!=state.applyEnabled)EnableWindow(apply,state.applyEnabled);
+        RefreshPictureRevert(dialog);
     }
 
     void SyncNeuralSettingControls(HWND h){
@@ -6298,7 +6482,6 @@ private:
         // The combo lists the rungs in the enum's own order, so the index IS the rung.
         select(IDC_NS_SCENE_CUTS,static_cast<int>(m_temporalSettings.sceneCuts));
         select(IDC_NS_STABILITY,static_cast<int>(m_temporalSettings.stability));
-        SyncNetworkChoice(h);
         const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         check(IDC_NS_CHAINED,m_neuralSettings.chainedHistory);
@@ -6307,6 +6490,7 @@ private:
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
         EnableDependentNeuralControls(h);
         UpdateNeuralSettingValueLabels(h);
+        SyncPictureExtraControls(h);
     }
 
     void ReadNeuralSettingControls(HWND h){
@@ -6322,7 +6506,6 @@ private:
         m_neuralSettings.autoMask=checked(IDC_NS_AUTOMASK);
         m_neuralSettings.passes=std::clamp(sel(IDC_NS_PASSES,m_neuralSettings.passes-1)+1,1,4);
         m_neuralSettings.chainedHistory=checked(IDC_NS_CHAINED);
-        ReadNetworkChoice(h);
         if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
         EnableDependentNeuralControls(h);
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
@@ -6348,34 +6531,13 @@ private:
     void ApplyLiveGuideControls(){m_guides.SetControls(m_renderGuides);m_guides.SetSceneCutSensitivity(m_temporalSettings.sceneCuts);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
 
     void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr,int x=0,int width=160){
-        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116,20);
-        HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132+x,y-3,width,200,id);
+        const int grow=m_dialogLabelExtra;
+        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16+x,y,116+grow,20);
+        // A grown label column narrows the combo rather than pushing it past
+        // its column's edge (16 + 416).
+        HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132+x+grow,y-3,grow?std::min(width,300-grow):width,200,id);
         for(const wchar_t* item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item));
         AddTip(h,label,tipKey);AddTip(h,combo,tipKey);
-    }
-
-    // The Network control (NeuralRuntimeChoice.h): its rungs, which one the
-    // settings name, and reading it back. A GPU that is not offered 310.9.16
-    // sees the previous runtime alone, greyed out.
-    void BuildNetworkChoice(HWND h,int y,int x){
-        const GpuGeneration gpu=m_opt.detectedGpu.generation;
-        std::vector<std::wstring> items;
-        if(neural_runtime::OffersCurrent(gpu))
-            for(const auto& rung:neural_runtime::kNetworks)items.emplace_back(rung.label);
-        items.push_back(T(neural_runtime::OffersCurrent(gpu)?L"neural.network.previous":L"neural.network.only_previous"));
-        CreateNeuralCombo(h,IDC_NS_NETWORK,L"neural.settings.network",y,{},L"neural.tip.network",x,284);
-        HWND combo=GetDlgItem(h,IDC_NS_NETWORK);
-        for(const auto& item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item.c_str()));
-        EnableWindow(combo,neural_runtime::ChoiceCount(gpu)>1);
-    }
-    void SyncNetworkChoice(HWND h){
-        if(HWND combo=GetDlgItem(h,IDC_NS_NETWORK))
-            SendMessageW(combo,CB_SETCURSEL,neural_runtime::ChoiceIndex(m_opt.detectedGpu.generation,m_neuralSettings.network,m_neuralSettings.previousRuntime),0);
-    }
-    void ReadNetworkChoice(HWND h){
-        HWND combo=GetDlgItem(h,IDC_NS_NETWORK);
-        const LRESULT index=combo?SendMessageW(combo,CB_GETCURSEL,0,0):CB_ERR;
-        if(index!=CB_ERR)neural_runtime::ApplyChoice(m_opt.detectedGpu.generation,size_t(index),m_neuralSettings.network,m_neuralSettings.previousRuntime);
     }
 
     HWND CreateNeuralCheck(HWND h,int id,const wchar_t* labelKey,int x,int y,int width,const wchar_t* tipKey=nullptr){
@@ -6428,73 +6590,176 @@ private:
         if(ruleLeft<item.rcItem.right){RECT rule{ruleLeft,mid,item.rcItem.right,mid+1};HBRUSH line=CreateSolidBrush(dark_mode::Rule);FillRect(item.hDC,&rule,line);DeleteObject(line);}
     }
 
-    // Two columns: what the model does to the picture on the left, what it
-    // costs and what it works from on the right. One column was 756 dip tall,
-    // 1,323 px at 175%, taller than a 1080p screen's work area; this is 418.
-    static constexpr int kNeuralColumn=448;
-    // The preset strip sits above both columns: a preset is the first choice
-    // and the one most people make, so it is the first thing the dialog asks.
-    static constexpr int kNeuralPresetBand=46;
+    // The preset strip sits above both zones: a preset is the first choice and
+    // the one most people make, so it is the first thing the panel asks. Under
+    // it the render zone's look and pipeline share one column as two pages,
+    // which is what keeps the panel at 550 dip with the viewing zone beside
+    // it: one column of everything was 756 dip tall, 1,323 px at 175%.
+    // The widest label the panel is about to show, in design units, so the
+    // label column can grow for it before anything is placed.
+    int PictureLabelExtra(HWND h){
+        std::vector<const wchar_t*> keys{L"neural.settings.preset",L"neural.settings.style",L"neural.settings.tone",L"neural.settings.structure",
+            L"neural.settings.color",L"neural.settings.intensity",L"neural.settings.skin",L"neural.settings.passes",L"neural.settings.scene_cuts",
+            L"neural.settings.stability",L"adjustments.neural_strength",L"adjustments.brightness",L"adjustments.contrast",
+            L"adjustments.saturation",L"adjustments.gamma",L"adjustments.temperature",L"adjustments.tint"};
+        for(const auto& row:m_pictureRenderRows)keys.push_back(row.labelKey);
+        HDC dc=GetDC(h);if(!dc)return 0;
+        const HGDIOBJ previous=SelectObject(dc,DialogFont(h));
+        int widest=0;
+        for(const wchar_t* key:keys){
+            const std::wstring text=T(key);SIZE size{};
+            if(GetTextExtentPoint32W(dc,text.c_str(),int(text.size()),&size))widest=std::max(widest,int(size.cx));
+        }
+        SelectObject(dc,previous);ReleaseDC(h,dc);
+        return LabelColumnGrowth(MulDiv(widest,USER_DEFAULT_SCREEN_DPI,int(ActiveWindowDpi(h))));
+    }
+    std::vector<HWND> DialogChildren(HWND h){
+        std::vector<HWND> children;
+        EnumChildWindows(h,[](HWND child,LPARAM lp)->BOOL{reinterpret_cast<std::vector<HWND>*>(lp)->push_back(child);return TRUE;},
+                         reinterpret_cast<LPARAM>(&children));
+        return children;
+    }
+    // The controls built since `before`, which is how a page knows its own.
+    std::vector<HWND> ChildrenSince(HWND h,const std::vector<HWND>& before){
+        std::vector<HWND> added;
+        for(HWND child:DialogChildren(h))if(std::find(before.begin(),before.end(),child)==before.end())added.push_back(child);
+        return added;
+    }
+    void ShowPicturePage(HWND h,bool pipeline){
+        m_picturePipelinePage=pipeline;
+        const HWND focus=GetFocus();bool focusHidden=false;
+        for(HWND child:m_pictureLookControls){ShowWindow(child,pipeline?SW_HIDE:SW_SHOWNA);focusHidden=focusHidden||(pipeline&&child==focus);}
+        for(HWND child:m_picturePipelineControls){ShowWindow(child,pipeline?SW_SHOWNA:SW_HIDE);focusHidden=focusHidden||(!pipeline&&child==focus);}
+        HWND toggle=GetDlgItem(h,IDC_PIC_PAGE);
+        if(toggle){SetWindowTextW(toggle,T(pipeline?L"picture.page.look":L"picture.page.pipeline").c_str());InvalidateRect(toggle,nullptr,TRUE);}
+        // A page that hid the focused control hands the focus to the switch, so
+        // Tab carries on from where the keyboard was.
+        if(focusHidden&&toggle)SetFocus(toggle);
+    }
+
+    // Two zones side by side under the look preset, the render zone on the
+    // left with a page switch between its look and its pipeline, the viewing
+    // zone on the right, and one footer: what Apply will do, Revert, Reset,
+    // Apply, Close. Every row is a design unit from its zone's top.
     void BuildNeuralSettingControls(HWND h){
-        constexpr int right=kNeuralColumn,top=kNeuralPresetBand;
+        m_dialogLabelExtra=PictureLabelExtra(h);
+        const int grow=m_dialogLabelExtra;
+        constexpr int viewing=kPictureViewingX,top=kPictureZoneTop;
         CreateNeuralCombo(h,IDC_NS_PRESET,L"neural.settings.preset",14,{},L"neural.tip.preset",0,230);
-        DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,380,8,484,36,IDC_NS_PRESET_NOTE);
-        CreateSettingsGroupHeading(h,L"neural.settings.group_look",12+top,0,400);
+        DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,452,8,472,36,IDC_NS_PRESET_NOTE);
+        CreateSettingsGroupHeading(h,L"picture.zone.render",top-34,0,432);
+        CreateSettingsGroupHeading(h,L"picture.zone.viewing",top-34,viewing,428);
+        HWND page=DialogControl(h,L"BUTTON",T(L"picture.page.pipeline").c_str(),WS_TABSTOP|BS_OWNERDRAW,290,top-6,142,26,IDC_PIC_PAGE);
+        AddTip(h,page,L"picture.tip.page");
+        const std::vector<HWND> beforeLook=DialogChildren(h);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_look",top,0,260);
         // Ordered by how far each control measurably moves the picture
         // (docs/measurements/knobs-upper-20261003): Style first, Intensity -
         // which below 1.00 acts like Color strength - after the controls that
         // do something of their own.
         // NVIDIA's names, with what each measurably does beside it: Natural
         // moves the picture furthest from the source.
-        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",44+top,{L"Default",L"Natural \u00b7 strongest change",L"Cinematic \u00b7 strong change"},L"neural.tip.style",0,230);
-        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",82+top,L"neural.tip.tone",100,0,true);
-        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",124+top,L"neural.tip.structure",100,0,true);
-        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",166+top,L"neural.tip.color",100,0,true);
-        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",208+top,L"neural.tip.intensity",100,0,true);
-        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",250+top,L"neural.tip.skin",0,0,true);
-        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,286+top,236,L"neural.tip.automask");
+        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",top+30,{L"Default",L"Natural · strongest change",L"Cinematic · strong change"},L"neural.tip.style",0,230);
+        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",top+68,L"neural.tip.tone",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",top+110,L"neural.tip.structure",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",top+152,L"neural.tip.color",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",top+194,L"neural.tip.intensity",100,0,true);
+        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",top+236,L"neural.tip.skin",0,0,true);
+        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132+grow,top+272,300-grow,L"neural.tip.automask");
+        m_pictureLookControls=ChildrenSince(h,beforeLook);
+        const std::vector<HWND> beforePipeline=DialogChildren(h);
         // Stacking, which arrived with RenoDX 6.x. Its own group because it
         // costs render time rather than changing the model's look: a second
         // pass adds 89 % model GPU time per frame (knobs-upper-20261003).
-        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",12+top,right,400);
-        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",40+top,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",right);
-        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+right,74+top,284,L"neural.tip.chained");
-        BuildNetworkChoice(h,108+top,right);
-        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",146+top,right,400);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+right,172+top,116,L"neural.tip.guide_mv");
-        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+right,172+top,80,L"neural.tip.guide_depth");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",top,0,260);
+        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",top+28,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",0,160);
+        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+grow,top+58,300-grow,L"neural.tip.chained");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",top+88,0,432);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+grow,top+112,116,L"neural.tip.guide_mv");
+        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+grow,top+112,96,L"neural.tip.guide_depth");
         // What the render does across time rather than to one frame: when a cut
         // resets the history. A ladder, not a slider - every rung is a measured
         // point (SceneCut.h), and Default is the one labelled recommended.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",210+top,right,400);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",top+142,0,432);
         {
             const std::wstring cuts[]={T(L"neural.scene_cuts.default"),T(L"neural.scene_cuts.more"),
                                        T(L"neural.scene_cuts.less"),T(L"neural.scene_cuts.off")};
-            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",238+top,
-                              {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts",right);
+            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",top+168,
+                              {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts",0);
             // A ladder with Off first and the default, for the reason the policy
             // header gives: it trades detail in motion for steadiness, and a
             // default never moves down a ladder to buy something else.
             const std::wstring stability[]={T(L"neural.stability.off"),T(L"neural.stability.low"),
                                             T(L"neural.stability.medium"),T(L"neural.stability.high")};
-            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",272+top,
-                              {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability",right);
+            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",top+202,
+                              {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability",0);
         }
+        // What the model is given, moved here from Encoder settings: it changes
+        // the render, so it belongs to the zone that re-renders.
+        CreateSettingsGroupHeading(h,L"neural.settings.group_source",top+238,0,432);
+        CreateNeuralCheck(h,IDC_PIC_DEBAND,L"encoder.settings.deband",16,top+262,416,L"encoder.tip.deband");
+        CreateNeuralCheck(h,IDC_PIC_EXPOSURE,L"encoder.settings.exposure",16,top+286,416,L"encoder.tip.exposure");
+        // The table-driven rows (PictureRenderRow), one combo each.
+        for(size_t index=0;index<m_pictureRenderRows.size()&&index<size_t(IDC_PIC_RENDER_ROW_COUNT);++index){
+            const PictureRenderRow& row=m_pictureRenderRows[index];
+            const int id=IDC_PIC_RENDER_ROW_FIRST+int(index);
+            CreateNeuralCombo(h,id,row.labelKey,top+318+int(index)*kPictureRowStep,{},row.tipKey,0,230);
+            if(HWND combo=GetDlgItem(h,id)){
+                const std::vector<std::wstring> choices=row.choices();
+                for(const std::wstring& choice:choices)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(choice.c_str()));
+                // One choice is a fact, not a setting: shown, greyed out.
+                EnableWindow(combo,choices.size()>1);
+            }
+        }
+        m_picturePipelineControls=ChildrenSince(h,beforePipeline);
+        BuildViewingZone(h,viewing,top);
         // What Apply will do to the picture on screen right now (issue #15:
         // "the settings do not apply" was partly a picture nobody said was the
         // previous render), then what kind of setting these are.
-        DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,16,372,848,20,IDC_NS_STATE,DialogAnchor::StretchNote);
-        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,396,848,38,0,DialogAnchor::StretchNote);
-        HWND adjust=DialogControl(h,L"BUTTON",T(L"neural.settings.open_adjustments").c_str(),WS_TABSTOP|BS_OWNERDRAW,16,442,170,30,IDC_NS_OPEN_ADJUST,DialogAnchor::BottomLeft);
-        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,550,442,86,30);
-        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,646,442,122,30,true);
-        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,778,442,86,30);
-        AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");AddTip(h,adjust,L"neural.tip.open_adjustments");
+        DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,16,kPictureFooterTop,908,20,IDC_NS_STATE,DialogAnchor::StretchNote);
+        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,kPictureFooterTop+24,908,38,0,DialogAnchor::StretchNote);
+        HWND revert=DialogButton(h,L"picture.revert",IDC_PIC_REVERT,504,kPictureFooterTop+76,96,30);
+        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,610,kPictureFooterTop+76,86,30);
+        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,706,kPictureFooterTop+76,122,30,true);
+        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,838,kPictureFooterTop+76,86,30);
+        AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");AddTip(h,revert,L"picture.tip.revert");
+        m_dialogLabelExtra=0;
         SyncNeuralSettingControls(h);
+        ShowPicturePage(h,m_picturePipelinePage);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kNeuralDesignW=880,kNeuralDesignH=486;
+    // The panel's geometry, in design units. The render zone is the left
+    // column (16..448), the viewing zone the right one from kPictureViewingX.
+    static constexpr int kPictureZoneTop=88,kPictureViewingX=464,kPictureRowStep=34,kPictureFooterTop=434;
+    // 550 is what fits a 1080p screen at 175% with the title bar. The pipeline
+    // page has room for one PictureRenderRow above the footer; a second one
+    // moves kPictureFooterTop and the design height down by kPictureRowStep.
+    static constexpr int kNeuralDesignW=940,kNeuralDesignH=550;
+
+    // Re-syncs the table-driven rows and the source switches with the rest.
+    void SyncPictureExtraControls(HWND h){
+        for(size_t index=0;index<m_pictureRenderRows.size()&&index<size_t(IDC_PIC_RENDER_ROW_COUNT);++index)
+            if(HWND combo=GetDlgItem(h,IDC_PIC_RENDER_ROW_FIRST+int(index)))
+                SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(m_pictureRenderRows[index].selected()),0);
+        const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
+        check(IDC_PIC_DEBAND,m_sourceDeband);check(IDC_PIC_EXPOSURE,m_suppliedExposure);
+    }
+    // They apply to the next neural render, as they did in Encoder settings:
+    // each that changes the written pixels is part of the render's cache key.
+    void ReadPictureSourceControls(HWND h){
+        const auto checked=[&](int id){HWND box=GetDlgItem(h,id);return box&&SendMessageW(box,BM_GETCHECK,0,0)==BST_CHECKED;};
+        m_sourceDeband=checked(IDC_PIC_DEBAND);m_suppliedExposure=checked(IDC_PIC_EXPOSURE);
+        SaveVideoSettings();
+    }
+    void ChoosePictureRenderRow(HWND h,int id){
+        const size_t index=size_t(id-IDC_PIC_RENDER_ROW_FIRST);
+        HWND combo=GetDlgItem(h,id);
+        const int choice=combo?int(SendMessageW(combo,CB_GETCURSEL,0,0)):CB_ERR;
+        if(index>=m_pictureRenderRows.size()||choice==CB_ERR)return;
+        m_pictureRenderRows[index].choose(choice);
+        SaveVideoSettings();SchedulePausedSettingsPreview();RefreshNeuralApplyState(h);
+    }
 
     // Playback takes it on the next frame (the renderer reads it per frame, and a
     // paused frame is drawn again so the picture shows it); an export takes it when
@@ -6543,9 +6808,13 @@ private:
         SyncFeatureMenuState();
     }
 
-    void ShowNeuralSettings(){
-        if(m_neuralWnd&&IsWindow(m_neuralWnd)){ShowWindow(m_neuralWnd,SW_SHOWNORMAL);SetForegroundWindow(m_neuralWnd);return;}
-        static constexpr const wchar_t* kClassName=L"DLSSVideoNeuralSettingsClassV14";
+    // Ctrl+N and Enhance > Picture land on the render zone; Ctrl+E and View >
+    // Viewing adjustments on the viewing zone. One panel either way.
+    void ShowNeuralSettings(){ShowPicture(PictureZone::Render);}
+    void ShowPicture(PictureZone zone){
+        m_pictureZone=zone;
+        if(m_neuralWnd&&IsWindow(m_neuralWnd)){ShowWindow(m_neuralWnd,SW_SHOWNORMAL);SetForegroundWindow(m_neuralWnd);FocusPictureZone(m_neuralWnd);return;}
+        static constexpr const wchar_t* kClassName=L"DLSSVideoPictureClassV15";
         WNDCLASSW n{};n.lpfnWndProc=NeuralWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=DarkDialogBrush();
         if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
         constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
@@ -6554,6 +6823,12 @@ private:
         RECT pr{};GetWindowRect(m_hwnd,&pr);const int pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
         m_neuralWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"neural.settings.title").c_str(),
             style,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
+        if(m_neuralWnd)FocusPictureZone(m_neuralWnd);
+    }
+    // The first control of the zone asked for, so the keyboard starts where the
+    // command said: the look preset, or Mix.
+    void FocusPictureZone(HWND h){
+        if(HWND first=GetDlgItem(h,m_pictureZone==PictureZone::Viewing?IDC_ADJ_NEURAL_STRENGTH:IDC_NS_PRESET))SetFocus(first);
     }
 
     // Everything the neural settings dialog decides about how a render looks.
@@ -6562,6 +6837,34 @@ private:
         friend bool operator==(const RenderSettings&,const RenderSettings&)=default;
     };
     RenderSettings CurrentRenderSettings()const{return {m_neuralSettings,m_renderGuides,m_temporalSettings};}
+    // What the picture on screen was rendered with: the running session's, or
+    // the cached render's. Nothing when no neural render is on screen.
+    std::optional<RenderSettings> AppliedRenderSettings()const{
+        if(m_liveSession)return m_liveRenderSettings;
+        if(m_cachedPlayback)return RenderSettings{m_cachedSettings,m_cachedGuides,m_cachedTemporal};
+        return std::nullopt;
+    }
+    // Revert is live exactly while the panel holds something other than what
+    // rendered the picture: Reset goes to the defaults, Revert to what you see.
+    void RefreshPictureRevert(HWND h){
+        HWND revert=h?GetDlgItem(h,IDC_PIC_REVERT):nullptr;if(!revert)return;
+        const auto applied=AppliedRenderSettings();
+        const bool live=applied&&*applied!=CurrentRenderSettings();
+        if((IsWindowEnabled(revert)!=FALSE)!=live)EnableWindow(revert,live);
+    }
+    void RevertPicture(HWND h){
+        const auto applied=AppliedRenderSettings();
+        if(!applied||*applied==CurrentRenderSettings())return;
+        const bool guidesChanged=applied->guides!=m_renderGuides||applied->temporal!=m_temporalSettings;
+        m_neuralSettings=applied->neural;m_renderGuides=applied->guides;m_temporalSettings=applied->temporal;
+        if(guidesChanged)ApplyLiveGuideControls();
+        LOG("Picture: reverted to the settings the picture on screen was rendered with.");
+        SyncNeuralSettingControls(h);SyncNeuralPresetControls(h);SaveVideoSettings();
+        // A paused preview of the abandoned settings is on screen: preview what
+        // the panel holds now, so the frame and the panel agree again.
+        if(m_previewShown||m_previewTimer)SchedulePausedSettingsPreview();
+        RefreshNeuralApplyState(h);SyncFeatureMenuState();
+    }
 
     // The render the picture came from is not what the dialog now holds. Only the
     // export path noticed this before, so a settings change made during playback
@@ -6621,7 +6924,14 @@ private:
         if(LRESULT result=0;SettingsDialogChrome(h,m,w,l,result))return result;
         switch(m){
         case WM_CREATE:ApplyDarkTitleBar(h);BuildNeuralSettingControls(h);return 0;
-        case WM_HSCROLL:ReadNeuralSettingControls(h);return 0;
+        // Two zones, one message: a viewing slider is instant, a render slider
+        // waits for the drag to settle and previews.
+        case WM_HSCROLL:{
+            const int id=l?GetDlgCtrlID(reinterpret_cast<HWND>(l)):0;
+            if(id>=IDC_ADJ_BRIGHTNESS&&id<=IDC_ADJ_NEURAL_STRENGTH)ReadAdjustmentControls(h);else ReadNeuralSettingControls(h);
+            RefreshPictureRevert(h);
+            return 0;
+        }
         case WM_GETMINMAXINFO:{
             const RECT wr=SettingsWindowRect(kNeuralDesignW,kNeuralDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)),ActiveWindowDpi(h));
             auto* mmi=reinterpret_cast<MINMAXINFO*>(l);mmi->ptMinTrackSize={wr.right-wr.left,wr.bottom-wr.top};return 0;
@@ -6629,10 +6939,14 @@ private:
         case WM_SIZE:ResizeSettingsChildren(h,kNeuralDesignW,kNeuralDesignH);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
+            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_temporalSettings={};m_sourceDeband=false;m_suppliedExposure=false;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();RefreshPictureRevert(h);return 0;}
+            if(id==IDC_PIC_REVERT&&code==BN_CLICKED){RevertPicture(h);return 0;}
+            if(id==IDC_PIC_PAGE&&code==BN_CLICKED){ShowPicturePage(h,!m_picturePipelinePage);return 0;}
+            if(id==IDC_ADJ_RESET&&code==BN_CLICKED){m_colorSettings={};m_comparison.strength=1.0f;SyncAdjustmentControls(h);ApplyVideoAdjustments(false);ApplyComparison(true);SaveVideoSettings();return 0;}
+            if((id==IDC_PIC_DEBAND||id==IDC_PIC_EXPOSURE)&&code==BN_CLICKED){ReadPictureSourceControls(h);return 0;}
+            if(id>=IDC_PIC_RENDER_ROW_FIRST&&id<IDC_PIC_RENDER_ROW_FIRST+IDC_PIC_RENDER_ROW_COUNT&&code==CBN_SELCHANGE){ChoosePictureRenderRow(h,id);return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
-            if(id==IDC_NS_OPEN_ADJUST&&code==BN_CLICKED){ShowAdjustments();return 0;}
             // Picking a preset writes its values into the controls, as the menu
             // does; picking Custom keeps the settings as they are.
             if(id==IDC_NS_PRESET&&code==CBN_SELCHANGE){
@@ -6645,8 +6959,8 @@ private:
             // it back, and the setting the user thinks they picked never
             // reaches the render. Adding a control without adding it to this
             // line is the one mistake this dialog invites, and it is silent.
-            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_NETWORK||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY)&&code==CBN_SELCHANGE)||
-               ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
+            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES||id==IDC_NS_SCENE_CUTS||id==IDC_NS_STABILITY)&&code==CBN_SELCHANGE)||
+               ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);RefreshPictureRevert(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -6672,8 +6986,6 @@ private:
         // The dither has an 8-bit store to act on only on the Standard rung; greyed,
         // not hidden, so the control still says the switch exists.
         if(HWND box=GetDlgItem(h,IDC_ES_CAPTURE_DITHER))EnableWindow(box,!EncoderQualityIsTenBit(m_cacheQuality));
-        check(IDC_ES_DEBAND,m_sourceDeband);
-        check(IDC_ES_EXPOSURE,m_suppliedExposure);
     }
 
     void ReadEncoderSettingControls(HWND h){
@@ -6686,8 +6998,6 @@ private:
         m_captureDither=checked(IDC_ES_CAPTURE_DITHER);
         m_cacheQuality=static_cast<EncoderQuality>(std::clamp(sel(IDC_ES_CACHE_QUALITY,int(m_cacheQuality)),0,2));
         if(HWND box=GetDlgItem(h,IDC_ES_CAPTURE_DITHER))EnableWindow(box,!EncoderQualityIsTenBit(m_cacheQuality));
-        m_sourceDeband=checked(IDC_ES_DEBAND);
-        m_suppliedExposure=checked(IDC_ES_EXPOSURE);
         SaveVideoSettings();
     }
 
@@ -6707,18 +7017,18 @@ private:
         // set to was 173 dip at 175%, which cut "CQ 16" off the rung's name.
         if(HWND combo=GetDlgItem(h,IDC_ES_CACHE_QUALITY))SetWindowPos(combo,nullptr,0,0,Sd(h,302),Sd(h,200),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
         CreateNeuralCheck(h,IDC_ES_CAPTURE_DITHER,L"encoder.settings.capture_dither",132,192,300,L"encoder.tip.capture_dither");
-        CreateSettingsGroupHeading(h,L"encoder.group_model",228);
-        CreateNeuralCheck(h,IDC_ES_DEBAND,L"encoder.settings.deband",16,254,418,L"encoder.tip.deband");
-        CreateNeuralCheck(h,IDC_ES_EXPOSURE,L"encoder.settings.exposure",16,278,418,L"encoder.tip.exposure");
+        // What the model is given (deband, smoothed exposure) moved to the Picture
+        // panel's render pipeline: it changes the render, which is what that
+        // zone is for, and this dialog is about how a render is stored.
         // Three lines: at 38 dip the note's third line was cut off.
-        DialogControl(h,L"STATIC",T(L"encoder.settings.note").c_str(),SS_LEFT,16,314,418,58,0,DialogAnchor::StretchNote);
-        DialogButton(h,L"encoder.settings.reset",IDC_ES_RESET,252,380,86,30);
-        DialogButton(h,L"encoder.settings.close",IDC_ES_CLOSE,348,380,86,30,true);
+        DialogControl(h,L"STATIC",T(L"encoder.settings.note").c_str(),SS_LEFT,16,230,418,58,0,DialogAnchor::StretchNote);
+        DialogButton(h,L"encoder.settings.reset",IDC_ES_RESET,252,296,86,30);
+        DialogButton(h,L"encoder.settings.close",IDC_ES_CLOSE,348,296,86,30,true);
         SyncEncoderSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kEncoderDesignW=466,kEncoderDesignH=424;
+    static constexpr int kEncoderDesignW=466,kEncoderDesignH=340;
 
     void ShowEncoderSettings(){
         if(m_encoderWnd&&IsWindow(m_encoderWnd)){ShowWindow(m_encoderWnd,SW_SHOWNORMAL);SetForegroundWindow(m_encoderWnd);return;}
@@ -6744,10 +7054,10 @@ private:
         case WM_SIZE:ResizeSettingsChildren(h,kEncoderDesignW,kEncoderDesignH);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_ES_RESET){m_gpuColorConversion=false;m_gpuSourceConversion=false;m_nvencPreset=5;m_captureDither=true;m_cacheQuality=EncoderQuality::Standard;m_sourceDeband=false;m_suppliedExposure=false;SyncEncoderSettingControls(h);SaveVideoSettings();return 0;}
+            if(id==IDC_ES_RESET){m_gpuColorConversion=false;m_gpuSourceConversion=false;m_nvencPreset=5;m_captureDither=true;m_cacheQuality=EncoderQuality::Standard;SyncEncoderSettingControls(h);SaveVideoSettings();return 0;}
             if(id==IDC_ES_CLOSE){DestroyWindow(h);return 0;}
             // Every control the dialog builds is named here; one left out is drawn and inert.
-            if(((id==IDC_ES_GPU_CONVERT||id==IDC_ES_GPU_SOURCE||id==IDC_ES_CAPTURE_DITHER||id==IDC_ES_DEBAND||id==IDC_ES_EXPOSURE)&&code==BN_CLICKED)||((id==IDC_ES_NVENC_PRESET||id==IDC_ES_CACHE_QUALITY)&&code==CBN_SELCHANGE)){ReadEncoderSettingControls(h);return 0;}
+            if(((id==IDC_ES_GPU_CONVERT||id==IDC_ES_GPU_SOURCE||id==IDC_ES_CAPTURE_DITHER)&&code==BN_CLICKED)||((id==IDC_ES_NVENC_PRESET||id==IDC_ES_CACHE_QUALITY)&&code==CBN_SELCHANGE)){ReadEncoderSettingControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -6799,6 +7109,9 @@ private:
 
     void ShowExportStages(){
         if(m_exportStagesWnd&&IsWindow(m_exportStagesWnd)){ShowWindow(m_exportStagesWnd,SW_SHOWNORMAL);SetForegroundWindow(m_exportStagesWnd);return;}
+        // A fresh dialog opens on what is being watched (ExportPipeline.h); one
+        // already open keeps what the viewer has ticked in it.
+        m_exportSelection=ExportSelectionForWatching(m_exportSelection,WatchedNow());
         static constexpr const wchar_t* kClassName=L"DLSSVideoExportStagesClassV1";
         WNDCLASSW n{};n.lpfnWndProc=ExportStagesWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=DarkDialogBrush();
         if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
@@ -6809,6 +7122,15 @@ private:
         m_exportStagesWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"export.stages.title").c_str(),
             style,int(pr.left)+std::max(0,(pw-w)/2),int(pr.top)+std::max(0,(ph-h)/2),w,h,
             m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
+    }
+
+    WatchedPicture WatchedNow()const{
+        WatchedPicture watched{};
+        watched.neuralOnScreen=m_neuralRequested||(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural);
+        watched.upscaler=upscaler_choice::Shown(UpscalingActive(),m_playbackVsr);
+        watched.sourceHeight=m_loaded?uint32_t(m_decoder.Height()):0u;
+        watched.outputHeight=EffectiveUpscaleHeight();
+        return watched;
     }
 
     void BuildExportStageControls(HWND h){
@@ -7010,13 +7332,6 @@ private:
         return DefWindowProcW(h,m,w,l);
     }
 
-    static LRESULT CALLBACK AdjustWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l) {
-        PlayerApp* a=nullptr;
-        if(m==WM_NCCREATE){auto* cs=reinterpret_cast<CREATESTRUCTW*>(l);a=static_cast<PlayerApp*>(cs->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}
-        else a=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
-        return a?a->AdjustWndProc(h,m,w,l):DefWindowProcW(h,m,w,l);
-    }
-
     static LRESULT CALLBACK RenderWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l) {
         PlayerApp* a=nullptr;
         if(m==WM_NCCREATE){auto* cs=reinterpret_cast<CREATESTRUCTW*>(l);a=static_cast<PlayerApp*>(cs->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}
@@ -7033,6 +7348,10 @@ private:
             if(m==WM_MOUSELEAVE){a->RenderMouseLeft();return 0;}
             if(m==WM_CAPTURECHANGED){a->RenderCaptureLost();return 0;}
             if(m==WM_LBUTTONDBLCLK){a->ToggleFullscreen();return 0;}
+            // Right-click on the picture: what you can do to it (AppMenu.cpp
+            // ToolbarMenu::Picture). WM_CONTEXTMENU rather than the button, so the
+            // menu opens on release as every Windows context menu does.
+            if(m==WM_CONTEXTMENU){a->ShowPictureMenu(POINT{GET_X_LPARAM(l),GET_Y_LPARAM(l)});return 0;}
             // The picture never keeps the keyboard. Keys that reached it anyway went to the
             // main window as WM_KEYDOWN, but the WM_CHAR TranslateMessage makes from them
             // stayed here, so ? (a character, not a key) did nothing while F1 worked.
@@ -8674,7 +8993,32 @@ private:
         case ToolbarAction::PlayPause:{const bool playing=m_playing||LiveResumePending();return{playing?UiIcon::Pause:UiIcon::Play,playing?L"Pause":L"Play",enabled,playing};}
         // A toggle pressed during a seek is queued rather than dropped, and the
         // label says so: a dead-looking key is how it read before.
-        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=m_neuralToggleDeferred?L"Neural Rendering · Queued for the seek":WarmUpStep()!=warm_up::Step::None?L"Neural Rendering · Starting":m_previewJob?L"Neural Rendering · Previewing settings":m_previewShown?L"Neural Rendering · Settings preview":enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active,m_previewJob!=0||NeuralJobActive()};}
+        // "DLSS 5 · On · Standard": on, the pill names the look it renders with,
+        // so the preset a viewer picked from the chevron beside it is on screen.
+        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;
+            const auto state=[&](const wchar_t* key){return T(L"toolbar.neural.name")+L" · "+T(key);};
+            const auto onOff=[&](bool on){return T(on?L"toolbar.state.on":L"toolbar.state.off");};
+            std::wstring label;
+            if(m_neuralToggleDeferred)label=state(L"toolbar.neural.queued");
+            else if(WarmUpStep()!=warm_up::Step::None)label=state(L"toolbar.neural.starting");
+            else if(m_previewJob)label=state(L"toolbar.neural.previewing");
+            else if(m_previewShown)label=state(L"toolbar.neural.preview_shown");
+            else if(enabled){label=state(active?L"toolbar.state.on":L"toolbar.state.off");if(active)label+=L" · "+NeuralPresetName();}
+            else if(cachedPair)label=state(L"toolbar.neural.seeking")+L" · "+onOff(active);
+            else label=state(NeuralJobActive()?L"toolbar.neural.preparing":L"toolbar.neural.no_cache");
+            return{UiIcon::Sparkles,label,enabled,active,m_previewJob!=0||NeuralJobActive()};}
+        // The DLSS 5 split button's menu half: the looks, Picture, Re-render.
+        // A control of its own, so Tab stops on it and Enter opens it.
+        case ToolbarAction::NeuralMenu:return{UiIcon::ChevronDown,L"▾",enabled,false};
+        // Names the upscaler playing, which used to be a status-line fact
+        // beside a pill that said "DLSS Upscaling · Off".
+        case ToolbarAction::Upscaler:{const auto shown=upscaler_choice::Shown(UpscalingActive(),m_playbackVsr);
+            const wchar_t* key=shown==upscaler_choice::Upscaler::SuperResolution?L"toolbar.upscaler.dlss_sr":
+                               shown==upscaler_choice::Upscaler::RtxVsr?L"toolbar.upscaler.rtx_vsr":L"toolbar.state.off";
+            return{UiIcon::Upscaling,T(L"toolbar.upscaler.name")+L" · "+T(key),enabled,shown!=upscaler_choice::Upscaler::None};}
+        // While an export runs this is how to stop it, as File > Export is.
+        case ToolbarAction::Export:{const bool running=m_exportWorker.joinable();
+            return{running?UiIcon::Stop:UiIcon::Export,T(running?L"toolbar.export.cancel":L"toolbar.export"),enabled||running,running,running};}
         case ToolbarAction::Stop:return{UiIcon::Stop,L"Stop",enabled,false};
         case ToolbarAction::Forward10:return{UiIcon::FastForward,L"10s",enabled,false};
         case ToolbarAction::Mute:return{m_muted?UiIcon::VolumeOff:UiIcon::Volume,m_muted?L"Sound":L"Mute",enabled,m_muted};
@@ -8713,7 +9057,7 @@ private:
             return{UiIcon::FrameGeneration,T(L"framegen.pill.generate"),enabled,false};
         }
         case ToolbarAction::Aspect:return{UiIcon::Crop,m_fill||m_onePixel?L"Fit":L"Fill",enabled,m_fill||m_onePixel};
-        case ToolbarAction::Adjustments:return{UiIcon::Adjustments,L"Color",enabled,m_adjustWnd!=nullptr};
+        case ToolbarAction::Adjustments:return{UiIcon::Adjustments,T(L"toolbar.picture"),enabled,m_neuralWnd!=nullptr};
         case ToolbarAction::DebugView:{const bool active=rendererReady&&m_renderer->GetDebugView()!=D3D12Renderer::DebugView::Final;return{UiIcon::Debug,L"Debug",enabled,active};}
         case ToolbarAction::Fullscreen:return{UiIcon::Maximize,L"Full",enabled,m_fullscreen};
         case ToolbarAction::None:break;
@@ -8722,6 +9066,13 @@ private:
     }
 
     bool ToolbarActionEnabled(ToolbarAction action)const{return IsToolbarActionEnabled(action,ToolbarState());}
+    // The look the pill names: the preset's short name ("Standard"), or Custom
+    // once a control has moved off every preset.
+    std::wstring NeuralPresetName()const{
+        const size_t index=neural_presets::IndexOf(m_neuralSettings);
+        if(index>=neural_presets::kPresetCount)return T(L"toolbar.neural.custom");
+        const auto name=neural_presets::ShortLabel(neural_presets::kPresets[index].label);return std::wstring(name.begin(),name.end());
+    }
 
     void DrawButton(HDC dc,ToolbarAction action,UiIcon icon,const std::wstring&label,const RECT&r,bool enabled,bool active,bool hover,bool pressed,bool focus,bool compact,bool working=false){
         // The resting and hovered looks mixed by how far the hover fade has got,
@@ -8744,7 +9095,7 @@ private:
         if(showIcon){const HGDIOBJ measured=SelectObject(dc,m_iconFont);GetTextExtentPoint32W(dc,&glyph,1,&iconSize);SelectObject(dc,measured);}
         const HFONT textFont=m_fontSmall?m_fontSmall:m_font;const HGDIOBJ measuredText=SelectObject(dc,textFont);
         GetTextExtentPoint32W(dc,label.c_str(),static_cast<int>(label.size()),&textSize);
-        const bool featureLabel=action==ToolbarAction::ToggleNeuralRendering||action==ToolbarAction::ToggleUpscaling||action==ToolbarAction::ToggleFrameGeneration;
+        const bool featureLabel=action==ToolbarAction::ToggleNeuralRendering||action==ToolbarAction::ToggleUpscaling||action==ToolbarAction::ToggleFrameGeneration||action==ToolbarAction::Upscaler;
         int neededWidth=iconSize.cx+textSize.cx+Dip(2*kButtonHorizontalInsetDip+kButtonIconLabelGapDip);
         // A feature pill the layout has narrowed keeps its state and drops its
         // name, rather than ellipsising the state - the one part of the label
@@ -11423,9 +11774,9 @@ private:
                                            double(GetTickCount64()-m_liveStartTick)/1000.0);
     }
     std::wstring BuildStatusText()const{
-        // The menu path the hint names has to be the one the menu has: the
-        // cancel item lives under DLSS > Convert & export, not under File.
-        if(m_exportWorker.joinable())return L"Exporting processed media \u00b7 DLSS > Convert & export > Cancel export to stop";
+        // The menu path the hint names has to be the one the menu has: Export
+        // is under File, and is Cancel export while one runs.
+        if(m_exportWorker.joinable())return T(L"status.exporting");
         // The conversion is the one activity that owns the whole status line:
         // it is minutes long, it is the reason the picture is not changing, and
         // a percentage is the only thing that distinguishes progress from a
@@ -11642,6 +11993,30 @@ private:
         const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,point.x,point.y,0,m_hwnd,nullptr);
         DestroyMenu(menu);if(command)HandleCommand(command);
     }
+    // The toolbar's two drop-downs. Their rows are the menu bar's own commands
+    // with the bar's checks and greys copied (AppMenu.cpp CreateToolbarMenu), so
+    // the menu state is brought up to date first and a pick runs the same
+    // command the bar's row would.
+    void ShowToolbarMenu(app_menu::ToolbarMenu which,const RECT& anchor){
+        SyncFeatureMenuState();
+        HMENU menu=app_menu::CreateToolbarMenu(which,GetMenu(m_hwnd),m_loc,m_keys);if(!menu)return;
+        POINT point{anchor.left,anchor.top};ClientToScreen(m_hwnd,&point);
+        const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,point.x,point.y,0,m_hwnd,nullptr);
+        DestroyMenu(menu);if(command)HandleCommand(command);
+    }
+
+    // The picture's context menu at `screen`, or - from the keyboard (Shift+F10,
+    // the menu key), where Windows sends -1,-1 - at the picture's centre.
+    void ShowPictureMenu(POINT screen){
+        if(screen.x==-1&&screen.y==-1){
+            RECT picture{};const HWND over=m_renderWnd&&IsWindowVisible(m_renderWnd)?m_renderWnd:m_hwnd;
+            GetClientRect(over,&picture);screen=POINT{(picture.left+picture.right)/2,(picture.top+picture.bottom)/2};ClientToScreen(over,&screen);
+        }
+        SyncFeatureMenuState();
+        HMENU menu=app_menu::CreateToolbarMenu(app_menu::ToolbarMenu::Picture,GetMenu(m_hwnd),m_loc,m_keys);if(!menu)return;
+        const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_TOPALIGN|TPM_RIGHTBUTTON,screen.x,screen.y,0,m_hwnd,nullptr);
+        DestroyMenu(menu);if(command)HandleCommand(command);
+    }
 
     void ActivateToolbarAction(ToolbarAction action,const RECT& anchor){
         if(!ToolbarActionEnabled(action))return;
@@ -11660,8 +12035,13 @@ private:
             if(m_frameGenWorker.joinable())CancelFrameGeneration();else StartFrameGeneration();
             break;
         case ToolbarAction::Aspect:SetAspect(m_onePixel?false:!m_fill,false);break;
-        case ToolbarAction::Adjustments:ShowAdjustments();break;
+        // Picture opens on the render zone, as Ctrl+N and Enhance > Picture do;
+        // the viewing zone is beside it in the same panel.
+        case ToolbarAction::Adjustments:ShowNeuralSettings();break;
         case ToolbarAction::DebugView:ShowDebugMenu(anchor);break;
+        case ToolbarAction::NeuralMenu:ShowToolbarMenu(app_menu::ToolbarMenu::Neural,anchor);break;
+        case ToolbarAction::Upscaler:ShowToolbarMenu(app_menu::ToolbarMenu::Upscaler,anchor);break;
+        case ToolbarAction::Export:HandleCommand(IDM_EXPORT_STAGES);break;
         case ToolbarAction::Fullscreen:ToggleFullscreen();break;
         case ToolbarAction::None:break;
         }
@@ -11809,7 +12189,7 @@ private:
         const bool interacting=m_dragSeek||m_dragVolume||m_pressedToolbarAction!=ToolbarAction::None||
             (capture&&(capture==m_hwnd||IsChild(m_hwnd,capture)))||m_fullscreenMenuLoop||
             m_fullscreenKeyboardFocus||!IsWindowEnabled(m_hwnd)||
-            (m_adjustWnd&&IsWindowVisible(m_adjustWnd))||(m_neuralWnd&&IsWindowVisible(m_neuralWnd))||(m_encoderWnd&&IsWindowVisible(m_encoderWnd));
+            (m_neuralWnd&&IsWindowVisible(m_neuralWnd))||(m_encoderWnd&&IsWindowVisible(m_encoderWnd));
         if(interacting){m_fullscreenLastInput=Clock::now();return;}
         if(Clock::now()-m_fullscreenLastInput<kFullscreenIdleDelay)return;
         m_fullscreenControlsHidden=true;m_focusedToolbarAction=ToolbarAction::None;
@@ -11923,6 +12303,9 @@ private:
         case WM_NOTIFY:if(const auto* header=reinterpret_cast<const NMHDR*>(l);header&&header->code==TTN_GETDISPINFOW)return TipNotify(*header);break;
         case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);SetCompareHover({});if(!m_dragSeek)ClearTimelineHover();SyncSliderHover();return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
+        // Shift+F10 and the menu key open the picture's menu from the keyboard,
+        // as a right-click on the picture does; a right-click on the chrome does not.
+        case WM_CONTEXTMENU:if(GET_X_LPARAM(l)==-1&&GET_Y_LPARAM(l)==-1&&m_loaded){ShowPictureMenu(POINT{-1,-1});return 0;}break;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();UpdateTimelineHover(m_mouseX,m_mouseY);}if(m_dragVolume)m_dragVolume=false;m_dragMix=false;SyncSliderHover();if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
         case WM_SETFOCUS:InvalidateControls();return 0;
@@ -11961,10 +12344,12 @@ private:
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
         // ? is a character, not a key: it is Shift+/ on a US layout and
         // somewhere else on most others, so it is matched after translation.
-        case WM_CHAR:if(w==L'?'){ToggleShortcutSheet();return 0;}break;
+        case WM_CHAR:
+            if(const auto command=w==L'?'?m_keys.Lookup(key_bindings::Chord{0,false,false,L'?'}):std::nullopt){HandleCommand(*command);return 0;}
+            break;
+        // Saved changes to input.conf apply when the player comes back to the front.
+        case WM_ACTIVATEAPP:if(w)ReloadKeyBindingsIfChanged();break;
         case WM_KEYDOWN:
-            // F1 is Windows' help key; nothing else in the player used it.
-            if(w==VK_F1){ToggleShortcutSheet();return 0;}
             // Esc's order is escape_key::Resolve: the sheet, then fullscreen, then
             // the longest-running job. Nothing else in this handler takes Esc.
             if(w==VK_ESCAPE){
@@ -11981,7 +12366,15 @@ private:
                 }
             }
             if(w==VK_F10)RevealFullscreenControls();
-            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(const auto command=app_menu::CommandForPlayerKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_OEM_PERIOD){StepCachedFrame();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){SetAspect(m_onePixel?false:!m_fill,false);return 0;}if(w=='D'){ToggleNeuralRendering();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}break;
+            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}
+            // Everything else is the key table (KeyBindings.h), matched with its
+            // modifiers exactly: Shift+S is not S. A key held with Alt is not one
+            // of them - Alt+key is the menu bar's, and Ctrl+Alt is AltGr typing a
+            // character on many layouts.
+            if(!(GetKeyState(VK_MENU)&0x8000)){
+                if(const auto command=m_keys.LookupKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}
+            }
+            break;
         }
         return DefWindowProcW(h,m,w,l);
     }
@@ -12003,8 +12396,9 @@ private:
             SelectSubtitleTrack(int(id-IDM_SUBTITLE_TRACK_FIRST),true);return;}
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_NEURAL_RENDERING:ToggleNeuralRendering();break;
-        case IDM_DLSS_UPSCALING:ToggleUpscaling();break;
-        case IDM_RTX_VSR_UPSCALING:TogglePlaybackVsr();break;
+        case IDM_RTX_VSR_UPSCALING:SelectUpscaler(upscaler_choice::Upscaler::RtxVsr);break;
+        case IDM_DLSS_UPSCALING:SelectUpscaler(upscaler_choice::Upscaler::SuperResolution);break;
+        case IDM_UPSCALER_NONE:SelectUpscaler(upscaler_choice::Upscaler::None);break;
         case IDM_UPSCALE_AUTO:SetUpscaleTarget(0);break;
         case IDM_PROCESSING_SCALE_FIRST:case IDM_PROCESSING_SCALE_FIRST+1:case IDM_PROCESSING_SCALE_LAST:
             if(const auto percent=app_menu::ProcessingScaleForCommand(id))SetProcessingScale(*percent);
@@ -12036,6 +12430,14 @@ private:
 case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExportStages();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;case IDM_RENDER_REPORT:ShowRenderReport();break;
         case IDM_CHECK_FOR_UPDATES:MaybeStartUpdateCheck(true);break;
         case IDM_KEYBOARD_SHORTCUTS:ToggleShortcutSheet();break;
+        case IDM_HELP_KEY_BINDINGS:EditKeyBindings();break;case IDM_HELP_USER_GUIDE:OpenUserGuide();break;
+        case IDM_HELP_LOG_FOLDER:OpenLogFolder();break;case IDM_HELP_ABOUT:ShowAbout();break;
+        case IDM_STEP_FRAME:StepCachedFrame();break;
+        // A, Fit and Fill in turn; from 1:1 it goes to Fit.
+        case IDM_ASPECT_TOGGLE:SetAspect(m_onePixel?false:!m_fill,false);break;
+        // Apply's path: a running session restarts at the playhead with the
+        // settings as they are; paused, the frame under it is rendered again.
+        case IDM_RERENDER_HERE:if(m_loaded&&m_neuralRequested)ApplyNeuralSettings();break;
         case IDM_SUBTITLE_OFF:SelectSubtitlesOff(true);break;case IDM_SUBTITLE_FILE:SelectSubtitleFile(true);break;
         case IDM_SUBTITLE_LOAD:LoadSubtitleFromDialog();break;case IDM_SUBTITLE_NEXT:NextSubtitles();break;
         case IDM_SUBTITLE_EARLIER:StepSubtitleDelay(-1);break;case IDM_SUBTITLE_LATER:StepSubtitleDelay(+1);break;
@@ -12152,7 +12554,12 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // over whatever is left; a player that dies without running it is covered
     // by the kill-on-close job object instead.
     ResidentNeuralHelper m_residentHelper;
-    AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr,m_fontTitle=nullptr;
+    AppOptions m_opt;Localizer m_loc;
+    // The keys (KeyBindings.h): the defaults, with input.conf beside the ini
+    // applied over them. Read before the window exists and again whenever the
+    // player comes back to the front with the file changed.
+    key_bindings::Table m_keys=key_bindings::Defaults();std::filesystem::file_time_type m_keysWritten{};
+    UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr,m_fontTitle=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_waitingForNetworkFrame=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false,m_neuralRequested=true;
     // Timeline scrubbing: what playback was doing before the drag, and when the
     // last preview seek went out so a drag cannot queue one per mouse move.
@@ -12946,6 +13353,13 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
         if(render.mode!=render_command::Mode::Player)return RunRenderCommand(render,options.userArguments);
     }
     if(!options.argumentsOk){LOG("Invalid command line: "<<WideToUtf8(options.argumentError));MessageBoxW(nullptr,options.argumentError.c_str(),L"DLSS 5 Video Player",MB_OK|MB_ICONERROR);return 1;}
+    // A translator's starting point, written before anything else starts: no
+    // runtime, no window, no GPU.
+    if(!options.languageTemplate.empty()){
+        std::ofstream out(std::filesystem::path(options.languageTemplate),std::ios::binary|std::ios::trunc);
+        out<<translation::FormatFile(Localizer::All(),L"DLSS 5 Video Player strings, in English. Translate the text after each '=',\nsave as lang\\<language tag>.lang beside DLSSVideoPlayer.exe (zh-Hans.lang, de.lang)\nand delete any line you leave untranslated: a missing key reads in English.");
+        return out?0:1;
+    }
     const StartupResult startup=RunNeuralAddonBootstrap(options);
     if(startup==StartupResult::ExitSuccess)return 0;
     if(startup==StartupResult::ExitFailure)return 1;

@@ -45,6 +45,11 @@ wchar_t GlyphForIcon(UiIcon icon)
     case UiIcon::Maximize: return L'\xeaea';         // maximize
     case UiIcon::YouTube: return L'\xec90';          // brand-youtube
     case UiIcon::Warning: return L'\xea06';          // alert-triangle
+    // file-export and chevron-down: the toolbar's Export button and the DLSS 5
+    // split button's menu half. Both verified present in the committed
+    // tabler-icons.ttf cmap (U+EDE9, U+EA5F).
+    case UiIcon::Export: return L'\xede9';           // file-export
+    case UiIcon::ChevronDown: return L'\xea5f';      // chevron-down
     // layout-columns: two panes side by side, which is what the compare
     // button on the taskbar thumbnail turns on. Verified present in the
     // committed tabler-icons.ttf cmap (U+EAD4, 9 contours).

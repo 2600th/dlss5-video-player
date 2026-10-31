@@ -145,6 +145,18 @@ inline bool IsNetworkUrl(std::wstring_view input)
     return starts(L"https://") || starts(L"http://");
 }
 
+// A resolved YouTube audio stream, read at playback speed (P1.48). It is one
+// progressive https file, and googlevideo drops that connection part-way:
+// on 2026-10-31 "Unable to read from socket" after 32-46 s of a real-time
+// read, and in the player the audio stopped at 62-75 s while the HLS video
+// played on, with the nightly 0.28.3 bundled as with 2026.10.26. ffmpeg's
+// http reconnect resumes at the byte it reached; the delay cap keeps a dead
+// stream inside the player's own stall handling instead of ffmpeg's default
+// 120 s. The certificate check and the https-only list are unchanged.
+inline constexpr std::wstring_view kNetworkAudioInputOptions =
+    L"-tls_verify 1 -protocol_whitelist https,tls,tcp "
+    L"-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 4 ";
+
 // "-protocol_whitelist file,crypto,data " for a local input, empty for a URL.
 inline std::wstring LocalInputOptions(std::wstring_view input)
 {

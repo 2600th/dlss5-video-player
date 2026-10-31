@@ -93,15 +93,16 @@ struct NetworkRung {
     std::wstring_view cost;
 };
 inline constexpr std::array<NetworkRung, 2> kNetworks{{
-    {Network::A, L"A \u00b7 same look as 0.28 (recommended)", L"Model time 3.8 ms a 1080p frame, 9.6 ms at 4K."},
-    {Network::B, L"B \u00b7 lighter: 36% less model time", L"Model time 2.4 ms a 1080p frame, 6.0 ms at 4K; a milder picture, nearer the source."},
+    {Network::A, L"A \u00b7 the 0.28 look (recommended)", L"Model time 3.8 ms a 1080p frame, 9.6 ms at 4K."},
+    {Network::B, L"B \u00b7 lighter, 36% less model time", L"Model time 2.4 ms a 1080p frame, 6.0 ms at 4K; a milder picture, nearer the source."},
 }};
 
 inline size_t NetworkIndex(Network network) { return network == Network::B ? 1 : 0; }
 
-// Neural settings' one Network control: the two rungs on 310.9.16 and, after
-// them, the previous runtime, which has only A. A GPU that is not offered
-// 310.9.16 shows the previous runtime alone, greyed out (ChoiceCount 1).
+// The Picture panel's Network row (a PictureRenderRow in main.cpp): the two
+// rungs on 310.9.16 and, after them, the previous runtime, which has only A. A
+// GPU that is not offered 310.9.16 shows the previous runtime alone, greyed
+// out (ChoiceCount 1).
 inline constexpr size_t kPreviousChoice = kNetworks.size();
 inline size_t ChoiceCount(GpuGeneration gpu) { return OffersCurrent(gpu) ? kNetworks.size() + 1 : 1; }
 inline size_t ChoiceIndex(GpuGeneration gpu, Network network, bool previousRequested)
