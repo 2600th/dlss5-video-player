@@ -369,9 +369,9 @@ The one-click download installs 0.3.5. A hand-installed 0.4.0 or 0.4.1 loads
 the same way, but some of its settings make generated frames differ from
 NVIDIA's, and the start screen names them: `Optimized=2` or `3` (lossy
 kernels; 0.4.0 ships with 2), `Preset=C` (FG Lite), and `Engine=XeSS`, which
-uses Intel's XeSS-FG model instead of NVIDIA's. Set `[DLSSG] Optimized=1` and
-`[FrameGeneration] Engine=DLSS` in `dlssg_sm86.ini` for output identical to
-NVIDIA's. These 0.4 builds are not tested here: no RTX 20 or 30 card has loaded
+uses Intel's XeSS-FG model instead of NVIDIA's. Set `[DLSSG] Optimized=1`, a `Preset`
+other than C and `[FrameGeneration] Engine=DLSS` in `dlssg_sm86.ini` for output
+identical to NVIDIA's. These 0.4 builds are not tested here: no RTX 20 or 30 card has loaded
 one.
 
 0.27.0 loads its imports from System32 only, which kept this add-on out of the
