@@ -84,7 +84,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_package.ps1
    something from **File > Game trailers**.
 4. Press `D`. It buffers for a few seconds, then plays the render.
 5. The compare bar under the picture switches between DLSS 5, Original, Split,
-   Wipe, Difference, Side by side and 2 × 2.
+   Wipe, Difference, Side by side and 2 × 2. It shows the chosen view's own
+   controls, and **⋯** opens the rest of the **Compare** menu.
 6. **File > Export** (`Ctrl+S`, or **Export** on the toolbar) saves it as a file.
 
 **File > Recent videos** reopens a video with its render, if the render covers
@@ -274,7 +275,7 @@ subtitles, HDR, the render quality ladder and `--render`.
 | Open a file / a YouTube URL | `Ctrl+O` / `Ctrl+L` |
 | Play or pause | `Space` |
 | DLSS 5 on or off | `D`, or the toolbar's DLSS 5 pill |
-| Compare views | `C` / `Shift+C` step the mode; `X` swaps sides; `[` and `]` change the Mix |
+| Compare views | `C` / `Shift+C` step the mode; `X` swaps sides; `[` and `]` change the Mix; double-click the Mix for 100% |
 | RTX VSR view; compare against it | `R`; `Shift+R` |
 | Zoom, loupe | `Z` / `Shift+Z` zoom in and out at the pointer; `L` loupe |
 | Save the view as a PNG | `Ctrl+Shift+S` |
@@ -284,7 +285,7 @@ subtitles, HDR, the render quality ladder and `--render`.
 | Mark In / Out; clear; go to time | `I` / `O`; `Shift+I`; `Ctrl+G` |
 | Render one frame / four seconds / the marked clip | `F` / `Shift+F` / `Ctrl+R` |
 | Generate frames; cancel a conversion | **Enhance > Generate frames**; `Esc` |
-| Picture (the render's look) | `Ctrl+N` |
+| Picture (the render's look) | `Ctrl+N`; in the panel, `Ctrl+Z` reverts and a double-click on a setting's name resets it |
 | Viewing adjustments (instant) | `Ctrl+E` |
 | Re-render from here; pause the background render | **Enhance > Re-render from here**; `P` |
 | Export | `Ctrl+S` |

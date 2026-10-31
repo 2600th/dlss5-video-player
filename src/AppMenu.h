@@ -91,6 +91,10 @@ inline constexpr UINT IDM_ENCODER_SETTINGS = 315;
 // Enhance > Re-render from here: Apply's restart at the playhead with the
 // settings as they are now, offered where the render is.
 inline constexpr UINT IDM_RERENDER_HERE = 316;
+// Enhance > Revert Picture changes: the Picture panel's Revert, Ctrl+Z by
+// default. Live only while the panel is open and differs from what rendered
+// the picture, as the button is.
+inline constexpr UINT IDM_PICTURE_REVERT = 317;
 // One contiguous block: CheckMenuRadioItem clears every command in the range it
 // is given, so a rung outside it would keep a stale check.
 inline constexpr UINT IDM_UPSCALE_AUTO = 334;
@@ -260,7 +264,12 @@ HMENU CreateDebugViewMenu(UINT selectedCommand);
 // (the two drop-downs above), Picture and Viewing adjustments, Re-render from
 // here, Save comparison image, and the view. Every row is still a menu bar
 // command, so the key column teaches the key.
-enum class ToolbarMenu { Neural, Upscaler, Picture };
+//
+// Compare is the compare bar's "more" button (UI proposal 3.3): the menu bar's
+// whole Compare menu, submenus and all, so the settings the bar has no room
+// for - against RTX VSR, a view's own settings, the mask, HDR at SDR - are one
+// click from it, with the bar's checks, greys and keys.
+enum class ToolbarMenu { Neural, Upscaler, Picture, Compare };
 HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& localizer, const key_bindings::Table& keys);
 bool RoutesToRehook(PlayerCommandRoute route, UINT value);
 // Shows, relabels or removes the right-justified update item in the menu bar.

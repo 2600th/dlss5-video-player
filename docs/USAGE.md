@@ -240,6 +240,14 @@ rendered, with an ETA), the **frame rate** (presented / source) and
 render starting or passing another tenth, playback falling behind the source
 or catching up, a newly dropped frame - rather than on every repaint.
 
+A fourth chip, left of them, names what makes the picture you see:
+`DLSS 5`, `DLSS 5 · RTX VSR`, `DLSS 5 · DLSS SR`, `RTX VSR`, or `Original`
+when nothing processes it. Hover it for the rest: the sizes through each stage
+(`1360×696 → DLSS 5 → RTX VSR → 1628×833`), every setting the render on screen
+was made with, the upscaler's quality, the neural add-on and whether frame
+generation is ready. It does not flash, and it is the first chip to go when the
+window is narrow.
+
 The timeline shows both states at once: the marked range is a solid violet block
 between a green In tick and an orange Out tick, played progress is blue, and
 teal stripes along the bottom name the parts of the source that already have
@@ -264,7 +272,15 @@ during cached playback on the neural view (it grays out otherwise; `D` turns the
 neural view on). It holds the mode, the Mix, the zoom and the swap, which are
 also under the **Compare** menu. In a narrower window it shortens the mode
 names and shows Swap and Loupe as icons (hover for their names); narrower
-still, the modes fold into one button that opens a menu of them:
+still, the modes fold into one button that opens a menu of them.
+
+The bar also holds the controls of the mode you picked, after Loupe:
+**Difference** adds its amplification (`×4`, a menu of the six steps) and
+**Luma | Color**; **2 × 2** adds the fourth pane's Mix (`Pane 4 · 50%`) when that
+pane is DLSS 5 rather than RTX VSR. A window with no room for them leaves them
+out, all together; they are still in the **Compare** menu. The **⋯** button at
+the end of the bar opens that whole menu: compare against RTX VSR, each view's
+settings, the mask and HDR at SDR.
 
 - **DLSS 5** shows the neural frame, **Original** the source frame. `C` steps
   through the modes and `Shift+C` steps back.
@@ -312,9 +328,10 @@ still, the modes fold into one button that opens a menu of them:
   shows RTX VSR.
 - **Mix** is how much of the neural result you see: 100% is the render
   untouched, lower mixes back toward the original, higher extends the model's
-  own change. Drag the slider or press `[` and `]` (a tenth per press). It
-  costs a present, not a re-render, and it is the same value as **DLSS 5 mix**
-  in the Picture panel's viewing zone.
+  own change. Drag the slider or press `[` and `]` (a tenth per press).
+  Double-click it (its name, track or value) to put it back to 100%. It
+  costs a present, not a re-render, and it is the same value as **Mix (DLSS 5 amount)** in the
+  Picture panel's viewing zone.
 - **A mask** limits where DLSS 5 shows. **Compare > Mask > Load mask
   image...** takes any PNG, BMP, JPEG, TIFF or GIF and uses its brightness,
   stretched over the frame: white keeps DLSS 5 at the Mix, black shows the
@@ -422,6 +439,18 @@ settings (Apply is greyed out when the render already uses them); while paused, 
 frame re-renders on its own once you stop changing a control, and the line says
 when the rest of the video is still the previous render. **Revert** goes back to
 the settings the picture on screen was rendered with; **Reset** to the defaults.
+`Ctrl+Z` is Revert while the panel is open, and so is **Enhance > Revert Picture
+changes**.
+
+A blue dot left of a setting means it is not at its default. Double-click the
+setting's name, or the value beside a slider, to put that one setting back; a
+checkbox is its own name, so double-click its dot. A render setting put back
+previews like any other change; a viewing one is instant.
+
+**Style** lists how far each look moved six test clips from the source:
+**Natural** furthest (+68 %), **Cinematic** +34 %, against **Default**. The
+tooltip gives the ranges, and
+[the measurement](measurements/knobs-upper-20261003/REPORT.md) the clips.
 
 The right zone, **Viewing - instant - this screen only**, is Mix and the colour
 sliders (brightness, contrast, saturation, white balance and tint): they change
@@ -546,7 +575,9 @@ combinations are left to the menu bar, and `Tab`, `Enter`, `Esc` and `F10` are
 kept for moving around the window, so the file cannot take them.
 
 The player reads the file when it starts and again whenever it becomes the
-active window, so saving in Notepad and clicking back is enough. A line it
+active window, so saving in Notepad and clicking back is enough. One key acts
+only in one place: `Ctrl+Z` (`picture-revert`) does nothing unless the Picture
+panel is open. A line it
 cannot use - an unknown command, a key it does not know, a key bound twice -
 is written to the log with its line number and skipped; it never stops the
 player starting. The menus' key columns, the toolbar's tooltips and the

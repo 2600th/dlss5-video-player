@@ -105,6 +105,15 @@ private:
             // What a narrow window shows instead: the bar steps down to these before it folds the modes into a menu.
             {L"compare.mode.neural.short", L"DLSS 5"}, {L"compare.mode.original.short", L"Orig."}, {L"compare.mode.split.short", L"Split"}, {L"compare.mode.wipe.short", L"Wipe"}, {L"compare.mode.difference.short", L"Diff."}, {L"compare.mode.side_by_side.short", L"Side"}, {L"compare.mode.quad.short", L"2 \u00d7 2"},
             {L"compare.tip.mode", L"Compare mode (C)"}, {L"compare.tip.swap", L"Swap sides (X)"}, {L"compare.tip.loupe", L"Loupe (L)"}, {L"compare.tip.zoom_in", L"Zoom in (Z)"}, {L"compare.tip.zoom_out", L"Zoom out (Shift+Z)"},
+            // The selected mode's own controls on the bar, and the button to the rest of the Compare menu.
+            // The tips name their keys from the key table, after the first line.
+            {L"compare.luma", L"Luma"}, {L"compare.color", L"Color"}, {L"compare.second_mix", L"Pane 4 \u00b7 %s"},
+            {L"compare.tip.mix", L"Mix: how much of the DLSS 5 render you see\nInstant, and not exported. Double-click to put it back to 100%."},
+            {L"compare.tip.difference_gain", L"Difference gain: how far the difference is amplified\n\u00d71 is the raw difference; \u00d732 makes a one-step change visible."},
+            {L"compare.tip.difference_luma", L"Luma: compare brightness only"},
+            {L"compare.tip.difference_color", L"Color: compare each color channel"},
+            {L"compare.tip.second_mix", L"Pane 4: DLSS 5 at a second Mix, to see two strengths at once"},
+            {L"compare.tip.more", L"More compare settings: against RTX VSR, each view's own settings, the mask, HDR at SDR"},
             {L"compare.hint.hold", L"Hold on the picture to see the original"},
             {L"compare.hint.unavailable", L"Turn on DLSS 5 to compare"}, {L"compare.tip.mode_cycle", L" (C and Shift+C step through the modes)"},
             {L"compare.tag.original", L"ORIGINAL"}, {L"compare.tag.dlss", L"DLSS 5"},
@@ -462,7 +471,27 @@ private:
             {L"picture.page.pipeline", L"Render pipeline \u203a"}, {L"picture.page.look", L"\u2039 Look"},
             {L"picture.tip.page", L"The render's pipeline: passes, guides, history across cuts and what the model is given. All of it re-renders."},
             {L"picture.revert", L"Revert"},
-            {L"picture.tip.revert", L"Back to the settings the picture on screen was rendered with. Reset goes back to the defaults."},
+            {L"picture.tip.revert", L"Back to the settings the picture on screen was rendered with\nReset goes back to the defaults."},
+            // A row's dot when its value is off the default; its text is what a screen reader says.
+            {L"picture.modified", L"Changed from the default"},
+            {L"picture.tip.modified", L"Changed from the default. Double-click the setting's name to put it back."},
+            {L"menu.picture_revert", L"Revert Picture changes"},
+            // Style's three looks, and how far each moved six clips from the source
+            // (docs/measurements/knobs-upper-20261003): the combo shows "name · distance".
+            {L"neural.style.0", L"Default"}, {L"neural.style.1", L"Natural"}, {L"neural.style.2", L"Cinematic"},
+            {L"neural.style.1.measured", L"furthest from the source (+68 %)"}, {L"neural.style.2.measured", L"+34 %"},
+            // The pipeline chip (X10) and its tip.
+            {L"chip.pipeline.none", L"Original"},
+            {L"chip.pipeline.tip", L"Pipeline: what makes the picture on screen"},
+            {L"chip.pipeline.settings", L"Rendered with: %s"},
+            {L"chip.pipeline.pending", L"The Picture panel holds other settings; Apply renders with them."},
+            {L"chip.pipeline.no_guides", L"none"},
+            {L"chip.pipeline.sr_quality", L"DLSS SR quality: %s"},
+            {L"chip.pipeline.dlaa", L"DLAA (DLSS anti-aliasing at the source's own size)"},
+            {L"chip.pipeline.vsr_quality", L"RTX VSR quality: %s"},
+            {L"chip.pipeline.addon", L"Neural add-on: a modified community build, experimental"},
+            {L"chip.pipeline.safe_mode", L"DLSS SR safe mode: the neural add-on is not loaded"},
+            {L"chip.pipeline.no_addon", L"Neural add-on: not loaded, so DLSS 5 cannot render"},
             {L"neural.settings.group_source", L"What the model is given"},
             {L"encoder.settings.gpu_convert", L"GPU color conversion"},
             {L"encoder.settings.gpu_source", L"GPU source conversion"},

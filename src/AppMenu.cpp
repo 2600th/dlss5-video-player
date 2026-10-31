@@ -27,6 +27,38 @@ HMENU find_menu_containing_command(HMENU menu, UINT command)
     return nullptr;
 }
 
+// A popup and its submenus as new menus, every row's id, text, check, grey and
+// radio mark copied: what a menu bar popup shows, to open somewhere else.
+HMENU copy_popup(HMENU source)
+{
+    HMENU copy = CreatePopupMenu();
+    if (!copy || !source) return copy;
+    const int count = GetMenuItemCount(source);
+    for (int index = 0; index < count; ++index) {
+        wchar_t text[256]{};
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_STRING | MIIM_SUBMENU;
+        item.dwTypeData = text;
+        item.cch = static_cast<UINT>(std::size(text));
+        if (!GetMenuItemInfoW(source, static_cast<UINT>(index), TRUE, &item)) continue;
+        MENUITEMINFOW row{sizeof(row)};
+        row.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE;
+        row.wID = item.wID;
+        row.fType = item.fType & (MFT_SEPARATOR | MFT_RADIOCHECK);
+        row.fState = item.fState & (MFS_CHECKED | MFS_DISABLED);
+        if (!(item.fType & MFT_SEPARATOR)) {
+            row.fMask |= MIIM_STRING;
+            row.dwTypeData = text;
+        }
+        if (item.hSubMenu) {
+            row.fMask |= MIIM_SUBMENU;
+            row.hSubMenu = copy_popup(item.hSubMenu);
+        }
+        InsertMenuItemW(copy, static_cast<UINT>(GetMenuItemCount(copy)), TRUE, &row);
+    }
+    return copy;
+}
+
 } // namespace
 
 namespace app_menu {
@@ -52,6 +84,10 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
 
 HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& localizer, const key_bindings::Table& keys)
 {
+    if (which == ToolbarMenu::Compare) {
+        // The Compare menu as the bar has it, found by its first mode.
+        if (HMENU compare = find_menu_containing_command(menuBar, IDM_COMPARE_NEURAL)) return copy_popup(compare);
+    }
     HMENU menu = CreatePopupMenu();
     if (!menu) return nullptr;
     const auto heading = [&](const wchar_t* key) {
@@ -112,6 +148,12 @@ HMENU CreateToolbarMenu(ToolbarMenu which, HMENU menuBar, const Localizer& local
         mirror(IDM_FULLSCREEN, L"menu.fullscreen");
         break;
     }
+    case ToolbarMenu::Compare:
+        // A menu bar without the Compare menu (only a test builds one): its modes.
+        for (const UINT command : {IDM_COMPARE_NEURAL, IDM_COMPARE_ORIGINAL, IDM_COMPARE_VSR, IDM_COMPARE_SPLIT,
+                                   IDM_COMPARE_WIPE, IDM_COMPARE_DIFFERENCE, IDM_COMPARE_SIDE_BY_SIDE, IDM_COMPARE_QUAD})
+            mirror(command, nullptr);
+        break;
     case ToolbarMenu::Neural:
         heading(L"menu.neural_presets");
         for (UINT index = 0; index < neural_presets::kPresetCount; ++index) mirror(IDM_NEURAL_PRESET_FIRST + index, nullptr);
@@ -277,7 +319,9 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key
     separator(compare);
     // What the other modes compare against, then one submenu per view that has
     // settings of its own. M3's loop, speed and flicker-map rows go in this
-    // group, one submenu per feature, as the compare bar's contextual part does.
+    // group, one submenu per feature, as the compare bar's contextual part does
+    // (CompareBarPolicy.h Part, main.cpp CompareBarContext); the bar's "more"
+    // button opens this whole menu, so a row here is where its control folds to.
     add(compare, IDM_COMPARE_AGAINST_VSR, L"menu.compare_against_vsr");
     HMENU difference = CreatePopupMenu();
     add(difference, IDM_COMPARE_DIFFERENCE_LESS, L"menu.compare_difference_less");
@@ -308,6 +352,8 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key
     // DLSS 5: the toggle, the panel, the look, and the render's own pace.
     add(enhance, IDM_NEURAL_RENDERING, L"menu.neural_rendering");
     add(enhance, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+    // The panel's Revert, so its key is in the key column and on the sheet.
+    add(enhance, IDM_PICTURE_REVERT, L"menu.picture_revert", MF_GRAYED);
     // Every preset is one neural evaluation at the same resolution, so this is a
     // choice of look, not a speed trade, and the menu says so where the choice is
     // made. Disabled, because it is a statement and not a choice. The numbers and

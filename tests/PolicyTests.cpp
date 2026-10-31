@@ -2584,33 +2584,83 @@ void status_chips_keep_fixed_places_and_give_the_line_the_rest_test()
 {
     using namespace status_chips;
     const RECT row{145, 500, 1424, 523};
-    const RowLayout all = LayoutRow(row, 96, {true, true, true});
+    const auto at = [](const RowLayout& layout, Chip chip) { return layout.chips[size_t(chip)]; };
+    const RowLayout all = LayoutRow(row, 96, {true, true, true, true});
     // Fixed order, fixed widths, right-aligned with a gap between.
-    CHECK_EQ(1424L, all.chips[2].right);
-    CHECK_EQ(LONG(kDroppedChipWidthDip), all.chips[2].right - all.chips[2].left);
-    CHECK_EQ(LONG(kFpsChipWidthDip), all.chips[1].right - all.chips[1].left);
-    CHECK_EQ(LONG(kRenderChipWidthDip), all.chips[0].right - all.chips[0].left);
-    CHECK_EQ(LONG(kChipGapDip), all.chips[2].left - all.chips[1].right);
-    CHECK_EQ(LONG(kChipGapDip), all.chips[1].left - all.chips[0].right);
-    CHECK_EQ(all.chips[0].left - LONG(kChipGapDip), all.text.right);
-    CHECK_EQ(LONG(kChipHeightDip), all.chips[0].bottom - all.chips[0].top);
+    CHECK_EQ(1424L, at(all, Chip::Dropped).right);
+    CHECK_EQ(LONG(kDroppedChipWidthDip), at(all, Chip::Dropped).right - at(all, Chip::Dropped).left);
+    CHECK_EQ(LONG(kFpsChipWidthDip), at(all, Chip::Fps).right - at(all, Chip::Fps).left);
+    CHECK_EQ(LONG(kRenderChipWidthDip), at(all, Chip::Render).right - at(all, Chip::Render).left);
+    CHECK_EQ(LONG(kPipelineChipWidthDip), at(all, Chip::Pipeline).right - at(all, Chip::Pipeline).left);
+    CHECK_EQ(LONG(kChipGapDip), at(all, Chip::Dropped).left - at(all, Chip::Fps).right);
+    CHECK_EQ(LONG(kChipGapDip), at(all, Chip::Fps).left - at(all, Chip::Render).right);
+    CHECK_EQ(LONG(kChipGapDip), at(all, Chip::Render).left - at(all, Chip::Pipeline).right);
+    CHECK_EQ(at(all, Chip::Pipeline).left - LONG(kChipGapDip), all.text.right);
+    CHECK_EQ(LONG(kChipHeightDip), at(all, Chip::Render).bottom - at(all, Chip::Render).top);
     // A chip that is not shown gives its room to the line, and the others do
     // not move.
-    const RowLayout noRender = LayoutRow(row, 96, {false, true, true});
-    CHECK(noRender.chips[0].right == noRender.chips[0].left);
-    CHECK_EQ(all.chips[1].left, noRender.chips[1].left);
-    CHECK_EQ(all.chips[1].left - LONG(kChipGapDip), noRender.text.right);
-    // Too narrow for every chip and the line's minimum: the render chip goes
-    // first, never one from the middle.
+    const RowLayout noRender = LayoutRow(row, 96, {false, false, true, true});
+    CHECK(at(noRender, Chip::Render).right == at(noRender, Chip::Render).left);
+    CHECK(at(noRender, Chip::Pipeline).right == at(noRender, Chip::Pipeline).left);
+    CHECK_EQ(at(all, Chip::Fps).left, at(noRender, Chip::Fps).left);
+    CHECK_EQ(at(all, Chip::Fps).left - LONG(kChipGapDip), noRender.text.right);
+    // Without a render the pipeline chip moves up beside the rate.
+    const RowLayout noRenderPipeline = LayoutRow(row, 96, {true, false, true, true});
+    CHECK_EQ(at(noRenderPipeline, Chip::Pipeline).right + LONG(kChipGapDip), at(all, Chip::Fps).left);
+    // Too narrow for every chip and the line's minimum: the pipeline chip goes
+    // first, then the render chip, never one from the middle.
     const RECT narrow{145, 500, 145 + kMinimumTextWidthDip + 260, 523};
-    const RowLayout squeezed = LayoutRow(narrow, 96, {true, true, true});
-    CHECK(squeezed.chips[0].right == squeezed.chips[0].left);
-    CHECK(squeezed.chips[1].right > squeezed.chips[1].left);
-    CHECK(squeezed.chips[2].right > squeezed.chips[2].left);
+    const RowLayout squeezed = LayoutRow(narrow, 96, {true, true, true, true});
+    CHECK(at(squeezed, Chip::Pipeline).right == at(squeezed, Chip::Pipeline).left);
+    CHECK(at(squeezed, Chip::Render).right == at(squeezed, Chip::Render).left);
+    CHECK(at(squeezed, Chip::Fps).right > at(squeezed, Chip::Fps).left);
+    CHECK(at(squeezed, Chip::Dropped).right > at(squeezed, Chip::Dropped).left);
     CHECK(squeezed.text.right - squeezed.text.left >= kMinimumTextWidthDip);
+    const RECT middling{145, 500, 145 + kMinimumTextWidthDip + 460, 523};
+    const RowLayout pipelineFirst = LayoutRow(middling, 96, {true, true, true, true});
+    CHECK(at(pipelineFirst, Chip::Pipeline).right == at(pipelineFirst, Chip::Pipeline).left);
+    CHECK(at(pipelineFirst, Chip::Render).right > at(pipelineFirst, Chip::Render).left);
     // Scales with dpi.
-    const RowLayout scaled = LayoutRow(RECT{218, 750, 2136, 785}, 144, {true, true, true});
-    CHECK_EQ(LONG(MulDiv(kDroppedChipWidthDip, 144, 96)), scaled.chips[2].right - scaled.chips[2].left);
+    const RowLayout scaled = LayoutRow(RECT{218, 750, 2136, 785}, 144, {true, true, true, true});
+    CHECK_EQ(LONG(MulDiv(kDroppedChipWidthDip, 144, 96)), at(scaled, Chip::Dropped).right - at(scaled, Chip::Dropped).left);
+    CHECK_EQ(LONG(MulDiv(kPipelineChipWidthDip, 144, 96)), at(scaled, Chip::Pipeline).right - at(scaled, Chip::Pipeline).left);
+}
+
+// The pipeline chip names the stages that make the picture, each once and in the
+// order a frame meets them; RTX VSR stands aside while DLSS SR runs, so the two
+// are never named together. Its tip's first fact is the sizes through them.
+void pipeline_chip_names_each_stage_once_test()
+{
+    using namespace status_chips;
+    const PipelineNames names{L"DLSS 5", L"DLSS SR", L"RTX VSR", L"Original"};
+    CHECK_EQ(std::wstring(L"Original"), PipelineText({}, names));
+    CHECK_EQ(std::wstring(L"DLSS 5"), PipelineText({true, false, false}, names));
+    CHECK_EQ(std::wstring(L"DLSS 5 \u00b7 RTX VSR"), PipelineText({true, false, true}, names));
+    CHECK_EQ(std::wstring(L"DLSS 5 \u00b7 DLSS SR"), PipelineText({true, true, true}, names));
+    CHECK_EQ(std::wstring(L"RTX VSR"), PipelineText({false, false, true}, names));
+    CHECK_EQ(std::wstring(L"1360\u00d7696 \u2192 DLSS 5 \u2192 RTX VSR \u2192 1628\u00d7833"),
+             PipelineFlow(1360, 696, {true, false, true}, names, 1628, 833));
+    CHECK_EQ(std::wstring(L"1920\u00d71080 \u2192 DLSS 5 \u2192 1920\u00d71080"), PipelineFlow(1920, 1080, {true, false, false}, names, 1920, 1080));
+    // No stage: the source, and the size the window shows it at when that differs.
+    CHECK_EQ(std::wstring(L"1920\u00d71080"), PipelineFlow(1920, 1080, {}, names, 1920, 1080));
+    CHECK_EQ(std::wstring(L"1280\u00d7720 \u2192 1920\u00d71080"), PipelineFlow(1280, 720, {}, names, 1920, 1080));
+    CHECK_EQ(std::wstring(L"1280\u00d7720 \u2192 DLSS SR"), PipelineFlow(1280, 720, {false, true, false}, names, 0, 0));
+    // The chip: shown with media, quiet, and never flashing - it is a name, not a meter.
+    const Snapshot chips = Build(true, {}, 30.0, 30.0, 0, L"DLSS 5");
+    CHECK(At(chips, Chip::Pipeline).visible);
+    CHECK(At(chips, Chip::Pipeline).quiet);
+    CHECK_EQ(uint64_t{0}, At(chips, Chip::Pipeline).flashKey);
+    CHECK(!At(Build(true, {}, 30.0, 30.0, 0), Chip::Pipeline).visible);
+    CHECK(!At(Build(false, {}, 30.0, 30.0, 0, L"DLSS 5"), Chip::Pipeline).visible);
+    Flash flash;
+    const std::chrono::steady_clock::time_point start{};
+    flash.Observe(Build(true, {}, 30.0, 30.0, 0, L"DLSS 5"), start);
+    flash.Observe(Build(true, {}, 30.0, 30.0, 0, L"DLSS 5 \u00b7 RTX VSR"), start + std::chrono::seconds(5));
+    CHECK_EQ(0.0, flash.Level(Chip::Pipeline, start + std::chrono::seconds(5)));
+    // Its tip is what the caller built, whole.
+    TipFacts facts{};
+    facts.pipeline = L"Pipeline\nfacts";
+    CHECK_EQ(facts.pipeline, TipText(Chip::Pipeline, facts));
 }
 
 void feature_pills_shrink_before_the_bar_goes_compact_test()
@@ -3600,8 +3650,11 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(CommandForPlayerKey('L', true, false) == app_menu::IDM_OPEN_YOUTUBE);
     for (const UINT key : {UINT('G'), UINT('N')})
         CHECK(!CommandForPlayerKey(key, false, false).has_value());
-    for (const UINT key : {'I', 'F', 'Z'})
+    for (const UINT key : {'I', 'F', 'K'})
         CHECK(!CommandForPlayerKey(key, true, false).has_value());
+    // Ctrl+Z is the Picture panel's Revert (new in 0.30.0); Z alone still zooms.
+    CHECK(CommandForPlayerKey('Z', true, false) == app_menu::IDM_PICTURE_REVERT);
+    CHECK(CommandForPlayerKey('Z', false, false) == app_menu::IDM_COMPARE_ZOOM);
     CHECK(!CommandForPlayerKey('G', true, true).has_value());
     // Modifiers match exactly: Shift+S is not S.
     CHECK(!CommandForPlayerKey('S', false, true).has_value());
@@ -11014,6 +11067,94 @@ void compare_bar_fits_every_width_and_dpi_test()
     for(const Item& item:plain.items)if(item.part==Part::Swap||item.part==Part::Loupe)CHECK(item.face==Face::Label);
 }
 
+// The selected mode's own controls (UI proposal 3.3): placed after Loupe in the
+// hint's room, all of them or none, never changing the tier; the "more" button at
+// the right end of every tier, at every width from the player's minimum up.
+void compare_bar_carries_the_modes_controls_and_folds_them_test()
+{
+    using namespace compare_bar;
+    for(const UINT dpi:{96u,144u,192u}){
+        Metrics metrics=EstimatedMetrics(8,dpi);
+        const Metrics plain=metrics;
+        // Difference: a gain drop-down and Luma | Color.
+        metrics.context={{Part::DifferenceGain,Scale(24,dpi),true},{Part::DifferenceLuma,Scale(30,dpi),false},{Part::DifferenceColor,Scale(34,dpi),false}};
+        const int gutter=Scale(kGutterDip,dpi);
+        bool shown=false,folded=false;
+        for(int width=MinimumToolbarClientWidth(dpi);width<=Scale(2400,dpi);width+=Scale(7,dpi)){
+            const Layout bar=LayoutBar(width,0,dpi,metrics,true);
+            CHECK(bar.fits);
+            // The controls never cost the modes their labels.
+            CHECK(bar.tier==LayoutBar(width,0,dpi,plain,true).tier);
+            // "More" is last, at the gutter, the size it should be.
+            REQUIRE(!bar.items.empty());
+            const Item& more=bar.items.back();
+            CHECK(more.part==Part::More);
+            CHECK_EQ(LONG(width-gutter),more.bounds.right);
+            CHECK_EQ(LONG(Scale(kMoreDip,dpi)),more.bounds.right-more.bounds.left);
+            size_t context=0;LONG previous=0,loupeRight=0;
+            for(const Item& item:bar.items){
+                CHECK(item.bounds.left>=previous);previous=item.bounds.right;
+                if(item.part==Part::Loupe)loupeRight=item.bounds.right;
+                if(item.part==Part::DifferenceGain||item.part==Part::DifferenceLuma||item.part==Part::DifferenceColor){
+                    ++context;CHECK(item.bounds.left>loupeRight);CHECK(item.bounds.right<more.bounds.left);
+                    // Wide enough for its text, and the gain for its chevron too.
+                    const ContextLabel* label=nullptr;for(const ContextLabel& c:metrics.context)if(c.part==item.part)label=&c;
+                    REQUIRE(label!=nullptr);
+                    const int extra=label->menu?Scale(kIconLabelGapDip,dpi)+Scale(kChevronDip,dpi):0;
+                    CHECK(item.bounds.right-item.bounds.left>=label->label+2*Scale(kLabelInsetDip,dpi)+extra);
+                }
+            }
+            // All or none, and folded exactly when none.
+            CHECK(context==0||context==metrics.context.size());
+            CHECK(bar.contextFolded==(context==0));
+            if(context)shown=true;else folded=true;
+            if(bar.hint.right>bar.hint.left)CHECK(bar.hint.right<=more.bounds.left);
+            // The Mix group runs from its caption (or track) to its read-out.
+            CHECK(bar.mixGroup.left<=bar.mixTrack.left&&bar.mixGroup.right>=bar.mixTrack.right);
+            CHECK(bar.mixGroup.top==bar.bar.top&&bar.mixGroup.bottom==bar.bar.bottom);
+        }
+        // The player's minimum folds them; a wide window shows them.
+        CHECK(shown);CHECK(folded);
+    }
+    // A mode with no controls of its own folds nothing.
+    const Layout none=LayoutBar(700,0,96,EstimatedMetrics(8,96),true);
+    CHECK(!none.contextFolded);
+    CHECK(none.items.back().part==Part::More);
+    // "More" is a target like the rest.
+    const Item& more=none.items.back();
+    const Item* hit=HitTest(none,POINT{(more.bounds.left+more.bounds.right)/2,(more.bounds.top+more.bounds.bottom)/2});
+    CHECK(hit!=nullptr&&hit->part==Part::More);
+}
+
+// The Mix's double-click: two presses within the system's time and distance,
+// the second one reported once; slow, far or forgotten presses are first presses.
+void compare_bar_double_click_is_the_systems_and_the_mixs_own_test()
+{
+    using compare_bar::DoubleClick;
+    const UINT interval=500;const int cx=4,cy=4;
+    DoubleClick click;
+    CHECK(!click.Press(1000,POINT{10,10},interval,cx,cy));
+    CHECK(click.Press(1000+interval,POINT{12,8},interval,cx,cy));
+    // A third press starts over, so a triple-click is one double-click and a press.
+    CHECK(!click.Press(1000+interval+10,POINT{12,8},interval,cx,cy));
+    // Too slow: the second becomes a first.
+    CHECK(!click.Press(5000,POINT{10,10},interval,cx,cy));
+    CHECK(!click.Press(5000+interval+1,POINT{10,10},interval,cx,cy));
+    CHECK(click.Press(5000+interval+2,POINT{10,10},interval,cx,cy));
+    // Too far, in either direction (the rectangle is centred on the first press).
+    CHECK(!click.Press(9000,POINT{10,10},interval,cx,cy));
+    CHECK(!click.Press(9001,POINT{13,10},interval,cx,cy));
+    CHECK(!click.Press(9100,POINT{50,10},interval,cx,cy));
+    CHECK(!click.Press(9101,POINT{50,13},interval,cx,cy));
+    // Forgotten (a press elsewhere between the two): no double-click.
+    CHECK(!click.Press(12000,POINT{10,10},interval,cx,cy));
+    click.Forget();
+    CHECK(!click.Press(12001,POINT{10,10},interval,cx,cy));
+    // The tick count wraps; an interval across the wrap still counts.
+    CHECK(!click.Press(0xFFFFFF00u,POINT{10,10},interval,cx,cy));
+    CHECK(click.Press(0x00000010u,POINT{10,10},interval,cx,cy));
+}
+
 // The zoom ladder is in screen pixels per output pixel, so the same step is a
 // different scale in a different window, and steps that would not magnify are skipped.
 void compare_zoom_ladder_zooms_at_the_pointer_and_pans_test()
@@ -17362,6 +17503,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(status_chip_tips_say_what_was_measured_test),
     TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),
     TEST_CASE(status_chips_keep_fixed_places_and_give_the_line_the_rest_test),
+    TEST_CASE(pipeline_chip_names_each_stage_once_test),
     TEST_CASE(feature_pills_shrink_before_the_bar_goes_compact_test),
     TEST_CASE(timeline_reads_chapters_the_way_ffprobe_prints_them_test),
     TEST_CASE(timeline_hover_says_where_and_what_the_render_map_says_there_test),
@@ -17493,6 +17635,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_label_premultiply_matches_the_gdi_composite_test),
     TEST_CASE(compare_bar_lays_out_and_hit_tests_test),
     TEST_CASE(compare_bar_fits_every_width_and_dpi_test),
+    TEST_CASE(compare_bar_carries_the_modes_controls_and_folds_them_test),
+    TEST_CASE(compare_bar_double_click_is_the_systems_and_the_mixs_own_test),
     TEST_CASE(compare_zoom_ladder_zooms_at_the_pointer_and_pans_test),
     TEST_CASE(compare_loupe_and_one_to_one_placement_test),
     TEST_CASE(compare_mask_shrinks_feathers_and_is_remembered_per_source_test),
