@@ -3,12 +3,16 @@
 #include <windows.h>
 
 #include <cwchar>
+#include <fstream>
+#include <iterator>
 #include <string_view>
 #include <system_error>
 
 #include "FrameGenerationPass.h"
 #include "Log.h"
+#include "NeuralPreflight.h"
 #include "NeuralWorker.h"
+#include "OfflineNeuralRenderer.h"
 #include "ReShadeConfig.h"
 #include "RuntimeModulePolicy.h"
 #include "Utf8Text.h"
@@ -185,6 +189,28 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
         if(!result.ok){
             sweep();
             return {result.cancelled?StageExportStatus::Cancelled:StageExportStatus::Failed,result.detail};
+        }
+        // An export runs no preflight, so the NR DLL the add-on loaded is read
+        // from its log here: RenoDX 10.8.0 falls back to another one when the
+        // file NRRuntimePath names will not load, and the export would then
+        // be a different runtime's picture under this one's name.
+        if(plan.requireNeural){
+            const neural_runtime::Runtime& wanted=neural_runtime::Select(job.gpu,job.neuralSettings.previousRuntime);
+            std::string log;
+            if(const auto path=ResolveNeuralRuntimeLogPath(runtimeDirectory);!path.empty()){
+                std::ifstream in(path,std::ios::binary);
+                log.assign(std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>());
+            }
+            const NeuralRuntimeBanner banner=ParseNeuralRuntimeBanner(log);
+            const std::string loaded=NeuralRuntimeFileRelativeTo(banner.dlssnrFile,runtimeDirectory);
+            if(!loaded.empty()&&!SameNeuralRuntimeFile(loaded,wanted.file)){
+                sweep();
+                const std::wstring refusal=L"The neural runtime loaded "+utf8_text::ToWide(loaded)+L" instead of "+std::wstring(wanted.file)+L".";
+                LOG("Stage export refused after the helper: "<<utf8_text::FromWide(refusal));
+                return {StageExportStatus::Failed,refusal};
+            }
+            LOG("Stage export rendered on "<<(loaded.empty()?std::string("an unnamed NR file"):loaded)<<" (DLSS-NR "<<(banner.dlssnrRuntime.empty()?std::string("?"):banner.dlssnrRuntime)
+                <<", "<<(loaded.empty()?std::string("signature unknown"):AuthenticodeState(runtimeDirectory/utf8_text::ToWide(loaded)))<<")");
         }
         produced=stageOne;
     }
