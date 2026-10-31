@@ -1,23 +1,46 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
+// Every string the player shows, by key. English is here; a translation
+// (TranslationFile.h) is laid over it, and any key it does not carry reads in
+// English, so a half-finished translation is a partly English player rather
+// than a broken one.
 class Localizer {
 public:
+    using Map = std::unordered_map<std::wstring, std::wstring>;
+
+    Localizer() = default;
+    // `translation` holds only keys English has, with placeholders that match
+    // (translation::Usable); `language` is its tag, "en" for none.
+    Localizer(Map translation, std::wstring language)
+        : translation_(std::make_shared<const Map>(std::move(translation))), language_(std::move(language)) {}
+
     std::wstring Get(const wchar_t* key) const {
+        if (!key) return {};
+        if (translation_) {
+            const auto it = translation_->find(key);
+            if (it != translation_->end()) return it->second;
+        }
         const auto& strings = EnglishDefaults();
         const auto it = strings.find(key);
         if (it != strings.end()) return it->second;
-        return key ? std::wstring(key) : std::wstring();
+        return std::wstring(key);
     }
 
-    using Map = std::unordered_map<std::wstring, std::wstring>;
+    // The tag of the translation in use, "en" when the strings are English.
+    const std::wstring& Language() const { return language_; }
+
     // Every English string, for the tests that check what the strings claim
-    // (a menu path they name has to exist).
+    // (a menu path they name has to exist) and for what a translation is held to.
     static const Map& All() { return EnglishDefaults(); }
 
 private:
+    std::shared_ptr<const Map> translation_;
+    std::wstring language_ = L"en";
 
     static const Map& EnglishDefaults() {
         static const Map strings = {

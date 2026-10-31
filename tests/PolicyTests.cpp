@@ -18,6 +18,7 @@
 #include "GpuPreference.h"
 #include "ReShadeConfig.h"
 #include "Localization.h"
+#include "TranslationFile.h"
 #include "AppMenu.h"
 #include "UiLayout.h"
 #include "UiResources.h"
@@ -1207,6 +1208,148 @@ void menu_paths_named_in_text_exist_test()
     CHECK(broken.empty());
     // The strings do name menu paths; a walk that found none would prove nothing.
     CHECK(walked >= 5);
+}
+
+// The contributor's format, line by line: what reads as a string, and what is
+// reported and skipped without stopping the rest of the file.
+void translation_file_parses_the_contributor_format_test()
+{
+    const std::string file =
+        "\xEF\xBB\xBF# a comment\r\n"
+        "menu.file = Datei\r\n"
+        "  menu.playback=Wiedergabe  \n"
+        "\n"
+        "menu.rtx_vsr_unavailable = \" \xE2\x80\x94 %s\"\n"
+        "framegen.failed = Zeile eins\\nZeile zwei\\t\\\\\n"
+        "no equals here\n"
+        "bad key! = x\n"
+        "menu.exit = a \\q b\n"
+        "menu.file = zweimal\n"
+        "menu.stop = \xC3\x28\n";
+    const translation::Parsed parsed = translation::Parse(file);
+    CHECK_EQ(size_t(4), parsed.strings.size());
+    CHECK(parsed.strings.at(L"menu.file") == L"Datei");
+    CHECK(parsed.strings.at(L"menu.playback") == L"Wiedergabe");
+    // Quotes keep the space a value starts with; the dash is UTF-8 read as such.
+    CHECK(parsed.strings.at(L"menu.rtx_vsr_unavailable") == L" — %s");
+    CHECK(parsed.strings.at(L"framegen.failed") == L"Zeile eins\nZeile zwei\t\\");
+    const std::vector<std::wstring> expected{
+        L"line 7: no '=' - a string is key = text",
+        L"line 8: 'bad key!' is not a key",
+        L"line 9: 'menu.exit': only \\n, \\t, \\\\ and \\\" are escapes",
+        L"line 10: 'menu.file' is given twice; the first one is used",
+        L"line 11: not UTF-8; save the file as UTF-8",
+    };
+    CHECK(parsed.problems == expected);
+}
+
+// The template a translator starts from is every English string, and it reads
+// back as exactly English: nothing is lost to quoting or escaping.
+void translation_template_reads_back_as_english_test()
+{
+    const std::string file = translation::FormatFile(Localizer::All(), L"header\nsecond line");
+    CHECK(file.rfind("# header\r\n# second line\r\n", 0) == 0);
+    const translation::Parsed parsed = translation::Parse(file);
+    CHECK(parsed.problems.empty());
+    CHECK(parsed.strings == Localizer::All());
+    CHECK(translation::CheckAgainst(Localizer::All(), parsed.strings, true).empty());
+}
+
+// A placeholder lost in translation is a format call reading an argument that is
+// not there, so the check is strict and the player drops such a string.
+void translation_placeholders_survive_or_the_string_reads_in_english_test()
+{
+    using translation::Placeholders;
+    CHECK((Placeholders(L"%u of %s at %.1f%% and %ls\tfps") ==
+           std::vector<std::wstring>{L"%u", L"%s", L"%.1f", L"%ls", L"\t"}));
+    CHECK(Placeholders(L"100%% sure").empty());
+    CHECK(Placeholders(L"50%.").empty());
+    const translation::Map english{{L"a", L"%u files in %s"}, {L"b", L"plain"}, {L"c", L"x\ty"}};
+    const translation::Map good{{L"a", L"%u Dateien in %s"}, {L"b", L"schlicht"}};
+    CHECK(translation::CheckAgainst(english, good, false).empty());
+    CHECK((translation::CheckAgainst(english, good, true) == std::vector<std::wstring>{L"c: missing"}));
+    // Reordered, dropped, a tab lost, a key English lacks.
+    const translation::Map bad{{L"a", L"in %s: %u"}, {L"c", L"x y"}, {L"zzz", L"?"}};
+    const std::vector<std::wstring> expected{L"a: its placeholders differ from English's",
+                                             L"c: its placeholders differ from English's", L"zzz: not an English key"};
+    CHECK(translation::CheckAgainst(english, bad, false) == expected);
+    CHECK(translation::Usable(english, bad).empty());
+    CHECK(translation::Usable(english, good).size() == 2);
+    // Every English string keeps its placeholders when made longer for the
+    // layout tests, so they test the strings a translation could really have.
+    translation::Map pseudo;
+    for (const auto& [key, text] : Localizer::All()) pseudo.emplace(key, translation::Pseudo(text, 0.4));
+    CHECK(translation::CheckAgainst(Localizer::All(), pseudo, true).empty());
+}
+
+void translation_files_follow_the_display_language_test()
+{
+    using translation::FileCandidates;
+    // Windows names Chinese by region; the files name it by script.
+    CHECK((FileCandidates(L"zh-CN", L"Hans") == std::vector<std::wstring>{L"zh-CN", L"zh-Hans-CN", L"zh-Hans", L"zh"}));
+    CHECK((FileCandidates(L"zh-TW", L"Hant") == std::vector<std::wstring>{L"zh-TW", L"zh-Hant-TW", L"zh-Hant", L"zh"}));
+    CHECK((FileCandidates(L"zh-Hans-SG", L"") == std::vector<std::wstring>{L"zh-Hans-SG", L"zh-Hans", L"zh"}));
+    CHECK((FileCandidates(L"de-DE", L"Latn") == std::vector<std::wstring>{L"de-DE", L"de-Latn-DE", L"de-Latn", L"de"}));
+    CHECK((FileCandidates(L"ja", L"") == std::vector<std::wstring>{L"ja"}));
+    CHECK(FileCandidates(L"", L"").empty());
+}
+
+// The fixture locale proves the loader end to end: its strings read over
+// English, everything it leaves out or gets wrong reads in English, and what it
+// gets wrong is reported.
+void translation_fixture_locale_reads_over_english_test()
+{
+    const std::filesystem::path fixtures = std::filesystem::path(DLSS_TEST_SOURCE_DIR).parent_path() / L"tests" / L"lang";
+    const translation::Loaded loaded = translation::Load(fixtures, L"x-test", Localizer::All());
+    CHECK(loaded.language == L"x-test");
+    CHECK(loaded.file.filename() == L"x-test.lang");
+    const Localizer localizer(loaded.strings, loaded.language);
+    CHECK(localizer.Language() == L"x-test");
+    CHECK(localizer.Get(L"app.title") == L"DLSS 5 Videoabspieler (Prüfung)");
+    CHECK(localizer.Get(L"menu.file") == L"Ｆｉｌｅ");
+    CHECK(localizer.Get(L"menu.rtx_vsr_unavailable") == L" — %s (Prüfung)");
+    // Not in the file, and in the file with its %s lost: both English.
+    CHECK(localizer.Get(L"menu.playback") == Localizer().Get(L"menu.playback"));
+    CHECK(localizer.Get(L"audio.passthrough.active") == Localizer().Get(L"audio.passthrough.active"));
+    CHECK(!loaded.strings.contains(L"not.an.english.key"));
+    const auto reported = [&](std::wstring_view text) {
+        return std::any_of(loaded.problems.begin(), loaded.problems.end(),
+                           [&](const std::wstring& problem) { return problem.find(text) != std::wstring::npos; });
+    };
+    CHECK(reported(L"no '='"));
+    CHECK(reported(L"not.an.english.key: not an English key"));
+    CHECK(reported(L"audio.passthrough.active: its placeholders differ"));
+    // A regional tag finds the language's file; English and an unknown language are English.
+    CHECK(translation::Load(fixtures, L"x-test-CA", Localizer::All()).language == L"x-test");
+    CHECK(translation::Load(fixtures, L"en", Localizer::All()).strings.empty());
+    const translation::Loaded none = translation::Load(fixtures, L"tlh", Localizer::All());
+    CHECK(none.language == L"en");
+    CHECK(none.strings.empty());
+    CHECK(none.file.empty());
+}
+
+// Every translation the project ships: no key English lacks, none missing, every
+// placeholder carried over, and nothing the parser had to skip. The fixture
+// locale under tests/ is not shipped and is not held to this.
+void shipped_translations_are_complete_test()
+{
+    const std::filesystem::path directory = std::filesystem::path(DLSS_TEST_SOURCE_DIR).parent_path() / translation::kDirectory;
+    std::error_code error;
+    size_t checked = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+        if (entry.path().extension() != translation::kExtension) continue;
+        ++checked;
+        std::ifstream stream(entry.path(), std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+        const translation::Parsed parsed = translation::Parse(bytes);
+        std::vector<std::wstring> problems = parsed.problems;
+        for (auto& problem : translation::CheckAgainst(Localizer::All(), parsed.strings, true)) problems.push_back(std::move(problem));
+        for (const auto& problem : problems) std::wcerr << entry.path().filename().wstring() << L": " << problem << L'\n';
+        CHECK(problems.empty());
+    }
+    // No lang folder at all is no translation yet; anything else that stops the scan is a fault.
+    CHECK(!error || error == std::errc::no_such_file_or_directory);
+    std::wcerr << L"shipped translations checked: " << checked << L'\n';
 }
 
 void keyboard_cheat_sheet_flows_whole_groups_into_columns_test()
@@ -15224,6 +15367,12 @@ void player_command_line_takes_the_output_box_and_the_last_file_test()
     CHECK(!noCross.outputExplicit);
     CHECK(noCross.file.empty());
     CHECK(noCross.error.empty());
+    // A translation to try, and the template to start one from; neither value
+    // is ever taken for the file to open.
+    const auto language = Parse({L"--lang", L"zh-Hans", L"clip.mkv", L"--lang-template", L"en.lang"});
+    CHECK(language.language == L"zh-Hans");
+    CHECK(language.languageTemplate == L"en.lang");
+    CHECK(language.file == L"clip.mkv");
 
     // --safe-mode was read by ParseRuntimeArguments; here it is skipped, as
     // is any other option. The last plain argument is the file.
@@ -15823,6 +15972,12 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(timeline_thumbnails_are_bucketed_cached_and_cheap_to_ask_for_test),
     TEST_CASE(keyboard_cheat_sheet_is_read_from_the_menus_test),
     TEST_CASE(menu_paths_named_in_text_exist_test),
+    TEST_CASE(translation_file_parses_the_contributor_format_test),
+    TEST_CASE(translation_template_reads_back_as_english_test),
+    TEST_CASE(translation_placeholders_survive_or_the_string_reads_in_english_test),
+    TEST_CASE(translation_files_follow_the_display_language_test),
+    TEST_CASE(translation_fixture_locale_reads_over_english_test),
+    TEST_CASE(shipped_translations_are_complete_test),
     TEST_CASE(keyboard_cheat_sheet_flows_whole_groups_into_columns_test),
     TEST_CASE(dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test),
     TEST_CASE(media_controls_ask_for_a_state_and_push_the_timeline_sparingly_test),

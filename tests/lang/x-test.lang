@@ -1,0 +1,11 @@
+# A fixture for the translation loader's tests (PolicyTests,
+# translation_fixture_locale_reads_over_english_test). Not a language anyone
+# reads, and never packaged: x- is BCP 47's private-use prefix.
+app.title = DLSS 5 Videoabspieler (Prüfung)
+menu.file = Ｆｉｌｅ
+menu.rtx_vsr_unavailable = " — %s (Prüfung)"
+vsr.keep_up.lowered = Wiedergabe zu langsam: RTX VSR auf %s gesenkt
+# Below: what the loader reports and leaves in English.
+audio.passthrough.active = Passthrough ohne Platzhalter
+not.an.english.key = ignoriert
+a line with no equals sign

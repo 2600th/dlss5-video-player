@@ -368,6 +368,9 @@ function Assert-Stage {
     # (docs/BUILDING.md), so it is allowed at the root and never required.
     $allowed = @($expected)
     if ($actual -ccontains $optionalVsrRuntime) { $allowed += $optionalVsrRuntime }
+    # A translation is lang\<language tag>.lang (src/TranslationFile.h); the
+    # packager ships whichever the tree has, so each is allowed and none required.
+    $allowed += @($actual | Where-Object { $_ -cmatch '^lang/[a-z]{2,3}(-[A-Za-z0-9]{2,8})*\.lang$' })
     $expectedSorted = @(Sort-PackagePathsOrdinal -Paths $allowed)
     if ([string]::Join("`n", $actual) -cne [string]::Join("`n", $expectedSorted)) {
         $missing = @($expectedSorted | Where-Object { $_ -cnotin $actual })

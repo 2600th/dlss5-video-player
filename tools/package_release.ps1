@@ -327,6 +327,16 @@ $sources += @(
     @('docs/EXAMPLE_VIDEOS.md', (Join-Path $repositoryRoot 'docs\EXAMPLE_VIDEOS.md'))
 )
 
+# The translations (src/TranslationFile.h): every lang\<tag>.lang the tree has,
+# in both variants, copied as committed (UTF-8, LF, pinned in .gitattributes).
+# PolicyTests' shipped_translations_are_complete_test is what lets one in.
+$languageRoot = Join-Path $repositoryRoot 'lang'
+if (Test-Path -LiteralPath $languageRoot -PathType Container) {
+    foreach ($language in @(Get-ChildItem -LiteralPath $languageRoot -Filter '*.lang' -File | Sort-Object Name)) {
+        $sources += ,@("lang/$($language.Name)", $language.FullName)
+    }
+}
+
 # RTX Video Super Resolution's feature DLL is optional: CMake stages it beside the
 # player only in a build configured with -DRTX_VIDEO_SDK (docs/BUILDING.md), the
 # SDK sits behind an NVIDIA developer login, and a build without it has no RTX VSR

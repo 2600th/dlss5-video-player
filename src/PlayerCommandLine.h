@@ -27,6 +27,12 @@ struct Parsed {
     // word opened "Trailer.mkv" for "...\007 First Light - Story Trailer.mkv",
     // which is also why a lone "-" counts as a word rather than an option.
     std::wstring file;
+    // `--lang <tag>`: the translation to use instead of the Windows display
+    // language's (TranslationFile.h); `en` is English. For trying a file.
+    std::wstring language;
+    // `--lang-template <file>`: write every English string there, in the
+    // translation file's form, and exit - where a translation starts.
+    std::wstring languageTemplate;
     // Non-empty when the command line is refused; the text is shown as is.
     std::wstring error;
 };
@@ -55,6 +61,8 @@ inline Parsed Parse(const std::vector<std::wstring>& arguments)
                 parsed.maxHeight = static_cast<uint32_t>(std::clamp(_wtoi(value.substr(cross + 1).c_str()), 64, kMaxOutputSide));
                 parsed.outputExplicit = true;
             }
+        } else if ((argument == L"--lang" || argument == L"--lang-template") && index + 1 < arguments.size()) {
+            (argument == L"--lang" ? parsed.language : parsed.languageTemplate) = arguments[++index];
         } else if (argument == L"--quality") {
             parsed.error = L"The legacy --quality option was removed. Neural rendering preserves source resolution; "
                            L"choose Super Resolution output in the DLSS menu.";

@@ -41,6 +41,7 @@
 #include "AudioPlayer.h"
 #include "SubtitleOverlay.h"
 #include "Localization.h"
+#include "TranslationFile.h"
 #include "AppMenu.h"
 #include "UiLayout.h"
 #include "UiResources.h"
@@ -1262,6 +1263,7 @@ struct AppOptions {
     std::vector<std::wstring> userArguments;
     std::wstring argumentError;
     std::wstring file;
+    std::wstring language,languageTemplate;
 };
 
 static AppOptions ParseArgs() {
@@ -1274,6 +1276,7 @@ static AppOptions ParseArgs() {
     o.userArguments=runtimeArguments.userArguments;
     const player_command_line::Parsed parsed=player_command_line::Parse(o.userArguments);
     o.maxW=parsed.maxWidth;o.maxH=parsed.maxHeight;o.outputExplicit=parsed.outputExplicit;o.file=parsed.file;
+    o.language=parsed.language;o.languageTemplate=parsed.languageTemplate;
     if(!parsed.error.empty()){o.argumentsOk=false;o.argumentError=parsed.error;}
     return o;
 }
@@ -2652,6 +2655,7 @@ public:
     bool Create(HINSTANCE hi) {
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
         LoadVideoSettings();
+        LoadTranslation();
         NeuralCacheManager historyCache(m_cacheRoot);
         if(historyCache.Valid()){
             m_cacheRoot=historyCache.Root();
@@ -4743,6 +4747,23 @@ private:
         // located: the settings file is not worth refusing to start over.
         const auto directory=platform_paths::ModuleDirectory();
         return (directory?*directory:std::filesystem::current_path())/L"DLSSVideoPlayer.ini";
+    }
+
+    // The strings the player shows (TranslationFile.h): --lang, then [Interface]
+    // Language, then the Windows display language; English for whatever the
+    // file leaves out. Before the window exists, so its title and menus are in it.
+    void LoadTranslation(){
+        std::wstring requested=m_opt.language;
+        if(requested.empty()){
+            wchar_t language[64]{};
+            GetPrivateProfileStringW(L"Interface",L"Language",L"",language,static_cast<DWORD>(std::size(language)),SettingsPath().c_str());
+            requested=language;
+        }
+        const auto directory=platform_paths::ModuleDirectory();
+        translation::Loaded loaded=translation::Load((directory?*directory:std::filesystem::current_path())/translation::kDirectory,requested,Localizer::All());
+        for(const auto& problem:loaded.problems)LOG("Translation "<<WideToUtf8(loaded.file.filename().wstring())<<": "<<WideToUtf8(problem)<<" (ignored).");
+        if(!loaded.file.empty())LOG("Strings: "<<WideToUtf8(loaded.file.wstring())<<", "<<loaded.strings.size()<<" of "<<Localizer::All().size()<<" translated; the rest in English.");
+        m_loc=Localizer(std::move(loaded.strings),loaded.language);
     }
 
     float ReadIniFloat(const wchar_t* section,const wchar_t* key,float fallback)const{
@@ -12887,6 +12908,13 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
         if(render.mode!=render_command::Mode::Player)return RunRenderCommand(render,options.userArguments);
     }
     if(!options.argumentsOk){LOG("Invalid command line: "<<WideToUtf8(options.argumentError));MessageBoxW(nullptr,options.argumentError.c_str(),L"DLSS 5 Video Player",MB_OK|MB_ICONERROR);return 1;}
+    // A translator's starting point, written before anything else starts: no
+    // runtime, no window, no GPU.
+    if(!options.languageTemplate.empty()){
+        std::ofstream out(std::filesystem::path(options.languageTemplate),std::ios::binary|std::ios::trunc);
+        out<<translation::FormatFile(Localizer::All(),L"DLSS 5 Video Player strings, in English. Translate the text after each '=',\nsave as lang\\<language tag>.lang beside DLSSVideoPlayer.exe (zh-Hans.lang, de.lang)\nand delete any line you leave untranslated: a missing key reads in English.");
+        return out?0:1;
+    }
     const StartupResult startup=RunNeuralAddonBootstrap(options);
     if(startup==StartupResult::ExitSuccess)return 0;
     if(startup==StartupResult::ExitFailure)return 1;
