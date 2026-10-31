@@ -98,6 +98,7 @@
 #include "NvencDirect.h"
 #include "NvencDirectMux.h"
 #include "NvencDirectPolicy.h"
+#include "KeepAwake.h"
 #ifdef small
 #undef small
 #endif
@@ -106,6 +107,7 @@
 #include <shellapi.h>
 #include <tlhelp32.h>
 #include <winioctl.h>
+#include <powerbase.h>
 
 #include <filesystem>
 #include <fstream>
@@ -15790,6 +15792,37 @@ void nvenc_direct_hand_off_matroska_is_laid_out_as_ebml_test()
     CHECK(!std::filesystem::exists(path));
 }
 
+// P1.45: the guard holds a system-required power request for exactly its
+// scope, and two guards are two requests. SystemExecutionState is what the
+// power manager enforces across the machine, read unelevated (`powercfg
+// /requests` needs an administrator). Another process may hold a request of
+// its own, so the release is checked only when none was held before.
+bool SystemRequiredNow()
+{
+    EXECUTION_STATE state = 0;
+    return CallNtPowerInformation(SystemExecutionState, nullptr, 0, &state, sizeof(state)) == 0 &&
+           (state & ES_SYSTEM_REQUIRED) != 0;
+}
+
+void keep_awake_holds_a_system_request_for_its_scope_and_guards_are_independent_test()
+{
+    const bool heldBefore = SystemRequiredNow();
+    {
+        const KeepAwake outer(L"PolicyTests: the outer keep-awake guard");
+        CHECK(outer.Active());
+        CHECK(SystemRequiredNow());
+        {
+            const KeepAwake inner(L"PolicyTests: the inner keep-awake guard");
+            CHECK(inner.Active());
+            CHECK(SystemRequiredNow());
+        }
+        // The inner guard released its own request, not the outer one's.
+        CHECK(outer.Active());
+        CHECK(SystemRequiredNow());
+    }
+    if (!heldBefore) CHECK(!SystemRequiredNow());
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(runtime_shutdown_releases_player_before_media_foundation_and_com_test),
@@ -15837,6 +15870,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(framegen_addon_loads_its_proxy_as_a_second_module_beside_system32_test),
     TEST_CASE(framegen_addon_download_is_offered_only_on_rtx20_and_rtx30_without_it_test),
     TEST_CASE(framegen_addon_install_verifies_every_pin_before_writing_test),
+    TEST_CASE(keep_awake_holds_a_system_request_for_its_scope_and_guards_are_independent_test),
     TEST_CASE(start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),

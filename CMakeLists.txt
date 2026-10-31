@@ -535,6 +535,8 @@ if(BUILD_TESTING)
     target_compile_definitions(PolicyTests PRIVATE YOUTUBE_RESOLVER_TESTING
         "DLSS_TEST_SOURCE_DIR=L\"${CMAKE_SOURCE_DIR}/src\"")
     add_dependencies(PolicyTests DLSSVideoPlayer)
+    # CallNtPowerInformation: the keep-awake case reads the machine's execution state.
+    target_link_libraries(PolicyTests PRIVATE powrprof)
     # Two registrations of one binary: the quick tier every pull request runs,
     # and the cases that drive real child processes for a second or more each
     # (kSlowCases), labelled `slow` so `ctest --preset quick` leaves them out.
