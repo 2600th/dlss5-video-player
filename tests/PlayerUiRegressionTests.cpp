@@ -2309,7 +2309,10 @@ struct PlayerAppTestAccess {
             GetWindowRect(dialog, &window);
             const DWORD style = DWORD(GetWindowLongPtrW(dialog, GWL_STYLE)), exStyle = DWORD(GetWindowLongPtrW(dialog, GWL_EXSTYLE));
             UINT larger = 0;
-            for (const UINT candidate : {dpi * 3 / 2, dpi * 5 / 4, dpi * 9 / 8}) {
+            // 17/16 since 0.30.0: the Picture panel is 940 dip wide, and at 9/8 it no
+            // longer fit CI's 1024-wide display, so no step was left and the case
+            // stopped with the panel still open for the cases after it.
+            for (const UINT candidate : {dpi * 3 / 2, dpi * 5 / 4, dpi * 9 / 8, dpi * 17 / 16}) {
                 RECT scaled{0, 0, MulDiv(dialogCase.designW, int(candidate), 96), MulDiv(dialogCase.designH, int(candidate), 96)};
                 AdjustWindowRectForDpi(scaled, style, FALSE, exStyle, dpi);
                 if (scaled.right - scaled.left <= GetSystemMetrics(SM_CXMAXTRACK) &&
