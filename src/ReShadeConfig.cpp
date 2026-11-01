@@ -478,8 +478,8 @@ constexpr std::pair<std::string_view, std::string_view> kManagedNeuralSettings[]
 // history off" rendered as on (docs/measurements/knobs-653-20260924). Only a
 // section this player wrote gets the stamp (NeuralSectionNeedsVersion): anyone
 // else's keys may be older ones, and migrating those is what the add-on's
-// migration is for. A 0.28 section - 0.28's stamp 6 and nothing but this
-// player's keys, which 6.5.3 never added to - is this player's too, and is
+// migration is for. A 0.28 section - 0.28's stamp 6 and nothing but keys this
+// player has written, which 6.5.3 never added to - is this player's too, and is
 // restamped rather than migrated: its keys are written whole on every job, so
 // the add-on's ~200 filled-in defaults would only make the first render's
 // settings snapshot, and so its key, differ from every later one's.
@@ -490,12 +490,30 @@ constexpr std::pair<std::string_view, std::string_view> kNeuralConfigStamps[]{
 // The stamp 0.28 wrote, for RenoDX 6.5.3.
 constexpr std::pair<std::string_view, std::string_view> kPlayer028ConfigVersion{"ConfigVersion", "6"};
 
+// Every [RenoDX.DLSS5] key any release of this player has written, from the
+// git history of ReShadeConfig.cpp, NeuralSettings.cpp and StageExport.cpp:
+// the managed contract (NREnableUpscaling until 0.24, NRFollowInputRes and
+// NRResolutionScale after it), the Picture settings since 0.2x, the per-pass
+// strengths and NRPreUpscale since 0.25, and 0.30's pinned behaviours and
+// NRRuntimePath. A job writes only the keys it needs - NRPreUpscale=1 below
+// 100 % processing scale, and 0 once after it to put it back, then nothing
+// (PreUpscaleOverride) - so "this job's keys" missed a 0.28 section holding
+// the NRPreUpscale=0 of an earlier 75 % render, and 10.8.0 migrated it.
+constexpr std::string_view kKeysThisPlayerHasWritten[]{
+    "EnableHooks", "NeuralUplift", "NREnableUpscaling", "NRFollowInputRes", "NRResolutionScale",
+    "NRIntensity", "NRLocalTone", "NRLocalStructure", "NRSkinStructure", "NRColorStrength", "NRPreset",
+    "NRStyle", "NRAutoMask", "NRPasses", "NRChainedHistory", "NRNormGovernor", "NRDetailStability",
+    "NRSkinIndependent", "NRRuntimePath", "NRPreUpscale",
+    "NRPass2Intensity", "NRPass2Color", "NRPass3Intensity", "NRPass3Color", "NRPass4Intensity", "NRPass4Color",
+};
+
 // True when [RenoDX.DLSS5] is missing, or holds no stamp (or 0.28's
-// ConfigVersion=6) and nothing but keys this call writes (the managed contract
-// and the caller's overrides): a section this player created, so every value
-// in it already means what the pinned add-on means by it. A section with any
-// other key, or with any other version - older, newer or the add-on's stamp -
-// is left alone.
+// ConfigVersion=6) and nothing but keys this player writes - any it has ever
+// written, the managed contract and the caller's overrides: a section this
+// player created, whose keys it writes whole on every job, so every value in
+// it already means, or is about to mean, what the pinned add-on means by it.
+// A section with any other key, or with any other version - older, newer or
+// the add-on's stamp - is left alone.
 bool NeuralSectionNeedsVersion(std::string_view ini, std::span<const NeuralAddonOverride> overrides)
 {
     bool inSection = false;
@@ -517,7 +535,8 @@ bool NeuralSectionNeedsVersion(std::string_view ini, std::span<const NeuralAddon
         if (key == kPlayer028ConfigVersion.first && equals != std::string_view::npos &&
             Trim(content.substr(equals + 1)) == kPlayer028ConfigVersion.second)
             continue;
-        if (!std::ranges::any_of(kManagedNeuralSettings, ours) && !std::ranges::any_of(overrides, ours))
+        if (!std::ranges::any_of(kKeysThisPlayerHasWritten, [&](std::string_view written) { return key == written; }) &&
+            !std::ranges::any_of(kManagedNeuralSettings, ours) && !std::ranges::any_of(overrides, ours))
             return false;
     }
     return true;

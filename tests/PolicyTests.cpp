@@ -8297,9 +8297,13 @@ void neural_addon_runtime_settings_enable_neural_and_hold_native_resolution_test
         "NeuralUplift=1\n"
         "NREnableUpscaling=1\n"
         "NRIntensity=1.25\n"
+        "ConfigVersion=10\n"
+        "ConfigRevision=1\n"
         "NRFollowInputRes=0\n"
         "NRResolutionScale=1\n";
 
+    // Every key in it is one this player has written (NREnableUpscaling until
+    // 0.24), so it is stamped: the pair written after it is what 10.8.0 reads.
     const std::string updated = UpdateNeuralAddonIni(input, true);
     CHECK_EQ(std::string(expected), updated);
     CHECK_EQ(updated, UpdateNeuralAddonIni(updated, true));
@@ -8356,11 +8360,12 @@ void neural_addon_section_this_player_writes_carries_the_addon_schema_version_te
                          "NRPasses=2\nConfigVersion=10\nConfigRevision=1\n[OVERLAY]\nWindow=x\n"),
              repaired);
     CHECK_EQ(repaired, UpdateNeuralAddonIni(repaired, true, overrides));
-    // The worker's own call writes no overrides: a section it did not write
-    // entirely is not its to stamp, and one already stamped stays as it is -
-    // so a resident helper never sees a "repair" the player's write implied.
+    // The worker's own call writes no overrides. It judges the section by the
+    // keys this player has ever written, as the player's call does, so the two
+    // stamp alike - and one already stamped stays as it is, so a resident
+    // helper never sees a "repair" the player's write implied.
     CHECK_EQ(repaired, UpdateNeuralAddonIni(repaired, true));
-    CHECK(UpdateNeuralAddonIni(unversioned, true).find("ConfigVersion") == std::string::npos);
+    CHECK_EQ(repaired, UpdateNeuralAddonIni(unversioned, true));
     // An empty section is one this player may have created.
     CHECK(UpdateNeuralAddonIni("[RenoDX.DLSS5]\n", true).find("ConfigVersion=10\nConfigRevision=1\n") != std::string::npos);
 
@@ -8375,14 +8380,47 @@ void neural_addon_section_this_player_writes_carries_the_addon_schema_version_te
              restamped);
     CHECK_EQ(restamped, UpdateNeuralAddonIni(restamped, true, overrides));
 
+    // A section this player wrote holds keys the current job does not write.
+    // 0.28's whole section after a 75 % render and a 100 % one: NRPreUpscale=0
+    // stays, and a 100 % job writes no NRPreUpscale (PreUpscaleOverride), so
+    // judging by this job's keys left it unstamped and 10.8.0 migrated it.
+    constexpr std::string_view player028Full =
+        "[RenoDX.DLSS5]\nConfigVersion=6\nEnableHooks=2\nNeuralUplift=1\nNRFollowInputRes=0\nNRResolutionScale=1\n"
+        "NRIntensity=1.000\nNRLocalTone=1.000\nNRLocalStructure=1.000\nNRSkinStructure=1.000\nNRColorStrength=1.000\n"
+        "NRPreset=0\nNRStyle=0\nNRAutoMask=1\nNRPasses=1\nNRChainedHistory=1\nNRNormGovernor=1\n"
+        "NRPass2Intensity=1.000\nNRPass2Color=1.000\nNRPass3Intensity=1.000\nNRPass3Color=1.000\n"
+        "NRPass4Intensity=1.000\nNRPass4Color=1.000\nNRPreUpscale=0\n";
+    const auto job100 = NeuralAddonOverridesFor(NeuralSettings{}, neural_runtime::kPrevious);
+    CHECK(std::ranges::none_of(job100, [](const NeuralAddonOverride& entry) { return entry.first == "NRPreUpscale"; }));
+    const std::string restamped028 = UpdateNeuralAddonIni(player028Full, true, job100);
+    CHECK(restamped028.starts_with("[RenoDX.DLSS5]\nConfigVersion=10\n"));
+    CHECK(restamped028.find("ConfigRevision=1\n") != std::string::npos);
+    CHECK(restamped028.find("NRPreUpscale=0\n") != std::string::npos);
+    CHECK_EQ(restamped028, UpdateNeuralAddonIni(restamped028, true, job100));
+    // An older one too: 0.24 wrote no stamp and NREnableUpscaling, and a key
+    // only 0.30 writes beside 0.28's stamp is still this player's.
+    for (const std::string_view ours : {
+            std::string_view("[RenoDX.DLSS5]\nNREnableUpscaling=0\nNRChainedHistory=0\n"),
+            std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nNRDetailStability=0\n")}) {
+        const std::string updated = UpdateNeuralAddonIni(ours, true);
+        CHECK(updated.find("ConfigVersion=10\n") != std::string::npos);
+        CHECK(updated.find("ConfigRevision=1\n") != std::string::npos);
+    }
+    // Every key a job writes now, on either runtime and at any scale, is one
+    // the list knows: an unstamped section of exactly those keys is stamped.
+    std::string everyKey = "[RenoDX.DLSS5]\nEnableHooks=2\nNeuralUplift=1\nNRFollowInputRes=0\nNRResolutionScale=1\nNRPreUpscale=1\n";
+    for (const neural_runtime::Runtime* runtime : {&neural_runtime::kCurrent, &neural_runtime::kPrevious})
+        for (const auto& [key, value] : NeuralAddonOverridesFor(NeuralSettings{}, *runtime)) everyKey += key + "=" + value + "\n";
+    CHECK(UpdateNeuralAddonIni(everyKey, true).find("ConfigVersion=10\n") != std::string::npos);
+
     // Somebody else's keys may be pre-v6 ones: the add-on's migration is for them.
     for (const std::string_view foreign : {
-            std::string_view("[RenoDX.DLSS5]\nNREnableUpscaling=0\nNRChainedHistory=0\n"),
             std::string_view("[RenoDX.DLSS5]\nNRChainedHistory=0\nFutureTuning=1\n"),
+            std::string_view("[RenoDX.DLSS5]\nNREnableUpscaling=0\nNRCodecMode=2\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion=4\nNRChainedHistory=0\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion=7\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nConfigRevision=1\nNRPasses=2\n"),
-            std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nNRDetailStability=0\n"),
+            std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nNRHookPoint=1\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion = 6\nNRCodecMode=2\n")}) {
         const std::string updated = UpdateNeuralAddonIni(foreign, true, overrides);
         const size_t first = updated.find("ConfigVersion");
@@ -8434,6 +8472,8 @@ void reshade_trailing_section_text_uses_reshade_section_boundaries_test()
         "DisabledAddons=\n"
         "[RenoDX.DLSS5] ; existing settings\n"
         "NRIntensity=1.25\n"
+        "ConfigVersion=10\n"
+        "ConfigRevision=1\n"
         "EnableHooks=2\n"
         "NeuralUplift=1\n"
         "NRFollowInputRes=0\n"
@@ -8441,6 +8481,8 @@ void reshade_trailing_section_text_uses_reshade_section_boundaries_test()
         "[OTHER] ; this must end the RenoDX section\n"
         "Foo=1\n";
 
+    // NRIntensity is this player's key, so the section is stamped - inside it,
+    // before [OTHER].
     CHECK_EQ(std::string(expected), UpdateNeuralAddonIni(input, true));
 }
 
