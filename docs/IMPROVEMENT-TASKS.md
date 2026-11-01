@@ -22,7 +22,7 @@ interrupt rule. M1.1, M1.2 and M2 ship together as 0.30.0, and M3 follows as
 P3.21 are new._
 
 _Re-checked against 0.30.0 on 2026-10-31: M1.1, M1.2 and M2 landed, and
-their tasks are removed. What they left open is P1.52-P1.54 and P2.67-P2.69,
+their tasks are removed. What they left open is P1.52-P1.54 and P2.67-P2.70,
 and P3.5 keeps only its signed-build and other-generation half. P1.54, the
 0.30.0 hands-on checks, opens M3._
 
@@ -32,7 +32,7 @@ lands, delete it from this file in the same change.
 
 **IDs are never reused.** Source comments cite them (`P2.8`, `P3.7`), so a
 new task takes the next free number in its tier even when lower numbers are
-free. Next free: **P0.21, P1.55, P2.70, P3.22**.
+free. Next free: **P0.21, P1.55, P2.71, P3.22**.
 
 Sources: three code audits (neural helper/cache/runtime; decode, playback,
 audio and export; app shell, build, CI and release) and two web surveys of the
@@ -127,6 +127,7 @@ clean at **0 warnings /W4**; CTest **37 registrations, all pass** (18 portable,
 | [P2.39](#p239) | RTX VSR on the neural render | M | Player, Pipeline | M8 |
 | | _Interface, input and convenience_ | | | |
 | [P2.67](#p267) | A native speaker's review of the Simplified Chinese text; more languages | S | Player, Docs | M8 |
+| [P2.70](#p270) | Remake the demo video and the saved-comparison still with the 0.30.0 UI | S | Docs | M3 |
 | | _HDR_ | | | |
 | [P2.56](#p256) | Try an FP16 scRGB swap chain for HDR presentation | S-M | Player | M7 |
 | | _Tests_ | | | |
@@ -164,7 +165,7 @@ L one to two weeks.
 | --- | --- | --- | --- | :---: | --- |
 | **M0, M1** | 0.28.3 | Shipped on 2026-10-16: YouTube, provenance, runtime readiness, seven measurements | - | - | - |
 | **M1.1, M1.2, M2** | 0.30.0 | Shipped on 2026-10-31: 0.28.3's claims proved or corrected, a stable yt-dlp, DLSS-NR 310.9.16 on RTX 50 with two networks, RenoDX 10.8.0, the UI restructure, translatable | - | - | - |
-| **M3** | 0.31.0 | Judge it: the review loop | P1.54 (first), P2.31, P2.29, P2.30, P2.28, P1.44, P2.61, P2.62, P2.69 | ~3 weeks | P1.54; M2's compare-bar slots are in 0.30.0 |
+| **M3** | 0.31.0 | Judge it: the review loop | P1.54 (first), P2.31, P2.29, P2.30, P2.28, P1.44, P2.61, P2.62, P2.69, P2.70 | ~3 weeks | P1.54; M2's compare-bar slots are in 0.30.0 |
 | **M4** | 0.32.0 | Fix it: faces, flicker and colour | P2.43, P2.36, P2.45, P2.37, P2.46 | ~3 weeks | M3 (tools to judge it); M2's Picture panel slot is in 0.30.0 |
 | **M5** | 0.33.0 | Never lose work, never wait | P2.35, P2.47, P2.48, P2.49, P2.51, P2.53, P2.59, P2.60, P2.64, P2.68, P1.51, P1.52, P1.53 | ~3 weeks | runs beside M3-M4; RTX 20-40 cards for P1.52 and P1.53 |
 | **M6** | 0.34.0 | Share and inspect | P2.27, P2.33, P2.32, P2.34, P2.40, P2.65, P1.50 | ~2 weeks | M3 (worst frames feed the frame pack) |
@@ -1001,6 +1002,21 @@ see Parked.
 - **Test.** No contributed file lacks a key or carries one English lacks, and
   every format placeholder survives. A layout smoke at the file's longest
   strings.
+
+<a id="p270"></a>
+### P2.70 · Remake the demo video and the saved-comparison still
+
+`S` · **Docs** · _found by the 0.30.0 screenshot round_
+
+- **What.** `docs/media/neural-comparison-demo.mp4` and its preview
+  `neural-comparison-preview.webp` show 24 Sep captures of the pre-0.30 UI from
+  0:06.8, and `docs/media/social/square-1080.mp4` includes the 24 Sep Difference
+  capture. `docs/screenshots/current/saved-comparison-2x2.png` predates 0.30.0's
+  footer, which adds the network and the runtime. Remake them from a 0.30.0
+  build, real output only, and record them in the provenance files.
+- **Why.** The README and the site show them beside the 0.30.0 screenshots.
+- **Where.** `docs/media/`, `docs/screenshots/`, `site/`.
+- **Test.** `site/test.ps1` passes; each file's provenance names its commit.
 
 ## HDR
 
