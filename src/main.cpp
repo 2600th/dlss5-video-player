@@ -110,6 +110,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 }
 #include "RecentMedia.h"
 #include "MediaPipeline.h"
+#include "MediaTools.h"
 #include "JsonEscape.h"
 #include "OfflineNeuralRenderer.h"
 #include "NeuralWorker.h"
@@ -4745,6 +4746,8 @@ private:
                 T(L"cache.cause.exists"),T(L"cache.cause.outside_root")};
     }
     AudioPlayer& Audio(){return m_networkAudio?*m_networkAudio:m_audio;}
+    // What Audio() restarts from: the YouTube audio URL, never the picture's (MediaTools.h).
+    const std::wstring& AudioInput()const{return media_tools::AudioInputFor(m_sourceKind==MediaSourceKind::YouTube,m_path,m_youtubeAudioUrl);}
     const AudioPlayer& Audio()const{return m_networkAudio?*m_networkAudio:m_audio;}
     // How often playback says how it is doing. A session can currently drop two
     // frames in three for minutes and write NOTHING: m_submitFps and
@@ -8616,7 +8619,7 @@ private:
             // A drag preview would respawn the audio helper on every step; the
             // release restarts it once.
             m_currentSec=double(frame.timestamp100ns)*1e-7;
-            if(seek_policy::RestartsAudioAfterSeek(m_dragSeek)){const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}}
+            if(seek_policy::RestartsAudioAfterSeek(m_dragSeek)){const bool audioOk=Audio().Start(AudioInput(),m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}}
             m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=seek_policy::PlaysAfterSeek(resumeAfter,true,m_haveNext);m_synchronizedPlayback.SetPaused(!resumeAfter);m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return true;
         }
         m_haveNext=false;m_next=VideoFrame{};m_nextPairFrame.reset();
@@ -8638,7 +8641,7 @@ private:
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         if(!RenderVideoFrame(f,true)){LOG("Seek frame render failed.");m_playing=false;SetSeeking(false);return false;}
         m_currentSec=double(f.timestamp100ns)*1e-7;m_haveNext=m_decoder.ReadNext(m_next);
-        if(seek_policy::RestartsAudioAfterSeek(m_dragSeek)){const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");}
+        if(seek_policy::RestartsAudioAfterSeek(m_dragSeek)){const bool audioOk=Audio().Start(AudioInput(),m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");}
         m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=seek_policy::PlaysAfterSeek(resumeAfter,false,m_haveNext);m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();LOG("Seek complete actual="<<m_currentSec);return true;
     }
 
@@ -8646,7 +8649,7 @@ private:
     // Frame steps stop audio rather than respawning it per step. Anything that
     // started it since (a seek, a scrub) leaves it active, and then a resume
     // is only a resume.
-    void ResumeAudio(){const bool restart=m_audioStaleAfterStep&&!Audio().Active();m_audioStaleAfterStep=false;if(!restart){Audio().Pause(false);return;}if(Audio().Start(m_path,m_currentSec))Audio().SetVolume(m_muted?0.0f:m_volume);}
+    void ResumeAudio(){const bool restart=m_audioStaleAfterStep&&!Audio().Active();m_audioStaleAfterStep=false;if(!restart){Audio().Pause(false);return;}if(Audio().Start(AudioInput(),m_currentSec))Audio().SetVolume(m_muted?0.0f:m_volume);}
     // Space pauses playback during an active session; the render behind it keeps
     // filling the buffer, and only an offline job takes the pause event.
     void TogglePause(){if(NeuralJobActive()&&!JobBehindPlayback()){SetNeuralJobPaused(!NeuralJobPaused());return;}if(m_liveBuffering){m_liveResumePlaying=!m_liveResumePlaying;InvalidateControls();return;}CancelPausedSettingsPreview();SetPaused(m_playing);}
@@ -11484,7 +11487,7 @@ private:
         m_cachedPlayback=true;m_cachedRange=m_liveRange;m_cachedSettings=m_liveRenderSettings.neural;m_cachedGuides=m_liveRenderSettings.guides;m_cachedTemporal=m_liveRenderSettings.temporal;m_cachedReceiptPath.clear();m_neuralPath.clear();
         if(!RenderVideoFrame(frame,true)){LOG("Active neural playback could not present its first pair.");m_synchronizedPlayback.Close();m_cachedPlayback=false;m_comparisonView=ComparisonView::Original;return false;}
         RememberRenderedCachedPair();m_cachedPresentedFrames=1;m_currentSec=double(frame.timestamp100ns)*1e-7;m_guideReset=false;m_dlssReset=false;
-        if(Audio().Start(m_path,m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!wasPlaying);}
+        if(Audio().Start(AudioInput(),m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!wasPlaying);}
         m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=wasPlaying;m_synchronizedPlayback.SetPaused(!wasPlaying);
         m_liveAttached=true;
         NoteNeuralFramePresented();
@@ -13021,7 +13024,7 @@ private:
         // A scrub seek still queued will restart audio and playback itself; it
         // only needs to know the play state the drag started from.
         if(m_seekPending||m_seeking){m_seekResumePlaying=m_dragWasPlaying;return;}
-        if(Audio().Start(m_path,m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!m_dragWasPlaying);}
+        if(Audio().Start(AudioInput(),m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!m_dragWasPlaying);}
         if(m_dragWasPlaying){m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}
     }
     void StopFullscreenTimer(){

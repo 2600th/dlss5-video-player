@@ -17924,6 +17924,22 @@ void youtube_audio_input_options_reconnect_and_keep_the_https_only_guard_test()
     CHECK(options.ends_with(L" "));
 }
 
+// A YouTube source's sound is its own URL: every audio restart reads it, not
+// the picture's stream, which has no audio track (0.30.0: no sound after
+// turning DLSS 5 on). Local files and a YouTube source with no separate audio
+// URL read their sound from the media itself.
+void audio_restarts_read_the_youtube_audio_url_not_the_picture_stream_test()
+{
+    const std::wstring media = L"https://manifest.googlevideo.com/api/manifest/hls_playlist/video-only.m3u8";
+    const std::wstring audio = L"https://rr1---sn.googlevideo.com/videoplayback?itag=251";
+    CHECK(media_tools::AudioInputFor(true, media, audio) == audio);
+    CHECK(media_tools::AudioInputFor(true, media, L"") == media);
+    const std::wstring local = L"D:\\Videos\\clip.mkv";
+    CHECK(media_tools::AudioInputFor(false, local, L"") == local);
+    // A stale URL left from a YouTube source is never used for a local file.
+    CHECK(media_tools::AudioInputFor(false, local, audio) == local);
+}
+
 // P1.48, the `network` tier: the bundled yt-dlp resolves a built-in trailer
 // exactly as File > Game trailers does, the video opens as PrepareYouTubeMedia
 // opens it and gives a frame past the first minute, and the audio is read at
@@ -18101,6 +18117,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(windows10_check_and_driver_notice_read_the_build_and_the_flag_test),
     TEST_CASE(keep_awake_holds_a_system_request_for_its_scope_and_guards_are_independent_test),
     TEST_CASE(youtube_audio_input_options_reconnect_and_keep_the_https_only_guard_test),
+    TEST_CASE(audio_restarts_read_the_youtube_audio_url_not_the_picture_stream_test),
     TEST_CASE(start_screen_stacks_the_panel_and_tiles_and_gives_way_to_small_windows_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),

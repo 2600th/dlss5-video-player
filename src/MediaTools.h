@@ -157,6 +157,17 @@ inline constexpr std::wstring_view kNetworkAudioInputOptions =
     L"-tls_verify 1 -protocol_whitelist https,tls,tcp "
     L"-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 4 ";
 
+// The input the audio reader opens for the source on screen. A YouTube source
+// is two streams: m_path is the picture alone and the sound is its own URL, so
+// restarting the audio from the picture's URL - turning DLSS 5 on, resuming
+// after a frame step, ending a drag seek - mapped no audio stream and played
+// silent (found testing 0.30.0, whose yt-dlp returns them apart). A source
+// without a separate audio URL, local or YouTube, reads its sound from itself.
+inline const std::wstring& AudioInputFor(bool youtube, const std::wstring& media, const std::wstring& youtubeAudio)
+{
+    return youtube && !youtubeAudio.empty() ? youtubeAudio : media;
+}
+
 // "-protocol_whitelist file,crypto,data " for a local input, empty for a URL.
 inline std::wstring LocalInputOptions(std::wstring_view input)
 {
