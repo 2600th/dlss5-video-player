@@ -142,7 +142,9 @@ function Select-PackageVariant {
 $temporaryRoot = $null
 $maxArchiveEntries = 128
 $maxArchiveEntryBytes = 512MB
-$maxArchiveTotalBytes = 1GB
+# 0.30.0 carries two DLSS-NR builds (310.9.16 for RTX 50 and 310.8.SF-v2),
+# about 1.08 GB unpacked; 2 GB still bounds a zip bomb.
+$maxArchiveTotalBytes = 2GB
 $maxCompressionRatio = 250.0
 
 function Get-RelativePackagePath {
