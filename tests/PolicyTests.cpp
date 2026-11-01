@@ -2830,6 +2830,15 @@ void pipeline_chip_names_each_stage_once_test()
     CHECK_EQ(std::wstring(L"1920\u00d71080"), PipelineFlow(1920, 1080, {}, names, 1920, 1080));
     CHECK_EQ(std::wstring(L"1280\u00d7720 \u2192 1920\u00d71080"), PipelineFlow(1280, 720, {}, names, 1920, 1080));
     CHECK_EQ(std::wstring(L"1280\u00d7720 \u2192 DLSS SR"), PipelineFlow(1280, 720, {false, true, false}, names, 0, 0));
+    // DLSS 5 is what is on screen, not what is loaded: a rendered video with
+    // DLSS 5 turned off still holds its pair, and showed "DLSS 5" over the
+    // original. A paused settings preview is a DLSS 5 frame either way.
+    CHECK(NeuralOnScreen(true, true, false));
+    CHECK(!NeuralOnScreen(true, false, false));
+    CHECK(!NeuralOnScreen(false, true, false));
+    CHECK(NeuralOnScreen(false, false, true));
+    CHECK_EQ(std::wstring(L"Original"), PipelineText({NeuralOnScreen(true, false, false), false, false}, names));
+    CHECK_EQ(std::wstring(L"RTX VSR"), PipelineText({NeuralOnScreen(true, false, false), false, true}, names));
     // The chip: shown with media, quiet, and never flashing - it is a name, not a meter.
     const Snapshot chips = Build(true, {}, 30.0, 30.0, 0, L"DLSS 5");
     CHECK(At(chips, Chip::Pipeline).visible);

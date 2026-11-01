@@ -2065,7 +2065,15 @@ struct PlayerAppTestAccess {
         const auto& pipeline = chips[size_t(status_chips::Chip::Pipeline)];
         CHECK(pipeline.visible);
         CHECK_EQ(pipeline.text, app.T(L"chip.pipeline.none"));
+        // A rendered pair with DLSS 5 turned off shows the original, and the
+        // chip says so; it named DLSS 5 over it.
+        const ComparisonView view = app.m_comparisonView;
+        const bool previewShown = app.m_previewShown;
+        app.m_previewShown = false;
         app.m_cachedPlayback = true;
+        app.m_comparisonView = ComparisonView::Original;
+        CHECK_EQ(app.BuildStatusChips()[size_t(status_chips::Chip::Pipeline)].text, app.T(L"chip.pipeline.none"));
+        app.m_comparisonView = ComparisonView::Neural;
         chips = app.BuildStatusChips();
         CHECK(chips[size_t(status_chips::Chip::Pipeline)].text.starts_with(app.T(L"toolbar.neural.name")));
         // The tip: the heading, the flow, the settings the render was made with in
@@ -2088,6 +2096,7 @@ struct PlayerAppTestAccess {
         CHECK(!app.BuildStatusChips()[size_t(status_chips::Chip::Pipeline)].visible);
         CHECK(app.PipelineTipText().empty());
         app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_cachedSettings = cachedSettings;
+        app.m_comparisonView = view; app.m_previewShown = previewShown;
         if (!hadRenderer) app.m_renderer.reset();
         app.m_cachedChips = {};
     }

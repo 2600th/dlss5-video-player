@@ -9478,11 +9478,12 @@ private:
                                    m_loaded&&m_renderer?status_chips::PipelineText(CurrentPipeline(),PipelineNames()):std::wstring{});
     }
     // The pipeline chip (X10): what makes the frames on screen now, not what is
-    // asked for - DLSS 5 while its frames play, and the upscaler that ran on the
+    // asked for - DLSS 5 while its frames are on screen (not while DLSS 5 is
+    // off over a rendered pair, which shows the original), and the upscaler that ran on the
     // last present, which is the one the status line names too.
     status_chips::Pipeline CurrentPipeline()const{
         status_chips::Pipeline pipeline;
-        pipeline.neural=m_cachedPlayback;
+        pipeline.neural=status_chips::NeuralOnScreen(m_cachedPlayback,m_comparisonView==ComparisonView::Neural,m_previewShown);
         pipeline.superResolution=UpscalingActive();
         pipeline.rtxVsr=m_renderer&&m_renderer->PlaybackVsrShown();
         return pipeline;
