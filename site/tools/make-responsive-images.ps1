@@ -89,7 +89,9 @@ $singles = @(
     @{ Name = 'photo-wipe'; File = 'photo-wipe.jpg'; Native = 1902 }
     @{ Name = 'saved-comparison-2x2'; File = 'saved-comparison-2x2.png'; Native = 1449 }
     @{ Name = 'neural-strength'; File = 'neural-strength.jpg'; Native = 1920 }
-    @{ Name = 'neural-settings'; File = 'neural-settings.jpg'; Native = 882 }
+    # The Picture panel is 942 wide at 100%; the page keeps offering it at the
+    # 882 it has always laid out, an area downscale like every other width.
+    @{ Name = 'neural-settings'; File = 'neural-settings.jpg'; Native = 942; Widths = @(882) }
     @{ Name = 'subtitles'; File = 'subtitles.jpg'; Native = 1902 }
     @{ Name = 'player-start'; File = 'player-start.jpg'; Native = 1116 }
     @{ Name = 'vsr-wipe-crop'; File = 'vsr-wipe-crop.png'; Native = 1449 }
@@ -98,7 +100,9 @@ $singles = @(
     $_.OutDir = Join-Path $assets 'screens'
     # A capture narrower than the phone width is offered at its own width only:
     # scaling it up to 960 would invent pixels.
-    $_.Widths = if ($_.Native -lt 960) { @($_.Native) } else { @(960, [math]::Min(1440, $_.Native)) }
+    if (-not $_.ContainsKey('Widths')) {
+        $_.Widths = if ($_.Native -lt 960) { @($_.Native) } else { @(960, [math]::Min(1440, $_.Native)) }
+    }
     $_
 }
 
