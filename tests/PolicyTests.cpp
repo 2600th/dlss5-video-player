@@ -132,6 +132,7 @@
 #include <iterator>
 #include <memory>
 #include <stop_token>
+#include <set>
 #include <sstream>
 #include <string>
 #include <future>
@@ -1346,6 +1347,8 @@ void translation_placeholders_survive_or_the_string_reads_in_english_test()
            std::vector<std::wstring>{L"%u", L"%s", L"%.1f", L"%ls", L"\t"}));
     CHECK(Placeholders(L"100%% sure").empty());
     CHECK(Placeholders(L"50%.").empty());
+    CHECK(!translation::FormatSafe(L"50%."));
+    CHECK(translation::FormatSafe(L"%u of %s at %.1f%% and %ls, %02u, %.6g, %d"));
     const translation::Map english{{L"a", L"%u files in %s"}, {L"b", L"plain"}, {L"c", L"x\ty"}};
     const translation::Map good{{L"a", L"%u Dateien in %s"}, {L"b", L"schlicht"}};
     CHECK(translation::CheckAgainst(english, good, false).empty());
@@ -1362,6 +1365,139 @@ void translation_placeholders_survive_or_the_string_reads_in_english_test()
     translation::Map pseudo;
     for (const auto& [key, text] : Localizer::All()) pseudo.emplace(key, translation::Pseudo(text, 0.4));
     CHECK(translation::CheckAgainst(Localizer::All(), pseudo, true).empty());
+}
+
+namespace {
+thread_local bool g_formatRejected = false;
+void __cdecl NoteRejectedFormat(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t)
+{
+    g_formatRejected = true;
+}
+} // namespace
+
+// A '%' the placeholder scan did not recognise was skipped, so "100%)", a
+// trailing %, %n and %I64d all passed the check and reached swprintf_s or
+// _scwprintf, which stop the process on a format they cannot parse (and
+// write through an argument for %n). Every '%' is tokenised now: where
+// English is a format string, each '%' of a translation must be %% or one
+// of English's conversions, in English's order.
+void translation_percent_signs_cannot_reach_a_format_call_unparsed_test()
+{
+    using translation::PlaceholdersMatch;
+    const std::wstring_view english = L"%u files in %s";
+    CHECK(PlaceholdersMatch(english, L"%u Dateien in %s"));
+    CHECK(PlaceholdersMatch(english, L"%u Dateien in %s (100%%)"));
+    for (const std::wstring_view bad : {L"%u Dateien in %s (100%)", L"%u Dateien in %s 100%",
+                                        L"%u Dateien%n in %s", L"%I64d %u Dateien in %s", L"%u Dateien in %s%C",
+                                        L"%u Dateien in %s%Z", L"%u Dateien in % s", L"%u Dateien in %*s"})
+        CHECK(!PlaceholdersMatch(english, bad));
+    // A format string written with only %% is one too.
+    CHECK(PlaceholdersMatch(L"100%% done", L"100%% fertig"));
+    CHECK(!PlaceholdersMatch(L"100%% done", L"100% fertig"));
+    // Display text: English has no conversion and no %%, so it is never given
+    // to a format call, and a translation writes its percent sign plainly -
+    // zh-Hans's "低于 100% 时" for English's "below 100 percent" - but still
+    // gains no conversion, and never a %n.
+    CHECK(PlaceholdersMatch(L"below 100 percent", L"低于 100% 时"));
+    CHECK(!PlaceholdersMatch(L"below 100 percent", L"低于 %s 时"));
+    const std::wstring_view display = L"Source, 100% (recommended)\t14.8 fps";
+    CHECK(PlaceholdersMatch(display, L"源分辨率，100%（推荐）\t14.8 fps"));
+    CHECK(!PlaceholdersMatch(display, L"源分辨率，100%（推荐）14.8 fps"));
+    CHECK(!PlaceholdersMatch(display, L"%s 100%（推荐）\t14.8 fps"));
+    CHECK(!PlaceholdersMatch(display, L"100%n\t14.8 fps"));
+    CHECK(!PlaceholdersMatch(display, L"100%-5ln\t14.8 fps"));
+
+    // What the player does with a file: the bad line reads in English, and the
+    // report says why.
+    const translation::Map strings{{L"a", L"%u files in %s"}, {L"b", L"plain"}, {L"c", L"plain"}};
+    const translation::Map file{{L"a", L"%u Dateien in %s (100%)"}, {L"b", L"100%n"}, {L"c", L"100%"}};
+    CHECK((translation::Usable(strings, file) == translation::Map{{L"c", L"100%"}}));
+    CHECK((translation::CheckAgainst(strings, file, false) ==
+           std::vector<std::wstring>{L"a: a % that is neither %% nor one of English's conversions",
+                                     L"b: a % that is neither %% nor one of English's conversions"}));
+
+    // The rule's premise, on English: a format string is itself all %% and
+    // conversions, display text is never given to a format call - no source
+    // line that names its key also formats - and no string has a %n.
+    // The format argument of every Format, FormatLocalizedText, _scwprintf and
+    // swprintf_s call in the sources (the first argument of the first three;
+    // of swprintf_s, the first after the buffer that holds a literal or a
+    // .c_str()), and the key literals in it.
+    std::set<std::string> formatKeys;
+    const auto arguments = [](std::string_view text) {
+        std::vector<std::string_view> found;
+        int depth = 0;
+        size_t start = 0;
+        bool quoted = false;
+        for (size_t index = 0; index < text.size(); ++index) {
+            const char c = text[index];
+            if (c == '"' && (index == 0 || text[index - 1] != '\\')) quoted = !quoted;
+            if (quoted) continue;
+            if (c == '(') ++depth;
+            else if (c == ')' && depth-- == 0) { found.push_back(text.substr(start, index - start)); return found; }
+            else if (c == ',' && depth == 0) { found.push_back(text.substr(start, index - start)); start = index + 1; }
+        }
+        found.push_back(text.substr(start));
+        return found;
+    };
+    size_t formatCalls = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(DLSS_TEST_SOURCE_DIR)) {
+        const auto extension = entry.path().extension();
+        if ((extension != L".cpp" && extension != L".h") || entry.path().filename() == L"Localization.h") continue;
+        std::ifstream stream(entry.path(), std::ios::binary);
+        for (std::string line; std::getline(stream, line);) {
+            for (const std::string_view marker : {"Format(", "FormatLocalizedText(", "_scwprintf(", "swprintf_s("}) {
+                for (size_t at = line.find(marker); at != std::string::npos; at = line.find(marker, at + 1)) {
+                    if (at > 0 && (std::isalnum(static_cast<unsigned char>(line[at - 1])) || line[at - 1] == '_')) continue;
+                    const auto args = arguments(std::string_view(line).substr(at + marker.size()));
+                    std::string_view format = args.empty() ? std::string_view{} : args[0];
+                    if (marker == "swprintf_s(") {
+                        format = {};
+                        for (size_t index = 1; index < args.size() && index <= 2 && format.empty(); ++index)
+                            if (args[index].find('"') != std::string_view::npos || args[index].find(".c_str()") != std::string_view::npos)
+                                format = args[index];
+                    }
+                    ++formatCalls;
+                    for (size_t open = format.find("L\""); open != std::string_view::npos; open = format.find("L\"", open + 2)) {
+                        const size_t close = format.find('"', open + 2);
+                        if (close == std::string_view::npos) break;
+                        formatKeys.emplace(format.substr(open + 2, close - open - 2));
+                        open = close;
+                    }
+                }
+            }
+        }
+    }
+    CHECK(formatCalls > 20);
+    CHECK(formatKeys.contains("neural.live.slow") && formatKeys.contains("keys.write_failed"));
+    size_t displayText = 0;
+    for (const auto& [key, text] : Localizer::All()) {
+        const translation::detail::PercentScan scan = translation::detail::ScanPercents(text);
+        CHECK(!scan.forbidden);
+        if (scan.formats) {
+            if (scan.stray) std::wcerr << key << L" is a format string with a '%' printf does not parse; write it as %%\n";
+            CHECK(!scan.stray);
+            continue;
+        }
+        ++displayText;
+        if (formatKeys.contains(utf8_text::FromWide(key))) {
+            std::wcerr << key << L" has no conversion and no %% but is given to a format call\n";
+            CHECK(false);
+        }
+    }
+    CHECK(displayText > 0);
+
+    // And why the premise matters: swprintf_s, which every localized format
+    // reaches, stops on a stray it cannot parse - the invalid-parameter
+    // handler, which terminates the player - while _scwprintf, which Format
+    // measures with first, accepts it.
+    const _invalid_parameter_handler previous = _set_thread_local_invalid_parameter_handler(NoteRejectedFormat);
+    for (const wchar_t* stray : {L"%s 100%)", L"100%", L"%n"}) {
+        g_formatRejected = false;
+        wchar_t buffer[64]{};
+        CHECK(swprintf_s(buffer, stray, L"") < 0 && g_formatRejected);
+    }
+    _set_thread_local_invalid_parameter_handler(previous);
 }
 
 void translation_files_follow_the_display_language_test()
@@ -17625,6 +17761,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(translation_file_parses_the_contributor_format_test),
     TEST_CASE(translation_template_reads_back_as_english_test),
     TEST_CASE(translation_placeholders_survive_or_the_string_reads_in_english_test),
+    TEST_CASE(translation_percent_signs_cannot_reach_a_format_call_unparsed_test),
     TEST_CASE(translation_files_follow_the_display_language_test),
     TEST_CASE(translation_fixture_locale_reads_over_english_test),
     TEST_CASE(shipped_translations_are_complete_test),
