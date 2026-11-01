@@ -212,7 +212,7 @@ As of 2026-10-16, from each project's README, releases and issues (details in
 | Keeps audio / subtitles / chapters on export | Yes / yes / yes | Yes / on some paths / yes | Audio yes | Audio and subtitles yes | Audio yes |
 | HDR | HDR shown on HDR displays; exports are SDR | 10-bit HDR export, SDR→HDR | HDR10 recording (experimental capture) | HDR kept, HEVC Main10 export | HDR10/HLG export |
 | Command line | `dlss5-convert`: files, folders, JSON report | `VE_CLI.exe` | No; a GUI queue | Not documented | Not documented |
-| Download | 377 MB (36 MB without the neural runtime) | 531 MB (.7z) | 229 MB | 719 MB (NVIDIA) | 588 MB lite |
+| Download | 588 MB (50 MB without the neural runtime) | 531 MB (.7z) | 229 MB | 719 MB (NVIDIA) | 588 MB lite |
 | Verifying the download | SHA-256, GitHub attestations, a file manifest and a verifier script | GitHub's per-file digest | SHA256SUMS and a runtime manifest | SHA-256 files | Runtime hashes |
 | Licence | MIT | Source-available, its own terms | PolyForm Strict (non-commercial) | GPL-3.0 (AGPL for its streaming part) | GPL-3.0 since v3.0.0; MIT before |
 
@@ -393,9 +393,9 @@ how the toggle works, not what every source will gain.
   cards; on RTX 20 and 30 the player offers to download the community
   [dlssg_sm86 add-on](docs/TROUBLESHOOTING.md#rtx-20-and-30-the-dlssg_sm86-add-on),
   which is unofficial and not bundled.
-- **Save converted video copies the cached render as it is**: 8-bit at the
+- **Save rendered video copies the cached render as it is**: 8-bit at the
   default Standard quality, 10-bit at High or Lossless, without adjustments,
-  upscaling or HDR. Use **Export with DLSS stages** to bake in a larger size.
+  upscaling or HDR. Use **File > Export…** to bake in a larger size.
 - **Not supported:** burning subtitles into an export, a render queue in the
   player (`dlss5-convert` converts a list or a folder in turn), or resuming an
   interrupted render after a restart.

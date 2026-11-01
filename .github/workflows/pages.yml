@@ -16,7 +16,7 @@ on:
   # pages-on-release.yml catches the publish and dispatches this workflow on
   # main instead.
 
-  # The 31 site tests and the build, with no deploy: the deploy job below is
+  # The 61 site tests and the build, with no deploy: the deploy job below is
   # skipped for pull requests.
   pull_request:
     paths:
