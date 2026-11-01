@@ -12,29 +12,29 @@
                                                            "width":  960,
                                                            "format":  "avif",
                                                            "file":  "compare-wipe-960.avif",
-                                                           "bytes":  12261,
-                                                           "psnrAgainstSource":  42.66
+                                                           "bytes":  19805,
+                                                           "psnrAgainstSource":  39.19
                                                        },
                                                        {
                                                            "width":  960,
                                                            "format":  "webp",
                                                            "file":  "compare-wipe-960.webp",
-                                                           "bytes":  19270,
-                                                           "psnrAgainstSource":  38.2
+                                                           "bytes":  33246,
+                                                           "psnrAgainstSource":  36.61
                                                        },
                                                        {
                                                            "width":  1440,
                                                            "format":  "avif",
                                                            "file":  "compare-wipe-1440.avif",
-                                                           "bytes":  22809,
-                                                           "psnrAgainstSource":  43.84
+                                                           "bytes":  35848,
+                                                           "psnrAgainstSource":  40.28
                                                        },
                                                        {
                                                            "width":  1440,
                                                            "format":  "webp",
                                                            "file":  "compare-wipe-1440.webp",
-                                                           "bytes":  34162,
-                                                           "psnrAgainstSource":  38.54
+                                                           "bytes":  59724,
+                                                           "psnrAgainstSource":  37.42
                                                        }
                                                    ]
                                   },
@@ -45,29 +45,29 @@
                                                                  "width":  960,
                                                                  "format":  "avif",
                                                                  "file":  "compare-difference-960.avif",
-                                                                 "bytes":  12041,
-                                                                 "psnrAgainstSource":  41.48
+                                                                 "bytes":  21914,
+                                                                 "psnrAgainstSource":  38.03
                                                              },
                                                              {
                                                                  "width":  960,
                                                                  "format":  "webp",
                                                                  "file":  "compare-difference-960.webp",
-                                                                 "bytes":  19976,
-                                                                 "psnrAgainstSource":  38.69
+                                                                 "bytes":  39474,
+                                                                 "psnrAgainstSource":  36.54
                                                              },
                                                              {
                                                                  "width":  1440,
                                                                  "format":  "avif",
                                                                  "file":  "compare-difference-1440.avif",
-                                                                 "bytes":  23368,
-                                                                 "psnrAgainstSource":  42.2
+                                                                 "bytes":  45057,
+                                                                 "psnrAgainstSource":  38.41
                                                              },
                                                              {
                                                                  "width":  1440,
                                                                  "format":  "webp",
                                                                  "file":  "compare-difference-1440.webp",
-                                                                 "bytes":  37258,
-                                                                 "psnrAgainstSource":  38.94
+                                                                 "bytes":  79064,
+                                                                 "psnrAgainstSource":  37.3
                                                              }
                                                          ]
                                         },
@@ -78,29 +78,29 @@
                                                          "width":  960,
                                                          "format":  "avif",
                                                          "file":  "photo-wipe-960.avif",
-                                                         "bytes":  18093,
-                                                         "psnrAgainstSource":  40.38
+                                                         "bytes":  19926,
+                                                         "psnrAgainstSource":  39.09
                                                      },
                                                      {
                                                          "width":  960,
                                                          "format":  "webp",
                                                          "file":  "photo-wipe-960.webp",
-                                                         "bytes":  30522,
-                                                         "psnrAgainstSource":  37.33
+                                                         "bytes":  33424,
+                                                         "psnrAgainstSource":  36.69
                                                      },
                                                      {
                                                          "width":  1440,
                                                          "format":  "avif",
                                                          "file":  "photo-wipe-1440.avif",
-                                                         "bytes":  32108,
-                                                         "psnrAgainstSource":  41.73
+                                                         "bytes":  35963,
+                                                         "psnrAgainstSource":  40.17
                                                      },
                                                      {
                                                          "width":  1440,
                                                          "format":  "webp",
                                                          "file":  "photo-wipe-1440.webp",
-                                                         "bytes":  52162,
-                                                         "psnrAgainstSource":  37.25
+                                                         "bytes":  60488,
+                                                         "psnrAgainstSource":  37.38
                                                      }
                                                  ]
                                 },
@@ -144,29 +144,29 @@
                                                               "width":  960,
                                                               "format":  "avif",
                                                               "file":  "neural-strength-960.avif",
-                                                              "bytes":  24021,
-                                                              "psnrAgainstSource":  39.51
+                                                              "bytes":  25183,
+                                                              "psnrAgainstSource":  39.84
                                                           },
                                                           {
                                                               "width":  960,
                                                               "format":  "webp",
                                                               "file":  "neural-strength-960.webp",
-                                                              "bytes":  35668,
-                                                              "psnrAgainstSource":  35.7
+                                                              "bytes":  36700,
+                                                              "psnrAgainstSource":  35.91
                                                           },
                                                           {
                                                               "width":  1440,
                                                               "format":  "avif",
                                                               "file":  "neural-strength-1440.avif",
-                                                              "bytes":  40863,
-                                                              "psnrAgainstSource":  40.64
+                                                              "bytes":  47917,
+                                                              "psnrAgainstSource":  40.66
                                                           },
                                                           {
                                                               "width":  1440,
                                                               "format":  "webp",
                                                               "file":  "neural-strength-1440.webp",
-                                                              "bytes":  58676,
-                                                              "psnrAgainstSource":  36.44
+                                                              "bytes":  64940,
+                                                              "psnrAgainstSource":  35.46
                                                           }
                                                       ]
                                      },
@@ -177,15 +177,15 @@
                                                               "width":  882,
                                                               "format":  "avif",
                                                               "file":  "neural-settings-882.avif",
-                                                              "bytes":  26681,
-                                                              "psnrAgainstSource":  39.87
+                                                              "bytes":  38641,
+                                                              "psnrAgainstSource":  39.09
                                                           },
                                                           {
                                                               "width":  882,
                                                               "format":  "webp",
                                                               "file":  "neural-settings-882.webp",
-                                                              "bytes":  31140,
-                                                              "psnrAgainstSource":  30.56
+                                                              "bytes":  38142,
+                                                              "psnrAgainstSource":  32.57
                                                           }
                                                       ]
                                      },
@@ -196,29 +196,29 @@
                                                         "width":  960,
                                                         "format":  "avif",
                                                         "file":  "subtitles-960.avif",
-                                                        "bytes":  18675,
-                                                        "psnrAgainstSource":  42.01
+                                                        "bytes":  22444,
+                                                        "psnrAgainstSource":  39.01
                                                     },
                                                     {
                                                         "width":  960,
                                                         "format":  "webp",
                                                         "file":  "subtitles-960.webp",
-                                                        "bytes":  27940,
-                                                        "psnrAgainstSource":  37.5
+                                                        "bytes":  37704,
+                                                        "psnrAgainstSource":  36.62
                                                     },
                                                     {
                                                         "width":  1440,
                                                         "format":  "avif",
                                                         "file":  "subtitles-1440.avif",
-                                                        "bytes":  33578,
-                                                        "psnrAgainstSource":  43.01
+                                                        "bytes":  40126,
+                                                        "psnrAgainstSource":  40.18
                                                     },
                                                     {
                                                         "width":  1440,
                                                         "format":  "webp",
                                                         "file":  "subtitles-1440.webp",
-                                                        "bytes":  46972,
-                                                        "psnrAgainstSource":  37.53
+                                                        "bytes":  66998,
+                                                        "psnrAgainstSource":  37.57
                                                     }
                                                 ]
                                },
@@ -229,29 +229,29 @@
                                                            "width":  960,
                                                            "format":  "avif",
                                                            "file":  "player-start-960.avif",
-                                                           "bytes":  37109,
-                                                           "psnrAgainstSource":  40.39
+                                                           "bytes":  41292,
+                                                           "psnrAgainstSource":  39.67
                                                        },
                                                        {
                                                            "width":  960,
                                                            "format":  "webp",
                                                            "file":  "player-start-960.webp",
-                                                           "bytes":  41692,
-                                                           "psnrAgainstSource":  34.68
+                                                           "bytes":  47252,
+                                                           "psnrAgainstSource":  34.25
                                                        },
                                                        {
                                                            "width":  1116,
                                                            "format":  "avif",
                                                            "file":  "player-start-1116.avif",
-                                                           "bytes":  55576,
-                                                           "psnrAgainstSource":  40.04
+                                                           "bytes":  60233,
+                                                           "psnrAgainstSource":  39.33
                                                        },
                                                        {
                                                            "width":  1116,
                                                            "format":  "webp",
                                                            "file":  "player-start-1116.webp",
-                                                           "bytes":  57272,
-                                                           "psnrAgainstSource":  33.02
+                                                           "bytes":  62812,
+                                                           "psnrAgainstSource":  32.69
                                                        }
                                                    ]
                                   },

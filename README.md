@@ -137,15 +137,14 @@ the whole video. Press `D` at the start to get one.
 
 ## Screenshots and GIFs too
 
-![A Mafia: The Old Country trailer frame saved as a PNG and opened in the player as a photo, in Wipe: the original left of a divider down the man's nose, the DLSS 5 render right of it](docs/screenshots/current/photo-wipe.jpg)
+![A Grand Theft Auto VI frame saved as a PNG and opened in the player as a photo, in Wipe: the original left of a divider down the woman's face, the DLSS 5 render right of it](docs/screenshots/current/photo-wipe.jpg)
 
 Open a PNG, JPEG, BMP, TIFF or static WebP and press `D`. It renders once, the
 compare views work as they do on a video, and it saves back as a PNG or JPEG
-at full size. Above, a *Mafia: The Old Country* trailer frame saved as a
-2560x1440 PNG, at default settings: the game's smooth orange skin comes back
-with texture, a truer tone and light that falls across the face. From the
-command line it took 8 seconds on an RTX 4080 SUPER. Animated GIFs render
-frame by frame and keep their timing.
+at full size. Above, a frame of *Grand Theft Auto VI: An Extended Look* saved
+as a 2560x1440 PNG, at default settings, the divider down the face. From the
+command line it took 12 seconds on an RTX 5090, launch to exit. Animated GIFs
+render frame by frame and keep their timing.
 
 ## Save the result
 
@@ -192,7 +191,7 @@ Two ways under **File**, and one from the command line:
   machine can run on it. `--range`, `--encode`, `--report` and the rest are in
   the [usage guide](docs/USAGE.md#from-the-command-line).
 
-![Export with DLSS stages: Super Resolution ticked, output height 2160p, Upscaler RTX VSR (recommended), neural rendering and frame generation unticked, and the result line 3840 × 2160 at 30 fps, 1 pass](docs/screenshots/current/export-stages-vsr.jpg)
+![Export with DLSS stages: Super Resolution ticked, output height 2160p, Upscaler RTX VSR (recommended), neural rendering and frame generation unticked, and the result line 3840 × 2160 at 30 fps · 1 pass](docs/screenshots/current/export-stages-vsr.jpg)
 
 ## How it compares
 
@@ -309,42 +308,43 @@ and the cache. The trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md
 
 ## Screenshots
 
-The player paused on one frame of *007 First Light* rendered at default
-settings: the first four on an RTX 5090 at 100% display scaling, the next three
-on an RTX 4080 SUPER at 150%. Click any image for full size.
+The player paused on one frame of *Grand Theft Auto VI: An Extended Look*
+rendered at default settings, on an RTX 5090 at 100% display scaling. The RTX
+VSR crop and the saved comparison file are from an earlier round, on a frame of
+*007 First Light*. Click any image for full size.
 
 ![A 960x540 copy of 007 First Light in Wipe, compared against RTX VSR: the player's plain scale of the original left of a divider down the face, RTX VSR at High right of it, both tags at the top; an unscaled crop of the player's picture](docs/screenshots/current/vsr-wipe-crop.png)
 
 One 540p frame shown at 1.51x: the player's plain scaling left of the divider,
-RTX VSR right, unscaled crop ([whole window](docs/screenshots/current/vsr-wipe.jpg)).
+RTX VSR right, unscaled crop ([the same comparison on the GTA VI frame, whole window](docs/screenshots/current/vsr-wipe.jpg)).
 The measured comparison is the
 [RTX VSR quality report](docs/measurements/vsr-quality-20261002/REPORT.md), not
 this frame.
 
-![The player in Wipe: the original left of a divider down the face, the DLSS 5 render right of it, with the compare bar below](docs/screenshots/current/compare-wipe.jpg)
+![The player in Wipe: the original left of a divider down the face, the DLSS 5 render right of it, with the compare bar and the toolbar below](docs/screenshots/current/compare-wipe.jpg)
 
-![Difference view: where the model changed the picture, amplified 4x, as brightness](docs/screenshots/current/compare-difference.jpg)
+![Difference view: where the model changed the picture, amplified 4x, as brightness, with the compare bar's x4 and Luma | Color controls](docs/screenshots/current/compare-difference.jpg)
 
-![2 x 2 view: original, DLSS 5, Difference and RTX VSR at High, with the toast confirming a saved comparison image](docs/screenshots/current/compare-2x2-toast.jpg)
+![2 x 2 view: original, DLSS 5, Difference and RTX VSR at High, with the toast in the status row confirming a saved comparison image](docs/screenshots/current/compare-2x2-toast.jpg)
 
-The file that save wrote, footer and all:
-[`saved-comparison-2x2.png`](docs/screenshots/current/saved-comparison-2x2.png).
+A file that save wrote, footer and all, from the earlier round on *007 First
+Light*: [`saved-comparison-2x2.png`](docs/screenshots/current/saved-comparison-2x2.png).
 
-![A subtitle drawn over the DLSS 5 frame (a test file that says what it is)](docs/screenshots/current/subtitles.jpg)
+![A test subtitle drawn over the DLSS 5 frame (a file written for the shot that says what it is)](docs/screenshots/current/subtitles.jpg)
 
-![Viewing adjustments, with the DLSS 5 mix slider, over the DLSS 5 frame (taken before 0.30.0, when they were a window of their own)](docs/screenshots/current/neural-strength.jpg)
+![View > Viewing adjustments: the Picture panel over the DLSS 5 frame, its viewing zone with Mix (DLSS 5 amount) at 100% and the color sliders beside the render zone's look](docs/screenshots/current/neural-strength.jpg)
 
-![The neural settings at their defaults (taken before 0.30.0; they are now the Picture panel's render zone)](docs/screenshots/current/neural-settings.jpg)
+![The Picture panel at its defaults, its render zone turned to Render pipeline: neural passes, the guides, scene cuts, temporal stability, what the model is given, and Network A](docs/screenshots/current/neural-settings.jpg)
 
 ### Start screen
 
-![Start screen on an RTX 5090: the capability check with its RTX VSR line, the Open file and Open YouTube URL actions, Recent tiles for GTA VI Trailer 2 and 007 First Light each marked Rendered 100%, and the other game trailers with their thumbnails](docs/screenshots/current/player-start.jpg)
+![Start screen on an RTX 5090 with driver 621.01: the capability check with the driver notice and the RTX VSR line, the Open file and Open YouTube URL actions, Recent tiles for two local GTA VI clips each marked Rendered 100%, and the game trailers with their thumbnails](docs/screenshots/current/player-start.jpg)
 
 ### Neural view on and off
 
-![GTA VI Trailer 2 paused on frame 1940 with the neural view on, on an RTX 5090](docs/screenshots/current/neural-playback.jpg)
+![Grand Theft Auto VI: An Extended Look paused with DLSS 5 on, on an RTX 5090: the toolbar's DLSS 5 · On · Standard pill and the pipeline chip, first of the status row's chips](docs/screenshots/current/neural-playback.jpg)
 
-![The same paused GTA VI frame with neural rendering off](docs/screenshots/current/original-comparison.jpg)
+![The same paused GTA VI frame with DLSS 5 off](docs/screenshots/current/original-comparison.jpg)
 
 One paused frame with only the view switched, at default settings. It shows
 how the toggle works, not what every source will gain.
