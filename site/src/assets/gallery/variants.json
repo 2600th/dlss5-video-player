@@ -12,65 +12,65 @@
                                                      {
                                                          "width":  960,
                                                          "format":  "avif",
-                                                         "pairPsnr":  27.17,
-                                                         "sourcePairPsnr":  27.29,
+                                                         "pairPsnr":  27.14,
+                                                         "sourcePairPsnr":  27.27,
                                                          "original":  {
-                                                                          "psnrAgainstSource":  38.87,
+                                                                          "psnrAgainstSource":  38.95,
                                                                           "file":  "gta-player-original-960.avif",
-                                                                          "bytes":  25658
+                                                                          "bytes":  25773
                                                                       },
                                                          "neural":  {
-                                                                        "psnrAgainstSource":  38.8,
+                                                                        "psnrAgainstSource":  38.83,
                                                                         "file":  "gta-player-neural-960.avif",
-                                                                        "bytes":  26617
+                                                                        "bytes":  26772
                                                                     }
                                                      },
                                                      {
                                                          "width":  960,
                                                          "format":  "webp",
-                                                         "pairPsnr":  27.24,
-                                                         "sourcePairPsnr":  27.29,
+                                                         "pairPsnr":  27.23,
+                                                         "sourcePairPsnr":  27.27,
                                                          "original":  {
-                                                                          "psnrAgainstSource":  36.31,
+                                                                          "psnrAgainstSource":  36.34,
                                                                           "file":  "gta-player-original-960.webp",
-                                                                          "bytes":  43300
+                                                                          "bytes":  43336
                                                                       },
                                                          "neural":  {
-                                                                        "psnrAgainstSource":  36.04,
+                                                                        "psnrAgainstSource":  36.06,
                                                                         "file":  "gta-player-neural-960.webp",
-                                                                        "bytes":  44214
+                                                                        "bytes":  44540
                                                                     }
                                                      },
                                                      {
                                                          "width":  1440,
                                                          "format":  "avif",
-                                                         "pairPsnr":  26.08,
-                                                         "sourcePairPsnr":  26.13,
+                                                         "pairPsnr":  26.05,
+                                                         "sourcePairPsnr":  26.09,
                                                          "original":  {
-                                                                          "psnrAgainstSource":  39.77,
+                                                                          "psnrAgainstSource":  39.7,
                                                                           "file":  "gta-player-original-1440.avif",
-                                                                          "bytes":  46627
+                                                                          "bytes":  52992
                                                                       },
                                                          "neural":  {
-                                                                        "psnrAgainstSource":  39.73,
+                                                                        "psnrAgainstSource":  39.68,
                                                                         "file":  "gta-player-neural-1440.avif",
-                                                                        "bytes":  48733
+                                                                        "bytes":  55702
                                                                     }
                                                      },
                                                      {
                                                          "width":  1440,
                                                          "format":  "webp",
-                                                         "pairPsnr":  26.2,
-                                                         "sourcePairPsnr":  26.13,
+                                                         "pairPsnr":  26.18,
+                                                         "sourcePairPsnr":  26.09,
                                                          "original":  {
-                                                                          "psnrAgainstSource":  35.38,
+                                                                          "psnrAgainstSource":  35.43,
                                                                           "file":  "gta-player-original-1440.webp",
-                                                                          "bytes":  83092
+                                                                          "bytes":  83276
                                                                       },
                                                          "neural":  {
-                                                                        "psnrAgainstSource":  34.84,
+                                                                        "psnrAgainstSource":  34.94,
                                                                         "file":  "gta-player-neural-1440.webp",
-                                                                        "bytes":  83574
+                                                                        "bytes":  84510
                                                                     }
                                                      }
                                                  ]

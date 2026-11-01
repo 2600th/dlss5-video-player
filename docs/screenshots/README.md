@@ -8,29 +8,84 @@ for images that have since been replaced are in the git history of this file.
 
 | File | What it shows | Made |
 | --- | --- | --- |
-| `current/neural-playback.jpg`, `original-comparison.jpg` | *Grand Theft Auto VI: An Extended Look* paused on frame 40 of a 3 s cut (source frame 400) at default settings, DLSS 5 on, then off: the toolbar's **DLSS 5** pill and the pipeline chip, first of the status row's chips | 1 Nov 2026, `66dae69` |
+| `current/neural-playback.jpg`, `original-comparison.jpg` | *Grand Theft Auto VI: An Extended Look* paused on frame 40 of a 3 s cut (source frame 400) at default settings, DLSS 5 off, then on: the toolbar's **DLSS 5** pill and the pipeline chip, first of the status row's chips, reading **Original**, then **DLSS 5** | 1 Nov 2026, `62467b1` |
 | `current/compare-wipe.jpg` | The same frame in Wipe, the divider down the face, with the compare bar and the toolbar | 31 Oct 2026, `66dae69` |
 | `current/compare-difference.jpg` | The same frame in Difference (x4, brightness only), with the compare bar's **×4** and **Luma \| Color** controls | 31 Oct 2026, `66dae69` |
 | `current/compare-2x2-toast.jpg` | The same frame in 2 x 2 (original, DLSS 5, Difference, RTX VSR at High), with the toast in the status row that confirms **Save comparison image** | 31 Oct 2026, `66dae69` |
 | `current/saved-comparison-2x2.png` | A file that save wrote: the player's own PNG of a 2 x 2 view of 007 First Light, frame 1122, with its provenance footer, as saved | 2 Oct 2026, `9d0f790` |
 | `current/vsr-wipe.jpg` | A 960x540 copy of the cut paused on frame 40 in Wipe, compared against RTX VSR: the player's plain (bilinear) scale of the original left of the divider, RTX VSR at High right of it, the picture at 1.51x the video | 1 Nov 2026, `66dae69` |
 | `current/vsr-wipe-crop.png` | The picture area of the 2 October `vsr-wipe.jpg` (a 960x540 copy of 007 First Light, frame 1122), 1:1, with both tags | 2 Oct 2026, `9d0f790` |
-| `current/export-stages-vsr.jpg` | **File > Export...** (the **Export with DLSS stages** window) with Super Resolution alone, 2160p, Upscaler **RTX VSR (recommended)**, and its summary line | 1 Nov 2026, `66dae69` |
+| `current/export-stages-vsr.jpg` | **File > Export...**, the window titled **Export**, with Super Resolution alone, 2160p, Upscaler **RTX VSR (recommended)**, and its summary line | 1 Nov 2026, `62467b1` |
 | `current/player-start.jpg` | The start screen after two renders and a restart: the capability check with the driver 621.01 notice and the RTX VSR line, two Recent tiles at Rendered 100%, and the Game trailers row | 1 Nov 2026, `66dae69` |
 | `current/subtitles.jpg` | A test subtitle file drawn over the DLSS 5 frame | 1 Nov 2026, `66dae69` |
-| `current/neural-strength.jpg` | **View > Viewing adjustments...**: the Picture panel in its real place over the DLSS 5 frame, Mix (DLSS 5 amount) at 100% in its viewing zone | 1 Nov 2026, `66dae69` |
-| `current/neural-settings.jpg` | **Enhance > Picture...** at its defaults, the render zone turned to **Render pipeline**, with the **Network** row (A, the 0.28 look) | 1 Nov 2026, `66dae69` |
-| `current/picture-menu.jpg` | The right-click menu on the picture, over the DLSS 5 frame | 1 Nov 2026, `66dae69` |
-| `current/photo-wipe.jpg` | The source's frame 400 saved as a PNG and opened as a photo, in Wipe, the divider down the face | 1 Nov 2026, `66dae69` |
+| `current/neural-strength.jpg` | **View > Viewing adjustments...**: the Picture panel in its real place over the DLSS 5 frame, Mix (DLSS 5 amount) at 100% in its viewing zone, **Render pipeline ›** at the footer's left | 1 Nov 2026, `62467b1` |
+| `current/neural-settings.jpg` | **Enhance > Picture...** at its defaults, the render zone turned to **Render pipeline**, with the **Network** row (A, the 0.28 look) under **Runtime** and **‹ Look** at the footer's left | 1 Nov 2026, `62467b1` |
+| `current/picture-menu.jpg` | The right-click menu on the picture, over the DLSS 5 frame | 1 Nov 2026, `62467b1` |
+| `current/photo-wipe.jpg` | The source's frame 400 saved as a PNG and opened as a photo, in Wipe, the divider down the face, the status line saying **Neural photo** | 1 Nov 2026, `62467b1` |
+
+## 1 November 2026 retakes
+
+Seven of the images above, retaken from `62467b1` after it fixed five things
+the 31 October round reported: the pipeline chip says **Original** when DLSS 5
+is off, a photo's status line says **Neural photo** with no range hint, the
+Picture panel's Render pipeline page has a **Runtime** heading over
+**Network** and the page switch sits at the footer's left, the Export window
+is titled **Export**, and a menu row offers an overlay hotkey only when that
+hotkey registered. They are `original-comparison.jpg`, `photo-wipe.jpg`,
+`neural-settings.jpg`, `neural-strength.jpg` (it shows the footer),
+`export-stages-vsr.jpg`, `picture-menu.jpg`, and `neural-playback.jpg`, so
+the on and off pair stays one session on one render. The rest did not change
+and were not retaken.
+
+**The player.** This repository at `62467b1` (0.30.0), the tested
+`build-upscaling` Release build, copied as before into another new folder,
+`%TEMP%\dlss5-shots\player2`, this time with its `lang\` folder
+(`zh-Hans.lang`), with no settings file, cache or logs; every launch passed
+`--lang en`. The clips, the PNG and the test subtitle were the 31 October
+files.
+
+**Hardware and runtime.** The same RTX 5090, now on driver 617.42
+(`32.0.16.1742`): the driver changed between the two rounds, outside this
+work. Every receipt records ReShade 6.8.0.2155, RenoDX 10.8.0 and DLSS-NR
+310.9.16.0, network A, lock ok. The cut rendered whole again, since the cache
+key changed (`6262c6a099e666fd…`, 90 / 90 verified); the PNG as before
+(`fb3ceadb869057b1…`, 1 / 1).
+
+**Display and capture.** As on 31 October: 100% scaling, the visible frame
+copied from the screen with the player's windows raised, JPEG quality 95 with
+no chroma subsampling. The player was on the second display, except for
+`photo-wipe.jpg`, taken on the first (`\\.\DISPLAY11`, also 1920x1080 at
+100%) because the machine's pointer was resting over the second display and
+moved the posted divider.
+
+**What was done.** The cut opened with the test subtitle beside it, which
+this build loads by itself; **Playback > Subtitles > Off** turned it off
+before the pair was captured. Paused on frame 40, **Enhance > DLSS 5 neural
+rendering** off (`original-comparison.jpg`, chip **Original**), then on again
+(`neural-playback.jpg`, chip **DLSS 5**), in the 1440x930 window. In the
+1902x1023 window, the picture menu as before; in the 1920x1032 window,
+**View > Viewing adjustments**, then **Enhance > Picture** and **Render
+pipeline ›**, the panel captured on its own. The Export window with the 540p
+copy open, set as before (it needs no render). The PNG opened as a photo,
+rendered with **Enhance > DLSS 5 neural rendering**, **Wipe**, divider at
+50.8%.
+
+**Frame checks.** As on 31 October, against frames 39, 40 and 41:
+
+| Capture | Against | 39 | 40 | 41 |
+| --- | --- | --- | --- | --- |
+| DLSS 5 on | render | 3.56 | **2.05** | 3.69 |
+| DLSS 5 off | the cut | 3.59 | **2.09** | 3.71 |
 
 ## 31 October 2026 images
 
-Every image above made on 31 October or 1 November: retaken because 0.30.0
+Every image above made on 31 October or 1 November at `66dae69`: retaken because 0.30.0
 restructured the menus, the toolbar, the compare bar and the dialogs, plus one
 new image, `picture-menu.jpg`. The session was interrupted after the three
 compare views on the evening of 31 October; the rest were taken the next
 morning from the same player folder, cache and clips, with the player started
-again.
+again. Seven were retaken later that day from `62467b1` (above); what follows
+describes this round's captures of them.
 
 **Hardware and runtime.** NVIDIA GeForce RTX 5090, driver 621.01
 (`32.0.16.2101`). Every render's receipt records ReShade 6.8.0.2155, RenoDX

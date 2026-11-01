@@ -78,29 +78,29 @@
                                                          "width":  960,
                                                          "format":  "avif",
                                                          "file":  "photo-wipe-960.avif",
-                                                         "bytes":  19926,
-                                                         "psnrAgainstSource":  39.09
+                                                         "bytes":  20041,
+                                                         "psnrAgainstSource":  39.13
                                                      },
                                                      {
                                                          "width":  960,
                                                          "format":  "webp",
                                                          "file":  "photo-wipe-960.webp",
-                                                         "bytes":  33424,
-                                                         "psnrAgainstSource":  36.69
+                                                         "bytes":  33462,
+                                                         "psnrAgainstSource":  36.72
                                                      },
                                                      {
                                                          "width":  1440,
                                                          "format":  "avif",
                                                          "file":  "photo-wipe-1440.avif",
-                                                         "bytes":  35963,
-                                                         "psnrAgainstSource":  40.17
+                                                         "bytes":  36453,
+                                                         "psnrAgainstSource":  40.22
                                                      },
                                                      {
                                                          "width":  1440,
                                                          "format":  "webp",
                                                          "file":  "photo-wipe-1440.webp",
-                                                         "bytes":  60488,
-                                                         "psnrAgainstSource":  37.38
+                                                         "bytes":  60982,
+                                                         "psnrAgainstSource":  37.54
                                                      }
                                                  ]
                                 },
@@ -144,29 +144,29 @@
                                                               "width":  960,
                                                               "format":  "avif",
                                                               "file":  "neural-strength-960.avif",
-                                                              "bytes":  25183,
-                                                              "psnrAgainstSource":  39.84
+                                                              "bytes":  25000,
+                                                              "psnrAgainstSource":  39.76
                                                           },
                                                           {
                                                               "width":  960,
                                                               "format":  "webp",
                                                               "file":  "neural-strength-960.webp",
-                                                              "bytes":  36700,
-                                                              "psnrAgainstSource":  35.91
+                                                              "bytes":  36526,
+                                                              "psnrAgainstSource":  35.89
                                                           },
                                                           {
                                                               "width":  1440,
                                                               "format":  "avif",
                                                               "file":  "neural-strength-1440.avif",
-                                                              "bytes":  47917,
+                                                              "bytes":  47739,
                                                               "psnrAgainstSource":  40.66
                                                           },
                                                           {
                                                               "width":  1440,
                                                               "format":  "webp",
                                                               "file":  "neural-strength-1440.webp",
-                                                              "bytes":  64940,
-                                                              "psnrAgainstSource":  35.46
+                                                              "bytes":  64896,
+                                                              "psnrAgainstSource":  35.47
                                                           }
                                                       ]
                                      },
@@ -177,15 +177,15 @@
                                                               "width":  882,
                                                               "format":  "avif",
                                                               "file":  "neural-settings-882.avif",
-                                                              "bytes":  38641,
-                                                              "psnrAgainstSource":  39.09
+                                                              "bytes":  38888,
+                                                              "psnrAgainstSource":  38.95
                                                           },
                                                           {
                                                               "width":  882,
                                                               "format":  "webp",
                                                               "file":  "neural-settings-882.webp",
-                                                              "bytes":  38142,
-                                                              "psnrAgainstSource":  32.57
+                                                              "bytes":  38300,
+                                                              "psnrAgainstSource":  32.53
                                                           }
                                                       ]
                                      },

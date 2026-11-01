@@ -191,7 +191,7 @@ Two ways under **File**, and one from the command line:
   machine can run on it. `--range`, `--encode`, `--report` and the rest are in
   the [usage guide](docs/USAGE.md#from-the-command-line).
 
-![Export with DLSS stages: Super Resolution ticked, output height 2160p, Upscaler RTX VSR (recommended), neural rendering and frame generation unticked, and the result line 3840 × 2160 at 30 fps · 1 pass](docs/screenshots/current/export-stages-vsr.jpg)
+![The Export window: Super Resolution ticked, output height 2160p, Upscaler RTX VSR (recommended), neural rendering and frame generation unticked, and the result line 3840 × 2160 at 30 fps · 1 pass](docs/screenshots/current/export-stages-vsr.jpg)
 
 ## How it compares
 
@@ -335,7 +335,7 @@ Light*: [`saved-comparison-2x2.png`](docs/screenshots/current/saved-comparison-2
 
 ![View > Viewing adjustments: the Picture panel over the DLSS 5 frame, its viewing zone with Mix (DLSS 5 amount) at 100% and the color sliders beside the render zone's look](docs/screenshots/current/neural-strength.jpg)
 
-![The Picture panel at its defaults, its render zone turned to Render pipeline: neural passes, the guides, scene cuts, temporal stability, what the model is given, and Network A](docs/screenshots/current/neural-settings.jpg)
+![The Picture panel at its defaults, its render zone turned to Render pipeline: neural passes, the guides, scene cuts, temporal stability, what the model is given, and the Runtime group's Network A, with the page switch at the footer's left](docs/screenshots/current/neural-settings.jpg)
 
 ### Start screen
 
