@@ -439,7 +439,7 @@ private:
             {L"neural.network.only_previous", L"A on 310.8.SF-v2 (this GPU)"},
             {L"neural.settings.passes", L"Neural passes"}, {L"neural.settings.chained", L"Keep temporal history per pass"},
             {L"neural.settings.group_look", L"Look"}, {L"adjustments.group_picture", L"Color"}, {L"encoder.group_conversion", L"Color conversion"}, {L"encoder.group_cache", L"Cache encoding"}, {L"encoder.group_model", L"What the model is given"},
-            {L"neural.settings.group_cost", L"Quality and render time"},
+            {L"neural.settings.group_cost", L"Quality and render time"}, {L"neural.settings.group_runtime", L"Runtime"},
             {L"neural.settings.group_guides", L"Guides sent to the model"},
             {L"neural.settings.group_temporal", L"Across frames"},
             {L"neural.settings.scene_cuts", L"Scene cuts"},
