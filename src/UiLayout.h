@@ -204,6 +204,12 @@ ButtonContentLayout LayoutButtonContent(RECT outer, SIZE icon, SIZE text,
                                         bool stacked, UINT dpi);
 PreRenderSurfaceLayout LayoutPreRenderSurface(int clientWidth, int clientHeight, UINT dpi);
 std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status);
+// The status line's first word for a picture played from a render: what was
+// rendered, a video or a photo ("status.neural_video", "status.neural_photo").
+std::wstring_view RenderedMediaStatusKey(bool stillImage);
+// Whether the status line suggests marking In and Out and rendering the range.
+// A photo has no range to mark, so never for one.
+bool ShowsRangeRenderHint(bool stillImage, bool liveSession, bool rangeRenderAvailable);
 std::wstring BuildPlayerWindowTitle(std::wstring_view appTitle,
                                     std::wstring_view mediaTitle,
                                     size_t maxCharacters);

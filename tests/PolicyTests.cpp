@@ -846,6 +846,19 @@ void open_action_content_keeps_idle_and_toolbar_copy_distinct_test()
     CHECK(toolbar.find(L"Abrir") == std::wstring::npos);
 }
 
+// A rendered photo's status line called it "Neural video", in English whatever
+// the language, and before a render suggested marking a range it does not have.
+void photo_status_line_says_photo_and_offers_no_range_test()
+{
+    Localizer localizer;
+    CHECK_EQ(std::wstring(L"Neural photo"), localizer.Get(RenderedMediaStatusKey(true).data()));
+    CHECK_EQ(std::wstring(L"Neural video"), localizer.Get(RenderedMediaStatusKey(false).data()));
+    CHECK(!ShowsRangeRenderHint(true, false, true));
+    CHECK(ShowsRangeRenderHint(false, false, true));
+    CHECK(!ShowsRangeRenderHint(false, true, true));
+    CHECK(!ShowsRangeRenderHint(false, false, false));
+}
+
 void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
 {
     const ToolbarAvailability loaded{true, false, true, false};
@@ -17887,6 +17900,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test),
     TEST_CASE(frame_generation_pill_follows_media_and_availability_only_test),
     TEST_CASE(open_action_content_keeps_idle_and_toolbar_copy_distinct_test),
+    TEST_CASE(photo_status_line_says_photo_and_offers_no_range_test),
     TEST_CASE(focused_toolbar_action_reconciles_layout_and_availability_changes_test),
     TEST_CASE(idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test),
     TEST_CASE(dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test),

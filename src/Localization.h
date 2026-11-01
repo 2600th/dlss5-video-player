@@ -565,6 +565,7 @@ private:
             {L"error.frame", L"No video frame could be decoded. Try another file."},
             {L"status.muted", L"Muted"}, {L"status.volume", L"Vol"}, {L"status.seeking", L"Seeking\u2026"},
             {L"status.render_hint", L"Mark I/O, then Ctrl+R renders the marked range"},
+            {L"status.neural_video", L"Neural video"}, {L"status.neural_photo", L"Neural photo"},
             {L"status.preparing_source", L"Downloading this source for rendering\u2026"},
             {L"status.hdr_tonemapped", L"HDR tone-mapped to SDR (DLSS 5 renders SDR)"},
             {L"status.hdr_original", L"HDR display: original in HDR, DLSS 5 in SDR"},

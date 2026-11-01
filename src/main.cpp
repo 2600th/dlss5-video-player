@@ -12689,7 +12689,7 @@ private:
             status.upscalingStatus=UpscalingStatus();status.frameGenerationStatus=FrameGenerationStatus();
             // The view is named only when it is not the neural one: "Neural
             // rendered" repeated what the Neural Rendering pill already says.
-            std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural video \u00b7 "))+
+            std::wstring text=(m_liveSession?std::wstring{}:T(RenderedMediaStatusKey(m_decoder.IsStillImage()).data())+L" \u00b7 ")+
                 (m_comparisonView==ComparisonView::Neural?std::wstring{}:T(L"neural.view.original")+L" \u00b7 ")+
                 BuildPlayerStatusText(status);
             if(const std::wstring hdr=HdrStatusText();!hdr.empty())text+=L" \u00b7 "+hdr;
@@ -12712,7 +12712,7 @@ private:
         // Lead with what was marked, or with how to mark, because the runtime
         // detail behind it is what a narrow window truncates.
         if(const std::wstring markers=MarkerStatusText();!markers.empty())text=markers+L" \u00b7 "+text;
-        else if(!m_liveSession&&RangeRenderAvailable())text=T(L"status.render_hint")+L" \u00b7 "+text;
+        else if(ShowsRangeRenderHint(m_decoder.IsStillImage(),m_liveSession,RangeRenderAvailable()))text=T(L"status.render_hint")+L" \u00b7 "+text;
         // Ahead of the hint and the runtime detail: it says why the picture is not
         // the HDR one the file carries, and what the model will be shown.
         if(const std::wstring hdr=HdrStatusText();!hdr.empty())text=hdr+L" \u00b7 "+text;
