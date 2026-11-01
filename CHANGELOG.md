@@ -26,6 +26,11 @@ The UI moved, so the [table below](#where-things-moved-in-0300) says where each
   then went silent while the picture played on: at 62-75 s on the built-in
   trailers, measured on 2026-10-31. The player now reconnects and carries on
   from the byte it reached.
+- **YouTube sound no longer stops when DLSS 5 is turned on.** YouTube sends the
+  picture and the sound as two streams, and turning DLSS 5 on, resuming after a
+  frame step or ending a drag seek restarted the sound from the picture's
+  stream, which has none. Found testing 0.30.0's own package; 0.28.3 had the
+  same code.
 - **yt-dlp is a stable release again, past certifi's critical certificate
   fix.** [GHSA-6q48-6c7w-9gw2](https://github.com/certifi/python-certifi/security/advisories/GHSA-6q48-6c7w-9gw2)
   (2026-10-20) left older yt-dlp builds open to man-in-the-middle attacks. The
