@@ -13226,9 +13226,11 @@ private:
             if(w==VK_F10)RevealFullscreenControls();
             if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}
             // Everything else is the key table (KeyBindings.h), matched with its
-            // modifiers exactly: Shift+S is not S. A key held with Alt is not one
-            // of them - Alt+key is the menu bar's, and Ctrl+Alt is AltGr typing a
-            // character on many layouts.
+            // modifiers exactly - Shift+S is not S - except that a transport key
+            // (Space, the arrows, . and ,) held with Shift or Ctrl and bound to
+            // nothing of its own runs the plain key's command. A key held with
+            // Alt is not one of them - Alt+key is the menu bar's, and Ctrl+Alt is
+            // AltGr typing a character on many layouts.
             if(!(GetKeyState(VK_MENU)&0x8000)){
                 if(const auto command=m_keys.LookupKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}
             }

@@ -1840,6 +1840,55 @@ void export_dialog_opens_on_the_picture_being_watched_test()
     CHECK(PlanExport(chosen, 1920, 1080, 30.0, 2, false).valid);
 }
 
+// Before 0.30, Space, Left, Right and . acted whatever Shift or Ctrl was held;
+// the key table matched exactly, so Shift+Left, Shift+Space and Ctrl+Left did
+// nothing. A transport key with modifiers and no binding of its own now runs
+// the plain key's command; letters stay exact, and a file's line wins.
+void key_binding_transport_keys_answer_with_shift_or_ctrl_held_test()
+{
+    const key_bindings::Table& defaults = key_bindings::Defaults();
+    for (const auto& [control, shift] : {std::pair{false, true}, std::pair{true, false}, std::pair{true, true}}) {
+        CHECK(defaults.LookupKey(VK_SPACE, control, shift) == app_menu::IDM_PLAY);
+        CHECK(defaults.LookupKey(VK_LEFT, control, shift) == app_menu::IDM_BACK10);
+        CHECK(defaults.LookupKey(VK_RIGHT, control, shift) == app_menu::IDM_FWD10);
+        CHECK(defaults.LookupKey(VK_OEM_PERIOD, control, shift) == app_menu::IDM_STEP_FRAME);
+        // Letters match exactly, as M2 made them: no modified S stops.
+        CHECK(defaults.LookupKey('S', control, shift) != app_menu::IDM_STOP);
+        // Up, Down and , have no default, so they fall back to nothing.
+        CHECK(!defaults.LookupKey(VK_UP, control, shift).has_value());
+    }
+    CHECK(!defaults.LookupKey('S', false, true).has_value());
+    CHECK(defaults.LookupKey('S', true, true) == app_menu::IDM_SAVE_COMPARISON_IMAGE);
+    // A non-transport key with a binding of its own keeps it: Shift+[ is not [.
+    CHECK(defaults.LookupKey(VK_OEM_4, false, true) == app_menu::IDM_COMPARE_DIFFERENCE_LESS);
+    CHECK(defaults.LookupKey(VK_OEM_4, false, false) == app_menu::IDM_COMPARE_BLEND_LESS);
+    CHECK(!defaults.LookupKey(VK_OEM_4, true, false).has_value());
+
+    // input.conf's lines win: a chord bound to something else runs that, an
+    // `ignore`d chord runs nothing, a bound Up or , answers with modifiers too,
+    // and a plain key rebound carries its modified chords with it.
+    const key_bindings::Loaded loaded = key_bindings::Parse(
+        "Shift+Left   previous-file\r\n"
+        "Ctrl+Space   ignore\r\n"
+        "Up           mute\r\n"
+        ",            step-frame\r\n"
+        "Right        next-file\r\n");
+    CHECK(loaded.problems.empty());
+    const key_bindings::Table& table = loaded.table;
+    CHECK(table.LookupKey(VK_LEFT, false, true) == app_menu::IDM_PREVIOUS_FILE);
+    CHECK(table.LookupKey(VK_LEFT, true, false) == app_menu::IDM_BACK10);
+    CHECK(!table.LookupKey(VK_SPACE, true, false).has_value());
+    CHECK(table.LookupKey(VK_SPACE, false, true) == app_menu::IDM_PLAY);
+    CHECK(table.LookupKey(VK_UP, true, false) == app_menu::IDM_MUTE);
+    CHECK(table.LookupKey(VK_OEM_COMMA, false, true) == app_menu::IDM_STEP_FRAME);
+    CHECK(table.LookupKey(VK_RIGHT, false, true) == app_menu::IDM_NEXT_FILE);
+    // A later line can bind an ignored chord again.
+    const key_bindings::Loaded rebound = key_bindings::Parse("Ctrl+Space ignore\r\nCtrl+Space mute\r\n");
+    CHECK(rebound.table.LookupKey(VK_SPACE, true, false) == app_menu::IDM_MUTE);
+    // The menu rows still print only the keys bound: the fallback is not a binding.
+    CHECK(defaults.KeysFor(app_menu::IDM_BACK10) == L"Left");
+}
+
 void key_binding_template_reads_back_as_the_defaults_test()
 {
     const std::string text = key_bindings::TemplateText();
@@ -17859,6 +17908,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(shipped_translations_are_complete_test),
     TEST_CASE(key_binding_defaults_are_the_players_keys_test),
     TEST_CASE(key_binding_file_rebinds_unbinds_and_reports_bad_lines_test),
+    TEST_CASE(key_binding_transport_keys_answer_with_shift_or_ctrl_held_test),
     TEST_CASE(key_binding_template_reads_back_as_the_defaults_test),
     TEST_CASE(toolbar_menus_mirror_the_menu_bar_rows_test),
     TEST_CASE(picture_context_menu_is_rows_of_the_menu_bar_test),
