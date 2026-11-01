@@ -1494,7 +1494,7 @@ static std::filesystem::path PickStageExportFile(HWND owner, std::wstring_view t
     filter.push_back(L'\0');
     const std::wstring defaultExtension=ExportContainerExtension(choices.front())+1;
     OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));
-    dialog.lpstrFilter=filter.c_str();dialog.nFilterIndex=1;dialog.lpstrDefExt=defaultExtension.c_str();dialog.lpstrTitle=L"Export with DLSS stages to a file";
+    dialog.lpstrFilter=filter.c_str();dialog.nFilterIndex=1;dialog.lpstrDefExt=defaultExtension.c_str();dialog.lpstrTitle=L"Export to a file";
     dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|OFN_OVERWRITEPROMPT;
     if(!GetSaveFileNameW(&dialog))return {};
     const std::filesystem::path chosen(ExportFileName(path,dialog.nFilterIndex?dialog.nFilterIndex-1u:0u,photo,animation));
@@ -1503,7 +1503,7 @@ static std::filesystem::path PickStageExportFile(HWND owner, std::wstring_view t
     std::error_code existsError;
     if(chosen!=std::filesystem::path(path)&&std::filesystem::exists(chosen,existsError)){
         const std::wstring question=chosen.filename().wstring()+L" already exists.\nDo you want to replace it?";
-        if(MessageBoxW(owner,question.c_str(),L"Export with DLSS stages",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return {};
+        if(MessageBoxW(owner,question.c_str(),L"Export",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return {};
     }
     return chosen;
 }

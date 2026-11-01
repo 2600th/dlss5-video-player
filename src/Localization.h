@@ -271,7 +271,7 @@ private:
             {L"menu.render_range", L"Render marked range"}, {L"menu.render_whole", L"Render whole video"},
             {L"menu.export_cached", L"Save rendered video…"},
             {L"menu.export_stages", L"Export…"},
-            {L"export.stages.title", L"Export with DLSS stages"},
+            {L"export.stages.title", L"Export"},
             {L"export.stages.upscale", L"Super Resolution"},
             {L"export.stages.engine", L"Upscaler"},
             {L"export.stages.engine_vsr", L"RTX VSR (recommended)"},

@@ -859,6 +859,16 @@ void photo_status_line_says_photo_and_offers_no_range_test()
     CHECK(!ShowsRangeRenderHint(false, false, false));
 }
 
+// The menu and the toolbar say "Export…" and "Export"; the window they open was
+// still titled "Export with DLSS stages", 0.28's menu name.
+void export_window_is_titled_as_the_menu_names_it_test()
+{
+    Localizer localizer;
+    const std::wstring title = localizer.Get(L"export.stages.title");
+    CHECK_EQ(localizer.Get(L"toolbar.export"), title);
+    CHECK_EQ(title + L"…", localizer.Get(L"menu.export_stages"));
+}
+
 void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
 {
     const ToolbarAvailability loaded{true, false, true, false};
@@ -17901,6 +17911,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(frame_generation_pill_follows_media_and_availability_only_test),
     TEST_CASE(open_action_content_keeps_idle_and_toolbar_copy_distinct_test),
     TEST_CASE(photo_status_line_says_photo_and_offers_no_range_test),
+    TEST_CASE(export_window_is_titled_as_the_menu_names_it_test),
     TEST_CASE(focused_toolbar_action_reconciles_layout_and_availability_changes_test),
     TEST_CASE(idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test),
     TEST_CASE(dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test),
