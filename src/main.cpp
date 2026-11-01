@@ -4546,7 +4546,7 @@ private:
         }
         // /select, takes one quoted path; a default cache path contains spaces.
         const std::wstring arguments=L"/select,\""+m_frameGenLastOutput.wstring()+L"\"";
-        ShellExecuteW(m_hwnd,L"open",L"explorer.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+        RevealInExplorer(arguments);
     }
     // Taskbar progress for the one job that lasts minutes, because in
     // fullscreen with the controls auto-hidden, and whenever the window is
@@ -5111,8 +5111,21 @@ private:
             }
             LOG("Wrote the key-binding template to "<<WideToUtf8(path.wstring()));
         }
-        const std::wstring arguments=L"\""+path.wstring()+L"\"";
-        ShellExecuteW(m_hwnd,L"open",L"notepad.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+        OpenInNotepad(path);
+    }
+    // Notepad by its full path in the system directory: a bare "notepad.exe"
+    // is searched for in the current directory first.
+    void OpenInNotepad(const std::filesystem::path& file){
+        const auto notepad=platform_paths::SystemFile(L"notepad.exe");
+        if(!notepad){LOG("Notepad was not opened: the system directory could not be read");return;}
+        const std::wstring arguments=L"\""+file.wstring()+L"\"";
+        ShellExecuteW(m_hwnd,L"open",notepad->c_str(),arguments.c_str(),nullptr,SW_SHOWNORMAL);
+    }
+    // Explorer the same way, from the Windows directory.
+    void RevealInExplorer(const std::wstring& arguments){
+        const auto explorer=platform_paths::WindowsFile(L"explorer.exe");
+        if(!explorer){LOG("Explorer was not opened: the Windows directory could not be read");return;}
+        ShellExecuteW(m_hwnd,L"open",explorer->c_str(),arguments.c_str(),nullptr,SW_SHOWNORMAL);
     }
     // Help > User guide: the guide shipped beside the player, or this version's
     // on GitHub when the folder has lost it.
@@ -5121,10 +5134,9 @@ private:
         const auto guide=(directory?*directory:std::filesystem::current_path())/L"docs"/L"USAGE.md";
         std::error_code error;
         if(std::filesystem::is_regular_file(guide,error)){
-            const std::wstring arguments=L"\""+guide.wstring()+L"\"";
             // Markdown has no handler on a fresh Windows; Notepad reads it.
             if(reinterpret_cast<INT_PTR>(ShellExecuteW(m_hwnd,L"open",guide.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
-                ShellExecuteW(m_hwnd,L"open",L"notepad.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+                OpenInNotepad(guide);
             return;
         }
         const std::string version=DLSS_VIDEO_PLAYER_VERSION;
@@ -5138,7 +5150,7 @@ private:
         std::error_code error;
         if(!log.empty()&&std::filesystem::is_regular_file(log,error)){
             const std::wstring arguments=L"/select,\""+log.wstring()+L"\"";
-            ShellExecuteW(m_hwnd,L"open",L"explorer.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+            RevealInExplorer(arguments);
             return;
         }
         const auto directory=platform_paths::ModuleDirectory();

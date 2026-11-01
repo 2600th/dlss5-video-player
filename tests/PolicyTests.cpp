@@ -4857,6 +4857,56 @@ void module_directory_is_the_parent_of_the_module_test()
     if (directory) CHECK_EQ(std::wstring(LR"(C:\Program Files\Player)"), directory->wstring());
 }
 
+// Help > Edit key bindings and the user guide's fallback opened "notepad.exe"
+// by bare name, which ShellExecuteW looks for in the current directory first.
+// The path is the system directory's, or nothing at all.
+void notepad_is_opened_from_the_system_directory_test()
+{
+    // GetSystemDirectoryW's contract, with a short first buffer.
+    const std::wstring system = LR"(C:\Windows\system32)";
+    int calls = 0;
+    const auto growing = [&](wchar_t* buffer, uint32_t size) -> uint32_t {
+        ++calls;
+        const uint32_t needed = static_cast<uint32_t>(system.size()) + 1;
+        if (calls == 1 || size < needed) return needed + 300;  // asks for more than it needs, once
+        std::copy(system.begin(), system.end(), buffer);
+        buffer[system.size()] = L'\0';
+        return static_cast<uint32_t>(system.size());
+    };
+    const auto notepad = platform_paths::SystemFileWith(growing, L"notepad.exe");
+    CHECK(notepad.has_value());
+    if (notepad) CHECK_EQ(std::wstring(LR"(C:\Windows\system32\notepad.exe)"), notepad->wstring());
+    CHECK_EQ(2, calls);
+    // A failure, a relative answer and an empty name give no path to search for.
+    CHECK(!platform_paths::SystemFileWith([](wchar_t*, uint32_t) -> uint32_t { return 0; }, L"notepad.exe"));
+    CHECK(!platform_paths::SystemFileWith(
+        [](wchar_t* buffer, uint32_t) -> uint32_t { buffer[0] = L'.'; buffer[1] = L'\0'; return 1; }, L"notepad.exe"));
+    CHECK(!platform_paths::SystemFileWith(
+        [&](wchar_t* buffer, uint32_t) -> uint32_t {
+            std::copy(system.begin(), system.end(), buffer);
+            buffer[system.size()] = L'\0';
+            return static_cast<uint32_t>(system.size());
+        }, L""));
+    // This machine's: absolute, in the system directory, and there.
+    const auto real = platform_paths::SystemFile(L"notepad.exe");
+    CHECK(real.has_value());
+    if (real) {
+        CHECK(real->is_absolute());
+        wchar_t directory[MAX_PATH]{};
+        CHECK(GetSystemDirectoryW(directory, MAX_PATH) > 0);
+        CHECK_EQ(std::filesystem::path(directory) / L"notepad.exe", *real);
+        std::error_code error;
+        CHECK(std::filesystem::is_regular_file(*real, error));
+    }
+    // Explorer, which the reveal commands opened by bare name too.
+    const auto explorer = platform_paths::WindowsFile(L"explorer.exe");
+    CHECK(explorer.has_value());
+    if (explorer) {
+        std::error_code error;
+        CHECK(explorer->is_absolute() && std::filesystem::is_regular_file(*explorer, error));
+    }
+}
+
 // The real module, which every production caller uses. It has to answer on
 // this machine or the fourteen call sites have no fallback.
 void module_directory_answers_for_this_process_test()
@@ -17959,6 +18009,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(module_path_never_accepts_a_filled_buffer_test),
     TEST_CASE(module_path_reports_a_failed_query_test),
     TEST_CASE(module_directory_is_the_parent_of_the_module_test),
+    TEST_CASE(notepad_is_opened_from_the_system_directory_test),
     TEST_CASE(module_directory_answers_for_this_process_test),
     TEST_CASE(renderer_recovery_rebuilds_into_a_fresh_window_test),
     TEST_CASE(renderer_recovery_keeps_a_retained_renderers_window_test),
