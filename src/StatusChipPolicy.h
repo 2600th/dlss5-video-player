@@ -96,6 +96,17 @@ struct Pipeline {
     bool rtxVsr{};           // RTX VSR does
 };
 
+// Whether DLSS 5 frames are what the screen shows, for Pipeline::neural. A
+// rendered video stays loaded as a pair while DLSS 5 is off, so the pair alone
+// is not the answer: its original side is on screen then, and the chip said
+// "DLSS 5" over it. The rendered side is shown in the DLSS 5 view (every
+// compare mode needs it, so they all are), and a paused settings preview is a
+// DLSS 5 frame over either.
+inline bool NeuralOnScreen(bool renderedPairLoaded, bool neuralViewSelected, bool previewShown)
+{
+    return (renderedPairLoaded && neuralViewSelected) || previewShown;
+}
+
 // The stage names in the viewer's language (Localization.h), and what the chip
 // says when no stage runs: the decoded picture, scaled by the window.
 struct PipelineNames {

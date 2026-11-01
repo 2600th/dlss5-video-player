@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 
 // One checked answer to "where is this executable", for the fourteen call
 // sites that used to ask it three incompatible ways.
@@ -77,6 +78,54 @@ inline std::optional<std::filesystem::path> ModulePath()
 inline std::optional<std::filesystem::path> ModuleDirectory()
 {
     return ModuleDirectoryWith(&QueryCurrentModulePath);
+}
+
+// `name` in the Windows system directory ("C:\Windows\System32\notepad.exe").
+// A bare L"notepad.exe" given to ShellExecuteW is searched for in the current
+// directory first - wherever the video was opened from - so a notepad.exe
+// planted beside a video ran in its place. `query(buffer, size)` has
+// GetSystemDirectoryW's contract: 0 on failure, the length when it fits, the
+// size it needs (terminator included) when it does not. nullopt rather than a
+// relative or truncated path, so there is never a name left to search for.
+template <class Query>
+std::optional<std::filesystem::path> SystemFileWith(Query&& query, std::wstring_view name)
+{
+    std::wstring buffer(MAX_PATH, L'\0');
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const uint32_t length = query(buffer.data(), static_cast<uint32_t>(buffer.size()));
+        if (length == 0) return std::nullopt;
+        if (length >= buffer.size()) {
+            if (length > kMaxPathCharacters) return std::nullopt;
+            buffer.assign(length, L'\0');
+            continue;
+        }
+        buffer.resize(length);
+        std::filesystem::path directory(std::move(buffer));
+        if (!directory.is_absolute() || name.empty()) return std::nullopt;
+        return directory / name;
+    }
+    return std::nullopt;
+}
+
+inline uint32_t QuerySystemDirectory(wchar_t* buffer, uint32_t size)
+{
+    return GetSystemDirectoryW(buffer, size);
+}
+
+inline std::optional<std::filesystem::path> SystemFile(std::wstring_view name)
+{
+    return SystemFileWith(&QuerySystemDirectory, name);
+}
+
+inline uint32_t QueryWindowsDirectory(wchar_t* buffer, uint32_t size)
+{
+    return GetWindowsDirectoryW(buffer, size);
+}
+
+// The same in the Windows directory, which is where explorer.exe lives.
+inline std::optional<std::filesystem::path> WindowsFile(std::wstring_view name)
+{
+    return SystemFileWith(&QueryWindowsDirectory, name);
 }
 
 } // namespace platform_paths

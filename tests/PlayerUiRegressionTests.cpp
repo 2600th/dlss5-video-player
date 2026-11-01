@@ -1959,6 +1959,67 @@ struct PlayerAppTestAccess {
         DeleteDC(dc);
     }
 
+    // The screenshot round of 0.30.0: the Network row sat under "What the model
+    // is given" with no heading of its own, a few pixels above the footer's
+    // "On screen:" line, and the page switch sat on the first group's heading
+    // row. The row has its Runtime group and room below it, and the switch
+    // shares no row with a heading, on either page.
+    static void picture_pipeline_page_gives_the_runtime_its_own_group_test()
+    {
+        PlayerApp& app = fixture->app;
+        for (const bool pipeline : {false, true}) {
+            app.m_picturePipelinePage = pipeline;
+            app.ShowNeuralSettings();
+            const HWND dialog = app.m_neuralWnd;
+            REQUIRE(dialog != nullptr);
+            const int dpi = int(ActiveWindowDpi(dialog));
+            const auto rectOf = [&](HWND control) {
+                RECT rect{};
+                GetWindowRect(control, &rect);
+                MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&rect), 2);
+                return rect;
+            };
+            std::vector<std::pair<std::wstring, RECT>> headings;
+            for (HWND child = GetWindow(dialog, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+                wchar_t kind[32]{};
+                GetClassNameW(child, kind, 32);
+                if (IsWindowVisible(child) && std::wstring_view(kind) == L"Static" &&
+                    (GetWindowLongPtrW(child, GWL_STYLE) & SS_TYPEMASK) == SS_OWNERDRAW)
+                    headings.emplace_back(ReadText(child), rectOf(child));
+            }
+            const HWND page = GetDlgItem(dialog, IDC_PIC_PAGE);
+            REQUIRE(page != nullptr);
+            const RECT switchRect = rectOf(page);
+            for (const auto& [text, rect] : headings) {
+                if (switchRect.bottom > rect.top && switchRect.top < rect.bottom)
+                    std::wcerr << L"page switch on the row of heading " << text << L'\n';
+                CHECK(!(switchRect.bottom > rect.top && switchRect.top < rect.bottom));
+            }
+            const auto heading = [&](const wchar_t* key) -> std::optional<RECT> {
+                for (const auto& [text, rect] : headings)
+                    if (text == app.T(key)) return rect;
+                return std::nullopt;
+            };
+            CHECK(heading(L"neural.settings.group_runtime").has_value() == pipeline);
+            if (pipeline) {
+                const RECT runtime = *heading(L"neural.settings.group_runtime");
+                const auto source = heading(L"neural.settings.group_source");
+                REQUIRE(source.has_value());
+                const RECT exposure = rectOf(GetDlgItem(dialog, IDC_PIC_EXPOSURE));
+                const RECT network = rectOf(GetDlgItem(dialog, IDC_PIC_RENDER_ROW_FIRST));
+                const RECT state = rectOf(GetDlgItem(dialog, IDC_NS_STATE));
+                // What the model is given, then Runtime, then the Network row under it.
+                CHECK(source->bottom <= exposure.top);
+                CHECK(exposure.bottom < runtime.top);
+                CHECK(runtime.bottom <= network.top);
+                // Clear of the footer's state line by a gap, not touching it.
+                CHECK(state.top - network.bottom >= MulDiv(8, dpi, 96));
+            }
+            DestroyWindow(dialog);
+        }
+        app.m_picturePipelinePage = false;
+    }
+
     // The Picture panel's per-control state (UI proposal 4.2 and 3.5): a dot on
     // each row whose value is off its default, a double-click on the row's name,
     // read-out or dot putting that one control back, and Ctrl+Z - a key of the
@@ -2121,7 +2182,15 @@ struct PlayerAppTestAccess {
         const auto& pipeline = chips[size_t(status_chips::Chip::Pipeline)];
         CHECK(pipeline.visible);
         CHECK_EQ(pipeline.text, app.T(L"chip.pipeline.none"));
+        // A rendered pair with DLSS 5 turned off shows the original, and the
+        // chip says so; it named DLSS 5 over it.
+        const ComparisonView view = app.m_comparisonView;
+        const bool previewShown = app.m_previewShown;
+        app.m_previewShown = false;
         app.m_cachedPlayback = true;
+        app.m_comparisonView = ComparisonView::Original;
+        CHECK_EQ(app.BuildStatusChips()[size_t(status_chips::Chip::Pipeline)].text, app.T(L"chip.pipeline.none"));
+        app.m_comparisonView = ComparisonView::Neural;
         chips = app.BuildStatusChips();
         CHECK(chips[size_t(status_chips::Chip::Pipeline)].text.starts_with(app.T(L"toolbar.neural.name")));
         // The tip: the heading, the flow, the settings the render was made with in
@@ -2144,6 +2213,7 @@ struct PlayerAppTestAccess {
         CHECK(!app.BuildStatusChips()[size_t(status_chips::Chip::Pipeline)].visible);
         CHECK(app.PipelineTipText().empty());
         app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_cachedSettings = cachedSettings;
+        app.m_comparisonView = view; app.m_previewShown = previewShown;
         if (!hadRenderer) app.m_renderer.reset();
         app.m_cachedChips = {};
     }
@@ -3481,6 +3551,7 @@ struct PlayerAppTestAccess {
         UI_CASE(picture_panel_zones_pages_revert_and_rows_test),
         UI_CASE(picture_panel_layout_survives_longer_strings_test),
         UI_CASE(simplified_chinese_fits_the_picture_panel_and_pills_test),
+        UI_CASE(picture_pipeline_page_gives_the_runtime_its_own_group_test),
         UI_CASE(picture_panel_marks_resets_and_reverts_each_control_test),
         UI_CASE(pipeline_chip_names_the_stages_and_tips_the_settings_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),

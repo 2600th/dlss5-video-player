@@ -30,6 +30,12 @@
 // because they are how the player is driven without a mouse, and Alt opens the
 // menu bar. Punctuation is named by its US-layout key ([ is the key right of
 // P), which is what the player has always matched.
+//
+// A key matches its modifiers exactly - Shift+S is not S - except the
+// transport keys (Space, Left, Right, Up, Down, . and ,): held with Shift
+// and/or Ctrl and bound to nothing of their own, they run the plain key's
+// command, as Space, Left, Right and . always did. A file's line for such a
+// chord, `ignore` included, wins over that.
 namespace key_bindings {
 
 // A key as pressed: a virtual key and its modifiers, or a character for the one
@@ -254,16 +260,37 @@ struct Binding {
     UINT command;
 };
 
+// The transport keys: Space, the arrows, . and ,. Before 0.30 Space, Left,
+// Right and . acted whatever Shift or Ctrl was held, and a viewer with a hand
+// on Shift still expects them to; letters match exactly, so Shift+S is not S.
+inline bool TransportKey(UINT key)
+{
+    return key == VK_SPACE || key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN ||
+           key == VK_OEM_PERIOD || key == VK_OEM_COMMA;
+}
+
 class Table {
 public:
-    // The command a key runs, if it runs one.
+    // The command a chord runs, if it runs one, matched exactly.
     std::optional<UINT> Lookup(const Chord& chord) const
     {
         for (const Binding& binding : bindings_)
             if (binding.chord == chord) return binding.command;
         return std::nullopt;
     }
-    std::optional<UINT> LookupKey(UINT key, bool control, bool shift) const { return Lookup(Chord{key, control, shift, 0}); }
+    // The command a key pressed with these modifiers runs: its own chord's,
+    // and for a transport key held with Shift and/or Ctrl that has none, the
+    // plain key's - so Shift+Left seeks back as Left does, while a chord the
+    // file binds, or unbinds with `ignore`, keeps its own meaning.
+    std::optional<UINT> LookupKey(UINT key, bool control, bool shift) const
+    {
+        const Chord chord{key, control, shift, 0};
+        if (const auto command = Lookup(chord)) return command;
+        if (!(control || shift) || !TransportKey(key) ||
+            std::find(ignored_.begin(), ignored_.end(), chord) != ignored_.end())
+            return std::nullopt;
+        return Lookup(Chord{key, false, false, 0});
+    }
 
     // What a menu row prints: every key of the command, in the table's order.
     std::wstring KeysFor(UINT command) const
@@ -277,13 +304,16 @@ public:
         return keys;
     }
 
-    // Binds `chord` to `command` in place of whatever it ran; nullopt unbinds it.
+    // Binds `chord` to `command` in place of whatever it ran; nullopt unbinds
+    // it, and keeps a transport chord from falling back to the plain key.
     void Bind(const Chord& chord, std::optional<UINT> command)
     {
         const auto existing = std::find_if(bindings_.begin(), bindings_.end(),
                                            [&](const Binding& binding) { return binding.chord == chord; });
+        std::erase(ignored_, chord);
         if (!command) {
             if (existing != bindings_.end()) bindings_.erase(existing);
+            if (chord.control || chord.shift) ignored_.push_back(chord);
         } else if (existing != bindings_.end()) {
             existing->command = *command;
         } else {
@@ -295,6 +325,7 @@ public:
 
 private:
     std::vector<Binding> bindings_;
+    std::vector<Chord> ignored_;  // chords a file set to `ignore`
 };
 
 inline const Table& Defaults()

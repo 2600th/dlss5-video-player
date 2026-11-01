@@ -37,7 +37,7 @@ struct NeuralRuntimeBanner {
     std::string renodxVersion;    // "4.7"
     std::string renodxBuild;      // "Sep  2 2026 01:15:39"
     std::string dlssnrRuntime;    // "310.9.16.0", the file version the NR DLL declares
-    std::string dlssnrFile;       // the NR DLL the add-on loaded, as its log names it
+    std::string dlssnrFile;       // the NR DLL the add-on loaded, as its log names it (bytes)
     std::string activeSettings;   // "upscaling=OFF intensity=1.000000 ..."
 
     friend bool operator==(const NeuralRuntimeBanner&, const NeuralRuntimeBanner&) = default;
@@ -47,13 +47,42 @@ struct NeuralRuntimeBanner {
 // ReShade.log). Missing lines leave the corresponding field empty.
 NeuralRuntimeBanner ParseNeuralRuntimeBanner(std::string_view reshadeLog);
 
+// The NR DLL path the add-on's log names, as the file it is. The log line is
+// bytes: UTF-8 when the add-on wrote it so, the ANSI code page when it went
+// through a narrow std::filesystem::path, and both read alike for an ASCII
+// path. The reading whose file exists is taken, UTF-8 first; when neither
+// exists, UTF-8 if the bytes are UTF-8. Empty for empty bytes.
+std::wstring DecodeLoggedNeuralRuntimePath(std::string_view loaded);
+// One spelling per file, so the add-on's path and the runtime directory can be
+// compared: '/' as '\', no \\?\ or \??\ prefix (\\?\UNC\ as \\), "." and ".."
+// resolved, each 8.3 component long (GetLongPathNameW, for a path that
+// exists), no trailing separator. Empty for a path that is not fully qualified
+// (C:\... or \\server\...), which names no one file.
+std::wstring NormalizedNeuralRuntimePath(std::wstring_view path);
 // The NR DLL the add-on loaded, relative to the runtime directory with '/'
 // ("310.8.SF-v2/nvngx_dlssnr.dll"): the receipt names it so a render on one
-// runtime can never pass for one on the other. Empty when `loaded` is empty
-// or outside `runtimeDirectory` (the add-on's %LOCALAPPDATA% fallback).
+// runtime can never pass for one on the other. Both paths are normalised and
+// compared ignoring case, so \\?\, 8.3 and case spellings of the same file
+// agree. Empty when `loaded` is empty or outside `runtimeDirectory` (the
+// add-on's %LOCALAPPDATA% fallback).
 std::string NeuralRuntimeFileRelativeTo(std::string_view loaded, const std::filesystem::path& runtimeDirectory);
 // Whether a receipt's NR file is `selected`, ignoring case and separators.
 bool SameNeuralRuntimeFile(std::string_view loaded, std::wstring_view selected);
+// Why the NR DLL the add-on's log names is not the one this job selected, or
+// empty when it is. RenoDX 10.8.0 falls back to another DLL when the one
+// NRRuntimePath names will not load - %LOCALAPPDATA%\DLSS5-NR\runtime first -
+// and a render on it would be cached and exported under the selected
+// runtime's key. So this fails closed: the log must name a file (10.8.0
+// writes "NR runtime <path> (looked in ...)" on both runtimes), the file must
+// be `selectedFile` under `runtimeDirectory`, and the file version it declares
+// ("NR runtime declares file version ...") must be `lockedFileVersion`, the
+// runtime lock's for that file. Every refusal names the file that loaded.
+// `selectedName` is the runtime's display name ("310.9.16").
+std::wstring NeuralRuntimeFileRefusal(const NeuralRuntimeBanner& banner,
+                                      const std::filesystem::path& runtimeDirectory,
+                                      std::wstring_view selectedFile,
+                                      std::string_view selectedName,
+                                      std::wstring_view lockedFileVersion);
 // The file's embedded Authenticode state in Get-AuthenticodeSignature's words
 // - Valid, NotSigned, HashMismatch, NotTrusted or UnknownError - so the
 // receipt and the runtime lock's signatureStatus read alike.

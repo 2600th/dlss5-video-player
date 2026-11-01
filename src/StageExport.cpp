@@ -202,13 +202,15 @@ StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop
                 log.assign(std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>());
             }
             const NeuralRuntimeBanner banner=ParseNeuralRuntimeBanner(log);
-            const std::string loaded=NeuralRuntimeFileRelativeTo(banner.dlssnrFile,runtimeDirectory);
-            if(!loaded.empty()&&!SameNeuralRuntimeFile(loaded,wanted.file)){
+            // Fails closed: a log that names no DLL, a DLL outside the runtime
+            // or one declaring another file version is refused, not exported.
+            if(const std::wstring refusal=NeuralRuntimeFileRefusal(banner,runtimeDirectory,wanted.file,wanted.version,
+                                                                   LockedFileVersion(EmbeddedRuntimeLock(),wanted.file));!refusal.empty()){
                 sweep();
-                const std::wstring refusal=L"The neural runtime loaded "+utf8_text::ToWide(loaded)+L" instead of "+std::wstring(wanted.file)+L".";
                 LOG("Stage export refused after the helper: "<<utf8_text::FromWide(refusal));
                 return {StageExportStatus::Failed,refusal};
             }
+            const std::string loaded=NeuralRuntimeFileRelativeTo(banner.dlssnrFile,runtimeDirectory);
             LOG("Stage export rendered on "<<(loaded.empty()?std::string("an unnamed NR file"):loaded)<<" (DLSS-NR "<<(banner.dlssnrRuntime.empty()?std::string("?"):banner.dlssnrRuntime)
                 <<", "<<(loaded.empty()?std::string("signature unknown"):AuthenticodeState(runtimeDirectory/utf8_text::ToWide(loaded)))<<")");
         }

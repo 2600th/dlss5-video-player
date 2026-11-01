@@ -132,6 +132,7 @@
 #include <iterator>
 #include <memory>
 #include <stop_token>
+#include <set>
 #include <sstream>
 #include <string>
 #include <future>
@@ -845,6 +846,29 @@ void open_action_content_keeps_idle_and_toolbar_copy_distinct_test()
     CHECK(toolbar.find(L"Abrir") == std::wstring::npos);
 }
 
+// A rendered photo's status line called it "Neural video", in English whatever
+// the language, and before a render suggested marking a range it does not have.
+void photo_status_line_says_photo_and_offers_no_range_test()
+{
+    Localizer localizer;
+    CHECK_EQ(std::wstring(L"Neural photo"), localizer.Get(RenderedMediaStatusKey(true).data()));
+    CHECK_EQ(std::wstring(L"Neural video"), localizer.Get(RenderedMediaStatusKey(false).data()));
+    CHECK(!ShowsRangeRenderHint(true, false, true));
+    CHECK(ShowsRangeRenderHint(false, false, true));
+    CHECK(!ShowsRangeRenderHint(false, true, true));
+    CHECK(!ShowsRangeRenderHint(false, false, false));
+}
+
+// The menu and the toolbar say "Export…" and "Export"; the window they open was
+// still titled "Export with DLSS stages", 0.28's menu name.
+void export_window_is_titled_as_the_menu_names_it_test()
+{
+    Localizer localizer;
+    const std::wstring title = localizer.Get(L"export.stages.title");
+    CHECK_EQ(localizer.Get(L"toolbar.export"), title);
+    CHECK_EQ(title + L"…", localizer.Get(L"menu.export_stages"));
+}
+
 void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
 {
     const ToolbarAvailability loaded{true, false, true, false};
@@ -1091,6 +1115,24 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
     const Localizer localizer;
     const HMENU bar = app_menu::CreateMenuBar(localizer, true);
     REQUIRE(bar != nullptr);
+    // The overlay hotkeys are printed only once registered, and only those that
+    // were: Ctrl+Alt+Space failed with error 1409 on a machine where another
+    // program held it, and the picture's right-click menu still offered it.
+    wchar_t play[256]{};
+    CHECK(GetMenuStringW(bar, app_menu::IDM_PLAY, play, static_cast<int>(std::size(play)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(play) == L"Play / Pause\tSpace");
+    app_menu::ApplyKeyBindings(bar, key_bindings::Defaults(), localizer, {false, true});
+    CHECK(GetMenuStringW(bar, app_menu::IDM_PLAY, play, static_cast<int>(std::size(play)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(play) == L"Play / Pause\tSpace");
+    const HMENU picture = app_menu::CreateToolbarMenu(app_menu::ToolbarMenu::Picture, bar, localizer, key_bindings::Defaults());
+    REQUIRE(picture != nullptr);
+    CHECK(GetMenuStringW(picture, app_menu::IDM_PLAY, play, static_cast<int>(std::size(play)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(play).find(L"Overlay") == std::wstring_view::npos);
+    wchar_t adjustments[256]{};
+    CHECK(GetMenuStringW(picture, app_menu::IDM_VIDEO_ADJUSTMENTS, adjustments, static_cast<int>(std::size(adjustments)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(adjustments).ends_with(L"(Overlay: Ctrl+Alt+C)"));
+    DestroyMenu(picture);
+    app_menu::ApplyKeyBindings(bar, key_bindings::Defaults(), localizer, {true, true});
     const auto rows = app_menu::CollectShortcuts(bar, localizer);
     const auto has = [&](std::wstring_view group, std::wstring_view action, std::wstring_view keys) {
         return std::any_of(rows.begin(), rows.end(), [&](const app_menu::ShortcutRow& row) {
@@ -1359,6 +1401,8 @@ void translation_placeholders_survive_or_the_string_reads_in_english_test()
            std::vector<std::wstring>{L"%u", L"%s", L"%.1f", L"%ls", L"\t"}));
     CHECK(Placeholders(L"100%% sure").empty());
     CHECK(Placeholders(L"50%.").empty());
+    CHECK(!translation::FormatSafe(L"50%."));
+    CHECK(translation::FormatSafe(L"%u of %s at %.1f%% and %ls, %02u, %.6g, %d"));
     const translation::Map english{{L"a", L"%u files in %s"}, {L"b", L"plain"}, {L"c", L"x\ty"}};
     const translation::Map good{{L"a", L"%u Dateien in %s"}, {L"b", L"schlicht"}};
     CHECK(translation::CheckAgainst(english, good, false).empty());
@@ -1375,6 +1419,139 @@ void translation_placeholders_survive_or_the_string_reads_in_english_test()
     translation::Map pseudo;
     for (const auto& [key, text] : Localizer::All()) pseudo.emplace(key, translation::Pseudo(text, 0.4));
     CHECK(translation::CheckAgainst(Localizer::All(), pseudo, true).empty());
+}
+
+namespace {
+thread_local bool g_formatRejected = false;
+void __cdecl NoteRejectedFormat(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t)
+{
+    g_formatRejected = true;
+}
+} // namespace
+
+// A '%' the placeholder scan did not recognise was skipped, so "100%)", a
+// trailing %, %n and %I64d all passed the check and reached swprintf_s or
+// _scwprintf, which stop the process on a format they cannot parse (and
+// write through an argument for %n). Every '%' is tokenised now: where
+// English is a format string, each '%' of a translation must be %% or one
+// of English's conversions, in English's order.
+void translation_percent_signs_cannot_reach_a_format_call_unparsed_test()
+{
+    using translation::PlaceholdersMatch;
+    const std::wstring_view english = L"%u files in %s";
+    CHECK(PlaceholdersMatch(english, L"%u Dateien in %s"));
+    CHECK(PlaceholdersMatch(english, L"%u Dateien in %s (100%%)"));
+    for (const std::wstring_view bad : {L"%u Dateien in %s (100%)", L"%u Dateien in %s 100%",
+                                        L"%u Dateien%n in %s", L"%I64d %u Dateien in %s", L"%u Dateien in %s%C",
+                                        L"%u Dateien in %s%Z", L"%u Dateien in % s", L"%u Dateien in %*s"})
+        CHECK(!PlaceholdersMatch(english, bad));
+    // A format string written with only %% is one too.
+    CHECK(PlaceholdersMatch(L"100%% done", L"100%% fertig"));
+    CHECK(!PlaceholdersMatch(L"100%% done", L"100% fertig"));
+    // Display text: English has no conversion and no %%, so it is never given
+    // to a format call, and a translation writes its percent sign plainly -
+    // zh-Hans's "低于 100% 时" for English's "below 100 percent" - but still
+    // gains no conversion, and never a %n.
+    CHECK(PlaceholdersMatch(L"below 100 percent", L"低于 100% 时"));
+    CHECK(!PlaceholdersMatch(L"below 100 percent", L"低于 %s 时"));
+    const std::wstring_view display = L"Source, 100% (recommended)\t14.8 fps";
+    CHECK(PlaceholdersMatch(display, L"源分辨率，100%（推荐）\t14.8 fps"));
+    CHECK(!PlaceholdersMatch(display, L"源分辨率，100%（推荐）14.8 fps"));
+    CHECK(!PlaceholdersMatch(display, L"%s 100%（推荐）\t14.8 fps"));
+    CHECK(!PlaceholdersMatch(display, L"100%n\t14.8 fps"));
+    CHECK(!PlaceholdersMatch(display, L"100%-5ln\t14.8 fps"));
+
+    // What the player does with a file: the bad line reads in English, and the
+    // report says why.
+    const translation::Map strings{{L"a", L"%u files in %s"}, {L"b", L"plain"}, {L"c", L"plain"}};
+    const translation::Map file{{L"a", L"%u Dateien in %s (100%)"}, {L"b", L"100%n"}, {L"c", L"100%"}};
+    CHECK((translation::Usable(strings, file) == translation::Map{{L"c", L"100%"}}));
+    CHECK((translation::CheckAgainst(strings, file, false) ==
+           std::vector<std::wstring>{L"a: a % that is neither %% nor one of English's conversions",
+                                     L"b: a % that is neither %% nor one of English's conversions"}));
+
+    // The rule's premise, on English: a format string is itself all %% and
+    // conversions, display text is never given to a format call - no source
+    // line that names its key also formats - and no string has a %n.
+    // The format argument of every Format, FormatLocalizedText, _scwprintf and
+    // swprintf_s call in the sources (the first argument of the first three;
+    // of swprintf_s, the first after the buffer that holds a literal or a
+    // .c_str()), and the key literals in it.
+    std::set<std::string> formatKeys;
+    const auto arguments = [](std::string_view text) {
+        std::vector<std::string_view> found;
+        int depth = 0;
+        size_t start = 0;
+        bool quoted = false;
+        for (size_t index = 0; index < text.size(); ++index) {
+            const char c = text[index];
+            if (c == '"' && (index == 0 || text[index - 1] != '\\')) quoted = !quoted;
+            if (quoted) continue;
+            if (c == '(') ++depth;
+            else if (c == ')' && depth-- == 0) { found.push_back(text.substr(start, index - start)); return found; }
+            else if (c == ',' && depth == 0) { found.push_back(text.substr(start, index - start)); start = index + 1; }
+        }
+        found.push_back(text.substr(start));
+        return found;
+    };
+    size_t formatCalls = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(DLSS_TEST_SOURCE_DIR)) {
+        const auto extension = entry.path().extension();
+        if ((extension != L".cpp" && extension != L".h") || entry.path().filename() == L"Localization.h") continue;
+        std::ifstream stream(entry.path(), std::ios::binary);
+        for (std::string line; std::getline(stream, line);) {
+            for (const std::string_view marker : {"Format(", "FormatLocalizedText(", "_scwprintf(", "swprintf_s("}) {
+                for (size_t at = line.find(marker); at != std::string::npos; at = line.find(marker, at + 1)) {
+                    if (at > 0 && (std::isalnum(static_cast<unsigned char>(line[at - 1])) || line[at - 1] == '_')) continue;
+                    const auto args = arguments(std::string_view(line).substr(at + marker.size()));
+                    std::string_view format = args.empty() ? std::string_view{} : args[0];
+                    if (marker == "swprintf_s(") {
+                        format = {};
+                        for (size_t index = 1; index < args.size() && index <= 2 && format.empty(); ++index)
+                            if (args[index].find('"') != std::string_view::npos || args[index].find(".c_str()") != std::string_view::npos)
+                                format = args[index];
+                    }
+                    ++formatCalls;
+                    for (size_t open = format.find("L\""); open != std::string_view::npos; open = format.find("L\"", open + 2)) {
+                        const size_t close = format.find('"', open + 2);
+                        if (close == std::string_view::npos) break;
+                        formatKeys.emplace(format.substr(open + 2, close - open - 2));
+                        open = close;
+                    }
+                }
+            }
+        }
+    }
+    CHECK(formatCalls > 20);
+    CHECK(formatKeys.contains("neural.live.slow") && formatKeys.contains("keys.write_failed"));
+    size_t displayText = 0;
+    for (const auto& [key, text] : Localizer::All()) {
+        const translation::detail::PercentScan scan = translation::detail::ScanPercents(text);
+        CHECK(!scan.forbidden);
+        if (scan.formats) {
+            if (scan.stray) std::wcerr << key << L" is a format string with a '%' printf does not parse; write it as %%\n";
+            CHECK(!scan.stray);
+            continue;
+        }
+        ++displayText;
+        if (formatKeys.contains(utf8_text::FromWide(key))) {
+            std::wcerr << key << L" has no conversion and no %% but is given to a format call\n";
+            CHECK(false);
+        }
+    }
+    CHECK(displayText > 0);
+
+    // And why the premise matters: swprintf_s, which every localized format
+    // reaches, stops on a stray it cannot parse - the invalid-parameter
+    // handler, which terminates the player - while _scwprintf, which Format
+    // measures with first, accepts it.
+    const _invalid_parameter_handler previous = _set_thread_local_invalid_parameter_handler(NoteRejectedFormat);
+    for (const wchar_t* stray : {L"%s 100%)", L"100%", L"%n"}) {
+        g_formatRejected = false;
+        wchar_t buffer[64]{};
+        CHECK(swprintf_s(buffer, stray, L"") < 0 && g_formatRejected);
+    }
+    _set_thread_local_invalid_parameter_handler(previous);
 }
 
 void translation_files_follow_the_display_language_test()
@@ -1814,6 +1991,55 @@ void export_dialog_opens_on_the_picture_being_watched_test()
     // And what it picks is an export the planner takes.
     chosen = ExportSelectionForWatching(ExportSelection{}, WatchedPicture{true, Upscaler::RtxVsr, 1080, 2160});
     CHECK(PlanExport(chosen, 1920, 1080, 30.0, 2, false).valid);
+}
+
+// Before 0.30, Space, Left, Right and . acted whatever Shift or Ctrl was held;
+// the key table matched exactly, so Shift+Left, Shift+Space and Ctrl+Left did
+// nothing. A transport key with modifiers and no binding of its own now runs
+// the plain key's command; letters stay exact, and a file's line wins.
+void key_binding_transport_keys_answer_with_shift_or_ctrl_held_test()
+{
+    const key_bindings::Table& defaults = key_bindings::Defaults();
+    for (const auto& [control, shift] : {std::pair{false, true}, std::pair{true, false}, std::pair{true, true}}) {
+        CHECK(defaults.LookupKey(VK_SPACE, control, shift) == app_menu::IDM_PLAY);
+        CHECK(defaults.LookupKey(VK_LEFT, control, shift) == app_menu::IDM_BACK10);
+        CHECK(defaults.LookupKey(VK_RIGHT, control, shift) == app_menu::IDM_FWD10);
+        CHECK(defaults.LookupKey(VK_OEM_PERIOD, control, shift) == app_menu::IDM_STEP_FRAME);
+        // Letters match exactly, as M2 made them: no modified S stops.
+        CHECK(defaults.LookupKey('S', control, shift) != app_menu::IDM_STOP);
+        // Up, Down and , have no default, so they fall back to nothing.
+        CHECK(!defaults.LookupKey(VK_UP, control, shift).has_value());
+    }
+    CHECK(!defaults.LookupKey('S', false, true).has_value());
+    CHECK(defaults.LookupKey('S', true, true) == app_menu::IDM_SAVE_COMPARISON_IMAGE);
+    // A non-transport key with a binding of its own keeps it: Shift+[ is not [.
+    CHECK(defaults.LookupKey(VK_OEM_4, false, true) == app_menu::IDM_COMPARE_DIFFERENCE_LESS);
+    CHECK(defaults.LookupKey(VK_OEM_4, false, false) == app_menu::IDM_COMPARE_BLEND_LESS);
+    CHECK(!defaults.LookupKey(VK_OEM_4, true, false).has_value());
+
+    // input.conf's lines win: a chord bound to something else runs that, an
+    // `ignore`d chord runs nothing, a bound Up or , answers with modifiers too,
+    // and a plain key rebound carries its modified chords with it.
+    const key_bindings::Loaded loaded = key_bindings::Parse(
+        "Shift+Left   previous-file\r\n"
+        "Ctrl+Space   ignore\r\n"
+        "Up           mute\r\n"
+        ",            step-frame\r\n"
+        "Right        next-file\r\n");
+    CHECK(loaded.problems.empty());
+    const key_bindings::Table& table = loaded.table;
+    CHECK(table.LookupKey(VK_LEFT, false, true) == app_menu::IDM_PREVIOUS_FILE);
+    CHECK(table.LookupKey(VK_LEFT, true, false) == app_menu::IDM_BACK10);
+    CHECK(!table.LookupKey(VK_SPACE, true, false).has_value());
+    CHECK(table.LookupKey(VK_SPACE, false, true) == app_menu::IDM_PLAY);
+    CHECK(table.LookupKey(VK_UP, true, false) == app_menu::IDM_MUTE);
+    CHECK(table.LookupKey(VK_OEM_COMMA, false, true) == app_menu::IDM_STEP_FRAME);
+    CHECK(table.LookupKey(VK_RIGHT, false, true) == app_menu::IDM_NEXT_FILE);
+    // A later line can bind an ignored chord again.
+    const key_bindings::Loaded rebound = key_bindings::Parse("Ctrl+Space ignore\r\nCtrl+Space mute\r\n");
+    CHECK(rebound.table.LookupKey(VK_SPACE, true, false) == app_menu::IDM_MUTE);
+    // The menu rows still print only the keys bound: the fallback is not a binding.
+    CHECK(defaults.KeysFor(app_menu::IDM_BACK10) == L"Left");
 }
 
 void key_binding_template_reads_back_as_the_defaults_test()
@@ -2757,6 +2983,15 @@ void pipeline_chip_names_each_stage_once_test()
     CHECK_EQ(std::wstring(L"1920\u00d71080"), PipelineFlow(1920, 1080, {}, names, 1920, 1080));
     CHECK_EQ(std::wstring(L"1280\u00d7720 \u2192 1920\u00d71080"), PipelineFlow(1280, 720, {}, names, 1920, 1080));
     CHECK_EQ(std::wstring(L"1280\u00d7720 \u2192 DLSS SR"), PipelineFlow(1280, 720, {false, true, false}, names, 0, 0));
+    // DLSS 5 is what is on screen, not what is loaded: a rendered video with
+    // DLSS 5 turned off still holds its pair, and showed "DLSS 5" over the
+    // original. A paused settings preview is a DLSS 5 frame either way.
+    CHECK(NeuralOnScreen(true, true, false));
+    CHECK(!NeuralOnScreen(true, false, false));
+    CHECK(!NeuralOnScreen(false, true, false));
+    CHECK(NeuralOnScreen(false, false, true));
+    CHECK_EQ(std::wstring(L"Original"), PipelineText({NeuralOnScreen(true, false, false), false, false}, names));
+    CHECK_EQ(std::wstring(L"RTX VSR"), PipelineText({NeuralOnScreen(true, false, false), false, true}, names));
     // The chip: shown with media, quiet, and never flashing - it is a name, not a meter.
     const Snapshot chips = Build(true, {}, 30.0, 30.0, 0, L"DLSS 5");
     CHECK(At(chips, Chip::Pipeline).visible);
@@ -4831,6 +5066,56 @@ void module_directory_is_the_parent_of_the_module_test()
         });
     CHECK(directory.has_value());
     if (directory) CHECK_EQ(std::wstring(LR"(C:\Program Files\Player)"), directory->wstring());
+}
+
+// Help > Edit key bindings and the user guide's fallback opened "notepad.exe"
+// by bare name, which ShellExecuteW looks for in the current directory first.
+// The path is the system directory's, or nothing at all.
+void notepad_is_opened_from_the_system_directory_test()
+{
+    // GetSystemDirectoryW's contract, with a short first buffer.
+    const std::wstring system = LR"(C:\Windows\system32)";
+    int calls = 0;
+    const auto growing = [&](wchar_t* buffer, uint32_t size) -> uint32_t {
+        ++calls;
+        const uint32_t needed = static_cast<uint32_t>(system.size()) + 1;
+        if (calls == 1 || size < needed) return needed + 300;  // asks for more than it needs, once
+        std::copy(system.begin(), system.end(), buffer);
+        buffer[system.size()] = L'\0';
+        return static_cast<uint32_t>(system.size());
+    };
+    const auto notepad = platform_paths::SystemFileWith(growing, L"notepad.exe");
+    CHECK(notepad.has_value());
+    if (notepad) CHECK_EQ(std::wstring(LR"(C:\Windows\system32\notepad.exe)"), notepad->wstring());
+    CHECK_EQ(2, calls);
+    // A failure, a relative answer and an empty name give no path to search for.
+    CHECK(!platform_paths::SystemFileWith([](wchar_t*, uint32_t) -> uint32_t { return 0; }, L"notepad.exe"));
+    CHECK(!platform_paths::SystemFileWith(
+        [](wchar_t* buffer, uint32_t) -> uint32_t { buffer[0] = L'.'; buffer[1] = L'\0'; return 1; }, L"notepad.exe"));
+    CHECK(!platform_paths::SystemFileWith(
+        [&](wchar_t* buffer, uint32_t) -> uint32_t {
+            std::copy(system.begin(), system.end(), buffer);
+            buffer[system.size()] = L'\0';
+            return static_cast<uint32_t>(system.size());
+        }, L""));
+    // This machine's: absolute, in the system directory, and there.
+    const auto real = platform_paths::SystemFile(L"notepad.exe");
+    CHECK(real.has_value());
+    if (real) {
+        CHECK(real->is_absolute());
+        wchar_t directory[MAX_PATH]{};
+        CHECK(GetSystemDirectoryW(directory, MAX_PATH) > 0);
+        CHECK_EQ(std::filesystem::path(directory) / L"notepad.exe", *real);
+        std::error_code error;
+        CHECK(std::filesystem::is_regular_file(*real, error));
+    }
+    // Explorer, which the reveal commands opened by bare name too.
+    const auto explorer = platform_paths::WindowsFile(L"explorer.exe");
+    CHECK(explorer.has_value());
+    if (explorer) {
+        std::error_code error;
+        CHECK(explorer->is_absolute() && std::filesystem::is_regular_file(*explorer, error));
+    }
 }
 
 // The real module, which every production caller uses. It has to answer on
@@ -8273,9 +8558,13 @@ void neural_addon_runtime_settings_enable_neural_and_hold_native_resolution_test
         "NeuralUplift=1\n"
         "NREnableUpscaling=1\n"
         "NRIntensity=1.25\n"
+        "ConfigVersion=10\n"
+        "ConfigRevision=1\n"
         "NRFollowInputRes=0\n"
         "NRResolutionScale=1\n";
 
+    // Every key in it is one this player has written (NREnableUpscaling until
+    // 0.24), so it is stamped: the pair written after it is what 10.8.0 reads.
     const std::string updated = UpdateNeuralAddonIni(input, true);
     CHECK_EQ(std::string(expected), updated);
     CHECK_EQ(updated, UpdateNeuralAddonIni(updated, true));
@@ -8332,11 +8621,12 @@ void neural_addon_section_this_player_writes_carries_the_addon_schema_version_te
                          "NRPasses=2\nConfigVersion=10\nConfigRevision=1\n[OVERLAY]\nWindow=x\n"),
              repaired);
     CHECK_EQ(repaired, UpdateNeuralAddonIni(repaired, true, overrides));
-    // The worker's own call writes no overrides: a section it did not write
-    // entirely is not its to stamp, and one already stamped stays as it is -
-    // so a resident helper never sees a "repair" the player's write implied.
+    // The worker's own call writes no overrides. It judges the section by the
+    // keys this player has ever written, as the player's call does, so the two
+    // stamp alike - and one already stamped stays as it is, so a resident
+    // helper never sees a "repair" the player's write implied.
     CHECK_EQ(repaired, UpdateNeuralAddonIni(repaired, true));
-    CHECK(UpdateNeuralAddonIni(unversioned, true).find("ConfigVersion") == std::string::npos);
+    CHECK_EQ(repaired, UpdateNeuralAddonIni(unversioned, true));
     // An empty section is one this player may have created.
     CHECK(UpdateNeuralAddonIni("[RenoDX.DLSS5]\n", true).find("ConfigVersion=10\nConfigRevision=1\n") != std::string::npos);
 
@@ -8351,14 +8641,47 @@ void neural_addon_section_this_player_writes_carries_the_addon_schema_version_te
              restamped);
     CHECK_EQ(restamped, UpdateNeuralAddonIni(restamped, true, overrides));
 
+    // A section this player wrote holds keys the current job does not write.
+    // 0.28's whole section after a 75 % render and a 100 % one: NRPreUpscale=0
+    // stays, and a 100 % job writes no NRPreUpscale (PreUpscaleOverride), so
+    // judging by this job's keys left it unstamped and 10.8.0 migrated it.
+    constexpr std::string_view player028Full =
+        "[RenoDX.DLSS5]\nConfigVersion=6\nEnableHooks=2\nNeuralUplift=1\nNRFollowInputRes=0\nNRResolutionScale=1\n"
+        "NRIntensity=1.000\nNRLocalTone=1.000\nNRLocalStructure=1.000\nNRSkinStructure=1.000\nNRColorStrength=1.000\n"
+        "NRPreset=0\nNRStyle=0\nNRAutoMask=1\nNRPasses=1\nNRChainedHistory=1\nNRNormGovernor=1\n"
+        "NRPass2Intensity=1.000\nNRPass2Color=1.000\nNRPass3Intensity=1.000\nNRPass3Color=1.000\n"
+        "NRPass4Intensity=1.000\nNRPass4Color=1.000\nNRPreUpscale=0\n";
+    const auto job100 = NeuralAddonOverridesFor(NeuralSettings{}, neural_runtime::kPrevious);
+    CHECK(std::ranges::none_of(job100, [](const NeuralAddonOverride& entry) { return entry.first == "NRPreUpscale"; }));
+    const std::string restamped028 = UpdateNeuralAddonIni(player028Full, true, job100);
+    CHECK(restamped028.starts_with("[RenoDX.DLSS5]\nConfigVersion=10\n"));
+    CHECK(restamped028.find("ConfigRevision=1\n") != std::string::npos);
+    CHECK(restamped028.find("NRPreUpscale=0\n") != std::string::npos);
+    CHECK_EQ(restamped028, UpdateNeuralAddonIni(restamped028, true, job100));
+    // An older one too: 0.24 wrote no stamp and NREnableUpscaling, and a key
+    // only 0.30 writes beside 0.28's stamp is still this player's.
+    for (const std::string_view ours : {
+            std::string_view("[RenoDX.DLSS5]\nNREnableUpscaling=0\nNRChainedHistory=0\n"),
+            std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nNRDetailStability=0\n")}) {
+        const std::string updated = UpdateNeuralAddonIni(ours, true);
+        CHECK(updated.find("ConfigVersion=10\n") != std::string::npos);
+        CHECK(updated.find("ConfigRevision=1\n") != std::string::npos);
+    }
+    // Every key a job writes now, on either runtime and at any scale, is one
+    // the list knows: an unstamped section of exactly those keys is stamped.
+    std::string everyKey = "[RenoDX.DLSS5]\nEnableHooks=2\nNeuralUplift=1\nNRFollowInputRes=0\nNRResolutionScale=1\nNRPreUpscale=1\n";
+    for (const neural_runtime::Runtime* runtime : {&neural_runtime::kCurrent, &neural_runtime::kPrevious})
+        for (const auto& [key, value] : NeuralAddonOverridesFor(NeuralSettings{}, *runtime)) everyKey += key + "=" + value + "\n";
+    CHECK(UpdateNeuralAddonIni(everyKey, true).find("ConfigVersion=10\n") != std::string::npos);
+
     // Somebody else's keys may be pre-v6 ones: the add-on's migration is for them.
     for (const std::string_view foreign : {
-            std::string_view("[RenoDX.DLSS5]\nNREnableUpscaling=0\nNRChainedHistory=0\n"),
             std::string_view("[RenoDX.DLSS5]\nNRChainedHistory=0\nFutureTuning=1\n"),
+            std::string_view("[RenoDX.DLSS5]\nNREnableUpscaling=0\nNRCodecMode=2\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion=4\nNRChainedHistory=0\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion=7\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nConfigRevision=1\nNRPasses=2\n"),
-            std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nNRDetailStability=0\n"),
+            std::string_view("[RenoDX.DLSS5]\nConfigVersion=6\nNRHookPoint=1\n"),
             std::string_view("[RenoDX.DLSS5]\nConfigVersion = 6\nNRCodecMode=2\n")}) {
         const std::string updated = UpdateNeuralAddonIni(foreign, true, overrides);
         const size_t first = updated.find("ConfigVersion");
@@ -8410,6 +8733,8 @@ void reshade_trailing_section_text_uses_reshade_section_boundaries_test()
         "DisabledAddons=\n"
         "[RenoDX.DLSS5] ; existing settings\n"
         "NRIntensity=1.25\n"
+        "ConfigVersion=10\n"
+        "ConfigRevision=1\n"
         "EnableHooks=2\n"
         "NeuralUplift=1\n"
         "NRFollowInputRes=0\n"
@@ -8417,6 +8742,8 @@ void reshade_trailing_section_text_uses_reshade_section_boundaries_test()
         "[OTHER] ; this must end the RenoDX section\n"
         "Foo=1\n";
 
+    // NRIntensity is this player's key, so the section is stamped - inside it,
+    // before [OTHER].
     CHECK_EQ(std::string(expected), UpdateNeuralAddonIni(input, true));
 }
 
@@ -14459,6 +14786,118 @@ void neural_runtime_file_is_named_from_the_addon_log_test()
     CHECK(PreflightNeuralRuntimeFile("").empty());
 }
 
+// The refusal of a wrong NR DLL fails closed. It used to refuse only a file
+// inside the runtime directory that was not the selected one, so RenoDX
+// 10.8.0's own fallback - %LOCALAPPDATA%\DLSS5-NR\runtime, outside it - a log
+// with no "NR runtime" line, and any spelling of the path the prefix match did
+// not know (\\?\, 8.3, a non-ASCII folder in the other encoding) all rendered,
+// were cached and were exported under the selected runtime's key.
+void neural_runtime_file_refusal_fails_closed_test()
+{
+    using neural_runtime::kCurrent;
+    using neural_runtime::kPrevious;
+    // The lock's file versions are what the declared one is held to.
+    CHECK_EQ(std::wstring(L"310.9.16.0"), LockedFileVersion(EmbeddedRuntimeLock(), kCurrent.file));
+    CHECK_EQ(std::wstring(L"310.8.2.0"), LockedFileVersion(EmbeddedRuntimeLock(), kPrevious.file));
+    CHECK_EQ(std::wstring(L"310.8.2.0"), LockedFileVersion(EmbeddedRuntimeLock(), L"310.8.sf-v2\\NVNGX_DLSSNR.dll"));
+    CHECK(LockedFileVersion(EmbeddedRuntimeLock(), L"nvngx_dlssnr_310.9.16.dll").empty());
+
+    const std::filesystem::path root = L"D:\\Player\\neural-runtime";
+    const auto banner = [](std::string file, std::string version) {
+        NeuralRuntimeBanner b;
+        b.dlssnrFile = std::move(file);
+        b.dlssnrRuntime = std::move(version);
+        return b;
+    };
+    const auto refusal = [&](const NeuralRuntimeBanner& b, const neural_runtime::Runtime& runtime,
+                             const std::filesystem::path& directory) {
+        return NeuralRuntimeFileRefusal(b, directory, runtime.file, runtime.version,
+                                        LockedFileVersion(EmbeddedRuntimeLock(), runtime.file));
+    };
+    // The selected file, declaring the locked version, in any spelling of it.
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, root).empty());
+    CHECK(refusal(banner("\\\\?\\d:\\PLAYER\\Neural-Runtime\\NVNGX_DLSSNR.DLL", "310.9.16.0"), kCurrent, root).empty());
+    CHECK(refusal(banner("D:/Player/neural-runtime/310.8.SF-v2/nvngx_dlssnr.dll", "310.8.2.0"), kPrevious, root).empty());
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\x\\..\\310.8.SF-v2\\nvngx_dlssnr.dll", "310.8.2.0"), kPrevious, root).empty());
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, L"\\\\?\\D:\\Player\\neural-runtime\\").empty());
+
+    // 10.8.0's fallback, outside the runtime: refused, and named.
+    const std::wstring fallback = refusal(
+        banner("C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, root);
+    CHECK(fallback.find(L"loaded C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll instead of "
+                        L"D:\\Player\\neural-runtime\\nvngx_dlssnr.dll (DLSS-NR 310.9.16)") != std::wstring::npos);
+    // The other runtime's file, and a neighbour that only shares a prefix.
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.9.16.0"), kPrevious, root)
+              .find(L"loaded D:\\Player\\neural-runtime\\nvngx_dlssnr.dll instead of") != std::wstring::npos);
+    CHECK(!refusal(banner("D:\\Player\\neural-runtime2\\nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, root).empty());
+    // No "NR runtime" line at all: 6.5.3's log, or a 10.8.0 that never got that far.
+    CHECK(refusal(banner("", "310.8.0"), kCurrent, root).find(L"did not name the NR DLL") != std::wstring::npos);
+    // A path that names no one file.
+    CHECK(refusal(banner("nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, root).find(L"not a full path") != std::wstring::npos);
+    // The right name with the wrong file version: only the start line's 310.8.0,
+    // the other runtime's version, or none at all.
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.8.0"), kCurrent, root)
+              .find(L"which declares file version 310.8.0, not 310.9.16.0") != std::wstring::npos);
+    CHECK(!refusal(banner("D:\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll", "310.9.16.0"), kPrevious, root).empty());
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", ""), kCurrent, root)
+              .find(L"declares no file version") != std::wstring::npos);
+    // A file the lock does not pin has no version to be held to.
+    CHECK(!NeuralRuntimeFileRefusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.9.16.0"), root,
+                                    kCurrent.file, kCurrent.version, L"").empty());
+
+    // RenoDX 10.8.0's own log, parsed, on each runtime.
+    const NeuralRuntimeBanner logged = ParseNeuralRuntimeBanner(
+        "DLSS5 Generic: NR runtime D:\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll (looked in "
+        "D:\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll; C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll)\r\n"
+        "DLSS5 Generic: NR runtime declares file version 310.8.2.0, GPU architecture NVSDK_NGX_GPU_Arch_Blackwell2\r\n"
+        "DLSS5 Generic: signed DLSSNR 310.8.0 D3D12 runtime initialized\r\n");
+    CHECK(refusal(logged, kPrevious, root).empty());
+    CHECK(!refusal(logged, kCurrent, root).empty());
+
+    // The receipt carries the whole path for the playback check, and reads back.
+    const std::string receipt = "{\"schema\":3,\"runtime\":{\"dlssnr\":\"310.9.16.0\",\"dlssnrFile\":\"\","
+                                "\"dlssnrPath\":\"C:\\\\Users\\\\u\\\\AppData\\\\Local\\\\DLSS5-NR\\\\runtime\\\\nvngx_dlssnr.dll\","
+                                "\"dlssnrSignature\":\"\"}}";
+    const NeuralRuntimeBanner read = PreflightNeuralRuntimeBanner(receipt);
+    CHECK_EQ(std::string("C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll"), read.dlssnrFile);
+    CHECK_EQ(std::string("310.9.16.0"), read.dlssnrRuntime);
+    CHECK(!refusal(read, kCurrent, root).empty());
+    // A receipt from before dlssnrPath names nothing, and is refused.
+    CHECK(!refusal(PreflightNeuralRuntimeBanner("{\"schema\":3,\"runtime\":{\"dlssnr\":\"310.9.16.0\","
+                                                "\"dlssnrFile\":\"nvngx_dlssnr.dll\"}}"), kCurrent, root).empty());
+    CHECK(PreflightNeuralRuntimeBanner("").dlssnrFile.empty());
+
+    // Real files, for the spellings only the file system can resolve: an 8.3
+    // name, and a non-ASCII folder logged in UTF-8 or in the ANSI code page.
+    const std::filesystem::path directory = process_temp_path(L"nr-runtime-directory-with-a-long-name-\u00e9");
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory / L"310.8.SF-v2", error);
+    CHECK(!error);
+    write_binary_file(directory / L"nvngx_dlssnr.dll", "x");
+    const std::wstring file = (directory / L"nvngx_dlssnr.dll").wstring();
+    const std::string utf8 = utf8_text::FromWide(file);
+    CHECK(refusal(banner(utf8, "310.9.16.0"), kCurrent, directory).empty());
+    CHECK_EQ(std::string("nvngx_dlssnr.dll"), NeuralRuntimeFileRelativeTo(utf8, directory));
+    BOOL lossy = FALSE;
+    const int ansiSize = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, file.c_str(), int(file.size()), nullptr, 0, nullptr, &lossy);
+    if (ansiSize > 0 && !lossy) {
+        std::string ansi(size_t(ansiSize), '\0');
+        WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, file.c_str(), int(file.size()), ansi.data(), ansiSize, nullptr, nullptr);
+        CHECK_EQ(file, DecodeLoggedNeuralRuntimePath(ansi));
+        CHECK(refusal(banner(ansi, "310.9.16.0"), kCurrent, directory).empty());
+    }
+    wchar_t shortName[MAX_PATH]{};
+    const DWORD shortLength = GetShortPathNameW(file.c_str(), shortName, MAX_PATH);
+    if (shortLength > 0 && shortLength < MAX_PATH && std::wstring_view(shortName) != file) {
+        CHECK(refusal(banner(utf8_text::FromWide(shortName), "310.9.16.0"), kCurrent, directory).empty());
+        CHECK(refusal(banner(utf8, "310.9.16.0"), kCurrent, std::filesystem::path(shortName).parent_path()).empty());
+    } else {
+        std::wcerr << L"8.3 names are off on this volume; the short-name case was not exercised\n";
+    }
+    std::filesystem::remove_all(directory, error);
+}
+
 // The comparison reference conversion runs on every presented frame once the
 // viewer picks Blend, Split or Wipe, which a scalar double pass over 3.69 Mpx
 // cannot do inside a 16.68 ms budget. Speeding it up is only allowed if the
@@ -17601,6 +18040,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test),
     TEST_CASE(frame_generation_pill_follows_media_and_availability_only_test),
     TEST_CASE(open_action_content_keeps_idle_and_toolbar_copy_distinct_test),
+    TEST_CASE(photo_status_line_says_photo_and_offers_no_range_test),
+    TEST_CASE(export_window_is_titled_as_the_menu_names_it_test),
     TEST_CASE(focused_toolbar_action_reconciles_layout_and_availability_changes_test),
     TEST_CASE(idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test),
     TEST_CASE(dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test),
@@ -17625,6 +18066,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(translation_file_parses_the_contributor_format_test),
     TEST_CASE(translation_template_reads_back_as_english_test),
     TEST_CASE(translation_placeholders_survive_or_the_string_reads_in_english_test),
+    TEST_CASE(translation_percent_signs_cannot_reach_a_format_call_unparsed_test),
     TEST_CASE(translation_files_follow_the_display_language_test),
     TEST_CASE(translation_fixture_locale_reads_over_english_test),
     TEST_CASE(shipped_translations_are_complete_test),
@@ -17633,6 +18075,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(simplified_chinese_menu_paths_exist_test),
     TEST_CASE(key_binding_defaults_are_the_players_keys_test),
     TEST_CASE(key_binding_file_rebinds_unbinds_and_reports_bad_lines_test),
+    TEST_CASE(key_binding_transport_keys_answer_with_shift_or_ctrl_held_test),
     TEST_CASE(key_binding_template_reads_back_as_the_defaults_test),
     TEST_CASE(toolbar_menus_mirror_the_menu_bar_rows_test),
     TEST_CASE(picture_context_menu_is_rows_of_the_menu_bar_test),
@@ -17783,6 +18226,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(module_path_never_accepts_a_filled_buffer_test),
     TEST_CASE(module_path_reports_a_failed_query_test),
     TEST_CASE(module_directory_is_the_parent_of_the_module_test),
+    TEST_CASE(notepad_is_opened_from_the_system_directory_test),
     TEST_CASE(module_directory_answers_for_this_process_test),
     TEST_CASE(renderer_recovery_rebuilds_into_a_fresh_window_test),
     TEST_CASE(renderer_recovery_keeps_a_retained_renderers_window_test),
@@ -17960,6 +18404,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(neural_presets_round_trip_and_default_to_the_shipped_settings_test),
     TEST_CASE(neural_runtime_choice_follows_the_gpu_and_never_sends_the_default_preset_test),
     TEST_CASE(neural_runtime_file_is_named_from_the_addon_log_test),
+    TEST_CASE(neural_runtime_file_refusal_fails_closed_test),
     TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
     TEST_CASE(variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test),
     TEST_CASE(variable_frame_rate_is_decided_on_b_frame_decode_order_test),

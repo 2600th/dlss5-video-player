@@ -489,7 +489,7 @@ std::wstring RowKeys(const key_bindings::Table& keys, UINT command)
     return text;
 }
 
-void ApplyKeyBindingsTo(HMENU menu, const key_bindings::Table& keys, const Localizer& localizer)
+void ApplyKeyBindingsTo(HMENU menu, const key_bindings::Table& keys, const Localizer& localizer, OverlayHotkeys hotkeys)
 {
     const int count = GetMenuItemCount(menu);
     for (int index = 0; index < count; ++index) {
@@ -499,7 +499,7 @@ void ApplyKeyBindingsTo(HMENU menu, const key_bindings::Table& keys, const Local
         item.dwTypeData = text;
         item.cch = static_cast<UINT>(std::size(text));
         if (!GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item) || (item.fType & MFT_SEPARATOR)) continue;
-        if (item.hSubMenu) { ApplyKeyBindingsTo(item.hSubMenu, keys, localizer); continue; }
+        if (item.hSubMenu) { ApplyKeyBindingsTo(item.hSubMenu, keys, localizer, hotkeys); continue; }
         // A row with no command name keeps its text: the measured rungs use the
         // key column for what each one measured.
         if (key_bindings::CommandName(item.wID).empty()) continue;
@@ -507,9 +507,11 @@ void ApplyKeyBindingsTo(HMENU menu, const key_bindings::Table& keys, const Local
         label = label.substr(0, label.find(L'\t'));
         std::wstring column = RowKeys(keys, item.wID);
         // The two overlay hotkeys are registered with Windows, not read from the
-        // key table, and are printed after the row's own keys.
-        const wchar_t* overlay = item.wID == IDM_PLAY ? L"menu.playpause_overlay"
-                               : item.wID == IDM_VIDEO_ADJUSTMENTS ? L"menu.adjustments_overlay" : nullptr;
+        // key table, and are printed after the row's own keys - each only when
+        // its registration succeeded.
+        const wchar_t* overlay = item.wID == IDM_PLAY && hotkeys.playPause ? L"menu.playpause_overlay"
+                               : item.wID == IDM_VIDEO_ADJUSTMENTS && hotkeys.adjustments ? L"menu.adjustments_overlay"
+                                                                                          : nullptr;
         if (overlay) column += (column.empty() ? L"" : L"   ") + localizer.Get(overlay);
         if (!column.empty()) label += L"\t" + column;
         MENUITEMINFOW update{sizeof(update)};
@@ -521,9 +523,10 @@ void ApplyKeyBindingsTo(HMENU menu, const key_bindings::Table& keys, const Local
 
 } // namespace
 
-void ApplyKeyBindings(HMENU menuBar, const key_bindings::Table& keys, const Localizer& localizer)
+void ApplyKeyBindings(HMENU menuBar, const key_bindings::Table& keys, const Localizer& localizer,
+                      OverlayHotkeys overlay)
 {
-    if (menuBar) ApplyKeyBindingsTo(menuBar, keys, localizer);
+    if (menuBar) ApplyKeyBindingsTo(menuBar, keys, localizer, overlay);
 }
 
 bool UpdateUpscalerMenu(HMENU menuBar, UINT chosen, bool vsrAvailable, bool superResolutionAvailable)

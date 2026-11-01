@@ -1494,7 +1494,7 @@ static std::filesystem::path PickStageExportFile(HWND owner, std::wstring_view t
     filter.push_back(L'\0');
     const std::wstring defaultExtension=ExportContainerExtension(choices.front())+1;
     OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));
-    dialog.lpstrFilter=filter.c_str();dialog.nFilterIndex=1;dialog.lpstrDefExt=defaultExtension.c_str();dialog.lpstrTitle=L"Export with DLSS stages to a file";
+    dialog.lpstrFilter=filter.c_str();dialog.nFilterIndex=1;dialog.lpstrDefExt=defaultExtension.c_str();dialog.lpstrTitle=L"Export to a file";
     dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|OFN_OVERWRITEPROMPT;
     if(!GetSaveFileNameW(&dialog))return {};
     const std::filesystem::path chosen(ExportFileName(path,dialog.nFilterIndex?dialog.nFilterIndex-1u:0u,photo,animation));
@@ -1503,7 +1503,7 @@ static std::filesystem::path PickStageExportFile(HWND owner, std::wstring_view t
     std::error_code existsError;
     if(chosen!=std::filesystem::path(path)&&std::filesystem::exists(chosen,existsError)){
         const std::wstring question=chosen.filename().wstring()+L" already exists.\nDo you want to replace it?";
-        if(MessageBoxW(owner,question.c_str(),L"Export with DLSS stages",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return {};
+        if(MessageBoxW(owner,question.c_str(),L"Export",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return {};
     }
     return chosen;
 }
@@ -2464,10 +2464,16 @@ private:
             preflightJson_=preflight.json;
         }
         // The add-on falls back to another NR DLL when the one NRRuntimePath
-        // names will not load; a render on it would carry this one's key.
+        // names will not load; a render on it would carry this one's key. A
+        // receipt that names no DLL, one outside the runtime, or one that
+        // declares another file version is refused, never let through.
         const neural_runtime::Runtime wanted=neural_runtime::Select(in_.gpu,in_.settings.previousRuntime);
-        const std::string loaded=PreflightNeuralRuntimeFile(preflightJson_);
-        if(!loaded.empty()&&!SameNeuralRuntimeFile(loaded,wanted.file)){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"The neural runtime loaded "+Utf8ToWide(loaded)+L" instead of "+std::wstring(wanted.file)+L" (DLSS-NR "+Utf8ToWide(std::string(wanted.version))+L").";LOG("Neural preflight refused: "<<WideToUtf8(completion_->result.detail));return false;}
+        if(std::wstring refusal=NeuralRuntimeFileRefusal(PreflightNeuralRuntimeBanner(preflightJson_),runtimeDirectory_,wanted.file,wanted.version,
+                                                         LockedFileVersion(EmbeddedRuntimeLock(),wanted.file));!refusal.empty()){
+            completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=std::move(refusal);
+            LOG("Neural preflight refused: "<<WideToUtf8(completion_->result.detail));
+            return false;
+        }
         return true;
     }
 
@@ -4540,7 +4546,7 @@ private:
         }
         // /select, takes one quoted path; a default cache path contains spaces.
         const std::wstring arguments=L"/select,\""+m_frameGenLastOutput.wstring()+L"\"";
-        ShellExecuteW(m_hwnd,L"open",L"explorer.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+        RevealInExplorer(arguments);
     }
     // Taskbar progress for the one job that lasts minutes, because in
     // fullscreen with the controls auto-hidden, and whenever the window is
@@ -5083,7 +5089,7 @@ private:
         const auto written=std::filesystem::last_write_time(KeyBindingsPath(),error);
         if((error?std::filesystem::file_time_type{}:written)==m_keysWritten)return;
         LoadKeyBindings();
-        if(HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr){app_menu::ApplyKeyBindings(menu,m_keys,m_loc);DrawMenuBar(m_hwnd);}
+        if(HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr){app_menu::ApplyKeyBindings(menu,m_keys,m_loc,m_overlayHotkeys);DrawMenuBar(m_hwnd);}
         ReloadToolbarTips();
         if(m_shortcutSheetOpen)ShowShortcutSheet();
     }
@@ -5105,8 +5111,21 @@ private:
             }
             LOG("Wrote the key-binding template to "<<WideToUtf8(path.wstring()));
         }
-        const std::wstring arguments=L"\""+path.wstring()+L"\"";
-        ShellExecuteW(m_hwnd,L"open",L"notepad.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+        OpenInNotepad(path);
+    }
+    // Notepad by its full path in the system directory: a bare "notepad.exe"
+    // is searched for in the current directory first.
+    void OpenInNotepad(const std::filesystem::path& file){
+        const auto notepad=platform_paths::SystemFile(L"notepad.exe");
+        if(!notepad){LOG("Notepad was not opened: the system directory could not be read");return;}
+        const std::wstring arguments=L"\""+file.wstring()+L"\"";
+        ShellExecuteW(m_hwnd,L"open",notepad->c_str(),arguments.c_str(),nullptr,SW_SHOWNORMAL);
+    }
+    // Explorer the same way, from the Windows directory.
+    void RevealInExplorer(const std::wstring& arguments){
+        const auto explorer=platform_paths::WindowsFile(L"explorer.exe");
+        if(!explorer){LOG("Explorer was not opened: the Windows directory could not be read");return;}
+        ShellExecuteW(m_hwnd,L"open",explorer->c_str(),arguments.c_str(),nullptr,SW_SHOWNORMAL);
     }
     // Help > User guide: the guide shipped beside the player, or this version's
     // on GitHub when the folder has lost it.
@@ -5115,10 +5134,9 @@ private:
         const auto guide=(directory?*directory:std::filesystem::current_path())/L"docs"/L"USAGE.md";
         std::error_code error;
         if(std::filesystem::is_regular_file(guide,error)){
-            const std::wstring arguments=L"\""+guide.wstring()+L"\"";
             // Markdown has no handler on a fresh Windows; Notepad reads it.
             if(reinterpret_cast<INT_PTR>(ShellExecuteW(m_hwnd,L"open",guide.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
-                ShellExecuteW(m_hwnd,L"open",L"notepad.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+                OpenInNotepad(guide);
             return;
         }
         const std::string version=DLSS_VIDEO_PLAYER_VERSION;
@@ -5132,7 +5150,7 @@ private:
         std::error_code error;
         if(!log.empty()&&std::filesystem::is_regular_file(log,error)){
             const std::wstring arguments=L"/select,\""+log.wstring()+L"\"";
-            ShellExecuteW(m_hwnd,L"open",L"explorer.exe",arguments.c_str(),nullptr,SW_SHOWNORMAL);
+            RevealInExplorer(arguments);
             return;
         }
         const auto directory=platform_paths::ModuleDirectory();
@@ -7126,10 +7144,8 @@ private:
         DialogControl(h,L"STATIC",L"",SS_LEFT|SS_NOPREFIX,452,8,472,36,IDC_NS_PRESET_NOTE);
         CreateSettingsGroupHeading(h,L"picture.zone.render",top-34,0,432);
         CreateSettingsGroupHeading(h,L"picture.zone.viewing",top-34,viewing,428);
-        HWND page=DialogControl(h,L"BUTTON",T(L"picture.page.pipeline").c_str(),WS_TABSTOP|BS_OWNERDRAW,290,top-6,142,26,IDC_PIC_PAGE);
-        AddTip(h,page,L"picture.tip.page");
         const std::vector<HWND> beforeLook=DialogChildren(h);
-        CreateSettingsGroupHeading(h,L"neural.settings.group_look",top,0,260);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_look",top,0,432);
         // Ordered by how far each control measurably moves the picture
         // (docs/measurements/knobs-upper-20261003): Style first, Intensity -
         // which below 1.00 acts like Color strength - after the controls that
@@ -7156,39 +7172,45 @@ private:
         // Stacking, which arrived with RenoDX 6.x. Its own group because it
         // costs render time rather than changing the model's look: a second
         // pass adds 89 % model GPU time per frame (knobs-upper-20261003).
-        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",top,0,260);
-        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",top+28,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",0,160);
-        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+grow,top+58,300-grow,L"neural.tip.chained");
-        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",top+88,0,432);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+grow,top+112,116,L"neural.tip.guide_mv");
-        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+grow,top+112,96,L"neural.tip.guide_depth");
+        // The page is one column of groups from the zone top to the footer, which
+        // it fills: heading to first row 22-26, row to row 24 (a check) or 32 (a
+        // combo), the last row to the next heading 28-30.
+        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",top,0,432);
+        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",top+26,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes",0,160);
+        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132+grow,top+52,300-grow,L"neural.tip.chained");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",top+80,0,432);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132+grow,top+102,116,L"neural.tip.guide_mv");
+        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252+grow,top+102,96,L"neural.tip.guide_depth");
         // What the render does across time rather than to one frame: when a cut
         // resets the history. A ladder, not a slider - every rung is a measured
         // point (SceneCut.h), and Default is the one labelled recommended.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",top+142,0,432);
+        CreateSettingsGroupHeading(h,L"neural.settings.group_temporal",top+130,0,432);
         {
             const std::wstring cuts[]={T(L"neural.scene_cuts.default"),T(L"neural.scene_cuts.more"),
                                        T(L"neural.scene_cuts.less"),T(L"neural.scene_cuts.off")};
-            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",top+168,
+            CreateNeuralCombo(h,IDC_NS_SCENE_CUTS,L"neural.settings.scene_cuts",top+154,
                               {cuts[0].c_str(),cuts[1].c_str(),cuts[2].c_str(),cuts[3].c_str()},L"neural.tip.scene_cuts",0);
             // A ladder with Off first and the default, for the reason the policy
             // header gives: it trades detail in motion for steadiness, and a
             // default never moves down a ladder to buy something else.
             const std::wstring stability[]={T(L"neural.stability.off"),T(L"neural.stability.low"),
                                             T(L"neural.stability.medium"),T(L"neural.stability.high")};
-            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",top+202,
+            CreateNeuralCombo(h,IDC_NS_STABILITY,L"neural.settings.stability",top+186,
                               {stability[0].c_str(),stability[1].c_str(),stability[2].c_str(),stability[3].c_str()},L"neural.tip.stability",0);
         }
         // What the model is given, moved here from Encoder settings: it changes
         // the render, so it belongs to the zone that re-renders.
-        CreateSettingsGroupHeading(h,L"neural.settings.group_source",top+238,0,432);
-        CreateNeuralCheck(h,IDC_PIC_DEBAND,L"encoder.settings.deband",16,top+262,416,L"encoder.tip.deband");
-        CreateNeuralCheck(h,IDC_PIC_EXPOSURE,L"encoder.settings.exposure",16,top+286,416,L"encoder.tip.exposure");
-        // The table-driven rows (PictureRenderRow), one combo each.
+        CreateSettingsGroupHeading(h,L"neural.settings.group_source",top+214,0,432);
+        CreateNeuralCheck(h,IDC_PIC_DEBAND,L"encoder.settings.deband",16,top+236,416,L"encoder.tip.deband");
+        CreateNeuralCheck(h,IDC_PIC_EXPOSURE,L"encoder.settings.exposure",16,top+260,416,L"encoder.tip.exposure");
+        // The table-driven rows (PictureRenderRow), one combo each, under their
+        // own heading: which runtime renders and its network are neither what
+        // the model is given nor how it is given it.
+        if(!m_pictureRenderRows.empty())CreateSettingsGroupHeading(h,L"neural.settings.group_runtime",top+290,0,432);
         for(size_t index=0;index<m_pictureRenderRows.size()&&index<size_t(IDC_PIC_RENDER_ROW_COUNT);++index){
             const PictureRenderRow& row=m_pictureRenderRows[index];
             const int id=IDC_PIC_RENDER_ROW_FIRST+int(index);
-            CreateNeuralCombo(h,id,row.labelKey,top+318+int(index)*kPictureRowStep,{},row.tipKey,0,230);
+            CreateNeuralCombo(h,id,row.labelKey,top+kPictureRenderRowTop+int(index)*kPictureRowStep,{},row.tipKey,0,230);
             if(HWND combo=GetDlgItem(h,id)){
                 const std::vector<std::wstring> choices=row.choices();
                 for(const std::wstring& choice:choices)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(choice.c_str()));
@@ -7198,6 +7220,11 @@ private:
             }
         }
         m_picturePipelineControls=ChildrenSince(h,beforePipeline);
+        // The page switch sits in the footer's button row, under the render zone
+        // it pages: on the zone's heading row it collided with the first group's
+        // heading. Built here so Tab reaches it after the page it switches.
+        HWND page=DialogControl(h,L"BUTTON",T(L"picture.page.pipeline").c_str(),WS_TABSTOP|BS_OWNERDRAW,16,kPictureFooterTop+76,142,30,IDC_PIC_PAGE,DialogAnchor::BottomLeft);
+        AddTip(h,page,L"picture.tip.page");
         BuildViewingZone(h,viewing,top);
         // What Apply will do to the picture on screen right now (issue #15:
         // "the settings do not apply" was partly a picture nobody said was the
@@ -7382,8 +7409,10 @@ private:
     // column (16..448), the viewing zone the right one from kPictureViewingX.
     static constexpr int kPictureZoneTop=88,kPictureViewingX=464,kPictureRowStep=34,kPictureFooterTop=434;
     // 550 is what fits a 1080p screen at 175% with the title bar. The pipeline
-    // page has room for one PictureRenderRow above the footer; a second one
-    // moves kPictureFooterTop and the design height down by kPictureRowStep.
+    // page has room for one PictureRenderRow, under its Runtime heading, 10
+    // above the footer; a second one moves kPictureFooterTop and the design
+    // height down by kPictureRowStep.
+    static constexpr int kPictureRenderRowTop=316;
     static constexpr int kNeuralDesignW=940,kNeuralDesignH=550;
 
     // Re-syncs the table-driven rows and the source switches with the rest.
@@ -9460,11 +9489,12 @@ private:
                                    m_loaded&&m_renderer?status_chips::PipelineText(CurrentPipeline(),PipelineNames()):std::wstring{});
     }
     // The pipeline chip (X10): what makes the frames on screen now, not what is
-    // asked for - DLSS 5 while its frames play, and the upscaler that ran on the
+    // asked for - DLSS 5 while its frames are on screen (not while DLSS 5 is
+    // off over a rendered pair, which shows the original), and the upscaler that ran on the
     // last present, which is the one the status line names too.
     status_chips::Pipeline CurrentPipeline()const{
         status_chips::Pipeline pipeline;
-        pipeline.neural=m_cachedPlayback;
+        pipeline.neural=status_chips::NeuralOnScreen(m_cachedPlayback,m_comparisonView==ComparisonView::Neural,m_previewShown);
         pipeline.superResolution=UpscalingActive();
         pipeline.rtxVsr=m_renderer&&m_renderer->PlaybackVsrShown();
         return pipeline;
@@ -10605,14 +10635,17 @@ private:
     void RegisterOverlayHotkeys(){
         // WM_HOTKEY is posted by Windows independently of the swapchain WndProc.
         // This remains usable while ReShade owns/captures normal mouse/keyboard input.
-        auto reg=[&](int id,UINT mods,UINT vk,const char* name){if(!RegisterHotKey(m_hwnd,id,mods|MOD_NOREPEAT,vk))LOG("Overlay hotkey unavailable: "<<name<<" winerr="<<GetLastError());};
-        reg(HK_PLAY_PAUSE,MOD_CONTROL|MOD_ALT,VK_SPACE,"Ctrl+Alt+Space");
+        auto reg=[&](int id,UINT mods,UINT vk,const char* name){if(RegisterHotKey(m_hwnd,id,mods|MOD_NOREPEAT,vk))return true;LOG("Overlay hotkey unavailable: "<<name<<" winerr="<<GetLastError());return false;};
+        m_overlayHotkeys.playPause=reg(HK_PLAY_PAUSE,MOD_CONTROL|MOD_ALT,VK_SPACE,"Ctrl+Alt+Space");
         reg(HK_BACK_10,MOD_CONTROL|MOD_ALT,VK_LEFT,"Ctrl+Alt+Left");
         reg(HK_FORWARD_10,MOD_CONTROL|MOD_ALT,VK_RIGHT,"Ctrl+Alt+Right");
         reg(HK_MUTE,MOD_CONTROL|MOD_ALT,'M',"Ctrl+Alt+M");
         reg(HK_DLSS,MOD_CONTROL|MOD_ALT,'D',"Ctrl+Alt+D");
-        reg(HK_ADJUSTMENTS,MOD_CONTROL|MOD_ALT,'C',"Ctrl+Alt+C");
+        m_overlayHotkeys.adjustments=reg(HK_ADJUSTMENTS,MOD_CONTROL|MOD_ALT,'C',"Ctrl+Alt+C");
         if(!RegisterHotKey(m_hwnd,HK_MEDIA_PLAY_PAUSE,MOD_NOREPEAT,VK_MEDIA_PLAY_PAUSE))LOG("Media Play/Pause hotkey unavailable winerr="<<GetLastError());
+        // The menus offer only the overlay hotkeys that registered (another program
+        // may hold one: error 1409), and the bar was built before there was a window.
+        if(HMENU menu=GetMenu(m_hwnd)){app_menu::ApplyKeyBindings(menu,m_keys,m_loc,m_overlayHotkeys);DrawMenuBar(m_hwnd);}
     }
     void UnregisterOverlayHotkeys(){if(!m_hwnd)return;for(int id:{HK_PLAY_PAUSE,HK_BACK_10,HK_FORWARD_10,HK_MUTE,HK_DLSS,HK_ADJUSTMENTS,HK_MEDIA_PLAY_PAUSE})UnregisterHotKey(m_hwnd,id);}
     void HandleHotkey(int id){
@@ -12670,7 +12703,7 @@ private:
             status.upscalingStatus=UpscalingStatus();status.frameGenerationStatus=FrameGenerationStatus();
             // The view is named only when it is not the neural one: "Neural
             // rendered" repeated what the Neural Rendering pill already says.
-            std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural video \u00b7 "))+
+            std::wstring text=(m_liveSession?std::wstring{}:T(RenderedMediaStatusKey(m_decoder.IsStillImage()).data())+L" \u00b7 ")+
                 (m_comparisonView==ComparisonView::Neural?std::wstring{}:T(L"neural.view.original")+L" \u00b7 ")+
                 BuildPlayerStatusText(status);
             if(const std::wstring hdr=HdrStatusText();!hdr.empty())text+=L" \u00b7 "+hdr;
@@ -12693,7 +12726,7 @@ private:
         // Lead with what was marked, or with how to mark, because the runtime
         // detail behind it is what a narrow window truncates.
         if(const std::wstring markers=MarkerStatusText();!markers.empty())text=markers+L" \u00b7 "+text;
-        else if(!m_liveSession&&RangeRenderAvailable())text=T(L"status.render_hint")+L" \u00b7 "+text;
+        else if(ShowsRangeRenderHint(m_decoder.IsStillImage(),m_liveSession,RangeRenderAvailable()))text=T(L"status.render_hint")+L" \u00b7 "+text;
         // Ahead of the hint and the runtime detail: it says why the picture is not
         // the HDR one the file carries, and what the model will be shown.
         if(const std::wstring hdr=HdrStatusText();!hdr.empty())text=hdr+L" \u00b7 "+text;
@@ -13208,9 +13241,11 @@ private:
             if(w==VK_F10)RevealFullscreenControls();
             if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}
             // Everything else is the key table (KeyBindings.h), matched with its
-            // modifiers exactly: Shift+S is not S. A key held with Alt is not one
-            // of them - Alt+key is the menu bar's, and Ctrl+Alt is AltGr typing a
-            // character on many layouts.
+            // modifiers exactly - Shift+S is not S - except that a transport key
+            // (Space, the arrows, . and ,) held with Shift or Ctrl and bound to
+            // nothing of its own runs the plain key's command. A key held with
+            // Alt is not one of them - Alt+key is the menu bar's, and Ctrl+Alt is
+            // AltGr typing a character on many layouts.
             if(!(GetKeyState(VK_MENU)&0x8000)){
                 if(const auto command=m_keys.LookupKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}
             }
@@ -13779,6 +13814,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     uint32_t m_liveJobSerial=0;
     // Debounced re-render of the paused frame after a neural settings change.
     bool m_previewJob=false,m_previewShown=false,m_previewQueued=false;
+    // The overlay hotkeys Windows registered; the menus print only these.
+    app_menu::OverlayHotkeys m_overlayHotkeys;
     NeuralRenderRange m_previewRange{};
     UINT_PTR m_previewTimer=0;
     std::filesystem::path m_liveDirectory;

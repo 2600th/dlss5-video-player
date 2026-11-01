@@ -59,8 +59,10 @@ The UI moved, so the [table below](#where-things-moved-in-0300) says where each
 - **Export opens on what you are watching,** not on whatever was ticked last.
 - **Help has About, User guide and Open log folder;** Check for updates moved
   there.
-- **Keys match their modifiers exactly.** `Shift+S` no longer stops playback,
-  and a key with `Alt` runs nothing.
+- **Letter keys match their modifiers exactly.** `Shift+S` no longer stops
+  playback, and a key with `Alt` runs nothing. Space, the arrow keys, `.` and
+  `,` still work with `Shift` or `Ctrl` held, unless `input.conf` binds that
+  chord.
 - **DLSS-NR 310.9.16 on RTX 50, with a choice of network.** RTX 50 cards now
   render with DLSS-NR 310.9.16. Network A, the default, is the 0.28 picture
   exactly: byte for byte the same frames. Network B is lighter and milder,
@@ -81,8 +83,9 @@ The UI moved, so the [table below](#where-things-moved-in-0300) says where each
   the first time. After that they are cached as before.
 - **The receipt names the runtime.** Preflight, receipts and export logs name
   the NR DLL file that loaded, its version and its signature state. A render
-  that loaded a different file than the one chosen is refused instead of being
-  saved under the wrong name.
+  or export that loaded any other file than the one chosen, including the
+  add-on's own fallback copy in `%LOCALAPPDATA%`, or a file of another version,
+  is refused with the file named, instead of being saved under the wrong name.
 - **Streamline 2.14.16 and DLSS Super Resolution 310.9.16.** Both carry valid
   NVIDIA signatures. Upscaled renders are byte-identical to 0.28.3's.
 - **Still a modified, unsigned community runtime.** Both DLSS-NR builds are

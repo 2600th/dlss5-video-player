@@ -31,7 +31,9 @@
 // string is reported in the log and skipped, a key English does not have is
 // ignored, and a string whose placeholders do not match English's is dropped,
 // because a %s that went missing in translation is a crash in swprintf rather
-// than a typo. Every key a file leaves out reads in English.
+// than a typo - as is a '%' English's format strings do not have ("100%)",
+// %n, a trailing %), so where English is a format string a percent sign is
+// written %% (PlaceholdersMatch). Every key a file leaves out reads in English.
 //
 // Which file: the Windows display language, most preferred first (Settings >
 // Time & language > Language), each tried from its full tag down to its bare
@@ -145,25 +147,89 @@ inline std::string FormatFile(const Map& strings, std::wstring_view header)
     return utf8_text::FromWide(text);
 }
 
+namespace detail {
+
+// Every '%' of a string, tokenised. A conversion is one of the shapes English
+// uses - flags from "-+0", digits of width, '.' and digits of precision, "l"
+// or "ll", and one of diuxXfFeEgGcs - and anything else is a stray: %n, %)
+// ("100%)"), a trailing %, %I64d, %C, %Z, "% d", "%*d". The format calls
+// (swprintf_s, _scwprintf) stop the process on a stray they cannot parse,
+// and %n writes through an argument, so a string that reaches them may have
+// none. `forbidden` is a %n in any form.
+struct PercentScan {
+    std::vector<std::wstring> placeholders;  // conversions and tabs, in order
+    bool formats = false;                    // a conversion or a %%: written for a format call
+    bool stray = false;
+    bool forbidden = false;
+};
+
+inline PercentScan ScanPercents(std::wstring_view text)
+{
+    const auto digits = [&](size_t at) {
+        while (at < text.size() && text[at] >= L'0' && text[at] <= L'9') ++at;
+        return at;
+    };
+    PercentScan scan;
+    for (size_t index = 0; index < text.size(); ++index) {
+        if (text[index] == L'\t') { scan.placeholders.emplace_back(L"\t"); continue; }
+        if (text[index] != L'%') continue;
+        if (index + 1 < text.size() && text[index + 1] == L'%') { scan.formats = true; ++index; continue; }
+        size_t end = index + 1;
+        while (end < text.size() && std::wstring_view(L"-+0").find(text[end]) != std::wstring_view::npos) ++end;
+        end = digits(end);
+        if (end < text.size() && text[end] == L'.') {
+            const size_t precision = digits(end + 1);
+            end = precision == end + 1 ? text.size() : precision;  // "%." alone is a stray
+        }
+        if (end < text.size() && text[end] == L'l') end += end + 1 < text.size() && text[end + 1] == L'l' ? 2 : 1;
+        if (end < text.size() && std::wstring_view(L"diuxXfFeEgGcs").find(text[end]) != std::wstring_view::npos) {
+            scan.placeholders.emplace_back(text.substr(index, end - index + 1));
+            scan.formats = true;
+            index = end;
+            continue;
+        }
+        scan.stray = true;
+        // %n under any flags, width or length ("%-5ln", "%hn"): never allowed.
+        size_t type = index + 1;
+        while (type < text.size() && std::wstring_view(L"-+ #0123456789.*hlLzjtwI").find(text[type]) != std::wstring_view::npos) ++type;
+        if (type < text.size() && text[type] == L'n') scan.forbidden = true;
+    }
+    return scan;
+}
+
+} // namespace detail
+
 // The printf conversions in a string, in order, plus every tab: what a
-// translation must carry over unchanged. "%%" is a literal and not one. A tab
-// is the column a menu row's measured value sits in.
+// translation must carry over unchanged. "%%" is a literal and not one, and
+// neither is a '%' that is not a conversion (detail::ScanPercents). A tab is
+// the column a menu row's measured value sits in.
 inline std::vector<std::wstring> Placeholders(std::wstring_view text)
 {
-    std::vector<std::wstring> found;
-    for (size_t index = 0; index < text.size(); ++index) {
-        if (text[index] == L'\t') { found.emplace_back(L"\t"); continue; }
-        if (text[index] != L'%') continue;
-        if (index + 1 < text.size() && text[index + 1] == L'%') { ++index; continue; }
-        size_t end = index + 1;
-        while (end < text.size() && std::wstring_view(L"-+ #0123456789.*").find(text[end]) != std::wstring_view::npos) ++end;
-        while (end < text.size() && std::wstring_view(L"hlLzjt").find(text[end]) != std::wstring_view::npos) ++end;
-        if (end < text.size() && std::wstring_view(L"diouxXeEfFgGaAcsSp").find(text[end]) != std::wstring_view::npos) {
-            found.emplace_back(text.substr(index, end - index + 1));
-            index = end;
-        }
-    }
-    return found;
+    return detail::ScanPercents(text).placeholders;
+}
+
+// Whether every '%' in `text` is "%%" or a conversion: what a string that
+// reaches a format call must be.
+inline bool FormatSafe(std::wstring_view text)
+{
+    return !detail::ScanPercents(text).stray;
+}
+
+// Whether `translation` may stand in for `english`. Its conversions and tabs
+// must be English's, in order, and it may hold no %n. When English is a
+// format string - it has a conversion or a %%, which every string a format
+// call is given has - every '%' in the translation must be "%%" or a
+// conversion too, or one "100%)" would stop the player in swprintf_s. Any
+// other English string is display text, never given to a format call
+// (translation_percent_signs_cannot_reach_a_format_call_unparsed_test holds
+// the sources to that), so its translation may write a percent sign as the
+// language does: "100%（推荐）" for "Source, 100% (recommended)".
+inline bool PlaceholdersMatch(std::wstring_view english, std::wstring_view translation)
+{
+    const detail::PercentScan source = detail::ScanPercents(english);
+    const detail::PercentScan target = detail::ScanPercents(translation);
+    if (target.forbidden || source.placeholders != target.placeholders) return false;
+    return !source.formats || !target.stray;
 }
 
 // What a translation gets wrong against English, one line each: keys English
@@ -178,6 +244,8 @@ inline std::vector<std::wstring> CheckAgainst(const Map& english, const Map& tra
         if (source == english.end()) { problems.push_back(key + L": not an English key"); continue; }
         if (Placeholders(source->second) != Placeholders(text))
             problems.push_back(key + L": its placeholders differ from English's");
+        else if (!PlaceholdersMatch(source->second, text))
+            problems.push_back(key + L": a % that is neither %% nor one of English's conversions");
     }
     if (complete)
         for (const auto& [key, text] : english)
@@ -193,7 +261,7 @@ inline Map Usable(const Map& english, Map translation)
 {
     for (auto it = translation.begin(); it != translation.end();) {
         const auto source = english.find(it->first);
-        if (source == english.end() || Placeholders(source->second) != Placeholders(it->second)) it = translation.erase(it);
+        if (source == english.end() || !PlaceholdersMatch(source->second, it->second)) it = translation.erase(it);
         else ++it;
     }
     return translation;

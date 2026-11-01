@@ -234,9 +234,20 @@ enum class PlayerCommandRoute {
 // whose command has a name prints that command's keys in its key column.
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable);
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable, const key_bindings::Table& keys);
-// Rewrites every named command's key column from `keys`; what follows the tab
-// on a row with no command name (a measured rung) is left alone.
-void ApplyKeyBindings(HMENU menuBar, const key_bindings::Table& keys, const Localizer& localizer);
+// The two global overlay hotkeys a menu row also prints - Ctrl+Alt+Space on
+// Play / Pause, Ctrl+Alt+C on Viewing adjustments - that Windows actually
+// registered for the player. Another program may hold one (RegisterHotKey
+// error 1409), and a row then must not offer it. None until registration.
+struct OverlayHotkeys {
+    bool playPause = false;
+    bool adjustments = false;
+};
+// Rewrites every named command's key column from `keys`, and the overlay
+// hotkeys `overlay` says are registered; what follows the tab on a row with no
+// command name (a measured rung) is left alone. The picture's right-click
+// menu and the shortcut sheet copy these rows.
+void ApplyKeyBindings(HMENU menuBar, const key_bindings::Table& keys, const Localizer& localizer,
+                      OverlayHotkeys overlay = {});
 // Enhance's upscaler radios, by position: RTX VSR, DLSS Super Resolution, none.
 // `chosen` is one of IDM_RTX_VSR_UPSCALING, IDM_DLSS_UPSCALING, IDM_UPSCALER_NONE.
 bool UpdateUpscalerMenu(HMENU menuBar, UINT chosen, bool vsrAvailable, bool superResolutionAvailable);

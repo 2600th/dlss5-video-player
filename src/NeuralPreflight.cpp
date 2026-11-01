@@ -699,20 +699,139 @@ NeuralRuntimeBanner ParseNeuralRuntimeBanner(std::string_view reshadeLog)
     return banner;
 }
 
+namespace {
+
+bool PathExists(const std::wstring& path)
+{
+    return !path.empty() && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// A Win32 call with GetFullPathNameW's contract: the length without the
+// terminator when it fits, the size it needs when it does not, 0 on failure.
+template <class Call>
+std::optional<std::wstring> GrowingPathCall(Call&& call)
+{
+    std::wstring buffer(MAX_PATH, L'\0');
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const DWORD length = call(buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) return std::nullopt;
+        if (length < buffer.size()) {
+            buffer.resize(length);
+            return buffer;
+        }
+        buffer.assign(length, L'\0');
+    }
+    return std::nullopt;
+}
+
+// Case-insensitively, as NTFS compares names: the ordinal table, not the
+// ASCII-only fold, so a non-ASCII directory matches its other case too.
+bool SamePathText(std::wstring_view a, std::wstring_view b)
+{
+    return a.size() == b.size() &&
+           (a.empty() || CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(),
+                                              static_cast<int>(b.size()), TRUE) == CSTR_EQUAL);
+}
+
+// `file` relative to `root`, both normalised, '\' separated; nullopt when
+// `file` is not strictly inside it.
+std::optional<std::wstring> RelativeInside(const std::wstring& file, const std::wstring& root)
+{
+    if (file.empty() || root.empty()) return std::nullopt;
+    // "C:\" keeps its separator; any other root is joined with one.
+    const size_t prefix = root.back() == L'\\' ? root.size() : root.size() + 1;
+    if (file.size() <= prefix || !SamePathText(std::wstring_view(file).substr(0, root.size()), root) ||
+        (root.back() != L'\\' && file[root.size()] != L'\\'))
+        return std::nullopt;
+    return file.substr(prefix);
+}
+
+} // namespace
+
+std::wstring DecodeLoggedNeuralRuntimePath(std::string_view loaded)
+{
+    if (loaded.empty()) return {};
+    const std::optional<std::wstring> utf8 = utf8_text::ToWideStrict(loaded);
+    std::optional<std::wstring> ansi;
+    const int size = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, loaded.data(), static_cast<int>(loaded.size()),
+                                         nullptr, 0);
+    if (size > 0) {
+        std::wstring wide(static_cast<size_t>(size), L'\0');
+        if (MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, loaded.data(), static_cast<int>(loaded.size()),
+                                wide.data(), size) == size)
+            ansi = std::move(wide);
+    }
+    if (utf8 && PathExists(NormalizedNeuralRuntimePath(*utf8))) return *utf8;
+    if (ansi && PathExists(NormalizedNeuralRuntimePath(*ansi))) return *ansi;
+    if (utf8) return *utf8;
+    return ansi.value_or(std::wstring());
+}
+
+std::wstring NormalizedNeuralRuntimePath(std::wstring_view path)
+{
+    std::wstring text(path);
+    std::replace(text.begin(), text.end(), L'/', L'\\');
+    if (text.starts_with(L"\\\\?\\UNC\\")) text = L"\\\\" + text.substr(8);
+    else if (text.starts_with(L"\\\\?\\") || text.starts_with(L"\\??\\")) text = text.substr(4);
+    const auto letter = [](wchar_t c) { return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z'); };
+    const bool drive = text.size() >= 3 && letter(text[0]) && text[1] == L':' && text[2] == L'\\';
+    const bool unc = text.size() >= 3 && text[0] == L'\\' && text[1] == L'\\' && text[2] != L'\\' && text[2] != L'?' &&
+                     text[2] != L'.';
+    if (!drive && !unc) return {};
+    if (const auto full = GrowingPathCall([&](wchar_t* buffer, DWORD size) {
+            return GetFullPathNameW(text.c_str(), size, buffer, nullptr);
+        }))
+        text = *full;
+    // Fails for a path that does not exist, which then keeps its spelling.
+    if (const auto longer = GrowingPathCall([&](wchar_t* buffer, DWORD size) {
+            return GetLongPathNameW(text.c_str(), buffer, size);
+        }))
+        text = *longer;
+    while (text.size() > 3 && text.back() == L'\\') text.pop_back();
+    return text;
+}
+
 std::string NeuralRuntimeFileRelativeTo(std::string_view loaded, const std::filesystem::path& runtimeDirectory)
 {
-    const auto generic = [](std::string text) {
-        std::replace(text.begin(), text.end(), '\\', '/');
-        while (!text.empty() && text.back() == '/') text.pop_back();
-        return text;
-    };
-    if (loaded.empty()) return {};
-    const std::string file = generic(std::string(loaded));
-    const std::string root = generic(utf8_text::FromWide(runtimeDirectory.wstring()));
-    if (root.empty() || file.size() <= root.size() + 1 || file[root.size()] != '/' ||
-        LowerAscii(std::string_view(file).substr(0, root.size())) != LowerAscii(root))
-        return {};
-    return file.substr(root.size() + 1);
+    const auto relative = RelativeInside(NormalizedNeuralRuntimePath(DecodeLoggedNeuralRuntimePath(loaded)),
+                                         NormalizedNeuralRuntimePath(runtimeDirectory.wstring()));
+    if (!relative) return {};
+    std::string text = utf8_text::FromWide(*relative);
+    std::replace(text.begin(), text.end(), '\\', '/');
+    return text;
+}
+
+std::wstring NeuralRuntimeFileRefusal(const NeuralRuntimeBanner& banner,
+                                      const std::filesystem::path& runtimeDirectory,
+                                      std::wstring_view selectedFile,
+                                      std::string_view selectedName,
+                                      std::wstring_view lockedFileVersion)
+{
+    std::wstring selected(selectedFile);
+    std::replace(selected.begin(), selected.end(), L'/', L'\\');
+    const std::wstring root = NormalizedNeuralRuntimePath(runtimeDirectory.wstring());
+    const std::wstring expected = (root.empty() ? runtimeDirectory.wstring() : root) + L"\\" + selected;
+    const std::wstring runtime = L" (DLSS-NR " + utf8_text::ToWide(selectedName) + L")";
+    if (banner.dlssnrFile.empty())
+        return L"The neural runtime did not name the NR DLL it loaded, so the render cannot be shown to run on " +
+               expected + runtime + L".";
+    const std::wstring logged = DecodeLoggedNeuralRuntimePath(banner.dlssnrFile);
+    const std::wstring loaded = NormalizedNeuralRuntimePath(logged);
+    if (loaded.empty())
+        return L"The neural runtime loaded " + (logged.empty() ? utf8_text::ToWide(banner.dlssnrFile) : logged) +
+               L", which is not a full path, instead of " + expected + runtime + L".";
+    const auto relative = RelativeInside(loaded, root);
+    if (!relative || !SamePathText(*relative, selected))
+        return L"The neural runtime loaded " + loaded + L" instead of " + expected + runtime + L".";
+    const std::wstring declared = utf8_text::ToWide(banner.dlssnrRuntime);
+    if (lockedFileVersion.empty())
+        return L"The neural runtime loaded " + loaded + L", and the runtime lock names no file version for " +
+               selected + L" to hold it to" + runtime + L".";
+    if (declared != lockedFileVersion)
+        return L"The neural runtime loaded " + loaded + L", which declares " +
+               (declared.empty() ? std::wstring(L"no file version") : L"file version " + declared) + L", not " +
+               std::wstring(lockedFileVersion) + runtime + L".";
+    return {};
 }
 
 bool SameNeuralRuntimeFile(std::string_view loaded, std::wstring_view selected)

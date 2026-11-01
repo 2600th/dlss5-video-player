@@ -504,6 +504,16 @@ std::wstring_view OpenActionLabelKey(bool idleSurface)
     return idleSurface ? L"idle.open" : L"button.open";
 }
 
+std::wstring_view RenderedMediaStatusKey(bool stillImage)
+{
+    return stillImage ? L"status.neural_photo" : L"status.neural_video";
+}
+
+bool ShowsRangeRenderHint(bool stillImage, bool liveSession, bool rangeRenderAvailable)
+{
+    return !stillImage && !liveSession && rangeRenderAvailable;
+}
+
 ToolbarAction ReconcileFocusedToolbarAction(std::span<const ToolbarItem> items,
                                             ToolbarAction current,
                                             ToolbarAvailability availability)

@@ -139,6 +139,12 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     const auto modules = DescribeRuntimeModules(moduleDirectory, LockedRuntimeFileNames());
     // Which NR DLL ran, and its signature, read off the file the add-on named.
     const std::string nrFile = NeuralRuntimeFileRelativeTo(banner.dlssnrFile, moduleDirectory);
+    // The whole path as well, so the player can refuse a fallback DLL outside
+    // the runtime directory and name it (NeuralRuntimeFileRefusal): nrFile is
+    // empty for one, exactly as for a log that named none.
+    const std::wstring nrLogged = DecodeLoggedNeuralRuntimePath(banner.dlssnrFile);
+    const std::wstring nrNormalized = NormalizedNeuralRuntimePath(nrLogged);
+    const std::wstring nrPath = nrNormalized.empty() ? nrLogged : nrNormalized;
     const std::string nrSignature =
         nrFile.empty() ? std::string() : AuthenticodeState(moduleDirectory / utf8_text::ToWideStrict(nrFile).value_or(L""));
     // Decided from the settled whole-log read, which is the same evidence `ok`
@@ -167,7 +173,8 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
             JsonEscape(banner.addonVersion) + "\",\"addonApi\":\"" + JsonEscape(banner.addonApiVersion) +
             "\",\"renodx\":\"" + JsonEscape(banner.renodxVersion) + "\",\"renodxBuild\":\"" +
             JsonEscape(banner.renodxBuild) + "\",\"dlssnr\":\"" + JsonEscape(banner.dlssnrRuntime) +
-            "\",\"dlssnrFile\":\"" + JsonEscape(nrFile) + "\",\"dlssnrSignature\":\"" + JsonEscape(nrSignature) +
+            "\",\"dlssnrFile\":\"" + JsonEscape(nrFile) + "\",\"dlssnrPath\":\"" + JsonEscapeWide(nrPath) +
+            "\",\"dlssnrSignature\":\"" + JsonEscape(nrSignature) +
             "\",\"activeSettings\":\"" + JsonEscape(banner.activeSettings) + "\"}";
     // The weights the pass evaluates are resolved outside the staged runtime,
     // so the receipt records what the render identity's model-store term
