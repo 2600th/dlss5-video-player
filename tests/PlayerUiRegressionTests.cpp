@@ -1062,6 +1062,8 @@ struct PlayerAppTestAccess {
         const wchar_t glyph = GlyphForIcon(UiIcon::Sparkles);
         struct ChipCase { status_chips::Chip chip; const wchar_t* widest; };
         const std::array chips{
+            ChipCase{status_chips::Chip::Pipeline, L"DLSS 5 \u00b7 DLSS SR"},
+            ChipCase{status_chips::Chip::Pipeline, L"DLSS 5 \u00b7 RTX VSR"},
             ChipCase{status_chips::Chip::Render, L"Render 99% · ETA 99:59:59"},
             ChipCase{status_chips::Chip::Fps, L"240 / 240 fps"},
             ChipCase{status_chips::Chip::Dropped, L"Dropped 99999"},
@@ -1100,7 +1102,7 @@ struct PlayerAppTestAccess {
         const bool loaded = app.m_loaded, hadRenderer = app.m_renderer != nullptr;
         app.m_loaded = true;
         if (!hadRenderer) app.m_renderer = MakeD3D12Renderer();
-        app.m_cachedChips = status_chips::Build(true, {true, 0.42, 75.0}, 58.6, 60.0, 2);
+        app.m_cachedChips = status_chips::Build(true, {true, 0.42, 75.0}, 58.6, 60.0, 2, L"DLSS 5 \u00b7 RTX VSR");
         app.m_cachedStatus = L"Status line";
         // An earlier case's subtitle shift may have left a toast in the slot.
         app.m_toast.Hide();
@@ -1113,10 +1115,25 @@ struct PlayerAppTestAccess {
         CHECK(Contains(L"Dropped 2"));
         CHECK(Contains(L"Status line"));
         const auto row = app.StatusRowLayout();
-        for (const RECT& chip : row.chips) {
+        for (size_t index = 0; index < row.chips.size(); ++index) {
+            const RECT& chip = row.chips[index];
+            // The pipeline chip is the first to give way, so a narrow fixture
+            // window may not have room for it; the other three always do here.
+            if (index == size_t(status_chips::Chip::Pipeline) && chip.right <= chip.left) {
+                const int needed = app.Dip(status_chips::kMinimumTextWidthDip + status_chips::kPipelineChipWidthDip + status_chips::kRenderChipWidthDip +
+                                           status_chips::kFpsChipWidthDip + status_chips::kDroppedChipWidthDip + 4 * status_chips::kChipGapDip);
+                CHECK(app.StatusRowRect().right - app.StatusRowRect().left < needed);
+                continue;
+            }
             CHECK(chip.right > chip.left);
             CHECK(chip.left >= row.text.right);
         }
+        if (const RECT& chip = row.chips[size_t(status_chips::Chip::Pipeline)]; chip.right > chip.left) CHECK(Contains(L"DLSS 5 \u00b7 RTX VSR"));
+        // And painted where it has room, whole.
+        drawnText.clear();
+        app.DrawStatusChip(dc, RECT{0, 0, app.Dip(status_chips::kPipelineChipWidthDip), app.Dip(status_chips::kChipHeightDip)},
+                           app.m_cachedChips[size_t(status_chips::Chip::Pipeline)], ui_palette::SecondaryText, 0.0);
+        CHECK(Contains(L"DLSS 5 \u00b7 RTX VSR"));
         app.m_loaded = loaded;
         app.m_neuralLifecycle = lifecycle;
         if (!hadRenderer) app.m_renderer.reset();
@@ -1837,6 +1854,37 @@ struct PlayerAppTestAccess {
                 }
             }
             ReleaseDC(dialog, dc);
+            // Each row's modified dot is there for the longer strings too: in the
+            // gutter left of its name, on the page its row is on.
+            for (const int id : app.PictureRowIds()) {
+                const HWND dot = GetDlgItem(dialog, id + kPictureDotIdOffset);
+                REQUIRE(dot != nullptr);
+                const HWND row = GetDlgItem(dialog, id);
+                CHECK((IsWindowVisible(dot) != FALSE) == (IsWindowVisible(row) != FALSE));
+                const HWND label = GetDlgItem(dialog, id + kPictureLabelIdOffset);
+                RECT d{}, anchor{};
+                GetWindowRect(dot, &d);
+                GetWindowRect(label ? label : row, &anchor);
+                CHECK(d.right <= anchor.left);
+                CHECK(d.left >= 0);
+            }
+            // A combo's open list holds its longest row whole, translated or not.
+            for (const int id : {IDC_NS_STYLE, IDC_NS_PASSES, IDC_NS_SCENE_CUTS, IDC_NS_STABILITY}) {
+                const HWND combo = GetDlgItem(dialog, id);
+                if (!combo || !IsWindowVisible(combo)) continue;
+                HDC measure = GetDC(combo);
+                const HGDIOBJ oldFont = SelectObject(measure, reinterpret_cast<HFONT>(SendMessageW(combo, WM_GETFONT, 0, 0)));
+                const int dropped = int(SendMessageW(combo, CB_GETDROPPEDWIDTH, 0, 0));
+                for (LRESULT index = 0; index < SendMessageW(combo, CB_GETCOUNT, 0, 0); ++index) {
+                    std::wstring text(size_t(SendMessageW(combo, CB_GETLBTEXTLEN, WPARAM(index), 0)), L'\0');
+                    SendMessageW(combo, CB_GETLBTEXT, WPARAM(index), reinterpret_cast<LPARAM>(text.data()));
+                    SIZE extent{};
+                    GetTextExtentPoint32W(measure, text.c_str(), int(text.size()), &extent);
+                    CHECK(extent.cx < dropped);
+                }
+                SelectObject(measure, oldFont);
+                ReleaseDC(combo, measure);
+            }
             for (size_t a = 0; a < children.size(); ++a) {
                 for (size_t b = a + 1; b < children.size(); ++b) {
                     RECT overlap{};
@@ -1909,6 +1957,192 @@ struct PlayerAppTestAccess {
         }
         app.UpdateFontsForDpi(96);
         DeleteDC(dc);
+    }
+
+    // The Picture panel's per-control state (UI proposal 4.2 and 3.5): a dot on
+    // each row whose value is off its default, a double-click on the row's name,
+    // read-out or dot putting that one control back, and Ctrl+Z - a key of the
+    // key table - running Revert from wherever the keyboard is in the panel.
+    static void picture_panel_marks_resets_and_reverts_each_control_test()
+    {
+        PlayerApp& app = fixture->app;
+        const NeuralSettings settings = app.m_neuralSettings;
+        const auto color = app.m_colorSettings;
+        const float strength = app.m_comparison.strength;
+        const bool live = app.m_liveSession, cached = app.m_cachedPlayback, loaded = app.m_loaded;
+        int chosen = 0;
+        PlayerApp::PictureRenderRow row{L"neural.settings.passes", nullptr,
+            [] { return std::vector<std::wstring>{L"A", L"B", L"C"}; },
+            [&chosen] { return chosen; }, [&chosen](int index) { chosen = index; }};
+        row.defaultChoice = 0;
+        app.m_pictureRenderRows.push_back(row);
+        // After the rows the player already has (the network row on this branch).
+        const int extraRow = IDC_PIC_RENDER_ROW_FIRST + int(app.m_pictureRenderRows.size()) - 1;
+        app.m_neuralSettings = {};
+        app.m_colorSettings = {};
+        app.m_comparison.strength = 1.0f;
+        app.m_picturePipelinePage = false;
+        app.ShowNeuralSettings();
+        const HWND dialog = app.m_neuralWnd;
+        REQUIRE(dialog != nullptr);
+        const auto dot = [&](int id) { return GetDlgItem(dialog, id + kPictureDotIdOffset); };
+        const auto marked = [&](int id) { const HWND d = dot(id); return d && GetWindowTextLengthW(d) > 0; };
+        const auto doubleClick = [&](int child) {
+            const HWND from = GetDlgItem(dialog, child);
+            REQUIRE(from != nullptr);
+            app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(child, STN_DBLCLK), reinterpret_cast<LPARAM>(from));
+        };
+        // Every row has its dot, left of its name, and none is lit at the defaults.
+        for (const int id : app.PictureRowIds()) {
+            REQUIRE(dot(id) != nullptr);
+            CHECK(!marked(id));
+            RECT d{}, anchor{};
+            GetWindowRect(dot(id), &d);
+            const HWND label = GetDlgItem(dialog, id + kPictureLabelIdOffset);
+            GetWindowRect(label ? label : GetDlgItem(dialog, id), &anchor);
+            CHECK(d.right <= anchor.left);
+        }
+        // A slider moved off its default lights its dot; a double-click on its name
+        // puts it back, slider and value, and the dot goes out.
+        const HWND tone = GetDlgItem(dialog, IDC_NS_TONE);
+        SendMessageW(tone, TBM_SETPOS, TRUE, 140);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, reinterpret_cast<LPARAM>(tone));
+        CHECK_EQ(app.m_neuralSettings.localTone, 1.4f);
+        CHECK(marked(IDC_NS_TONE));
+        CHECK(!marked(IDC_NS_STRUCTURE));
+        doubleClick(IDC_NS_TONE + kPictureLabelIdOffset);
+        CHECK_EQ(app.m_neuralSettings.localTone, NeuralSettings{}.localTone);
+        CHECK_EQ(int(SendMessageW(tone, TBM_GETPOS, 0, 0)), 100);
+        CHECK(!marked(IDC_NS_TONE));
+        // The read-out works too, and a viewing row resets as instantly as it moves.
+        const HWND mix = GetDlgItem(dialog, IDC_ADJ_NEURAL_STRENGTH);
+        SendMessageW(mix, TBM_SETPOS, TRUE, 50);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, reinterpret_cast<LPARAM>(mix));
+        CHECK_EQ(app.m_comparison.strength, 0.5f);
+        CHECK(marked(IDC_ADJ_NEURAL_STRENGTH));
+        doubleClick(IDC_ADJ_NEURAL_STRENGTH + 100);
+        CHECK_EQ(app.m_comparison.strength, 1.0f);
+        CHECK(!marked(IDC_ADJ_NEURAL_STRENGTH));
+        // A checkbox is its own name, so its dot is what a double-click resets.
+        const HWND mask = GetDlgItem(dialog, IDC_NS_AUTOMASK);
+        SendMessageW(mask, BM_SETCHECK, BST_UNCHECKED, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_AUTOMASK, BN_CLICKED), reinterpret_cast<LPARAM>(mask));
+        CHECK(!app.m_neuralSettings.autoMask);
+        CHECK(marked(IDC_NS_AUTOMASK));
+        doubleClick(IDC_NS_AUTOMASK + kPictureDotIdOffset);
+        CHECK(app.m_neuralSettings.autoMask);
+        CHECK_EQ(int(SendMessageW(mask, BM_GETCHECK, 0, 0)), BST_CHECKED);
+        // The Style row: a combo, its measured distances in its rows, its name a target.
+        const HWND style = GetDlgItem(dialog, IDC_NS_STYLE);
+        std::wstring natural(size_t(SendMessageW(style, CB_GETLBTEXTLEN, 1, 0)), L'\0');
+        SendMessageW(style, CB_GETLBTEXT, 1, reinterpret_cast<LPARAM>(natural.data()));
+        CHECK(natural.find(L"+68 %") != std::wstring::npos);
+        SendMessageW(style, CB_SETCURSEL, 2, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STYLE, CBN_SELCHANGE), reinterpret_cast<LPARAM>(style));
+        CHECK_EQ(app.m_neuralSettings.style, 2);
+        CHECK(marked(IDC_NS_STYLE));
+        doubleClick(IDC_NS_STYLE + kPictureLabelIdOffset);
+        CHECK_EQ(app.m_neuralSettings.style, 0);
+        CHECK_EQ(int(SendMessageW(style, CB_GETCURSEL, 0, 0)), 0);
+        // A combo's CBN_SELCHANGE has STN_DBLCLK's number; it is not a reset.
+        SendMessageW(style, CB_SETCURSEL, 1, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STYLE, CBN_SELCHANGE), reinterpret_cast<LPARAM>(style));
+        CHECK_EQ(app.m_neuralSettings.style, 1);
+        app.m_neuralSettings.style = 0; app.SyncNeuralSettingControls(dialog);
+        // A table-driven row with a default is marked and reset like the rest.
+        app.ShowPicturePage(dialog, true);
+        const HWND extra = GetDlgItem(dialog, extraRow);
+        SendMessageW(extra, CB_SETCURSEL, 2, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(extraRow, CBN_SELCHANGE), reinterpret_cast<LPARAM>(extra));
+        CHECK_EQ(chosen, 2);
+        CHECK(marked(extraRow));
+        CHECK(IsWindowVisible(dot(extraRow)) != FALSE);
+        CHECK(IsWindowVisible(dot(IDC_NS_TONE)) == FALSE);
+        doubleClick(extraRow + kPictureLabelIdOffset);
+        CHECK_EQ(chosen, 0);
+        CHECK(!marked(extraRow));
+        app.ShowPicturePage(dialog, false);
+        CHECK(IsWindowVisible(dot(IDC_NS_TONE)) != FALSE);
+        // Ctrl+Z is Revert: a key of the table, in its menu row, from the control
+        // the keyboard is on, and live only while the panel differs from the render.
+        CHECK(app.m_keys.KeysFor(IDM_PICTURE_REVERT) == L"Ctrl+Z");
+        app.m_loaded = true; app.m_liveSession = false; app.m_cachedPlayback = true;
+        app.m_cachedSettings = {}; app.m_cachedSettings.localTone = 1.4f;
+        app.m_cachedGuides = app.m_renderGuides; app.m_cachedTemporal = app.m_temporalSettings;
+        app.RefreshNeuralApplyState(dialog);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_PICTURE_REVERT, MF_BYCOMMAND) & MF_GRAYED) == 0);
+        BYTE keys[256]{};
+        GetKeyboardState(keys);
+        const BYTE control = keys[VK_CONTROL];
+        keys[VK_CONTROL] = 0x80;
+        SetKeyboardState(keys);
+        SetFocus(tone);
+        SendMessageW(tone, WM_KEYDOWN, 'Z', 0);
+        keys[VK_CONTROL] = control;
+        SetKeyboardState(keys);
+        CHECK_EQ(app.m_neuralSettings.localTone, 1.4f);
+        CHECK_EQ(int(SendMessageW(tone, TBM_GETPOS, 0, 0)), 140);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_PICTURE_REVERT, MF_BYCOMMAND) & MF_GRAYED) != 0);
+        // Without Ctrl, Z is the trackbar's and nothing reverts.
+        app.m_neuralSettings.localTone = 0.5f;
+        SendMessageW(tone, WM_KEYDOWN, 'Z', 0);
+        CHECK_EQ(app.m_neuralSettings.localTone, 0.5f);
+        // The menu row and the main window's key run the same Revert while the panel is open.
+        app.HandleCommand(IDM_PICTURE_REVERT);
+        CHECK_EQ(app.m_neuralSettings.localTone, 1.4f);
+        app.m_liveSession = live; app.m_cachedPlayback = cached; app.m_loaded = loaded;
+        app.m_neuralSettings = settings; app.m_colorSettings = color; app.m_comparison.strength = strength;
+        app.SaveVideoSettings();
+        DestroyWindow(dialog);
+        CHECK(app.m_neuralWnd == nullptr);
+        // With the panel closed there is nothing to revert in front of you.
+        app.m_neuralSettings.localTone = 0.7f;
+        app.HandleCommand(IDM_PICTURE_REVERT);
+        CHECK_EQ(app.m_neuralSettings.localTone, 0.7f);
+        app.m_neuralSettings = settings;
+        app.m_pictureRenderRows.pop_back();
+        app.m_picturePipelinePage = false;
+    }
+
+    // The pipeline chip (X10): the stages that make the picture, named; and its
+    // tip, which carries the sizes, the settings and what the line had to cut.
+    static void pipeline_chip_names_the_stages_and_tips_the_settings_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, hadRenderer = app.m_renderer != nullptr;
+        const NeuralSettings cachedSettings = app.m_cachedSettings;
+        app.m_loaded = true;
+        if (!hadRenderer) app.m_renderer = MakeD3D12Renderer();
+        app.m_cachedPlayback = false;
+        auto chips = app.BuildStatusChips();
+        const auto& pipeline = chips[size_t(status_chips::Chip::Pipeline)];
+        CHECK(pipeline.visible);
+        CHECK_EQ(pipeline.text, app.T(L"chip.pipeline.none"));
+        app.m_cachedPlayback = true;
+        chips = app.BuildStatusChips();
+        CHECK(chips[size_t(status_chips::Chip::Pipeline)].text.starts_with(app.T(L"toolbar.neural.name")));
+        // The tip: the heading, the flow, the settings the render was made with in
+        // the panel's own words, the add-on and frame generation.
+        app.m_cachedSettings = {};
+        app.m_cachedSettings.style = 1;
+        app.m_cachedSettings.localTone = 1.5f;
+        // A chip not shown has nothing to say.
+        app.m_cachedChips = {};
+        CHECK(app.CallbackTipText(PlayerApp::kChipTipIdBase + static_cast<UINT_PTR>(status_chips::Chip::Pipeline)).empty());
+        app.m_cachedChips = chips;
+        const std::wstring shown = app.CallbackTipText(PlayerApp::kChipTipIdBase + static_cast<UINT_PTR>(status_chips::Chip::Pipeline));
+        CHECK(shown.starts_with(app.T(L"chip.pipeline.tip")));
+        CHECK(shown.find(L"\u2192 " + app.T(L"toolbar.neural.name")) != std::wstring::npos);
+        CHECK(shown.find(app.T(L"neural.settings.style") + L" " + app.T(L"neural.style.1")) != std::wstring::npos);
+        CHECK(shown.find(app.T(L"neural.settings.tone") + L" 1.50") != std::wstring::npos);
+        CHECK(shown.find(app.FrameGenerationStatus()) != std::wstring::npos);
+        // No media, no chip and no tip.
+        app.m_loaded = false;
+        CHECK(!app.BuildStatusChips()[size_t(status_chips::Chip::Pipeline)].visible);
+        CHECK(app.PipelineTipText().empty());
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_cachedSettings = cachedSettings;
+        if (!hadRenderer) app.m_renderer.reset();
+        app.m_cachedChips = {};
     }
 
     // Every settings dialog is laid out in design units at its own dpi, draws
@@ -3244,6 +3478,8 @@ struct PlayerAppTestAccess {
         UI_CASE(picture_panel_zones_pages_revert_and_rows_test),
         UI_CASE(picture_panel_layout_survives_longer_strings_test),
         UI_CASE(simplified_chinese_fits_the_picture_panel_and_pills_test),
+        UI_CASE(picture_panel_marks_resets_and_reverts_each_control_test),
+        UI_CASE(pipeline_chip_names_the_stages_and_tips_the_settings_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
         UI_CASE(dark_menu_bar_test),
         UI_CASE(media_controls_and_thumbnail_buttons_test),
@@ -3559,6 +3795,138 @@ struct PlayerAppTestAccess {
         app.m_comparison = entry; app.m_zoomStep = entryZoom; app.m_comparison.strength = 1.0f; app.ApplyComparison(false);
     }
 
+    // The compare bar's 0.30.0 parts (UI proposal 3.3): the selected mode's own
+    // controls, the "more" button and the Compare menu it opens, and the Mix's
+    // double-click, which is the bar's own and never the window's class style.
+    static void CheckCompareBarContextAndMix(PlayerApp& app)
+    {
+        const ComparisonSettings entry = app.m_comparison;
+        const bool configured = app.m_opt.neuralAddonConfigured;
+        app.m_opt.neuralAddonConfigured = true;
+        REQUIRE(app.CompareBarVisible());
+        REQUIRE(app.ComparisonModesAvailable());
+        // No class style: a double-click on a toolbar button would arrive as one.
+        CHECK((GetClassLongPtrW(app.m_hwnd, GCL_STYLE) & CS_DBLCLKS) == 0);
+        const auto find = [&](const compare_bar::Layout& layout, compare_bar::Part part) -> const compare_bar::Item* {
+            for (const auto& item : layout.items) if (item.part == part) return &item;
+            return nullptr;
+        };
+        const auto press = [&](const compare_bar::Item& item) {
+            return app.CompareBarMouseDown((item.bounds.left + item.bounds.right) / 2, (item.bounds.top + item.bounds.bottom) / 2, 1000);
+        };
+        // A mode without controls of its own has none, and "more" is always at the end.
+        app.SetComparisonMode(ComparisonMode::SplitVertical);
+        auto layout = app.CompareBarLayout();
+        CHECK(app.CompareBarContext().empty());
+        CHECK(find(layout, compare_bar::Part::DifferenceGain) == nullptr);
+        const auto* more = find(layout, compare_bar::Part::More);
+        REQUIRE(more != nullptr);
+        CHECK(&layout.items.back() == more);
+        CHECK(app.CompareBarItemEnabled(*more));
+        // Difference: its gain, then Luma | Color, whose mark follows the channels.
+        app.SetComparisonMode(ComparisonMode::Difference);
+        layout = app.CompareBarLayout();
+        const auto* gain = find(layout, compare_bar::Part::DifferenceGain);
+        const auto* luma = find(layout, compare_bar::Part::DifferenceLuma);
+        const auto* color = find(layout, compare_bar::Part::DifferenceColor);
+        if (!layout.contextFolded) {
+            REQUIRE(gain != nullptr && luma != nullptr && color != nullptr);
+            CHECK(gain->bounds.right <= luma->bounds.left && luma->bounds.right <= color->bounds.left);
+            CHECK(color->bounds.right < find(layout, compare_bar::Part::More)->bounds.left);
+            app.m_comparison.differenceLuma = true;
+            CHECK(press(*color));
+            CHECK(!app.m_comparison.differenceLuma);
+            CHECK(press(*color));
+            CHECK(!app.m_comparison.differenceLuma);
+            CHECK(press(*luma));
+            CHECK(app.m_comparison.differenceLuma);
+            CHECK_EQ(app.CompareContextLabel(compare_bar::Part::DifferenceGain), std::wstring(L"\u00d7") + std::to_wstring(int(app.m_comparison.differenceGain)));
+        } else {
+            CHECK(gain == nullptr && luma == nullptr && color == nullptr);
+        }
+        // The gain menu's pick: on the ladder, and named in the tag.
+        const uint64_t revision = app.m_labelTextRevision;
+        app.SetDifferenceGain(16.0f);
+        CHECK_EQ(app.m_comparison.differenceGain, 16.0f);
+        CHECK(app.m_labelTextRevision != revision);
+        app.SetDifferenceGain(5.0f);
+        CHECK_EQ(app.m_comparison.differenceGain, 4.0f);
+        // 2 x 2 shows its fourth pane's Mix where that pane is DLSS 5, not RTX VSR.
+        app.SetComparisonMode(ComparisonMode::Quad);
+        CHECK(app.CompareBarContext() == std::vector<compare_bar::Part>{compare_bar::Part::SecondMix});
+        CHECK(app.CompareContextLabel(compare_bar::Part::SecondMix).find(app.PercentText(app.m_comparison.secondMix)) != std::wstring::npos);
+        // The tips that name keys take them from the key table.
+        CHECK(app.CompareTipText(compare_bar::Part::MixTrack, L"compare.tip.mix").find(L"([ / ])") != std::wstring::npos);
+        CHECK(app.CompareTipText(compare_bar::Part::MixTrack, L"compare.tip.mix").find(L"Double-click") != std::wstring::npos);
+        CHECK(app.CompareTipText(compare_bar::Part::DifferenceGain, L"compare.tip.difference_gain").find(L"Shift+[ / Shift+]") != std::wstring::npos);
+        // "More" opens the whole Compare menu: the same rows, submenus and checks.
+        app.SyncFeatureMenuState();
+        const HMENU source = GetSubMenu(GetMenu(app.m_hwnd), 3);
+        HMENU copy = app_menu::CreateToolbarMenu(app_menu::ToolbarMenu::Compare, GetMenu(app.m_hwnd), app.m_loc, app.m_keys);
+        REQUIRE(source != nullptr && copy != nullptr);
+        CHECK(GetMenuState(source, IDM_COMPARE_NEURAL, MF_BYCOMMAND) != UINT(-1));
+        CHECK_EQ(GetMenuItemCount(source), GetMenuItemCount(copy));
+        for (const UINT command : {IDM_COMPARE_QUAD, IDM_COMPARE_AGAINST_VSR, IDM_COMPARE_HDR_AT_SDR, IDM_COMPARE_MASK_LOAD, IDM_COMPARE_DIFFERENCE_LUMA, IDM_COMPARE_SECOND_MIX_FIRST})
+            CHECK_EQ(GetMenuState(source, command, MF_BYCOMMAND), GetMenuState(copy, command, MF_BYCOMMAND));
+        DestroyMenu(copy);
+        // Two presses on the Mix inside the double-click time and distance put it back
+        // to 100%; the first press set it, as a single press always has.
+        app.SetComparisonMode(ComparisonMode::SplitVertical);
+        layout = app.CompareBarLayout();
+        const int y = (layout.bar.top + layout.bar.bottom) / 2;
+        const int quarter = layout.mixTrack.left + (layout.mixTrack.right - layout.mixTrack.left) / 4;
+        const DWORD interval = GetDoubleClickTime();
+        app.m_mixClick.Forget();
+        CHECK(app.CompareBarMouseDown(quarter, y, 5000));
+        CHECK(std::abs(app.m_comparison.strength - 0.5f) < 0.051f);
+        CHECK(app.CompareBarMouseDown(quarter, y, 5000 + interval));
+        CHECK_EQ(app.m_comparison.strength, 1.0f);
+        CHECK(!app.m_dragMix);
+        // The caption is part of the target; a slow second press is a new first one.
+        app.MouseUp(quarter, y);
+        CHECK(app.CompareBarMouseDown(quarter, y, 9000));
+        CHECK(app.CompareBarMouseDown(quarter, y, 9000 + interval + 1));
+        CHECK(app.m_comparison.strength != 1.0f);
+        app.MouseUp(quarter, y);
+        // A press anywhere else between the two - a toolbar button - is not part of
+        // a double-click, so the button acted and the Mix keeps its value.
+        app.m_mixClick.Forget();
+        CHECK(app.CompareBarMouseDown(quarter, y, 12000));
+        app.MouseUp(quarter, y);
+        CHECK(!app.CompareBarMouseDown(4, layout.bar.bottom + 4, 12010));
+        CHECK(app.CompareBarMouseDown(quarter, y, 12020));
+        CHECK(app.m_comparison.strength != 1.0f);
+        app.MouseUp(quarter, y);
+        if (layout.mixLabel.right > layout.mixLabel.left) {
+            app.m_mixClick.Forget();
+            const int caption = (layout.mixLabel.left + layout.mixLabel.right) / 2;
+            CHECK(app.CompareBarMouseDown(caption, y, 20000));
+            CHECK(app.CompareBarMouseDown(caption, y, 20001));
+            CHECK_EQ(app.m_comparison.strength, 1.0f);
+        }
+        // Every contextual label, 40 % longer, still fits its segment: the bar
+        // measures the widest value it can show, not the one it shows now.
+        const Localizer english = app.m_loc;
+        Localizer::Map pseudo;
+        for (const auto& [key, text] : Localizer::All()) pseudo[key] = translation::Pseudo(text, 0.4);
+        app.m_loc = Localizer(std::move(pseudo), L"x-pseudo");
+        for (const ComparisonMode mode : {ComparisonMode::Difference, ComparisonMode::Quad}) {
+            app.SetComparisonMode(mode);
+            const auto metrics = app.CompareBarMetrics();
+            const auto wide = compare_bar::LayoutBar(4000, 0, 96, metrics, true);
+            CHECK(!wide.contextFolded);
+            for (const auto& label : metrics.context) {
+                const auto* item = find(wide, label.part);
+                REQUIRE(item != nullptr);
+                const int needed = label.label + 2 * compare_bar::kLabelInsetDip + (label.menu ? compare_bar::kIconLabelGapDip + compare_bar::kChevronDip : 0);
+                CHECK(item->bounds.right - item->bounds.left >= needed);
+            }
+        }
+        app.m_loc = english;
+        app.m_opt.neuralAddonConfigured = configured;
+        app.m_comparison = entry; app.ApplyComparison(false);
+    }
+
     // The spatial mask on the Mix: loaded for a source, remembered for it, restored when
     // it comes back, and forgotten on Clear.
     static void CheckComparisonMask(PlayerApp& app)
@@ -3673,6 +4041,7 @@ struct PlayerAppTestAccess {
         CHECK_EQ(app.m_comparison.strength, 0.0f);
         app.m_comparison.strength = 1.0f;
         CheckCompareBarAndPeek(app);
+        CheckCompareBarContextAndMix(app);
         CheckComparisonMask(app);
         CheckSavedComparisonComposition(app);
         // Z steps along the ladder; with no render window or output to measure it is

@@ -20,6 +20,13 @@
 // it paints with, and the bar steps down through fixed arrangements until one fits:
 // full labels, short labels with icon toggles, a mode menu, and a tight row with no
 // Mix caption. The last one fits the player's minimum window at every DPI.
+//
+// Since 0.30.0 (UI proposal 3.3) the bar also carries the selected mode's own
+// controls - Difference's gain and its Luma | Color switch, 2 x 2's fourth-pane
+// Mix - in the room the hint used, and a "more" button at its right end that
+// opens the Compare menu. The contextual controls never change the tier: they
+// show when the row has room left for all of them, and otherwise fold into the
+// menu behind that button, where every one of them is a row already.
 namespace compare_bar {
 
 inline constexpr int kBarHeightDip = 44;
@@ -40,8 +47,20 @@ inline constexpr int kZoomButtonDip = 32;
 inline constexpr int kZoomValueDip = 44;
 inline constexpr int kIconToggleDip = 36;
 inline constexpr int kHintMinDip = 120;
+// The "more" button: as wide as an icon toggle, and on every tier.
+inline constexpr int kMoreDip = 36;
 
-enum class Part { None, Mode, ModeMenu, MixTrack, ZoomOut, ZoomIn, Swap, Loupe };
+enum class Part {
+    None, Mode, ModeMenu, MixTrack, ZoomOut, ZoomIn, Swap, Loupe,
+    // The selected mode's own controls (contextual), laid out after Loupe.
+    DifferenceGain, DifferenceLuma, DifferenceColor, SecondMix,
+    // M3 (0.31.0): the loop, speed and flicker-map controls are contextual parts
+    // too. Each is a Part added here, a ContextLabel from main.cpp's
+    // CompareBarContext for the modes it belongs to, and a case in
+    // CompareBarMouseDown; the layout below places and folds it with no other
+    // change, and the Compare menu's M3 group (AppMenu.cpp) is where it folds to.
+    More,
+};
 
 // How a segment shows its content; main.cpp draws it this way.
 enum class Face { Label, ShortLabel, Icon, IconLabel };
@@ -58,6 +77,14 @@ struct Item {
     Face face = Face::Label;
 };
 
+// One contextual control: its part, the width of the widest text it can show
+// (measured like the rest), and whether it opens a menu, which adds a chevron.
+struct ContextLabel {
+    Part part = Part::None;
+    int label = 0;
+    bool menu = false;
+};
+
 // Pixel widths of the text the bar can show, measured by the caller in the font the
 // bar paints with. `icon` is the width of one Tabler glyph, 0 when the icon font is
 // unavailable: the toggles then keep their words at every tier.
@@ -68,6 +95,8 @@ struct Metrics {
     int loupeLabel = 0;
     int mixLabel = 0;
     int icon = 0;
+    // The selected mode's own controls, in bar order; empty for a mode with none.
+    std::vector<ContextLabel> context;
 };
 
 struct Layout {
@@ -78,6 +107,12 @@ struct Layout {
     RECT mixValue{};
     RECT zoomValue{};
     RECT hint{};  // empty when there is no room left for it
+    // The label, the track and the read-out as one target the bar's height: a
+    // double-click on any of it puts the Mix back to 100%, and the tip names it there.
+    RECT mixGroup{};
+    // True when the mode has contextual controls the row had no room for; they are
+    // then reached through the "more" button.
+    bool contextFolded = false;
     Tier tier = Tier::Full;
     bool compact = false;  // anything but Full
     bool fits = true;      // false only when even Tight overflowed and items were dropped
@@ -172,7 +207,15 @@ inline int Width(const Plan& plan, bool loupe, UINT dpi)
     width += plan.gap + plan.mixLabel + plan.track + plan.mixValue;
     width += plan.gap + 2 * Scale(kZoomButtonDip, dpi) + Scale(kZoomValueDip, dpi);
     width += plan.gap + plan.swap + (loupe ? plan.loupe : 0);
+    // The "more" button sits at the end of every tier.
+    width += plan.gap + Scale(kMoreDip, dpi);
     return width;
+}
+
+inline int ContextWidth(const ContextLabel& item, UINT dpi)
+{
+    const int extra = item.menu ? Scale(kIconLabelGapDip, dpi) + Scale(kChevronDip, dpi) : 0;
+    return std::max(Scale(kMinSegmentDip, dpi), std::max(0, item.label) + 2 * Scale(kLabelInsetDip, dpi) + extra);
 }
 
 } // namespace detail
@@ -200,7 +243,11 @@ inline Layout LayoutBar(int clientWidth, int top, UINT dpi, const Metrics& metri
     layout.tier = ChooseTier(clientWidth, dpi, metrics, modeCount, loupe);
     layout.compact = layout.tier != Tier::Full;
     const detail::Plan plan = detail::PlanFor(layout.tier, metrics, modeCount, dpi);
-    const int right = std::max(gutter, clientWidth - gutter);
+    // The "more" button is anchored to the right edge, and everything else stops a
+    // gap short of it, so it is the one item a too-narrow row never drops.
+    const int edge = std::max(gutter, clientWidth - gutter);
+    const RECT more{std::max(gutter, edge - Scale(kMoreDip, dpi)), itemTop, edge, itemTop + itemHeight};
+    const int right = std::max<int>(gutter, more.left - plan.gap);
     int x = gutter;
     const auto take = [&](int width) {
         const RECT r{x, itemTop, x + width, itemTop + itemHeight};
@@ -233,11 +280,53 @@ inline Layout LayoutBar(int clientWidth, int top, UINT dpi, const Metrics& metri
     x += plan.gap;
     push(Part::Swap, 0, take(plan.swap), plan.toggleFace);
     if (loupe) push(Part::Loupe, 0, take(plan.loupe), plan.toggleFace);
+    layout.mixGroup = RECT{layout.mixLabel.right > layout.mixLabel.left ? layout.mixLabel.left : layout.mixTrack.left, layout.bar.top,
+                           layout.mixValue.right > layout.mixValue.left ? layout.mixValue.right : layout.mixTrack.right, layout.bar.bottom};
+    // The mode's own controls, all or none: a Luma without its Color, or a gain
+    // without the channels it amplifies, would be half a control.
+    if (!metrics.context.empty()) {
+        int width = plan.gap;
+        for (const ContextLabel& item : metrics.context) width += detail::ContextWidth(item, dpi);
+        if (x + width <= right) {
+            x += plan.gap;
+            for (const ContextLabel& item : metrics.context) push(item.part, 0, take(detail::ContextWidth(item, dpi)), Face::Label);
+        } else {
+            layout.contextFolded = true;
+        }
+    }
     // Whatever is left says how to peek, and is simply dropped when it would not fit.
-    const int hintLeft = x + plan.gap, hintRight = clientWidth - gutter;
+    const int hintLeft = x + plan.gap, hintRight = right;
     if (hintRight - hintLeft >= Scale(kHintMinDip, dpi)) layout.hint = RECT{hintLeft, itemTop, hintRight, itemTop + itemHeight};
+    layout.items.push_back(Item{Part::More, 0, more, Face::Icon});
     return layout;
 }
+
+// Whether a press on the Mix is the second of a double-click. The main window has
+// no CS_DBLCLKS - with it, two quick presses on a toolbar button would arrive as a
+// press and a double-click, and the second would not act - so the bar keeps its
+// own memory of the last press on the Mix and holds it to Windows' own limits
+// (GetDoubleClickTime, SM_CXDOUBLECLK and SM_CYDOUBLECLK). The caller forgets it on
+// a press anywhere else, so only two presses on the Mix in a row are a double-click.
+class DoubleClick {
+public:
+    // True for the second press of a double-click, which is then forgotten, so a
+    // third press starts over.
+    bool Press(DWORD time, POINT point, UINT interval, int width, int height)
+    {
+        const bool second = pending_ && time - time_ <= interval &&
+                            std::abs(point.x - point_.x) <= width / 2 && std::abs(point.y - point_.y) <= height / 2;
+        pending_ = !second;
+        time_ = time;
+        point_ = point;
+        return second;
+    }
+    void Forget() { pending_ = false; }
+
+private:
+    bool pending_ = false;
+    DWORD time_ = 0;
+    POINT point_{};
+};
 
 inline const Item* HitTest(const Layout& layout, POINT point)
 {
