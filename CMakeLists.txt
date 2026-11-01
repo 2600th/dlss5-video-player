@@ -593,6 +593,11 @@ if(BUILD_TESTING)
         add_test(NAME PackageSourceIdentity COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_SOURCE_DIR}/tests/PackageSourceIdentity.ps1" -Tools "${CMAKE_SOURCE_DIR}/tools")
         set_tests_properties(PackageSourceIdentity PROPERTIES TIMEOUT 60)
+        # The package check allows lang\<tag>.lang and still forbids the
+        # legacy pt-BR pack.
+        add_test(NAME PackageLanguagePaths COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_SOURCE_DIR}/tests/PackageLanguagePaths.ps1" -Tools "${CMAKE_SOURCE_DIR}/tools")
+        set_tests_properties(PackageLanguagePaths PROPERTIES TIMEOUT 60)
         # P1.31: the complete package needs a passing hardware-suite report.
         add_test(NAME HardwareTestReport COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_SOURCE_DIR}/tests/HardwareTestReport.ps1" -Tools "${CMAKE_SOURCE_DIR}/tools")

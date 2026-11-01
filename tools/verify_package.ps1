@@ -356,6 +356,17 @@ function Assert-LockedFiles {
     }
 }
 
+# The localisation the first release builds carried and dropped: a pt-BR pack,
+# loose or under languages/, which the player no longer reads (the legacy
+# Language= setting is ignored). Neither may come back in a package. A 0.30
+# translation is lang\<tag>.lang (src/TranslationFile.h), pt-BR's included,
+# and is allowed by name above, so that one shape is not a legacy artifact.
+function Test-LegacyLanguageArtifact {
+    param([string]$RelativePath)
+    if ($RelativePath -cmatch '^lang/[A-Za-z0-9-]+\.lang$') { return $false }
+    return $RelativePath -match '(?i)(^|[/_.-])pt-br([/_.-]|$)|languages/'
+}
+
 function Assert-Stage {
     param([string]$Root)
     $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
@@ -417,7 +428,7 @@ function Assert-Stage {
     Assert-ReleaseExecutableIdentity -Root $resolvedRoot
 
     foreach ($relative in $actual) {
-        if ($relative -match '(?i)(^|[/_.-])pt-br([/_.-]|$)|languages/') {
+        if (Test-LegacyLanguageArtifact -RelativePath $relative) {
             throw "Portuguese/language artifact is forbidden: $relative"
         }
         $path = Join-Path $resolvedRoot $relative
