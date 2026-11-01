@@ -106,7 +106,11 @@ written as 0.01: 10.8.0 declines a session in which every pass is at zero
 strength, and the render then fails. Keys the player does not write are
 preserved. The preflight receipt and the render log name the NR file that
 loaded, its version and its Authenticode state, and a render on a file other
-than the selected one is refused. Safe mode skips the neural helper entirely and writes none of the
+than the selected one is refused, live and in an export: a file outside
+`neural-runtime\` (10.8.0's fallback to `%LOCALAPPDATA%\DLSS5-NR\runtime`),
+a log that names no file, and a file whose declared version is not the
+runtime lock's (`310.9.16.0` or `310.8.2.0`) all are, and the refusal names
+the file that loaded. Safe mode skips the neural helper entirely and writes none of the
 neural settings.
 
 Both neural runtimes are modified and unsigned: their authors removed the

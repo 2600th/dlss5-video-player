@@ -137,6 +137,19 @@ const RuntimeLock& EmbeddedRuntimeLock()
     return lock;
 }
 
+std::wstring LockedFileVersion(const RuntimeLock& lock, std::wstring_view destination)
+{
+    const auto key = [](std::wstring_view text) {
+        std::wstring folded(text);
+        for (wchar_t& c : folded) c = c == L'\\' ? L'/' : (c >= L'A' && c <= L'Z' ? wchar_t(c - L'A' + L'a') : c);
+        return folded;
+    };
+    const std::wstring wanted = key(destination);
+    for (const RuntimeLockEntry& entry : lock.entries)
+        if (key(entry.destination) == wanted) return entry.fileVersion;
+    return {};
+}
+
 std::vector<RuntimeLockCheck> VerifyRuntimeLock(const std::filesystem::path& runtimeDirectory,
                                                 const RuntimeLock& lock,
                                                 std::stop_token stop)

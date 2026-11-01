@@ -1,8 +1,13 @@
 #include "CrashDump.h"
 #include "GuideFiles.h"
 #include "NarrowText.h"
+#include "NeuralPreflight.h"
+#include "NeuralReceipt.h"
+#include "NeuralRuntimeChoice.h"
 #include "NeuralWorker.h"
 #include "NeuralWorkerProtocol.h"
+#include "RuntimeLock.h"
+#include "Utf8Text.h"
 #include "ResidentWorkerLoop.h"
 #include "TestSupport.h"
 #include "TestEnvironment.h"
@@ -594,7 +599,32 @@ int RunRealPreflight(int argc, wchar_t** argv)
     const NeuralPreflightResult result = RunNeuralPreflight(argv[2]);
     std::wcout << L"ok=" << result.ok << L" cancelled=" << result.cancelled << L" detail=" << result.detail << L'\n';
     std::cout << result.json << '\n';
-    return result.ok ? EXIT_SUCCESS : EXIT_FAILURE;
+    if (!result.ok) return EXIT_FAILURE;
+    // The wrong-NR-DLL refusal fails closed, so a real runtime's own evidence
+    // must pass it, or every render would be refused: the receipt, as the
+    // player's preflight reads it, and the log, as an export reads it. The
+    // probe loads whichever DLL the ini's NRRuntimePath names, so either
+    // runtime may be the one that ran.
+    const std::filesystem::path runtimeDirectory = std::filesystem::path(argv[2]).parent_path();
+    std::string log;
+    if (const auto path = ResolveNeuralRuntimeLogPath(runtimeDirectory); !path.empty()) {
+        std::ifstream in(path, std::ios::binary);
+        log.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    bool passed = true;
+    for (const auto& [source, banner] : {std::pair{L"receipt", PreflightNeuralRuntimeBanner(result.json)},
+                                         std::pair{L"log", ParseNeuralRuntimeBanner(log)}}) {
+        std::wstring refusal;
+        std::string_view ran;
+        for (const neural_runtime::Runtime* runtime : {&neural_runtime::kCurrent, &neural_runtime::kPrevious}) {
+            refusal = NeuralRuntimeFileRefusal(banner, runtimeDirectory, runtime->file, runtime->version,
+                                               LockedFileVersion(EmbeddedRuntimeLock(), runtime->file));
+            if (refusal.empty()) { ran = runtime->version; break; }
+        }
+        if (refusal.empty()) std::wcout << L"nr-file " << source << L": " << utf8_text::ToWide(ran) << L'\n';
+        else { std::wcout << L"nr-file " << source << L" refused: " << refusal << L'\n'; passed = false; }
+    }
+    return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 int RunRealWorker(int argc, wchar_t** argv)

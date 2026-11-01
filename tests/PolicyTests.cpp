@@ -14347,6 +14347,118 @@ void neural_runtime_file_is_named_from_the_addon_log_test()
     CHECK(PreflightNeuralRuntimeFile("").empty());
 }
 
+// The refusal of a wrong NR DLL fails closed. It used to refuse only a file
+// inside the runtime directory that was not the selected one, so RenoDX
+// 10.8.0's own fallback - %LOCALAPPDATA%\DLSS5-NR\runtime, outside it - a log
+// with no "NR runtime" line, and any spelling of the path the prefix match did
+// not know (\\?\, 8.3, a non-ASCII folder in the other encoding) all rendered,
+// were cached and were exported under the selected runtime's key.
+void neural_runtime_file_refusal_fails_closed_test()
+{
+    using neural_runtime::kCurrent;
+    using neural_runtime::kPrevious;
+    // The lock's file versions are what the declared one is held to.
+    CHECK_EQ(std::wstring(L"310.9.16.0"), LockedFileVersion(EmbeddedRuntimeLock(), kCurrent.file));
+    CHECK_EQ(std::wstring(L"310.8.2.0"), LockedFileVersion(EmbeddedRuntimeLock(), kPrevious.file));
+    CHECK_EQ(std::wstring(L"310.8.2.0"), LockedFileVersion(EmbeddedRuntimeLock(), L"310.8.sf-v2\\NVNGX_DLSSNR.dll"));
+    CHECK(LockedFileVersion(EmbeddedRuntimeLock(), L"nvngx_dlssnr_310.9.16.dll").empty());
+
+    const std::filesystem::path root = L"D:\\Player\\neural-runtime";
+    const auto banner = [](std::string file, std::string version) {
+        NeuralRuntimeBanner b;
+        b.dlssnrFile = std::move(file);
+        b.dlssnrRuntime = std::move(version);
+        return b;
+    };
+    const auto refusal = [&](const NeuralRuntimeBanner& b, const neural_runtime::Runtime& runtime,
+                             const std::filesystem::path& directory) {
+        return NeuralRuntimeFileRefusal(b, directory, runtime.file, runtime.version,
+                                        LockedFileVersion(EmbeddedRuntimeLock(), runtime.file));
+    };
+    // The selected file, declaring the locked version, in any spelling of it.
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, root).empty());
+    CHECK(refusal(banner("\\\\?\\d:\\PLAYER\\Neural-Runtime\\NVNGX_DLSSNR.DLL", "310.9.16.0"), kCurrent, root).empty());
+    CHECK(refusal(banner("D:/Player/neural-runtime/310.8.SF-v2/nvngx_dlssnr.dll", "310.8.2.0"), kPrevious, root).empty());
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\x\\..\\310.8.SF-v2\\nvngx_dlssnr.dll", "310.8.2.0"), kPrevious, root).empty());
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, L"\\\\?\\D:\\Player\\neural-runtime\\").empty());
+
+    // 10.8.0's fallback, outside the runtime: refused, and named.
+    const std::wstring fallback = refusal(
+        banner("C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, root);
+    CHECK(fallback.find(L"loaded C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll instead of "
+                        L"D:\\Player\\neural-runtime\\nvngx_dlssnr.dll (DLSS-NR 310.9.16)") != std::wstring::npos);
+    // The other runtime's file, and a neighbour that only shares a prefix.
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.9.16.0"), kPrevious, root)
+              .find(L"loaded D:\\Player\\neural-runtime\\nvngx_dlssnr.dll instead of") != std::wstring::npos);
+    CHECK(!refusal(banner("D:\\Player\\neural-runtime2\\nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, root).empty());
+    // No "NR runtime" line at all: 6.5.3's log, or a 10.8.0 that never got that far.
+    CHECK(refusal(banner("", "310.8.0"), kCurrent, root).find(L"did not name the NR DLL") != std::wstring::npos);
+    // A path that names no one file.
+    CHECK(refusal(banner("nvngx_dlssnr.dll", "310.9.16.0"), kCurrent, root).find(L"not a full path") != std::wstring::npos);
+    // The right name with the wrong file version: only the start line's 310.8.0,
+    // the other runtime's version, or none at all.
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.8.0"), kCurrent, root)
+              .find(L"which declares file version 310.8.0, not 310.9.16.0") != std::wstring::npos);
+    CHECK(!refusal(banner("D:\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll", "310.9.16.0"), kPrevious, root).empty());
+    CHECK(refusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", ""), kCurrent, root)
+              .find(L"declares no file version") != std::wstring::npos);
+    // A file the lock does not pin has no version to be held to.
+    CHECK(!NeuralRuntimeFileRefusal(banner("D:\\Player\\neural-runtime\\nvngx_dlssnr.dll", "310.9.16.0"), root,
+                                    kCurrent.file, kCurrent.version, L"").empty());
+
+    // RenoDX 10.8.0's own log, parsed, on each runtime.
+    const NeuralRuntimeBanner logged = ParseNeuralRuntimeBanner(
+        "DLSS5 Generic: NR runtime D:\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll (looked in "
+        "D:\\Player\\neural-runtime\\310.8.SF-v2\\nvngx_dlssnr.dll; C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll)\r\n"
+        "DLSS5 Generic: NR runtime declares file version 310.8.2.0, GPU architecture NVSDK_NGX_GPU_Arch_Blackwell2\r\n"
+        "DLSS5 Generic: signed DLSSNR 310.8.0 D3D12 runtime initialized\r\n");
+    CHECK(refusal(logged, kPrevious, root).empty());
+    CHECK(!refusal(logged, kCurrent, root).empty());
+
+    // The receipt carries the whole path for the playback check, and reads back.
+    const std::string receipt = "{\"schema\":3,\"runtime\":{\"dlssnr\":\"310.9.16.0\",\"dlssnrFile\":\"\","
+                                "\"dlssnrPath\":\"C:\\\\Users\\\\u\\\\AppData\\\\Local\\\\DLSS5-NR\\\\runtime\\\\nvngx_dlssnr.dll\","
+                                "\"dlssnrSignature\":\"\"}}";
+    const NeuralRuntimeBanner read = PreflightNeuralRuntimeBanner(receipt);
+    CHECK_EQ(std::string("C:\\Users\\u\\AppData\\Local\\DLSS5-NR\\runtime\\nvngx_dlssnr.dll"), read.dlssnrFile);
+    CHECK_EQ(std::string("310.9.16.0"), read.dlssnrRuntime);
+    CHECK(!refusal(read, kCurrent, root).empty());
+    // A receipt from before dlssnrPath names nothing, and is refused.
+    CHECK(!refusal(PreflightNeuralRuntimeBanner("{\"schema\":3,\"runtime\":{\"dlssnr\":\"310.9.16.0\","
+                                                "\"dlssnrFile\":\"nvngx_dlssnr.dll\"}}"), kCurrent, root).empty());
+    CHECK(PreflightNeuralRuntimeBanner("").dlssnrFile.empty());
+
+    // Real files, for the spellings only the file system can resolve: an 8.3
+    // name, and a non-ASCII folder logged in UTF-8 or in the ANSI code page.
+    const std::filesystem::path directory = process_temp_path(L"nr-runtime-directory-with-a-long-name-\u00e9");
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory / L"310.8.SF-v2", error);
+    CHECK(!error);
+    write_binary_file(directory / L"nvngx_dlssnr.dll", "x");
+    const std::wstring file = (directory / L"nvngx_dlssnr.dll").wstring();
+    const std::string utf8 = utf8_text::FromWide(file);
+    CHECK(refusal(banner(utf8, "310.9.16.0"), kCurrent, directory).empty());
+    CHECK_EQ(std::string("nvngx_dlssnr.dll"), NeuralRuntimeFileRelativeTo(utf8, directory));
+    BOOL lossy = FALSE;
+    const int ansiSize = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, file.c_str(), int(file.size()), nullptr, 0, nullptr, &lossy);
+    if (ansiSize > 0 && !lossy) {
+        std::string ansi(size_t(ansiSize), '\0');
+        WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, file.c_str(), int(file.size()), ansi.data(), ansiSize, nullptr, nullptr);
+        CHECK_EQ(file, DecodeLoggedNeuralRuntimePath(ansi));
+        CHECK(refusal(banner(ansi, "310.9.16.0"), kCurrent, directory).empty());
+    }
+    wchar_t shortName[MAX_PATH]{};
+    const DWORD shortLength = GetShortPathNameW(file.c_str(), shortName, MAX_PATH);
+    if (shortLength > 0 && shortLength < MAX_PATH && std::wstring_view(shortName) != file) {
+        CHECK(refusal(banner(utf8_text::FromWide(shortName), "310.9.16.0"), kCurrent, directory).empty());
+        CHECK(refusal(banner(utf8, "310.9.16.0"), kCurrent, std::filesystem::path(shortName).parent_path()).empty());
+    } else {
+        std::wcerr << L"8.3 names are off on this volume; the short-name case was not exercised\n";
+    }
+    std::filesystem::remove_all(directory, error);
+}
+
 // The comparison reference conversion runs on every presented frame once the
 // viewer picks Blend, Split or Wipe, which a scalar double pass over 3.69 Mpx
 // cannot do inside a 16.68 ms budget. Speeding it up is only allowed if the
@@ -17845,6 +17957,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(neural_presets_round_trip_and_default_to_the_shipped_settings_test),
     TEST_CASE(neural_runtime_choice_follows_the_gpu_and_never_sends_the_default_preset_test),
     TEST_CASE(neural_runtime_file_is_named_from_the_addon_log_test),
+    TEST_CASE(neural_runtime_file_refusal_fails_closed_test),
     TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
     TEST_CASE(variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test),
     TEST_CASE(variable_frame_rate_is_decided_on_b_frame_decode_order_test),

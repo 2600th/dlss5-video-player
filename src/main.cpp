@@ -2464,10 +2464,16 @@ private:
             preflightJson_=preflight.json;
         }
         // The add-on falls back to another NR DLL when the one NRRuntimePath
-        // names will not load; a render on it would carry this one's key.
+        // names will not load; a render on it would carry this one's key. A
+        // receipt that names no DLL, one outside the runtime, or one that
+        // declares another file version is refused, never let through.
         const neural_runtime::Runtime wanted=neural_runtime::Select(in_.gpu,in_.settings.previousRuntime);
-        const std::string loaded=PreflightNeuralRuntimeFile(preflightJson_);
-        if(!loaded.empty()&&!SameNeuralRuntimeFile(loaded,wanted.file)){completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=L"The neural runtime loaded "+Utf8ToWide(loaded)+L" instead of "+std::wstring(wanted.file)+L" (DLSS-NR "+Utf8ToWide(std::string(wanted.version))+L").";LOG("Neural preflight refused: "<<WideToUtf8(completion_->result.detail));return false;}
+        if(std::wstring refusal=NeuralRuntimeFileRefusal(PreflightNeuralRuntimeBanner(preflightJson_),runtimeDirectory_,wanted.file,wanted.version,
+                                                         LockedFileVersion(EmbeddedRuntimeLock(),wanted.file));!refusal.empty()){
+            completion_->result.failure=NeuralRenderFailure::Preflight;completion_->result.detail=std::move(refusal);
+            LOG("Neural preflight refused: "<<WideToUtf8(completion_->result.detail));
+            return false;
+        }
         return true;
     }
 

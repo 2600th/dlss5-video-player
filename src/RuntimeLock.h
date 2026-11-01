@@ -41,6 +41,11 @@ std::optional<RuntimeLock> ParseRuntimeLock(std::string_view json);
 // once; a build whose embedded lock does not parse terminates on first use.
 const RuntimeLock& EmbeddedRuntimeLock();
 
+// The fileVersion the lock pins for `destination` ("310.8.SF-v2/nvngx_dlssnr.dll"
+// gives "310.8.2.0"), matched ignoring ASCII case and separators; empty when the
+// lock has no such entry.
+std::wstring LockedFileVersion(const RuntimeLock& lock, std::wstring_view destination);
+
 struct RuntimeLockCheck {
     std::wstring name;
     bool present{};

@@ -279,6 +279,45 @@ std::string PreflightNeuralRuntimeFile(std::string_view preflightJson)
     return std::string(ScanString(TrimmedPreflight(preflightJson), "runtime", "dlssnrFile"));
 }
 
+NeuralRuntimeBanner PreflightNeuralRuntimeBanner(std::string_view preflightJson)
+{
+    // The inverse of JsonEscape: short forms and \u00XX. A path has neither a
+    // quote nor a control character, so in practice only "\\" occurs.
+    const auto unescape = [](std::string_view escaped) {
+        std::string text;
+        for (size_t index = 0; index < escaped.size(); ++index) {
+            if (escaped[index] != '\\' || index + 1 == escaped.size()) { text.push_back(escaped[index]); continue; }
+            const char next = escaped[++index];
+            switch (next) {
+            case 'b': text.push_back('\b'); break;
+            case 'f': text.push_back('\f'); break;
+            case 'n': text.push_back('\n'); break;
+            case 'r': text.push_back('\r'); break;
+            case 't': text.push_back('\t'); break;
+            case 'u': {
+                unsigned value = 0;
+                const std::string_view digits = escaped.substr(index + 1, 4);
+                if (digits.size() == 4 &&
+                    std::from_chars(digits.data(), digits.data() + 4, value, 16).ptr == digits.data() + 4 && value < 0x20) {
+                    text.push_back(static_cast<char>(value));
+                    index += 4;
+                } else {
+                    text.push_back('u');
+                }
+                break;
+            }
+            default: text.push_back(next); break;
+            }
+        }
+        return text;
+    };
+    const std::string_view preflight = TrimmedPreflight(preflightJson);
+    NeuralRuntimeBanner banner;
+    banner.dlssnrFile = unescape(ScanString(preflight, "runtime", "dlssnrPath"));
+    banner.dlssnrRuntime = unescape(ScanString(preflight, "runtime", "dlssnr"));
+    return banner;
+}
+
 std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs)
 {
     const std::string_view preflight = inputs.preflightJson;

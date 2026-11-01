@@ -37,6 +37,14 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
 // "310.8.SF-v2/nvngx_dlssnr.dll"); empty when it names none.
 std::string PreflightNeuralRuntimeFile(std::string_view preflightJson);
 
+// What NeuralRuntimeFileRefusal judges a preflight receipt by: the whole path
+// of the NR DLL the probe's add-on loaded (runtime.dlssnrPath, UTF-8) and the
+// file version it declared (runtime.dlssnr). Both are empty in a receipt that
+// names neither - one from before dlssnrPath, whose worker hash keys it out of
+// every reuse anyway - and that receipt is refused rather than trusted.
+struct NeuralRuntimeBanner;
+NeuralRuntimeBanner PreflightNeuralRuntimeBanner(std::string_view preflightJson);
+
 // One log line: gpu/driver/reshade/renodx/nr (version, file, signature)/feature18 (with the feature's
 // own NGX result and the diagnosed cause when the probe classified one) from
 // the preflight JSON plus lock status, failure kind, frame counts and the
