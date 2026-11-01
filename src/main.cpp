@@ -5089,7 +5089,7 @@ private:
         const auto written=std::filesystem::last_write_time(KeyBindingsPath(),error);
         if((error?std::filesystem::file_time_type{}:written)==m_keysWritten)return;
         LoadKeyBindings();
-        if(HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr){app_menu::ApplyKeyBindings(menu,m_keys,m_loc);DrawMenuBar(m_hwnd);}
+        if(HMENU menu=m_hwnd?GetMenu(m_hwnd):nullptr){app_menu::ApplyKeyBindings(menu,m_keys,m_loc,m_overlayHotkeys);DrawMenuBar(m_hwnd);}
         ReloadToolbarTips();
         if(m_shortcutSheetOpen)ShowShortcutSheet();
     }
@@ -10624,14 +10624,17 @@ private:
     void RegisterOverlayHotkeys(){
         // WM_HOTKEY is posted by Windows independently of the swapchain WndProc.
         // This remains usable while ReShade owns/captures normal mouse/keyboard input.
-        auto reg=[&](int id,UINT mods,UINT vk,const char* name){if(!RegisterHotKey(m_hwnd,id,mods|MOD_NOREPEAT,vk))LOG("Overlay hotkey unavailable: "<<name<<" winerr="<<GetLastError());};
-        reg(HK_PLAY_PAUSE,MOD_CONTROL|MOD_ALT,VK_SPACE,"Ctrl+Alt+Space");
+        auto reg=[&](int id,UINT mods,UINT vk,const char* name){if(RegisterHotKey(m_hwnd,id,mods|MOD_NOREPEAT,vk))return true;LOG("Overlay hotkey unavailable: "<<name<<" winerr="<<GetLastError());return false;};
+        m_overlayHotkeys.playPause=reg(HK_PLAY_PAUSE,MOD_CONTROL|MOD_ALT,VK_SPACE,"Ctrl+Alt+Space");
         reg(HK_BACK_10,MOD_CONTROL|MOD_ALT,VK_LEFT,"Ctrl+Alt+Left");
         reg(HK_FORWARD_10,MOD_CONTROL|MOD_ALT,VK_RIGHT,"Ctrl+Alt+Right");
         reg(HK_MUTE,MOD_CONTROL|MOD_ALT,'M',"Ctrl+Alt+M");
         reg(HK_DLSS,MOD_CONTROL|MOD_ALT,'D',"Ctrl+Alt+D");
-        reg(HK_ADJUSTMENTS,MOD_CONTROL|MOD_ALT,'C',"Ctrl+Alt+C");
+        m_overlayHotkeys.adjustments=reg(HK_ADJUSTMENTS,MOD_CONTROL|MOD_ALT,'C',"Ctrl+Alt+C");
         if(!RegisterHotKey(m_hwnd,HK_MEDIA_PLAY_PAUSE,MOD_NOREPEAT,VK_MEDIA_PLAY_PAUSE))LOG("Media Play/Pause hotkey unavailable winerr="<<GetLastError());
+        // The menus offer only the overlay hotkeys that registered (another program
+        // may hold one: error 1409), and the bar was built before there was a window.
+        if(HMENU menu=GetMenu(m_hwnd)){app_menu::ApplyKeyBindings(menu,m_keys,m_loc,m_overlayHotkeys);DrawMenuBar(m_hwnd);}
     }
     void UnregisterOverlayHotkeys(){if(!m_hwnd)return;for(int id:{HK_PLAY_PAUSE,HK_BACK_10,HK_FORWARD_10,HK_MUTE,HK_DLSS,HK_ADJUSTMENTS,HK_MEDIA_PLAY_PAUSE})UnregisterHotKey(m_hwnd,id);}
     void HandleHotkey(int id){
@@ -13800,6 +13803,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     uint32_t m_liveJobSerial=0;
     // Debounced re-render of the paused frame after a neural settings change.
     bool m_previewJob=false,m_previewShown=false,m_previewQueued=false;
+    // The overlay hotkeys Windows registered; the menus print only these.
+    app_menu::OverlayHotkeys m_overlayHotkeys;
     NeuralRenderRange m_previewRange{};
     UINT_PTR m_previewTimer=0;
     std::filesystem::path m_liveDirectory;

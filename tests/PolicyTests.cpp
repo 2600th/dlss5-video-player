@@ -1115,6 +1115,24 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
     const Localizer localizer;
     const HMENU bar = app_menu::CreateMenuBar(localizer, true);
     REQUIRE(bar != nullptr);
+    // The overlay hotkeys are printed only once registered, and only those that
+    // were: Ctrl+Alt+Space failed with error 1409 on a machine where another
+    // program held it, and the picture's right-click menu still offered it.
+    wchar_t play[256]{};
+    CHECK(GetMenuStringW(bar, app_menu::IDM_PLAY, play, static_cast<int>(std::size(play)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(play) == L"Play / Pause\tSpace");
+    app_menu::ApplyKeyBindings(bar, key_bindings::Defaults(), localizer, {false, true});
+    CHECK(GetMenuStringW(bar, app_menu::IDM_PLAY, play, static_cast<int>(std::size(play)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(play) == L"Play / Pause\tSpace");
+    const HMENU picture = app_menu::CreateToolbarMenu(app_menu::ToolbarMenu::Picture, bar, localizer, key_bindings::Defaults());
+    REQUIRE(picture != nullptr);
+    CHECK(GetMenuStringW(picture, app_menu::IDM_PLAY, play, static_cast<int>(std::size(play)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(play).find(L"Overlay") == std::wstring_view::npos);
+    wchar_t adjustments[256]{};
+    CHECK(GetMenuStringW(picture, app_menu::IDM_VIDEO_ADJUSTMENTS, adjustments, static_cast<int>(std::size(adjustments)), MF_BYCOMMAND) > 0);
+    CHECK(std::wstring_view(adjustments).ends_with(L"(Overlay: Ctrl+Alt+C)"));
+    DestroyMenu(picture);
+    app_menu::ApplyKeyBindings(bar, key_bindings::Defaults(), localizer, {true, true});
     const auto rows = app_menu::CollectShortcuts(bar, localizer);
     const auto has = [&](std::wstring_view group, std::wstring_view action, std::wstring_view keys) {
         return std::any_of(rows.begin(), rows.end(), [&](const app_menu::ShortcutRow& row) {
