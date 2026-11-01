@@ -139,9 +139,18 @@ The UI moved, so the [table below](#where-things-moved-in-0300) says where each
   **Playback > Subtitles**: written ones first, then auto-generated, in your
   interface language and English. They start off, as on YouTube. Each is
   fetched once from YouTube and kept in the cache.
+- **The interface in Simplified Chinese.** A Windows display language of
+  Chinese (China), Chinese (Singapore) or any `zh-Hans` tag shows the menus,
+  toolbar, Picture panel and messages in Simplified Chinese
+  (`lang\zh-Hans.lang`, beside the player). Traditional Chinese (Taiwan, Hong
+  Kong, Macao) stays in English until a translation ships. `--lang en` or
+  `[Interface] Language=en` in `DLSSVideoPlayer.ini` keeps English. The
+  translation was drafted with an AI model and has not yet been reviewed by a
+  native speaker; corrections are welcome as issues or pull requests.
 - **A translatable interface.** Strings come from `lang\<language>.lang`
   beside the player when there is one, with English for every key it lacks.
-  `--lang-template` writes a file to start a translation from.
+  `--lang-template` writes a file to start a translation from, and
+  `tools\lang_keys.ps1` lists the keys a translation is missing.
 
 ### Corrections to 0.28.3
 
