@@ -7,7 +7,7 @@ text is in git history (this file at tag `dlss5-video-player-v0.25.0`), and the
 decisions that still shape the code are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## 0.30.0 - 2026-10-31
+## 0.30.0 - 2026-11-01
 
 One release where there would have been three. The menus, the settings and the
 toolbar are rearranged around what you do, so they are relearned once. RTX 50
@@ -196,7 +196,9 @@ The UI moved, so the [table below](#where-things-moved-in-0300) says where each
   captions. It is in no other preset or CI tier.
 - `tools/benchmark/m12.py` measures the two runtimes and both networks
   ([report](docs/measurements/runtime-310916-20261031/REPORT.md)).
-- The package is about 200 MB larger: it carries both DLSS-NR builds.
+- The complete package is 588 MB, 211 MB more than 0.28.3's: it carries both
+  DLSS-NR builds. Unpacked it is about 1.08 GB, so `verify_package.ps1` now
+  allows up to 2 GB.
 
 ## 0.28.3 - 2026-10-16
 
