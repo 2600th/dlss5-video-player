@@ -260,10 +260,12 @@ $tokens = @{
 
 $html = Expand-Token -Text (Read-TextFile -Path (Join-Path $srcRoot 'index.html')) -Values $tokens
 
-# The page marks what is in main but not yet released. v0.27.2 is the last
-# release without those features; a build that offers a newer one drops the
-# marks and the note, because they would then be false.
-$html = Resolve-UnreleasedMarks -Html $html -ReleaseVersion $release.Version -LastWithout '0.27.2'
+# The page can mark what is in main but not yet released: a feature marked New,
+# and a note in <!-- unreleased --> fences. Nothing is marked now, because
+# 0.30.0 carries every feature the page describes. A feature described ahead of
+# the next release is marked New; a build that offers a release newer than
+# 0.30.0 drops the marks and the note, because they would then be false.
+$html = Resolve-UnreleasedMarks -Html $html -ReleaseVersion $release.Version -LastWithout '0.30.0'
 
 # --- 4. write -----------------------------------------------------------------
 
