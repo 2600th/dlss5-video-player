@@ -1806,16 +1806,14 @@ struct PlayerAppTestAccess {
         app.m_picturePipelinePage = false;
     }
 
-    // Every string the panel shows, 40 % longer and bracketed (translation::Pseudo):
-    // each label still fits its control, the label column grows instead of the
-    // label clipping, and no two controls of a page overlap or leave the window.
-    static void picture_panel_layout_survives_longer_strings_test()
+    // Every string the panel shows in `strings`: each label still fits its
+    // control, the label column grows instead of the label clipping, and no two
+    // controls of a page overlap or leave the window.
+    static void CheckPicturePanelLayout(Localizer::Map strings, const wchar_t* language)
     {
         PlayerApp& app = fixture->app;
         const Localizer english = app.m_loc;
-        Localizer::Map pseudo;
-        for (const auto& [key, text] : Localizer::All()) pseudo[key] = translation::Pseudo(text, 0.4);
-        app.m_loc = Localizer(std::move(pseudo), L"x-pseudo");
+        app.m_loc = Localizer(std::move(strings), language);
         for (const bool pipeline : {false, true}) {
             app.m_picturePipelinePage = pipeline;
             app.ShowNeuralSettings();
@@ -1901,6 +1899,64 @@ struct PlayerAppTestAccess {
         }
         app.m_loc = english;
         app.m_picturePipelinePage = false;
+    }
+
+    // English 40 % longer and bracketed (translation::Pseudo).
+    static void picture_panel_layout_survives_longer_strings_test()
+    {
+        Localizer::Map pseudo;
+        for (const auto& [key, text] : Localizer::All()) pseudo[key] = translation::Pseudo(text, 0.4);
+        CheckPicturePanelLayout(std::move(pseudo), L"x-pseudo");
+    }
+
+    // The translation that ships (lang\zh-Hans.lang), as the player loads it.
+    static translation::Loaded LoadSimplifiedChinese()
+    {
+        translation::Loaded loaded = translation::Load(std::filesystem::path(DLSS_TEST_LANG_DIR), L"zh-Hans", Localizer::All());
+        REQUIRE(loaded.language == L"zh-Hans");
+        CHECK_EQ(Localizer::All().size(), loaded.strings.size());
+        return loaded;
+    }
+
+    // P2.63: the Picture panel in Simplified Chinese, and the narrowed toolbar
+    // pill's Frame Generation states, which come from the translation through
+    // the pill's own " · " cut: each fits at every dpi the pill is drawn at.
+    static void simplified_chinese_fits_the_picture_panel_and_pills_test()
+    {
+        translation::Loaded loaded = LoadSimplifiedChinese();
+        const Localizer chinese(loaded.strings, loaded.language);
+        CheckPicturePanelLayout(std::move(loaded.strings), L"zh-Hans");
+
+        PlayerApp& app = fixture->app;
+        HDC dc = CreateCompatibleDC(nullptr);
+        REQUIRE(dc != nullptr);
+        const wchar_t glyph = GlyphForIcon(UiIcon::Sparkles);
+        for (const UINT dpi : {96u, 120u, 144u, 192u}) {
+            app.UpdateFontsForDpi(dpi);
+            const HFONT font = app.m_fontSmall ? app.m_fontSmall : app.m_font;
+            const auto width = [&](HFONT face, std::wstring_view text) {
+                const HGDIOBJ previous = SelectObject(dc, face);
+                SIZE size{};
+                CHECK(GetTextExtentPoint32W(dc, text.data(), static_cast<int>(text.size()), &size));
+                SelectObject(dc, previous);
+                return size.cx;
+            };
+            const int pill = MulDiv(kFeaturePillNarrowWidthDip, static_cast<int>(dpi), 96);
+            const int chrome = width(app.m_iconFont, std::wstring_view(&glyph, 1)) +
+                               MulDiv(2 * kButtonHorizontalInsetDip + kButtonIconLabelGapDip, static_cast<int>(dpi), 96);
+            for (const wchar_t* key : {L"framegen.pill.generate", L"framegen.pill.cancel", L"framegen.pill.busy",
+                                       L"framegen.pill.unavailable", L"framegen.pill.get_copy", L"framegen.pill.copying",
+                                       L"toolbar.state.on", L"toolbar.state.off", L"toolbar.neural.no_cache",
+                                       L"toolbar.neural.preparing", L"toolbar.neural.queued", L"toolbar.neural.previewing"}) {
+                const std::wstring label = chinese.Get(key);
+                const std::wstring_view state = FeaturePillStateLabel(label);
+                if (width(font, state) + chrome > pill)
+                    std::wcerr << L"pill state does not fit at " << dpi << L" dpi: " << std::wstring(state) << L'\n';
+                CHECK(width(font, state) + chrome <= pill);
+            }
+        }
+        app.UpdateFontsForDpi(96);
+        DeleteDC(dc);
     }
 
     // The Picture panel's per-control state (UI proposal 4.2 and 3.5): a dot on
@@ -3424,6 +3480,7 @@ struct PlayerAppTestAccess {
         UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
         UI_CASE(picture_panel_zones_pages_revert_and_rows_test),
         UI_CASE(picture_panel_layout_survives_longer_strings_test),
+        UI_CASE(simplified_chinese_fits_the_picture_panel_and_pills_test),
         UI_CASE(picture_panel_marks_resets_and_reverts_each_control_test),
         UI_CASE(pipeline_chip_names_the_stages_and_tips_the_settings_test),
         UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),

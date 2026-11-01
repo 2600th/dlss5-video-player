@@ -263,13 +263,36 @@ inline std::vector<std::wstring> DisplayLanguages()
     return languages;
 }
 
-// "Hans" for zh-CN, "Latn" for en-US: the first script Windows lists for it.
+// The script a file is named by, from the list Windows gives for a locale
+// ("Hani;Hans;" for zh-CN, "Latn;" for en-US). Han (Hani) heads both Chinese
+// lists and tells Simplified from Traditional not at all, so Hans or Hant wins
+// wherever it is listed; otherwise the first. Chinese that Windows lists
+// neither for is named by its region, as Windows itself names it: Taiwan, Hong
+// Kong and Macao read Traditional, everywhere else Simplified.
+inline std::wstring ScriptFrom(std::wstring_view tag, std::wstring_view scripts)
+{
+    std::wstring first;
+    for (std::wstring_view rest = scripts; !rest.empty();) {
+        const size_t semicolon = rest.find(L';');
+        const std::wstring_view script = rest.substr(0, semicolon);
+        rest = semicolon == std::wstring_view::npos ? std::wstring_view{} : rest.substr(semicolon + 1);
+        if (script == L"Hans" || script == L"Hant") return std::wstring(script);
+        if (first.empty()) first = script;
+    }
+    const size_t dash = tag.find_first_of(L"-_");
+    if (_wcsnicmp(std::wstring(tag.substr(0, dash)).c_str(), L"zh", 3) != 0) return first;
+    const std::wstring_view region = dash == std::wstring_view::npos ? std::wstring_view{} : tag.substr(dash + 1, 2);
+    for (const wchar_t* traditional : {L"TW", L"HK", L"MO"})
+        if (region.size() == 2 && _wcsnicmp(std::wstring(region).c_str(), traditional, 2) == 0) return L"Hant";
+    return L"Hans";
+}
+
+// "Hans" for zh-CN, "Hant" for zh-TW, "Latn" for en-US (ScriptFrom).
 inline std::wstring ScriptOf(const std::wstring& tag)
 {
     wchar_t scripts[64]{};
-    if (!GetLocaleInfoEx(tag.c_str(), LOCALE_SSCRIPTS, scripts, static_cast<int>(std::size(scripts)))) return {};
-    std::wstring script(scripts);
-    return script.substr(0, script.find(L';'));
+    if (!GetLocaleInfoEx(tag.c_str(), LOCALE_SSCRIPTS, scripts, static_cast<int>(std::size(scripts)))) scripts[0] = L'\0';
+    return ScriptFrom(tag, scripts);
 }
 
 struct Loaded {
@@ -286,19 +309,17 @@ inline std::optional<std::string> ReadFile(const std::filesystem::path& path)
     return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
 }
 
-// The first file found for `requested` (a tag from the ini or the command line)
-// or, when that is empty, for the display languages in order. English is the
+// The first file found for `languages`, most preferred first. English is the
 // answer when the first language that matters is English, or when nothing is
-// found: an English user with Chinese second in the list gets English.
-inline Loaded Load(const std::filesystem::path& directory, std::wstring_view requested, const Map& english)
+// found: an English user with Chinese second in the list gets English, and a
+// Traditional Chinese reader (zh-TW, zh-HK, zh-Hant) is never handed the
+// Simplified file, which is named zh-Hans and not zh.
+inline Loaded LoadFirst(const std::filesystem::path& directory, const std::vector<std::wstring>& languages, const Map& english)
 {
     Loaded loaded;
     loaded.language = L"en";
-    std::vector<std::wstring> languages;
-    if (!requested.empty()) languages.emplace_back(requested);
-    else languages = DisplayLanguages();
     for (const std::wstring& language : languages) {
-        const std::wstring script = requested.empty() ? ScriptOf(language) : std::wstring();
+        const std::wstring script = ScriptOf(language);
         for (const std::wstring& candidate : FileCandidates(language, script)) {
             if (_wcsicmp(candidate.c_str(), L"en") == 0) return loaded;
             const std::filesystem::path file = directory / (candidate + std::wstring(kExtension));
@@ -314,6 +335,13 @@ inline Loaded Load(const std::filesystem::path& directory, std::wstring_view req
         }
     }
     return loaded;
+}
+
+// `requested` (a tag from the ini or the command line, `zh-CN` as good as
+// `zh-Hans`) or, when that is empty, the Windows display languages in order.
+inline Loaded Load(const std::filesystem::path& directory, std::wstring_view requested, const Map& english)
+{
+    return LoadFirst(directory, requested.empty() ? DisplayLanguages() : std::vector<std::wstring>{std::wstring(requested)}, english);
 }
 
 } // namespace translation

@@ -1189,7 +1189,9 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
 // generation prompt's "DLSS > Show converted file". Every string is read the way a
 // person reads it - from a top-level menu, each " > " stepping into the item whose
 // visible label comes next - and the walk has to find every step it is given.
-void menu_paths_named_in_text_exist_test()
+// `localizer` is the language read: a translation's paths have to spell its own
+// menu labels, and `menus` are the seven top-level names in that language.
+static void CheckMenuPathsNamedInText(const Localizer& localizer, const std::vector<std::wstring>& menus)
 {
     struct Node {
         std::wstring label;
@@ -1221,7 +1223,6 @@ void menu_paths_named_in_text_exist_test()
         }
         return nodes;
     };
-    const Localizer localizer;
     const HMENU bar = app_menu::CreateMenuBar(localizer, true);
     REQUIRE(bar != nullptr);
     std::vector<Node> top = read(read, bar);
@@ -1230,8 +1231,8 @@ void menu_paths_named_in_text_exist_test()
     // Generate frames becomes "Cancel frame generation" during a conversion, and
     // Export becomes "Cancel export" during an export.
     for (Node& menu : top) {
-        if (menu.label == L"Enhance") menu.children.push_back(Node{localizer.Get(L"menu.cancel_frame_generation"), {}});
-        if (menu.label == L"File") menu.children.push_back(Node{localizer.Get(L"menu.cancel_export_running"), {}});
+        if (menu.label == localizer.Get(L"menu.enhance")) menu.children.push_back(Node{localizer.Get(L"menu.cancel_frame_generation"), {}});
+        if (menu.label == localizer.Get(L"menu.file")) menu.children.push_back(Node{localizer.Get(L"menu.cancel_export_running"), {}});
     }
     std::wstring broken;
     // The seven menus of 0.30.0, in order; the six-menu bar's names are gone, and
@@ -1239,8 +1240,10 @@ void menu_paths_named_in_text_exist_test()
     // the walk below would never start from it.
     std::vector<std::wstring> names;
     for (const Node& menu : top) names.push_back(menu.label);
-    CHECK(names == (std::vector<std::wstring>{L"File", L"Playback", L"View", L"Compare", L"Enhance", L"Tools", L"Help"}));
-    for (const auto& [key, text] : Localizer::All()) {
+    CHECK(names == menus);
+    for (const auto& entry : Localizer::All()) {
+        const std::wstring& key = entry.first;
+        const std::wstring text = localizer.Get(key.c_str());
         for (const wchar_t* gone : {L"DLSS > ", L"Video > ", L"Advanced > "}) {
             const size_t at = text.find(gone);
             if (at != std::wstring::npos && (at == 0 || !std::iswalpha(text[at - 1])))
@@ -1248,14 +1251,18 @@ void menu_paths_named_in_text_exist_test()
         }
     }
     // A path may leave out an item's trailing qualifier: "RTX VSR Upscaling" names
-    // "RTX VSR Upscaling (recommended)".
+    // "RTX VSR Upscaling (recommended)", and a full-width one counts the same.
     const auto spelled = [](const std::wstring& label) {
         const size_t open = label.rfind(L" (");
-        return open != std::wstring::npos && label.back() == L')' ? label.substr(0, open) : label;
+        if (open != std::wstring::npos && label.back() == L')') return label.substr(0, open);
+        const size_t wide = label.rfind(L'（');
+        return wide != std::wstring::npos && label.back() == L'）' ? label.substr(0, wide) : label;
     };
 
     size_t walked = 0;
-    for (const auto& [key, text] : Localizer::All()) {
+    for (const auto& entry : Localizer::All()) {
+        const std::wstring& key = entry.first;
+        const std::wstring text = localizer.Get(key.c_str());
         for (const Node& menu : top) {
             const std::wstring start = menu.label + L" > ";
             for (size_t at = text.find(start); at != std::wstring::npos; at = text.find(start, at + 1)) {
@@ -1290,6 +1297,12 @@ void menu_paths_named_in_text_exist_test()
     CHECK(broken.empty());
     // The strings do name menu paths; a walk that found none would prove nothing.
     CHECK(walked >= 10);
+}
+
+void menu_paths_named_in_text_exist_test()
+{
+    CheckMenuPathsNamedInText(Localizer(),
+                              {L"File", L"Playback", L"View", L"Compare", L"Enhance", L"Tools", L"Help"});
 }
 
 // The contributor's format, line by line: what reads as a string, and what is
@@ -1426,12 +1439,111 @@ void shipped_translations_are_complete_test()
         const translation::Parsed parsed = translation::Parse(bytes);
         std::vector<std::wstring> problems = parsed.problems;
         for (auto& problem : translation::CheckAgainst(Localizer::All(), parsed.strings, true)) problems.push_back(std::move(problem));
+        // A lone '&' in a menu label is a mnemonic underline Windows draws; the
+        // menus have none, so a menu string keeps exactly English's ('&&' is a
+        // literal ampersand, as in "Cache && encoding…").
+        const auto mnemonics = [](const std::wstring& text) {
+            size_t count = 0;
+            for (size_t index = 0; index < text.size(); ++index) {
+                if (text[index] != L'&') continue;
+                if (index + 1 < text.size() && text[index + 1] == L'&') { ++index; continue; }
+                ++count;
+            }
+            return count;
+        };
+        for (const auto& [key, text] : parsed.strings) {
+            const auto source = Localizer::All().find(key);
+            if (key.starts_with(L"menu.") && source != Localizer::All().end() && mnemonics(source->second) != mnemonics(text))
+                problems.push_back(key + L": its '&' mnemonics differ from English's");
+        }
+        // Nothing the player would drop: every line it reads is a string it shows.
+        CHECK_EQ(parsed.strings.size(), translation::Usable(Localizer::All(), parsed.strings).size());
         for (const auto& problem : problems) std::wcerr << entry.path().filename().wstring() << L": " << problem << L'\n';
         CHECK(problems.empty());
     }
-    // No lang folder at all is no translation yet; anything else that stops the scan is a fault.
-    CHECK(!error || error == std::errc::no_such_file_or_directory);
+    // The tree ships Simplified Chinese; a scan that cannot read lang\ is a fault.
+    CHECK(!error);
+    CHECK(std::filesystem::exists(directory / L"zh-Hans.lang"));
+    CHECK(checked >= 1);
     std::wcerr << L"shipped translations checked: " << checked << L'\n';
+}
+
+// A translation has to carry over every printf conversion English has, so an
+// English sentence that only reads as one - "70 % of", "45-71 % less", "50% -
+// the" are "% o", "% le" and "% - the" to the check - is a line every
+// translation loses. Prose says "percent" there, or puts no space and letter
+// after the sign; none of the player's real conversions takes the space flag.
+void english_strings_carry_only_real_placeholders_test()
+{
+    std::wstring accidental;
+    for (const auto& [key, text] : Localizer::All())
+        for (const std::wstring& placeholder : translation::Placeholders(text))
+            if (placeholder.find(L' ') != std::wstring::npos) accidental += key + L": '" + placeholder + L"' | ";
+    if (!accidental.empty()) std::wcerr << L"English text that reads as a placeholder: " << accidental << L'\n';
+    CHECK(accidental.empty());
+}
+
+// P2.63: the Simplified Chinese file serves China, Singapore and any zh-Hans
+// tag, and never a Traditional Chinese reader (Taiwan, Hong Kong, Macao, any
+// zh-Hant tag), who reads English until a zh-Hant file ships. Windows lists
+// Han (Hani) ahead of Hans or Hant for every Chinese locale, so the script is
+// whichever of those two it lists, or the region's.
+void simplified_chinese_follows_the_display_language_test()
+{
+    using translation::ScriptFrom;
+    CHECK(ScriptFrom(L"zh-CN", L"Hani;Hans;") == L"Hans");
+    CHECK(ScriptFrom(L"zh-SG", L"Hani;Hans;") == L"Hans");
+    CHECK(ScriptFrom(L"zh-TW", L"Hani;Hant;") == L"Hant");
+    CHECK(ScriptFrom(L"zh-HK", L"Hani;Hant;") == L"Hant");
+    CHECK(ScriptFrom(L"en-US", L"Latn;") == L"Latn");
+    CHECK(ScriptFrom(L"ja-JP", L"Hani;Hira;Jpan;Kana;") == L"Hani");
+    // Nothing useful from Windows: Chinese by its region, anything else none.
+    CHECK(ScriptFrom(L"zh-CN", L"") == L"Hans");
+    CHECK(ScriptFrom(L"zh-MY", L"Hani;") == L"Hans");
+    CHECK(ScriptFrom(L"zh", L"") == L"Hans");
+    CHECK(ScriptFrom(L"zh-TW", L"") == L"Hant");
+    CHECK(ScriptFrom(L"zh_hk", L"") == L"Hant");
+    CHECK(ScriptFrom(L"zh-MO", L"Hani;") == L"Hant");
+    CHECK(ScriptFrom(L"de-DE", L"").empty());
+    CHECK(ScriptFrom(L"zha", L"").empty());
+    // What this Windows says.
+    CHECK(translation::ScriptOf(L"zh-CN") == L"Hans");
+    CHECK(translation::ScriptOf(L"zh-SG") == L"Hans");
+    CHECK(translation::ScriptOf(L"zh-TW") == L"Hant");
+    CHECK(translation::ScriptOf(L"zh-HK") == L"Hant");
+
+    const std::filesystem::path directory = std::filesystem::path(DLSS_TEST_SOURCE_DIR).parent_path() / translation::kDirectory;
+    const auto picks = [&](const std::vector<std::wstring>& languages) {
+        return translation::LoadFirst(directory, languages, Localizer::All()).language;
+    };
+    for (const wchar_t* simplified : {L"zh-CN", L"zh-SG", L"zh-Hans", L"zh-Hans-CN", L"zh-Hans-SG", L"zh-Hans-HK", L"zh"})
+        CHECK(picks({simplified}) == L"zh-Hans");
+    for (const wchar_t* traditional : {L"zh-TW", L"zh-HK", L"zh-MO", L"zh-Hant", L"zh-Hant-TW", L"zh-Hant-HK"}) {
+        CHECK(picks({traditional}) == L"en");
+        CHECK(picks({traditional, L"en-US"}) == L"en");
+    }
+    // The first language that has a file, or is English, decides.
+    CHECK(picks({L"en-US", L"zh-CN"}) == L"en");
+    CHECK(picks({L"fr-FR", L"zh-CN"}) == L"zh-Hans");
+    CHECK(picks({L"zh-TW", L"zh-CN"}) == L"zh-Hans");
+    // --lang and [Interface] Language take a regional tag as well as the file's.
+    const translation::Loaded requested = translation::Load(directory, L"zh-CN", Localizer::All());
+    CHECK(requested.language == L"zh-Hans");
+    CHECK(requested.file.filename() == L"zh-Hans.lang");
+    CHECK(requested.problems.empty());
+    CHECK_EQ(Localizer::All().size(), requested.strings.size());
+    CHECK(translation::Load(directory, L"zh-TW", Localizer::All()).language == L"en");
+    CHECK(translation::Load(directory, L"en", Localizer::All()).strings.empty());
+}
+
+// Every menu path the Chinese strings name ("播放 > 停止") is in the Chinese menus.
+void simplified_chinese_menu_paths_exist_test()
+{
+    const std::filesystem::path directory = std::filesystem::path(DLSS_TEST_SOURCE_DIR).parent_path() / translation::kDirectory;
+    translation::Loaded loaded = translation::Load(directory, L"zh-Hans", Localizer::All());
+    REQUIRE(loaded.language == L"zh-Hans");
+    CheckMenuPathsNamedInText(Localizer(std::move(loaded.strings), loaded.language),
+                              {L"文件", L"播放", L"视图", L"比较", L"增强", L"工具", L"帮助"});
 }
 
 // The defaults are the keys the player had before there was a table: every one
@@ -17516,6 +17628,9 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(translation_files_follow_the_display_language_test),
     TEST_CASE(translation_fixture_locale_reads_over_english_test),
     TEST_CASE(shipped_translations_are_complete_test),
+    TEST_CASE(english_strings_carry_only_real_placeholders_test),
+    TEST_CASE(simplified_chinese_follows_the_display_language_test),
+    TEST_CASE(simplified_chinese_menu_paths_exist_test),
     TEST_CASE(key_binding_defaults_are_the_players_keys_test),
     TEST_CASE(key_binding_file_rebinds_unbinds_and_reports_bad_lines_test),
     TEST_CASE(key_binding_template_reads_back_as_the_defaults_test),
