@@ -257,7 +257,8 @@ frames as 0.28.3's.
 - **Resume where you left off**, `PgDn`/`PgUp` for the next file in the folder,
   `Ctrl+Shift+C` to copy the comparison and `Ctrl+V` to open what you copied.
 - **Every key can be changed** in `input.conf`, and the interface can be
-  translated.
+  translated. **Simplified Chinese** ships first, drafted with an AI model and
+  not yet reviewed by a native speaker.
 
 Earlier releases are in [CHANGELOG.md](CHANGELOG.md); 0.28.3 kept Windows awake
 under a render, 0.28.2 made the neural
