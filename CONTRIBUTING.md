@@ -1,6 +1,6 @@
 # Contributing
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 Start with [Building and testing](docs/BUILDING.md) for the pinned dependencies
 and the canonical `build-upscaling` commands.
@@ -14,7 +14,13 @@ and the canonical `build-upscaling` commands.
 - Keep temporal-resource state transitions explicit and documented.
 - Avoid adding a per-frame `WaitGPU()` to the normal playback path.
 - When changing seek/audio lifetime code, test repeated forward/backward seeking.
-- When changing UI strings, add or update the built-in English defaults.
+- When changing UI strings, add or update the built-in English defaults in
+  `src/Localization.h`. A translation that ships in `lang\` must carry every
+  English key, so add the new key to `lang\zh-Hans.lang` too;
+  `tools\lang_keys.ps1 zh-Hans` lists the keys it lacks, and PolicyTests fails
+  until it has them.
+- When adding a command, give it a name in `src/KeyBindings.h`, so
+  `input.conf` can bind it and the menus and shortcut sheet show its key.
 
 ## Before opening a pull request
 
@@ -22,7 +28,9 @@ For code changes, build Release x64 and run the device-free suites. The quick
 tier pull requests run is `cmake --preset ci`, `cmake --build --preset ci
 --parallel` and `ctest --preset quick`; before a release, or when touching the
 decoder, audio or YouTube child-process code, run every device-free suite
-(`ctest --preset portable`, which adds the `slow` tier). FFmpeg and FFprobe must
+(`ctest --preset portable`, which adds the `slow` tier). After changing a
+YouTube helper pin or the resolver, also run `ctest --preset network`, which
+plays a built-in trailer from YouTube and needs the internet. FFmpeg and FFprobe must
 be staged so the real-media suite runs rather than reporting itself skipped. For rendering, timing or decoding changes
 also run the hardware smokes on an RTX card with an audio endpoint
 (`ctest -L "gpu|audio"`); for

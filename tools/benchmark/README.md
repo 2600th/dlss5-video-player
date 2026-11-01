@@ -1,6 +1,6 @@
 # Neural quality benchmark
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 Repeatable corpus, worker driver, metric analysis and blind A/B tooling for the
 isolated `NeuralWorker.exe`. Everything is written
@@ -47,7 +47,10 @@ directory holding `ffmpeg.exe` and `ffprobe.exe`.
 | `cutlab.py` | Scores the cut criterion itself against the manifest's labelled cuts and sweeps it; `--ladder` scores the four Scene cuts rungs the player offers; needs no GPU, no worker and no render |
 | `duplab.py` | Scores `scene_cut::IsDuplicateDecodedPair` - frame generation's hold-a-repeat test - on corpus clips re-timed onto twos through libx264, against the real pairs of the same files and a small object crossing a still frame; needs no GPU |
 | `knobs.py` | Renders one control at a time from the player's shipped state and reports bytes differing, mean and max absolute delta, and how much of the change lands on detected faces; the table in `docs/BENCHMARK.md` is its output |
-| `m12.py` | The DLSS-NR 310.9.16 / RenoDX 10.8.0 session (P3.14): swaps the candidate add-on, NR DLL, Streamline and DLSS SR into each profile's clone only, from `external/runtime-staging/<tag>/extracted/`; `render`, `pace`, `fade` (fade-to-black clips from the M1 corpus with the bundled FFmpeg), `fadecheck`, `looks` (the knobs method) and `timing`. `docs/measurements/runtime-310916-20261031` is its output |
+| `m1.py` | The M1 session (2026-10-16): renders through `run.py`'s driver at the Lossless rung (`--cache-quality lossless`) from the keys the player wrote before 0.30.0, per-pass strengths included; `render`, `drift`, `looks` and `timing`. `docs/measurements/passes-drift-20261016`, `nvidia-defaults-20261016` and `renodx-85-20261016` are its output |
+| `m12.py` | The DLSS-NR 310.9.16 / RenoDX 10.8.0 session (P3.14): swaps the candidate add-on, NR DLL, Streamline and DLSS SR into each profile's clone only, from `external/runtime-staging/<tag>/extracted/`. The files it does not swap come from the runtime snapshot, which for the session was 0.28.3's (RenoDX 6.5.3, DLSS-NR 310.8.SF-v2): its `653-308` profiles are that runtime as it is, so against a 0.30.0 snapshot they are not 0.28's. It rewrites `ConfigVersion=6` to 10 for the 10.8.0 profiles. Commands: `render`, `pace`, `fade` (fade-to-black clips from the M1 corpus with the bundled FFmpeg), `fadecheck`, `looks` (the knobs method) and `timing`. `fade` writes its clips and a new `manifest.json` into `--corpus`, which defaults to the M1 corpus, so give it its own (`--corpus build-upscaling/benchmark-corpus-m12-fade`). `docs/measurements/runtime-310916-20261031` is its output |
+| `nvenc_aq.py` | NVENC adaptive quantisation and lookahead against the cache encode's options, each arm at four CQ values and scored with libvmaf (P2.50); `docs/measurements/nvenc-aq-20261016` is its output |
+| `pipe_transport.py` | What moving one decoded frame through the decoder pipe costs, isolated from the rest of the worker (P2.57); `docs/measurements/nv12-transport-20261016` is its output |
 | `governor.py` | Renders the shipped settings at each `NRNormGovernor` value, repeated, and scores reproducibility, flicker+, sigma+ and whole-frame brightness pumping, with a mean-luma-over-time plot per clip; builds `real-lighting` (real footage under an exposure schedule) for it |
 | `guidefiles.py` | The `depth=file:` / `mv=file:` layout (PFM read/write, area average), `truth` for the near/far clips, `convert` for offline depth maps, `compare`, and `prove` - the byte-identical round trip |
 | `roundtrip.profile.json` | The four arms `guidefiles.py prove` renders |
@@ -190,7 +193,7 @@ the evidence that rung was chosen on.
 A profile is `{guides, overrides, passes}`:
 
 - `guides` is the `--guides` string: the canonical `mv=0|1,depth=0|1`, or the benchmark-only guide sources `mv=cpu`, `mv=file:<dir>` and `depth=file:<dir>` (see *Guide files* below). A disabled guide is still uploaded with neutral values (motion 0, depth 0.75) so the DLSS input contract is unchanged. `{clip}` and `{work}` are replaced per run.
-- `overrides` are exact-case `[RenoDX.DLSS5]` keys written into the profile's `ReShade.ini` after the managed keys: the player's four (`EnableHooks=2`, `NeuralUplift=1`, `NRFollowInputRes=0`, `NRResolutionScale=1`) and `ConfigVersion=6`, the schema stamp the add-on writes on first load - without it 6.5.3 migrates the section as schema v0 and resets `NRChainedHistory` to 1. `NRResolutionScale` is a multiplier, so `1` is native. Known RenoDX 6.5.3 keys: `NRIntensity`, `NRLocalTone`, `NRLocalStructure`, `NRSkinStructure`, `NRColorStrength`, `NRPreset` (0-3), `NRStyle` (0 default, 1 natural, 2 cinematic), `NRAutoMask`, `NRPasses` (1-4), `NRChainedHistory` and `NRNormGovernor` (0 off, 1 slew, 2 stable; the add-on's default is 2, the player pins 1), which the player writes; and `NRGlobalTone` (default 1) and `NRUICorrection` (default 0), which it does not. **The add-on's default governor makes a repeat of one configuration differ from itself** on this runtime, so any byte-for-byte comparison writes `NRNormGovernor` 0 or 1; see `docs/measurements/knobs-653-20260924/REPORT.md` and, for what each value costs, `governor.py` and `docs/measurements/governor-20260924/REPORT.md`.
+- `overrides` are exact-case `[RenoDX.DLSS5]` keys written into the profile's `ReShade.ini` after the managed keys: the player's four (`EnableHooks=2`, `NeuralUplift=1`, `NRFollowInputRes=0`, `NRResolutionScale=1`) and `ConfigVersion=6`, the schema stamp RenoDX 6.5.3 writes on first load - without it 6.5.3 migrates the section as schema v0 and resets `NRChainedHistory` to 1. `NRResolutionScale` is a multiplier, so `1` is native. **That is 0.28's contract, for RenoDX 6.5.3.** 0.30.0 bundles RenoDX 10.8.0 and stamps `ConfigVersion=10` and `ConfigRevision=1`; 10.8.0 migrates a section stamped 6 when it loads it. A profile cannot change the stamp: an override of a managed key is dropped. `m12.py` rewrites it after `run.py` has made the clone. Nor does `run.py` write 0.30's other keys (`NRDetailStability=1`, `NRSkinIndependent=0`, `NRRuntimePath`) unless a profile does. Known RenoDX 6.5.3 keys: `NRIntensity`, `NRLocalTone`, `NRLocalStructure`, `NRSkinStructure`, `NRColorStrength`, `NRPreset` (0-3), `NRStyle` (0 default, 1 natural, 2 cinematic), `NRAutoMask`, `NRPasses` (1-4), `NRChainedHistory`, `NRNormGovernor` (0 off, 1 slew, 2 stable; the add-on's default is 2, the player pins 1) and the per-pass strengths `NRPass2Intensity` to `NRPass4Color`, which the player writes; and `NRGlobalTone` (default 1) and `NRUICorrection` (default 0), which it does not. On DLSS-NR 310.9.16 `NRPreset` picks the network: 1 is network A, 0, 2 and 3 are network B. The 0.30.0 player writes 1 or 2, never 0. **The add-on's default governor makes a repeat of one configuration differ from itself** on this runtime, so any byte-for-byte comparison writes `NRNormGovernor` 0 or 1; see `docs/measurements/knobs-653-20260924/REPORT.md` and, for what each value costs, `governor.py` and `docs/measurements/governor-20260924/REPORT.md`.
 - `passes` 1 or 2.
 
 `run.ABLATION` changes one factor per profile: `baseline`, `mv-off`, `depth-off`,
@@ -220,8 +223,10 @@ RenoDX defaults, which leaves the automatic mask OFF while the player ships
 `NRAutoMask=1`. The shipped-state arms are `--profile-file
 docs/measurements/depth-ab-20260914/shipped-state.profile.json --profiles
 shipped-depth-proxy shipped-depth-constant`, which differ only in `guides` and write
-the eight keys the player wrote when they were measured; the player's current eleven
-are `SHIPPED` in `knobs.py`.
+the eight keys the player wrote when they were measured. `SHIPPED` in `knobs.py` is
+0.28's state without the per-pass strengths: eleven keys, `NRPreset=0`. 0.30.0 also
+writes `NRDetailStability`, `NRSkinIndependent` and `NRRuntimePath`, and `NRPreset` 1
+or 2 for the network.
 
 Every profile runs `--neural-preflight` once; the Feature 18 probe receipt (GPU,
 driver, ReShade/RenoDX/DLSS-NR versions, locked module hashes, feature18

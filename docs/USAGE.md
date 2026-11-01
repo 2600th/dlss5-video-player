@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 The interface is in English or Simplified Chinese; see [Language](#language).
 
@@ -38,7 +38,7 @@ render instead. To stop the requests, set this in `DLSSVideoPlayer.ini`:
 ThumbnailFetch=0
 ```
 
-Pictures already cached still show. **Clear Neural Cache** removes them with
+Pictures already cached still show. **Tools > Clear neural cache** removes them with
 the rest of the cache.
 
 Open a local photo, GIF or video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
@@ -126,7 +126,8 @@ The toolbar reads left to right as the same jobs:
 - **Fit** / **Fill** and **Full**.
 
 Frame generation and the debug views are not on the toolbar: they are
-**Enhance > Generate frames** and **View > Debug view** (keys `1` to `4`).
+**Enhance > Generate frames (higher frame rate)...** and **View > Debug view**
+(keys `1` to `4`).
 
 **Right-click the picture** (or press `Shift+F10` or the menu key) for what you
 can do to it: Play / Pause, DLSS 5, the compare modes, the look presets, the
@@ -221,17 +222,15 @@ and never starts a whole-video render. Saving a converted video refuses an
 entry that was rendered with settings you have since changed, and offers to
 convert that range again.
 
-The three feature buttons in the bottom bar each carry their own icon and
-colour, so the bar still tells them apart when it narrows. A narrower window
-first shrinks the three buttons, and one too narrow for its whole label keeps
-the state (`On`, `Generate`, `Panel too small`) and drops the feature name,
-which the icon and the tooltip still give; only below 850 dip do they go to
+The DLSS 5 and Upscaler pills each carry their own icon, so the bar still
+tells them apart when it narrows. A narrower window first drops the optional
+buttons, then shrinks the DLSS 5 pill, and a pill too narrow for its whole
+label keeps the state (`On · Standard`, `RTX VSR`) and drops the name, which
+the icon and the tooltip still give; only below 706 dip do the buttons go to
 icons with a short label underneath. A button is grey when the feature is unavailable, plain when it
 is off, highlighted when it is on, and teal while it is working - the same teal
 the timeline uses for rendered coverage, because both mean "this is being made
-right now". Hovering one says what it does and, when it is unavailable, why: a
-source that already fills the panel has nothing to upscale, and the button says
-so instead of only greying out.
+right now". Hovering one says what it does.
 
 Three chips at the right end of the status line keep the numbers you watch
 during playback in fixed places: **Render** (how much of the session's range is
@@ -292,8 +291,8 @@ settings, the mask and HDR at SDR.
   difference between DLSS 5 (at the current Mix) and the original, computed in
   linear light and amplified 4x, as brightness. `Shift+]` and `Shift+[` step the
   amplification through 1x, 2x, 4x, 8x, 16x and 32x, and **Compare >
-  Difference as brightness only** switches between one grey value and a
-  difference per color channel. The image adjustments do not apply to it, and
+  Difference view > Difference as brightness only** switches between one grey value and a
+  difference per color channel. The viewing adjustments do not apply to it, and
   its tag names the amplification and the channels, e.g. `DIFFERENCE x4 · LUMA`.
 - **Side by side** shows the original and DLSS 5 as two panes of the same
   frame - one pair, so always one timestamp - each fitted whole into its half.
@@ -308,7 +307,7 @@ settings, the mask and HDR at SDR.
   frame the player already decodes - it needs no render and no cache, and it
   never reaches the cache or a saved render's identity. It is also the
   playback upscaler (see [RTX VSR upscaling](#rtx-vsr-upscaling)) and the
-  default upscaler of **Export with DLSS stages**. Where the
+  default upscaler of **File > Export**. Where the
   window shows the picture larger than the video, RTX VSR makes it at the size
   it is shown; otherwise it runs at the video's own size, where it cleans up
   compression. Its tag names the quality, e.g. `RTX VSR · HIGH`.
@@ -425,12 +424,13 @@ the neural model's style, local tone, local structure, color strength, intensity
 skin structure and automatic mask - in that order, the order of how far each one
 measurably moves the picture - the number of neural passes and whether temporal
 history carries between them, the motion-vector and depth guide switches, how
-readily a scene cut resets the render's temporal history, and how much temporal
-stability the render gets. The look comes first; **Render pipeline ›** turns
-the zone to the rest - the passes, the guides, the scene cuts, temporal
-stability, and what the model is given (**Deband** and **Smoothed exposure**,
-the `[Encoding] SourceDeband` and `SuppliedExposure` keys, here because they
-change the render).
+readily a scene cut resets the render's temporal history, how much temporal
+stability the render gets, and which neural network renders. The look comes
+first; **Render pipeline ›** turns the zone to the rest - the passes, the
+guides, the scene cuts, temporal stability, what the model is given
+(**Deband** and **Smoothed exposure**, the `[Encoding] SourceDeband` and
+`SuppliedExposure` keys, here because they change the render) and, under
+**Runtime**, the **Network**.
 
 These change the neural render itself, which is what conversions and exports
 write. A line above the buttons says what **Apply** will do to the picture on
@@ -453,7 +453,7 @@ tooltip gives the ranges, and
 [the measurement](measurements/knobs-upper-20261003/REPORT.md) the clips.
 
 The right zone, **Viewing - instant - this screen only**, is Mix and the colour
-sliders (brightness, contrast, saturation, white balance and tint): they change
+sliders (brightness, contrast, saturation, gamma, temperature and tint): they change
 only what this screen shows and are not written by conversions or exports.
 **View > Viewing adjustments** (`Ctrl+E`) opens the same panel with Mix focused.
 Writing a file is a separate action under **File > Export**. The guide
@@ -506,12 +506,24 @@ adds on every one of them (by 0.02 to 0.42 of an 8-bit code) with PSNR against
 the source unchanged within 0.2 dB; on a synthetic noise texture it costs some
 fine detail, which is why it is a choice. Each rung renders its own cache entry.
 
-The render preset is deliberately not in that dialog. Measured against the
-pinned RenoDX 6.5.3 it changes nothing - the output is byte-identical - while a
-change still costs a full re-render. It remains in `DLSSVideoPlayer.ini` as
-`[NeuralSettings] Preset` so runtime-comparison work can still drive it, and it
-remains part of the render identity so a runtime that does honour it cannot be
-served a stale cache entry. Skin structure only acts
+**Network** picks which neural network renders. RTX 50 cards render with
+DLSS-NR 310.9.16, which has two. **A · the 0.28 look (recommended)** is the
+default and renders the same frames as 0.28, byte for byte. **B · lighter, 36%
+less model time** is NVIDIA's lightweight network: a milder picture, nearer the
+source. Its model time on an RTX 5090 was 2.4 ms a 1080p frame against A's
+3.8 ms, and 6.0 against 9.6 ms at 4K
+([the measurement](measurements/runtime-310916-20261031/REPORT.md)). The third
+choice, **310.8.SF-v2 (previous runtime)**, renders with the runtime 0.28
+shipped, which has only A, so a runtime change can be told from anything else.
+Every other GPU renders with 310.8.SF-v2, and the row shows **A on 310.8.SF-v2
+(this GPU)**, greyed out. Both DLSS-NR builds are modified, unsigned community
+runtimes. The row is saved as `[NeuralSettings] Network` (`a` or `b`) and
+`PreviousRuntime`, and the runtime and network are part of the render
+identity. The add-on's hidden render preset, which earlier versions saved as
+`[NeuralSettings] Preset`, is now this row; the player removes that key the
+next time it saves.
+
+Skin structure only acts
 with Automatic mask on: its slider reads **As structure** (the default) at the left
 end, where skin follows Local structure, and 0.00 to 0.99 after it, which gives skin
 its own value; it is greyed out with "Mask off" while Automatic mask is off and keeps
@@ -578,9 +590,9 @@ The player reads the file when it starts and again whenever it becomes the
 active window, so saving in Notepad and clicking back is enough. One key acts
 only in one place: `Ctrl+Z` (`picture-revert`) does nothing unless the Picture
 panel is open. A line it
-cannot use - an unknown command, a key it does not know, a key bound twice -
-is written to the log with its line number and skipped; it never stops the
-player starting. The menus' key columns, the toolbar's tooltips and the
+cannot use - an unknown command, a key it does not know - is written to the
+log with its line number and skipped; it never stops the player starting. A
+key bound twice is logged too, and the last line wins. The menus' key columns, the toolbar's tooltips and the
 shortcut sheet all show the keys the file gives.
 
 ### Language
@@ -640,8 +652,8 @@ does not.
 The player also answers Windows' own media controls: the player card in the
 volume flyout and on the lock screen shows the video's title and position and
 its play, pause, stop and seek work, as do a headset's buttons. Hovering the
-taskbar button shows three buttons under the thumbnail - play/pause, Neural
-Rendering on/off and side-by-side compare (**Side by side**, and back to the
+taskbar button shows three buttons under the thumbnail - play/pause, DLSS 5
+on/off and side-by-side compare (**Side by side**, and back to the
 neural picture) - which do exactly what the matching menu commands do.
 
 ### RTX VSR upscaling
@@ -664,8 +676,8 @@ VMAF NEG (which does not reward sharpening) and PSNR too, at 0.45 ms for a 540p 
 a 1080p frame takes about 1.5 ms and a 1440p one 2.7 ms on that GPU
 ([docs/measurements/vsr-quality-20261002](measurements/vsr-quality-20261002/REPORT.md)).
 Its error does change more from one frame to the next than a plain scaler's, so
-fine moving detail can shimmer slightly; turn it off from the same menu if you
-see that.
+fine moving detail can shimmer slightly; pick **No upscaler (window scaling)**
+in the same menu if you see that.
 
 It stands aside wherever it does not apply: while **DLSS Super Resolution** is on, in
 the comparison views (which show it as a member of their own), at a Mix other
@@ -716,7 +728,7 @@ frame-to-frame change is no larger than the source's. **Temporal** accumulates
 earlier frames: its picture changes less from frame to frame than the source,
 which calms grain and also trails motion. The greyed
 line at the top of the submenu and each item's right-hand column give the measured
-range. The same choice is the **History** row of **Export with DLSS stages**.
+range. The same choice is the **History** row of **File > Export**.
 
 ### YouTube source quality
 
@@ -783,15 +795,16 @@ at their original paths.
 closes current playback and removes owned cache data, keeping recent titles and
 original-source references. Work belonging to another player that is still
 running - its live session and its unfinished renders - is kept, and so is any
-entry that player has open. Clearing is blocked during acquisition, rendering or
-export.
+entry that player has open. Clearing is blocked during acquisition, rendering,
+export or frame generation.
 
 ## Saved settings and reproducibility
 
 `DLSSVideoPlayer.ini` beside the executable stores volume, mute, fit/fill,
-original/neural view, RTX VSR Upscaling (`[Playback] RtxVsr`), DLSS Super Resolution (`[Playback] SuperResolution`) and its output size, YouTube quality,
-image adjustments, comparison mode and Mix, neural settings, processing scale and
-guide switches. It
+original/neural view, the playback upscaler (`[Playback] RtxVsr` and
+`[Playback] SuperResolution`), DLSS Super Resolution's output size, YouTube
+quality, viewing adjustments, comparison mode and Mix, neural settings with the
+network, processing scale, guide switches and resume positions. It
 also keeps `[NeuralPace]`: one measured steady-state render pace per source
 size (`Samples=WxH:ms;...`) for the detected GPU, which the keep-up forecast
 predicts from - exactly at a measured size, along this GPU's own fitted line
@@ -828,7 +841,7 @@ dither, both on by default, do:
   change between rungs. The key carries `high-main10-cq14-v1` or
   `lossless-ffv1-10bit-v1` for the other two, and a
   10-bit rung ignores `GpuColorConversion` and `CaptureDither`, which have
-  nothing to act on there. Cached playback and **Save converted video** take
+  nothing to act on there. Cached playback and **Save rendered video** take
   every rung: MKV copies the stream, MP4 carries High's HEVC as it is and turns
   Lossless's FFV1 into lossless 10-bit H.264. The numbers are in
   `docs/measurements/cache-quality-20260923/`.
@@ -913,14 +926,14 @@ dither, both on by default, do:
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,
-runtime binaries, the render revision (which a release moves only when it
+runtime binaries, which NR runtime and network rendered, the render revision (which a release moves only when it
 changes what a render writes), GPU path and source dimensions. Changes
 to neural settings trigger a new render. A settings change detected between
 render start and completion prevents publication of that result.
 
 The snapshot includes add-on enable state and the neural add-on's settings;
-overlay appearance is excluded. Playback adjustments and runtime upscaling do
-not affect the offline render. This adds no unverified sliders or presets.
+overlay appearance is excluded. Viewing adjustments and the playback upscaler
+do not affect the offline render. This adds no unverified sliders or presets.
 
 ## Choosing the audio track
 
@@ -1072,7 +1085,10 @@ video** then writes a copy wherever you want one.
 
 **File > Export** (`Ctrl+S`, or the toolbar's **Export**) writes one file
 with any combination of Super Resolution, neural rendering and frame
-generation. Tick the stages you want, pick an output height and a frame rate,
+generation. It opens on what you are watching: Neural rendering is ticked
+when DLSS 5 is on screen, and Super Resolution when the playback upscaler grows
+the picture, at the rung and on the upscaler playing. Frame generation starts
+unticked. Tick the stages you want, pick an output height and a frame rate,
 and the summary line reads back the geometry and frame rate the file will
 actually have before anything starts.
 
@@ -1125,13 +1141,13 @@ with any other extension gets the selected type's extension added. MKV and MP4
 keep the video exactly as the passes encoded it - only the container changes -
 and an MP4 of HEVC is tagged `hvc1`, which Apple's players need. A source with
 non-square pixels (a DVD rip at 720x480, HDV at 1440x1080) keeps its display
-shape: the file states the source's display aspect, as **Save converted
+shape: the file states the source's display aspect, as **Save rendered
 video**'s does.
 
 Whatever the stages, the file carries the source's audio, subtitles and
 chapters (only the part a range covers, on the range's own clock: a subtitle
 already showing when the range starts is kept for the rest of its time, and
-"Save converted video" cuts a range the same way). MKV copies them as they are, turning
+"Save rendered video" cuts a range the same way). MKV copies them as they are, turning
 MP4 timed text into SubRip. MP4 copies the audio it can hold and encodes the
 rest to AAC, turns text subtitles into MP4 timed text, and leaves out picture
 subtitles and font attachments, which it has no place for. An export whose
@@ -1147,7 +1163,7 @@ toolbar's Export button reads **Cancel**.
 
 This does not touch the neural cache. A cache entry is a playback carrier keyed
 on the source and its settings; this is a one-off at a size and a rate you
-picked. **Save converted video** is still how you keep the render you are
+picked. **Save rendered video** is still how you keep the render you are
 already watching.
 
 ### From the command line
@@ -1185,6 +1201,10 @@ What to render, as the dialog's ticks and settings choose it:
   and applies over `--preset`; one not given keeps the preset's or the saved
   value. For example, three stacked passes of the strong look:
   `dlss5-convert clip.mp4 --preset strong --passes 3`.
+- `--network` is **Network**: `a` or `b`. It needs `nr`. Without it, the saved
+  choice. A GPU that renders with 310.8.SF-v2, which has only A, renders A for
+  `b`, and the plan's `runtime:` line says which ran. No flag picks the
+  previous runtime; the saved choice applies.
 - `--processing-scale` is `100`, `75` or `50`, the rungs of **Enhance >
   Processing scale**, for `nr` without `sr`. Without it, the saved rung.
 - `--encode` is the **Cache & encoding** quality ladder: `standard` (8-bit
@@ -1293,7 +1313,7 @@ doing, and refuses after five seconds rather than interleaving with it.
 After a live session, the item is offered only once a single render covered the
 whole video; while coverage is still a set of regions filled by separate jobs
 it stays greyed out, because the file that would be saved is one region, not
-the film. **Convert whole video** produces an entry the item accepts.
+the film. **Enhance > Render whole video** produces an entry the item accepts.
 
 PNG is the default for photos, GIF for animation, and MKV for video. PNG and
 JPEG export the first processed frame. GIF exports animation with a generated
@@ -1313,7 +1333,7 @@ burned into the image, and the subtitles the player shows (see "Subtitles")
 never reach an export.
 
 The output uses the cached video, even when the original view is selected.
-Playback image adjustments and runtime upscaling are not baked in. At the
+Viewing adjustments and the playback upscaler are not baked in. At the
 default Standard quality the cache is 8-bit, and no container can recover
 precision it lost.
 

@@ -1,6 +1,6 @@
 # Third-party components
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 The project source is MIT-licensed, but the release interoperates with and may
 redistribute components under separate terms. No upstream endorsement is
@@ -136,9 +136,9 @@ The selected `renodx-dlss5.addon64` 10.8.0 binary comes from the
 `RankFTW/rhi-repo` release mirror
 (https://github.com/RankFTW/rhi-repo/releases/tag/renodx-dlss5-10.8.0). It is
 unsigned and enabled by default on every detected NVIDIA RTX GPU. It loads
-the NR DLL that `NRRuntimePath` names; when that file will not load it looks
-beside itself and then in `%LOCALAPPDATA%\DLSS5-NR\runtime\`, which is why
-the player checks the file the add-on reports loading. No public
+the NR DLL that `NRRuntimePath` names; when that file will not load it falls
+back to another, `%LOCALAPPDATA%\DLSS5-NR\runtime\` first, which is why the
+player checks the file the add-on reports loading. No public
 source for this add-on was found: the RenoDX framework repository,
 https://github.com/clshortfuse/renodx, holds no DLSS5 add-on in `src/addons`
 (devkit, dlssfix and fpslimiter only, checked 2026-10-16).

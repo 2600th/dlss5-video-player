@@ -1,6 +1,6 @@
 # DLSS 5 Video Player — technical overview
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 The player renders a whole video while you watch it, keeps every rendered
 region seekable, reuses the validated result, and compares it with the original
@@ -26,15 +26,16 @@ Game trailers**. Rendering can also run behind playback: a session collects a
 four-second lead and then plays the rendered frames while the render continues
 ahead of the playhead. Press `D` to turn a session on, or to compare original
 and neural views once a render is cached. Recent history reuses valid downloads
-and renders. **DLSS > Convert & export > Save converted video** writes PNG/JPEG
+and renders. **File > Save rendered video…** writes PNG/JPEG
 photos, animated GIFs, or MP4/MKV videos. MKV preserves compatible source
 streams. The cache prefers
 `cache/v1` beside the EXE and falls back to LocalAppData when unwritable.
 Fullscreen hides controls until the mouse moves; see [usage](docs/USAGE.md).
 
-Fresh-install defaults are Neural Rendering on, RTX VSR upscaling on wherever the
-window shows a video larger than it is, playback DLSS Upscaling off,
-upscaling output on Auto (the largest rung the monitor can show), and YouTube Auto taking the tallest rung up to
+Fresh-install defaults are DLSS 5 neural rendering on, RTX VSR as the playback
+upscaler wherever the window shows a video larger than it is (the other choices
+are DLSS Super Resolution and no upscaler), DLSS SR output size on Auto (the
+largest rung the monitor can show), and YouTube Auto taking the tallest rung up to
 1440p at the highest bitrate, or up to 2160p when a source offers nothing lower.
 Player preferences persist after that. Manual YouTube choices are 1080p,
 1440p and 2160p; each selects the highest advertised video bitrate at that
@@ -48,6 +49,9 @@ resolution across codecs. Source selection and playback upscaling are separate.
 | Public core package | Player and official SDK DLSS runtime; local Media Foundation playback and native NGX, without the experimental neural runtime or media helpers |
 
 The experimental proxy belongs in `neural-runtime/`, beside `NeuralWorker.exe`.
+That folder holds two DLSS-NR builds: `nvngx_dlssnr.dll` (310.9.16), which RTX 50
+cards render with by default, and `310.8.SF-v2/nvngx_dlssnr.dll`, which every other RTX card
+renders with.
 The main player must not have a root-level `dxgi.dll`. Do not mix components
 from different packages. See [runtime setup](docs/DLSS5_SETUP.md).
 
@@ -65,19 +69,23 @@ from different packages. See [runtime setup](docs/DLSS5_SETUP.md).
 3. **Validate and cache.** Every source frame must have a captured native
    evaluation. Runtime receipts, dimensions, timing, final-frame decode and
    content hashes must pass before atomic publication. Neural settings
-   snapshots and their hashes are part of the render identity.
+   snapshots, which name the NR runtime and network, and their hashes are part
+   of the render identity.
 4. **Play and compare.** Audio drives timestamp-matched original/neural frame
-   pairs. Optional runtime Super Resolution runs independently in the player.
-   Image adjustments are applied during presentation.
+   pairs. The optional playback upscaler, RTX VSR or DLSS Super Resolution,
+   runs independently in the player. Viewing adjustments are applied during
+   presentation.
 5. **Export.** The validated neural video is stream-copied with available source
    audio, compatible subtitles, attachments, metadata and chapters. Export never
-   overwrites an existing destination. **Export with DLSS stages** is the other
+   overwrites an existing destination. **File > Export…** is the other
    route: it writes one file with any combination of Super Resolution, neural
    rendering and frame generation, in NVIDIA's own order, without touching the
    cache. `dlss5-convert.exe` runs that export from a console, for one file or
-   a folder, with every stage and Neural setting as an option.
+   a folder. Every stage, the look preset, passes, style, intensity, local
+   tone and structure, colour strength, network, processing scale and encode
+   quality are options; the other Picture settings come from the saved ones.
 
-Neural cache output preserves source resolution. Playback upscaling and image
+Neural cache output preserves source resolution. Playback upscaling and viewing
 adjustments do not change the cache or export. The Standard cache is 8-bit
 (High and Lossless are 10-bit), and HDR sources are tone mapped to SDR before
 the model. A render queue in the player and resuming a render after a
@@ -93,11 +101,12 @@ do not supply the separately obtained experimental neural runtime.
 
 Player diagnostics are in `DLSSVideoPlayer.log` beside the executable. Neural
 diagnostics are in `neural-runtime/NeuralWorker.log` and
-`neural-runtime/ReShade.log`. **Advanced > Restart in DLSS SR safe mode** skips
+`neural-runtime/ReShade.log`. **Tools > Restart in DLSS SR safe mode** skips
 the neural helper for that launch. See [troubleshooting](docs/TROUBLESHOOTING.md).
 
-Nineteen portable CTest registrations, seventeen GPU smokes (two more in a build
-with the RTX Video SDK) and an audio-clock smoke are listed in
+Twenty portable CTest registrations, an online one (`PolicyTestsNetwork`,
+`ctest --preset network`), seventeen GPU smokes (two more in a build with the
+RTX Video SDK) and an audio-clock smoke are listed in
 [Building and testing](docs/BUILDING.md). Real-media
 GPU checks and their limits are recorded per machine and date in the
 repository's [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).

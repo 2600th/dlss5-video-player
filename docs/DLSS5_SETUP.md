@@ -1,6 +1,6 @@
 # Experimental DLSS 5 neural-rendering mode
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 This is a community experiment built around a separately supplied RenoDX /
 ReShade add-on and modified neural runtime. It is not NVIDIA's official
@@ -29,8 +29,8 @@ the GPU decides which one a render loads:
 
 | File in `neural-runtime/` | Runtime | Rendered on |
 |---|---|---|
-| `nvngx_dlssnr.dll` | DLSS-NR 310.9.16, with two networks, A and B | RTX 50 |
-| `310.8.SF-v2/nvngx_dlssnr.dll` | ShortFuse's universal 310.8 build (`310.8.SF-v2`), network A only | RTX 20, 30 and 40; on RTX 50 when **Previous runtime** is chosen |
+| `nvngx_dlssnr.dll` | DLSS-NR 310.9.16, with two networks, A and B | GeForce RTX 50 |
+| `310.8.SF-v2/nvngx_dlssnr.dll` | ShortFuse's universal 310.8 build (`310.8.SF-v2`), network A only | RTX 20, 30 and 40, and RTX-branded workstation parts; on RTX 50 when **310.8.SF-v2 (previous runtime)** is chosen |
 
 Both are modified, unsigned files (below). The 310.9.16 file is NVIDIA's
 310.9.16 with community-built Turing, Ampere and Ada kernels added in an
@@ -44,8 +44,8 @@ stays nearer the source), and
 the previous runtime. `dlss5-convert --network a|b` does the same for a
 conversion. Measured in [`docs/measurements/runtime-310916-20261031`](measurements/runtime-310916-20261031/).
 None of this is official NVIDIA support: NVIDIA ships DLSS 5 for RTX 50 and has announced
-RTX 40 for later. The product name only selects the cache label and the pace
-prior; whether feature 18 actually runs is decided by the runtime's own
+RTX 40 for later. The product name selects the NR runtime, the cache label
+and the pace prior; whether feature 18 actually runs is decided by the runtime's own
 capability check and the strict evidence chain, which refuse the render rather
 than publish an unverified one. Turing and Ampere lack native FP8 tensor
 math, so the same network runs several times slower there; the offline cache
@@ -92,10 +92,12 @@ picture ahead of DLSS Super Resolution, and `NRPreUpscale=0` when a render at
 100% finds a 1 left behind. A render at 100% on a file that holds 0, or no such
 key, writes nothing.
 
-Each neural render also writes the model settings from **DLSS > Neural
-settings** into the same section: `NRIntensity`, `NRLocalTone`,
+Each neural render also writes the model settings from **Enhance >
+Picture…** into the same section: `NRIntensity`, `NRLocalTone`,
 `NRLocalStructure`, `NRSkinStructure`, `NRColorStrength`, `NRPreset`,
-`NRStyle`, `NRAutoMask`, `NRPasses` and `NRChainedHistory`, plus
+`NRStyle`, `NRAutoMask`, `NRPasses` and `NRChainedHistory`, and
+`NRPass2Intensity` to `NRPass4Intensity` and `NRPass2Color` to
+`NRPass4Color`, which give stacked passes the same strengths, plus
 `NRNormGovernor`, which is pinned at `1`, `NRDetailStability=1` and
 `NRSkinIndependent=0`, which hold 10.8.0's two new behaviours off, and
 `NRRuntimePath`, the NR DLL for this render (`nvngx_dlssnr.dll` or
@@ -123,9 +125,9 @@ See [third-party notices](../THIRD_PARTY.md) and the packaged
 
 At the default 100% processing scale the offline neural helper uses a native
 1:1 DLAA carrier, with upscaling off; the 75% and 50% rungs run it as Super
-Resolution back to the source size, as described above. DLSS Upscaling
-starts off on a fresh install; in a build that has it, **DLSS > RTX VSR
-Upscaling** starts on. Its output target
+Resolution back to the source size, as described above. **Enhance > DLSS
+Super Resolution** starts off on a fresh install; in a build that has it,
+**Enhance > RTX VSR (recommended)** starts on. The DLSS SR output target
 is Auto: the largest of the 1080p, 1440p and 2160p rungs that the monitor's
 current mode can scan out, never one above it. Any rung can be pinned from
 **Enhance > DLSS SR output size**. The backend selects a supported NGX
@@ -174,7 +176,9 @@ the driver the runtime is verified against - in the message. The floor the wider
 community publishes for the same runtime is 616.56. An older driver answers
 `CreateFeature` with `0xbad00002`
 (`NVSDK_NGX_Result_FAIL_PlatformError`); an architecture the runtime itself
-refuses answers `0xbad00001` instead.
+refuses answers `0xbad00001` instead. The 610.47 render was made with 310.8 on
+an RTX 4080 SUPER; both NR DLLs in this release declare 615.00 as their
+minimum driver.
 
 The architecture follows lessons from [Zonnery's offline
 converter](https://github.com/Zonnery/dlss5-nr-player) and the verification
@@ -185,9 +189,9 @@ or redistribute runtime binaries from those repositories.
 The cache prefers `cache\v1` beside `DLSSVideoPlayer.exe` and falls back to
 `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1` when that folder cannot be
 written, or is nested so deep that the cache's own paths would pass Windows'
-260-character limit. **Advanced > Clear Neural
-Cache** reports its current size and requires confirmation. Clearing is blocked
-while acquisition, a neural job or export is active. Confirmed clearing closes
+260-character limit. **Tools > Clear neural
+cache** reports its current size and requires confirmation. Clearing is blocked
+while acquisition, a neural job, an export or frame generation is active. Confirmed clearing closes
 playback first. Windows package virtualization may redirect the physical cache
 under the launching app's LocalCache. Retention and settings-aware cache
 identity are described in the [usage guide](USAGE.md).
@@ -207,8 +211,8 @@ runtime SR evaluations appear in the player's separate `DLSSVideoPlayer.log`.
 
 ## Safe mode
 
-If the experimental path is unstable, choose **Advanced > Restart in DLSS SR
+If the experimental path is unstable, choose **Tools > Restart in DLSS SR
 safe mode**. Safe mode skips the neural helper for that launch and keeps the
 official NGX path available. A later normal launch on an RTX GPU enables
-neural pre-rendering again. DLSS Upscaling starts off and RTX VSR
-Upscaling starts on on a fresh install; both then follow the saved preference.
+neural pre-rendering again. DLSS Super Resolution starts off and RTX VSR
+starts on on a fresh install; both then follow the saved preference.

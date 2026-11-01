@@ -1,6 +1,6 @@
 # Security
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 The player launches its package-local `ffmpeg.exe`, `ffprobe.exe`,
 `yt-dlp.exe`, and `deno.exe` helpers without a command shell. Playback falls
@@ -23,8 +23,8 @@ Offline neural jobs run in the package-local
 `neural-runtime/NeuralWorker.exe`. The experimental proxy/add-on belongs in
 that subdirectory; the player rejects the old root-level proxy layout.
 
-The experimental package intentionally contains a modified neural DLL whose
-NVIDIA signature was removed, plus unsigned ReShade/RenoDX files. Those signature
+The experimental package intentionally contains two modified neural DLLs whose
+NVIDIA signatures were removed, plus unsigned ReShade/RenoDX files. Those signature
 states are disclosed separately from malware-scan results. The exact release
 inputs are pinned by size and SHA-256 and the package verifier rejects drift or
 unexpected files.
@@ -33,10 +33,11 @@ Both neural DLLs' embedded NVIDIA signatures are removed by the community
 modifications that extend them to every RTX generation (310.9.16 with added
 Turing, Ampere and Ada kernels, and the universal 310.8.SF-v2 build, both
 locked in `packaging/runtime-lock.json`). Do not describe either as
-legitimately signed. RenoDX 10.8.0 falls back to an NR DLL beside itself and
-then to `%LOCALAPPDATA%\DLSS5-NR\runtime\nvngx_dlssnr.dll` when the one it is
-told to load fails; the player refuses a render whose preflight names any
-file other than the selected, locked one. A hash
+legitimately signed. RenoDX 10.8.0 falls back to another NR DLL, such as
+`%LOCALAPPDATA%\DLSS5-NR\runtime\nvngx_dlssnr.dll`, when the one it is told
+to load fails. The player refuses a render or an export whose log names any
+file other than the selected one under `neural-runtime\`, names no file, or
+names one whose declared version is not the lock's. A hash
 match proves reproducibility only; scan and isolate untrusted binaries before
 execution.
 
