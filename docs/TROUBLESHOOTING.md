@@ -1,6 +1,6 @@
 # Troubleshooting
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
 
@@ -28,7 +28,9 @@ the runtime is verified against, and 616.56 is the floor the wider community
 publishes for the same runtime. Below the floor the render is refused up front
 with the detected, minimum and verified numbers, and the startup log carries the
 same verdict. DXGI reports the driver as `32.0.15.6614`-style; that is
-566.14, and `32.0.16.1664` is 616.64.
+566.14, and `32.0.16.1664` is 616.64. The 610.47 render was made with
+310.8 on an RTX 4080 SUPER. Both NR DLLs in this release declare 615.00 as
+their minimum driver.
 
 Update the driver, then start the render again. On Windows 10 that has a
 limit: NVIDIA's
@@ -150,8 +152,8 @@ path is longer than about 140 characters is refused, because the files the
 cache writes inside it would pass Windows' 260-character path limit; choose a
 shorter folder.
 
-What the cache holds, how to choose its location and what **Advanced > Clear
-Neural Cache** removes are in
+What the cache holds, how to choose its location and what **Tools > Clear
+neural cache** removes are in
 [Recent videos and cache retention](USAGE.md#recent-videos-and-cache-retention).
 
 ## Neural cache staging could not be created
@@ -199,7 +201,7 @@ a slightly longer audio tail does not count as missing neural video.
 
 ## Export is unavailable or fails
 
-**File > Save rendered video** becomes available after validated neural playback
+**File > Save rendered video…** becomes available after validated neural playback
 opens. Select a new filename: existing destinations are never overwritten.
 Export needs the cached neural file, its original source and FFmpeg.
 
@@ -259,15 +261,17 @@ keeps the cache beside the player writable.
 
 ## Upscaling is off or playback drops frames
 
-Two upscalers, and only one at a time. **RTX VSR Upscaling** is on by default and
+Two upscalers, and only one at a time. **Enhance** offers **RTX VSR
+(recommended)**, **DLSS Super Resolution** or **No upscaler (window scaling)**,
+and so does the toolbar's **Upscaler** button. RTX VSR is the default and
 works whenever the window shows the video larger than it is; the status line says
 `RTX VSR Upscaling on` while it does. If playback keeps dropping frames because of
 it, it lowers its own quality for that video, then pauses (`RTX VSR Upscaling
-paused (playback fell behind)`); a lower rung under **Video > Compare > RTX VSR
-quality**, or turning it off in the DLSS menu, settles it for good.
+paused (playback fell behind)`); a lower rung under **Enhance > RTX VSR
+quality**, or another choice of upscaler, settles it for good.
 
-DLSS Upscaling starts off on a fresh installation and then follows the saved
-preference. Enable it from the DLSS menu or bottom bar. The output rung is Auto
+DLSS Super Resolution starts off on a fresh installation and then follows the
+saved preference. The status line calls it `DLSS Upscaling`. The output rung is Auto
 by default and follows the monitor's current mode; **Enhance > DLSS SR output size**
 pins 1080p, 1440p or 2160p instead. Two different refusals are reported and are
 not the same problem: "source meets output" means the source already meets or
@@ -293,23 +297,25 @@ and the notice `R` shows, name the one that is missing:
   `VSR.NeedsUpdatedDriver`; update the driver;
 - **nvngx_vsr.dll is missing** - restore it from the package or the SDK's
   `bin/Windows/x64/rel` folder;
-- **not supported on this GPU or driver**, or **could not start (NGX 0x...)** -
+- **not supported on this GPU or driver**, or **could not start on this GPU
+  (NGX 0x...)** -
   the runtime refused it; `DLSSVideoPlayer.log` has the `RTX VSR capability:`
   line with what NGX answered, and the create's result.
 
 Like every compare mode, the RTX VSR view is live only during cached playback on
-the neural view (`D`). As the playback upscaler (**Enhance > RTX VSR**) it
-runs whenever the window shows the video larger than it is; the reasons listed
-above grey that menu item too, and its label names the one that applies. Its cost is logged every 300 frames as `RTX VSR GPU:`; if
-playback drops frames with it on, pick a lower rung under **Video > Compare >
-RTX VSR quality**, or turn **RTX VSR Upscaling** off.
+the neural view (`D`). As the playback upscaler (**Enhance > RTX VSR
+(recommended)**) it runs whenever the window shows the video larger than it is;
+the reasons listed above grey that menu item too, and its label names the one
+that applies. Its cost is logged every 300 frames as `RTX VSR GPU:`; if
+playback drops frames with it on, pick a lower rung under **Enhance > RTX VSR
+quality**, or choose **Enhance > No upscaler (window scaling)**.
 
 ## Generate frames is unavailable, or refuses
 
-**Enhance > Generate frames** converts a video to a higher frame rate and writes a
-new file; it does not run during playback. The pill and the status line always
-name the reason rather than only saying "Unavailable", and the reasons fall into
-four groups.
+**Enhance > Generate frames (higher frame rate)...** converts a video to a
+higher frame rate and writes a new file; it does not run during playback. The
+status line always names the reason rather than only saying "Unavailable", and
+the reasons fall into four groups.
 
 *Nothing to generate between.* "no frame rate", "still image" and "variable
 frame rate" are properties of the source: generated frames need a constant
@@ -322,8 +328,8 @@ above what the panel can show, so generated frames would never be presented.
 "already lands evenly" means every source frame is already scanned out the same
 number of times and no higher multiple divides this refresh.
 
-*A setting, not the display.* "set to 2x, needs 5x" is **DLSS > Generated
-frames** being the binding limit - 24 fps film on a 120 Hz panel needs 5x to
+*A setting, not the display.* "set to 2×, needs 5×" is **Enhance > Frame
+generation rate** being the binding limit - 24 fps film on a 120 Hz panel needs 5x to
 land exactly - and raising that setting converts it. "even cadence only" is the
 **Even cadence only** option refusing an uneven landing; turning it off converts
 anyway, with the generated frames in the same uneven grid the video already

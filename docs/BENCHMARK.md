@@ -1,6 +1,6 @@
 # Neural quality benchmark
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 The benchmark exists to give quality claims a repeatable test set: measured
 neural time / FPS / VRAM / flicker / OCR / face consistency / colour shift /
@@ -12,10 +12,17 @@ requirements, commands, flags, profiles, metric definitions, output layout and
 caveats - is in [`tools/benchmark/README.md`](../tools/benchmark/README.md).
 
 Every measurement on this page was taken against RenoDX 4.70 and DLSS-NR
-310.8.0, except the settings table at the end, which was re-measured on the pinned
-RenoDX 6.5.3 on 2026-09-24. The rest are the last known state rather than the
-current one; the pages below say per section which of them a rerun would be
-expected to move.
+310.8.0, except the settings table at the end, which was re-measured on RenoDX
+6.5.3, the add-on pinned then, on 2026-09-24. The rest are the last known state
+rather than the current one; the pages below say per section which of them a
+rerun would be expected to move.
+
+0.30.0 pins RenoDX 10.8.0, and renders with DLSS-NR 310.9.16 on RTX 50 and
+310.8.SF-v2 elsewhere. None of the tables here was re-run on them. The
+[M1.2 report](measurements/runtime-310916-20261031/REPORT.md) measured what
+changed: 310.9.16's network A renders byte-identical to 310.8.SF-v2, and 10.8.0
+with the player's two new pins renders 310.8.SF-v2 within 0.1 of an 8-bit level
+of 6.5.3.
 
 ## The corpus, and where it stops being synthetic
 
@@ -147,8 +154,12 @@ motion shifting by at most 0.00108 between the two states.
 The sign can invert on the difference: `structure-0` improves delta-E by 2.46 on
 `cuts-similar` measured against `baseline` and worsens it by 2.94 measured against
 the shipped state. Run art-knob ablations from the shipped state:
-`tools/benchmark/knobs.py` holds it (`SHIPPED`, the eleven keys the player writes
-today, including `NRNormGovernor=1`) and varies one key per row;
+`tools/benchmark/knobs.py` holds 0.28's (`SHIPPED`, eleven keys including
+`NRNormGovernor=1`, without the per-pass strengths) and varies one key per row.
+0.30.0 also writes `NRDetailStability`, `NRSkinIndependent`, `NRRuntimePath` and
+`NRPreset` 1 or 2 for the network, and stamps the section for RenoDX 10.8.0, which
+`run.py` and `knobs.py` do not; `tools/benchmark/m12.py` writes the stamp
+(`ConfigVersion=10`), the two pins and the network for its 10.8.0 profiles.
 `docs/measurements/art-defaults-20260914/shipped-state.profile.json` is the eight-key
 state that 2026-09-14 measurement used. On it `NRAutoMask` was the only key whose
 explicit write changed a pixel; the other seven at shipped values were bit-identical
@@ -428,15 +439,21 @@ why it writes governor 0 is the next subsection. Full table, face shares and met
 What the table decides in the UI:
 
 - **Color strength changes the image**: 0.20 moves more of the picture than
-  Intensity at 0.40, so the dialog shows it as a 0.00-1.00 slider (default 1.00).
-- **The render preset is inert**, on a third runtime now, and stays hidden.
+  Intensity at 0.40, so the Picture panel shows it as a 0.00-1.00 slider (default
+  1.00). Since 0.30.0 a 0.00 is written as 0.01, because RenoDX 10.8.0 refuses a
+  session with every pass at zero strength.
+- **The render preset is inert** on DLSS-NR 310.8, the third runtime it was measured
+  inert on, and is not a setting. On 310.9.16 the same key picks the network: 1 is
+  network A, 0, 2 and 3 are network B
+  ([M1.2 report](measurements/runtime-310916-20261031/REPORT.md)). The Picture
+  panel's **Network** row writes 1 or 2.
 - **Skin structure's negative values follow Local structure.** Every negative value and
   exactly +1.00 render the shipped picture byte for byte here because structure is
   1.00 in this table; at structure 0.50, −1.00 renders byte-identical to skin 0.50
   ([knobs-upper report](measurements/knobs-upper-20261003/REPORT.md)). 0.00, 0.25,
   0.50 and 0.99 each give skin its own value, and the add-on's own overlay text
   ("negative smooths, positive enhances, 0 = neutral") does not describe what the
-  runtime does. The dialog's slider reads **As structure** at its left end, written
+  runtime does. The Picture panel's slider reads **As structure** at its left end, written
   as −1.00, then 0.00 to 0.99, greyed out with "Mask off" while Automatic mask is off;
   a saved negative value or +1.00 loads as As structure.
 - **Intensity stops at 1.00.** 1.30, 1.50 and 2.00 render byte-identical to 1.00 on
@@ -454,7 +471,7 @@ What the table decides in the UI:
   a global control, and the mask toggle less (1.35×). There is nothing here worth
   wiring into the compare mask as a "Protect skin" option, so nothing was.
 - **Global tone and UI correction are inert** on this path at every value tried, so
-  the player does not write them and the dialog does not show them.
+  the player does not write them and the Picture panel does not show them.
   `NRUICorrection` is read as an integer (0.5 is stored back as 0).
 - **Chained history changes the image**, once the harness writes `ConfigVersion`
   (below).
@@ -484,11 +501,17 @@ NRCodecMode/NRChainedHistory defaults adopted", a `.bak` beside the add-on), whi
 picture. So `run.py` writes the player's own managed keys plus `ConfigVersion=6`, the
 stamp the add-on writes on first load and so the state of every player runtime after
 its first launch; at the defaults this changes no pixel (identical digests with and
-without the migration on three clips). The player writes `ConfigVersion=6` into a
+without the migration on three clips). The 0.28 player wrote `ConfigVersion=6` into a
 section it creates (`src/ReShadeConfig.cpp`), because `packaging/ReShade.ini` carries
 no `[RenoDX.DLSS5]` section; a preflight on a fresh runtime logs no migration and
 leaves no `.bak`.
 
+RenoDX 10.8.0, which 0.30.0 bundles, has its own stamp: `ConfigVersion=10` and
+`ConfigRevision=1`. It migrates a section stamped 6 on load and leaves
+`ReShade.ini.v10-backup` beside the add-on. The 0.30.0 player writes 10.8.0's stamp,
+and restamps a section 0.28 wrote rather than letting the add-on migrate it. `run.py`
+still writes 6, so against a 0.30.0 runtime its renders go through that migration.
+
 Settings and guides are part of the render identity, so every distinct combination
-renders from scratch: changing an inert control such as the render preset still costs
-a full re-render and produces byte-identical output.
+renders from scratch: changing a setting where it is inert still costs a full
+re-render and produces byte-identical output.

@@ -1,6 +1,6 @@
 # Rebuilding the demonstration video
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 This folder builds `docs/media/neural-comparison-demo.mp4` with
 [Remotion](https://www.remotion.dev) 4.0.520. What the video shows and where its
@@ -14,11 +14,12 @@ footage came from is in [docs/media/README.md](../../docs/media/README.md).
   (2560x1440): [007 First Light - Story Trailer](https://www.youtube.com/watch?v=trvIyyFt_MM)
   and [GTA VI Trailer 2](https://www.youtube.com/watch?v=VQRLujxTm3c)
 - The player's whole-video render of each, at default settings. Open the
-  trailer from **File > Game trailers**, run **DLSS > Convert & export >
-  Convert whole video to neural video** and let it finish, then copy its folder
-  out of `cache/v1/renders/` (and the source out of `cache/v1/sources/`)
-  **before you next start the player**. On startup the player deletes the least
-  recently used renders whenever the drive has less than 20 GB free.
+  trailer from **File > Game trailers**, run **Enhance > Render whole video**
+  and let it finish, then copy its folder out of `cache/v1/renders/` (and the
+  source out of `cache/v1/sources/`) **before you next start the player**. On
+  startup the player deletes renders it can never serve again (made under
+  another driver, for one), and the least recently used renders whenever the
+  drive has less than 20 GB free.
 - A folder of player window captures, taken with
   `tools/verification/capture-window.ps1`'s method: `difference.png`,
   `side-by-side.png` and `loupe.png` (the 007 frame 1122 in those views),
@@ -75,6 +76,11 @@ The composition lives in `src/`:
 - `social.tsx`: the 1200x630 card and the 1080x1080 clip, framed from the
   same inputs
 - `brand.tsx`: the site's colours and the caption style
+
+The Side by side scene's caption in `index.tsx` names the 0.28 menu,
+`Video > Compare`. Since 0.30.0 that menu is **Compare**; change the caption
+when the video is remade (task P2.70 in
+[docs/IMPROVEMENT-TASKS.md](../../docs/IMPROVEMENT-TASKS.md#p270)).
 
 Every clip scene lasts exactly as long as its clip, so nothing is looped, held
 or sped up, except the render band, which shows 10 s of captures in 5 s and

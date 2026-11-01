@@ -1,6 +1,6 @@
 # Game trailer examples
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 **File > Game trailers** and the start screen's trailer row offer seven official
 trailers, picked for what DLSS 5 changes most: faces, skin, hair, cloth and
@@ -10,11 +10,13 @@ anonymous session at up to 2160p. The start screen shows as many as fit its
 width, in this order, so the strongest go first, each with its YouTube
 thumbnail (fetched at run time, not shipped; see
 [Usage](USAGE.md#open-render-and-compare) for what that request is and how to
-turn it off). A tile's title is the game's name, which fits its width; the
-table below names each trailer in full.
+turn it off). A tile's title is the game's name, which fits its width (GTA VI's
+keeps "Trailer 2"); the table below names each trailer in full. A trailer you
+have opened is left out of the row: it is in the recent videos, with its
+thumbnail. When the player cannot play YouTube, the row offers no trailers.
 
-Every figure below was read on 24 September 2026 with the bundled yt-dlp
-2026.08.19, run with the player's own flags (`--no-config --no-cache-dir
+Every figure below was read on 24 September 2026 with yt-dlp 2026.08.19, the
+build the player bundled then (0.30.0 bundles 2026.10.26), run with the player's own flags (`--no-config --no-cache-dir
 --no-plugin-dirs --no-playlist`, the Auto format selector and
 `-S height,vbr,abr`) and `-J`. "Auto" is the rung the player's default
 YouTube quality picks: the tallest up to 1440p, then the highest bitrate.

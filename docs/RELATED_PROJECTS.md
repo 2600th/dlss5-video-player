@@ -1,6 +1,6 @@
 # Related DLSS 5 neural-rendering projects
 
-_Verified against 0.28.3 (f42cb39) on 2026-10-16._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 Every link, and every fact in "Where this player fits" and "The landscape", was
 checked on the project's public page on 2026-10-16. Star counts are that day's,
@@ -28,7 +28,7 @@ not (see the table). The nearest are Lunarc, which keeps ranges you choose to
 pre-render and marks them on its timeline, and DLSS5Tool, whose preview can
 pre-render the frames that follow; neither renders the whole video while it
 plays. Frame generation here is a separate conversion
-(**Enhance > Generate frames** writes a new file); it is not part of live
+(**Enhance > Generate frames (higher frame rate)...** writes a new file); it is not part of live
 playback.
 
 ## The landscape on 2026-10-16
@@ -45,6 +45,9 @@ Neither announcement names a public SDK. The latest public
 [Streamline SDK](https://github.com/NVIDIA-RTX/Streamline) (2.14.1), both
 released on 2026-09-08, add nothing for it: the first adds a Ray
 Reconstruction preset, the second frame-generation pacing options.
+Since 0.30.0 this player bundles NVIDIA-signed DLSS Super Resolution 310.9.16 and
+Streamline 2.14.16, taken from a community mirror (RankFTW/rhi-repo). Its two
+DLSS-NR builds are still modified, unsigned community runtimes.
 
 | Project | What it is | Relevant to this player |
 | --- | --- | --- |
@@ -92,8 +95,8 @@ from.
 - [DLSS5-Feeder](https://github.com/jlrouzies-fr/DLSS5-Feeder) documents the
   RenoDX `[RenoDX.DLSS5]` controls. This player adapted its MIT-licensed
   configuration contract: use its raw-NGX-only hook mode (`EnableHooks=2`),
-  enable neural uplift, explicitly disable RenoDX upscaling, and preserve
-  unrelated user settings. The Streamline hook mode is unnecessary because
+  enable neural uplift, explicitly keep RenoDX from upscaling (now by pinning
+  its working resolution to native 1:1), and preserve unrelated user settings. The Streamline hook mode is unnecessary because
   this player calls NGX directly.
 - [DLSS 5 Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot) treats the
   feeder route as native DLAA and warns against mixing independently versioned

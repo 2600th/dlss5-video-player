@@ -1,6 +1,6 @@
 # Player demonstration
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 [Watch the MP4](neural-comparison-demo.mp4) ·
 [Looping preview](neural-comparison-preview.webp) ·
@@ -14,6 +14,17 @@ A 24.8-second, silent video: 1920x1080, 30 fps, 744 frames, H.264. GitHub
 strips `<video>` tags from Markdown, so the README shows
 `neural-comparison-preview.webp` instead: the same cut at 800 px and 8 fps.
 The poster is its frame 45. Everything in it was rendered at the player's **default** neural settings.
+
+**Not yet remade for 0.30.0.** The player scenes, from 0:06.8 in the video and
+the preview, are window captures from 24 September 2026 of the interface before
+0.30.0, and one caption names the old `Video > Compare` menu (now **Compare**).
+In [`social/square-1080.mp4`](social/square-1080.mp4) the Difference view and the
+saved 2 × 2 comparison image come from the same pre-0.30.0 captures; that image's
+footer predates 0.30.0's, which names the network beside the runtime. Remaking them from a
+0.30.0 build is task P2.70 in
+[docs/IMPROVEMENT-TASKS.md](../IMPROVEMENT-TASKS.md#p270). The split scenes, the
+poster, the card and the stills show source and render pixels, not the
+interface.
 
 ## What's in it
 
@@ -65,8 +76,8 @@ slowed, looped or frozen; the paused frames are paused frames.
 | [Grand Theft Auto VI Trailer 2](https://www.youtube.com/watch?v=VQRLujxTm3c), Rockstar Games | 2560x1440 VP9, 30 fps, 166.8 s | 5,002 of 5,002 frames verified |
 
 Both were fetched through the player's own YouTube feature at its **Auto**
-quality and rendered whole with **Convert whole video to neural video** at
-default settings (settings digest `96bf471a…` in the cache manifest) on an RTX
+quality and rendered whole with **Convert whole video to neural video** (now
+**Enhance > Render whole video**) at default settings (settings digest `96bf471a…` in the cache manifest) on an RTX
 4080 SUPER, driver 610.47, runtime lock `310.8.SF-v2`, by the player at
 `dced888`. The source files' SHA-256 and the renders' cache keys are in the
 [stills' provenance records](stills/). The player scenes and the band clip were
@@ -119,7 +130,7 @@ up a smudge.
 whole in a fresh profile, the way
 [the demo's sources are](../../tools/demo-video/README.md#you-need), at default
 settings: Intensity, Local tone, Local structure and Color strength 1.0, Skin
-structure Off, one pass. Every render verified all of its frames. The source and
+structure Off (now labelled As structure), one pass. Every render verified all of its frames. The source and
 render were then copied out of the cache, and each figure
 was made with
 [`tools/demo-video/make-face-comparison.py`](../../tools/demo-video/make-face-comparison.py),

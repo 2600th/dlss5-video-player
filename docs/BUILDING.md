@@ -1,6 +1,6 @@
 # Building and testing
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
 C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the
@@ -54,8 +54,9 @@ running those deliberately.
 `PolicyTestsNetwork` (label `network`, `ctest --preset network`) plays YouTube
 the way the player does, with the staged yt-dlp, Deno and FFmpeg: it resolves
 the first built-in trailer, reads a video frame past the first minute and a
-minute of audio at playback speed, in about two minutes. No other preset and no
-CI tier runs it, because each would then depend on YouTube. Run it after
+minute of audio at playback speed, and fetches the trailer's captions, in about
+two minutes. The preset runs on the `ci` build in `build-ci`. No other preset
+and no CI tier runs it, because each would then depend on YouTube. Run it after
 changing a YouTube helper pin or the resolver, and before a release.
 
 Naming `Visual Studio 17 2022` on a machine that has only 2026 asks for the v143
@@ -108,15 +109,15 @@ Launch `build-upscaling/Release/DLSSVideoPlayer.exe`. Its neural worker is built
 as `build-upscaling/Release/neural-runtime/NeuralWorker.exe`. Without the
 experimental runtime, a source build uses the native playback path.
 
-The nineteen portable tests (PolicyTests is registered twice, as its quick and
-`slow` tiers) cover recent history, settings/cache integrity,
+The twenty portable tests (PolicyTests is registered twice here, as its quick
+and `slow` tiers) cover recent history, settings/cache integrity,
 real-media export and cached comparison playback through the real decoders,
 runtime lock and worker protocols, runtime, upscaling and export policy, range selection,
 frame identity, update checks, the release API surface, prerender, playback and
 native UI regressions, the `dlss5-convert.exe` console converter, that no shipped
 executable imports a Visual C++ runtime DLL, that the player resolves its
-load-time DLLs from System32 only, and the packager's source-commit and
-hardware-report checks. Every test carries a time limit, and the real-media suite
+load-time DLLs from System32 only, and the packager's source-commit,
+translation-path and hardware-report checks. Every test carries a time limit, and the real-media suite
 reports itself skipped rather than failed when FFmpeg is not staged.
 
 Seventeen more are registered under the `gpu` label and need an RTX card with the
@@ -268,16 +269,21 @@ locked members, checks each against the lock's size and SHA-256, stages them
 in `external/runtime`, and finishes with the full `stage_runtime.ps1`
 validation (Authenticode state and numeric file version). Files that already
 match the lock are not downloaded again, so re-running it costs nothing. The
-largest download is the 111 MiB neural runtime archive. The lock's
-`provenance` names each source; for reference:
+two DLSS-NR archives are the largest downloads. The lock's `provenance` names
+each source; for reference:
 
 | Locked file | Public source |
 | --- | --- |
-| `nvngx_dlssnr.dll` | `RankFTW/rhi-repo` release `dlssnr-310.8.SF-v2` |
-| `nvngx_dlss.dll` | `RankFTW/rhi-repo` release `dlss-310.9.1` |
-| `renodx-dlss5.addon64` | `RankFTW/rhi-repo` release `renodx-dlss5-6.5.3` |
-| `sl.*.dll` (8 files) | `RankFTW/rhi-repo` release `streamline-2.13.0.0` (deliberately not 2.14.x - see THIRD_PARTY.md) |
+| `nvngx_dlssnr.dll` (310.9.16, RTX 50) | `RankFTW/rhi-repo` release `dlssnr-310.9.16` |
+| `310.8.SF-v2/nvngx_dlssnr.dll` (every other RTX card) | `RankFTW/rhi-repo` release `dlssnr-310.8.SF-v2` |
+| `nvngx_dlss.dll` | `RankFTW/rhi-repo` release `dlss-310.9.16` |
+| `renodx-dlss5.addon64` | `RankFTW/rhi-repo` release `renodx-dlss5-10.8.0` |
+| `sl.*.dll` (7 files) | `RankFTW/rhi-repo` release `streamline-2.14.16.0-v2` |
+| `sl.dlss_nr.dll` | `RankFTW/rhi-repo` release `streamline-2.13.0.0` (no 2.14 release ships it - see THIRD_PARTY.md) |
 | `dxgi.dll` | `ReShade64.dll` inside `ReShade_Setup_6.8.0_Addon.exe` from reshade.me; the installer is a ZIP container |
+
+Both DLSS-NR builds are modified, unsigned community runtimes, not NVIDIA's
+signed files.
 
 Fetching them for your own build is you obtaining the files from their
 publishers. It does not resolve the redistribution question for the combined
@@ -324,6 +330,9 @@ with the pinned SDK and the locks in `packaging/`. The copy that ships in the
 package has neither, so from an unpacked folder it runs in package mode: it
 reads the version and variant from `PACKAGE_MANIFEST.txt` and holds every file
 to the manifest and the allowlist. CI runs that copy from an extracted core zip.
+The verifier also refuses a zip that unpacks to more than 2 GB, as a guard
+against a zip bomb. The complete 0.30.0 package, with both DLSS-NR builds,
+unpacks to about 1.08 GB.
 
 Every package names the commit it was built from in `PACKAGE_MANIFEST.txt`,
 and the assembler refuses a tree with uncommitted changes to tracked files. A

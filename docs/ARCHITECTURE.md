@@ -1,6 +1,6 @@
 # Architecture
 
-_Verified against 0.28.0 (4f3150a) on 2026-10-02._
+_Verified against 0.30.0 (095c3e8) on 2026-11-01._
 
 ## High-level pipeline
 
@@ -30,7 +30,7 @@ Render request
   v
 Original + validated neural cache -> synchronized decoded frame pairs
   |
-  +-> chosen view -> optional playback SR -> image adjustments -> D3D12 display
+  +-> chosen view -> optional playback upscaler -> viewing adjustments -> D3D12 display
   |
   +-> cached neural frames -> PNG/JPEG/GIF or MP4/MKV export
   |
@@ -266,7 +266,7 @@ why the engine is preferred wherever it exists. D3D12 expands whichever field wa
 produced to the exact DLSS render dimensions.
 
 The engine is used only when the frame handed to the renderer is already the DLSS
-input size. That holds on every neural path; the runtime Super Resolution toggle,
+input size. That holds on every neural path; playback DLSS Super Resolution,
 where the two differ, keeps the estimator. A machine without `nvofapi64.dll`, an
 older card or a build configured without the SDK headers all fall back the same
 way, and the log says which backend came up.
@@ -418,8 +418,8 @@ codes rather than flat bands: +-half a code on the 8-bit SDR backbuffer, and
 offset is scaled by one minus the subtitles' coverage, which is dithering the
 picture before the subtitle layer goes over it, so the video around the text is
 dithered and the glyphs are not speckled. It is presentation-only and always on. The cache capture can dither its
-own 8-bit store (`SetCaptureDither`, Encoder settings > Dither the cached
-frames, on by default), but against an 8x8 ordered (Bayer) map rather than blue noise: its
+own 8-bit store (`SetCaptureDither`, Tools > Cache & encoding… > Dither the
+cached frames, on by default), but against an 8x8 ordered (Bayer) map rather than blue noise: its
 frames go on to HEVC, whose quantiser removes exactly the high frequencies blue
 noise lives in, while a period-8 tile survives it (the measurement is in
 `DitherPolicy.h`). That path compiles separate entry points
@@ -497,7 +497,8 @@ Before every render the player verifies the staged runtime against the
 embedded `packaging/runtime-lock.json` (size, SHA-256, file version) and
 refuses drift instead of adopting a newer stack. On a cache miss the helper
 first runs `--neural-preflight`: a synthetic Feature 18 probe whose JSON
-receipt records GPU, driver, ReShade/RenoDX/DLSS-NR banner versions, every
+receipt records GPU, driver, ReShade/RenoDX/DLSS-NR banner versions, the NR
+DLL that loaded and its signature state, NGX's DLSS-NR capability block, every
 locked module's hash and every feature-18 creation/evaluation observation.
 After the render, `receipt.json` (preflight, lock checks, request, result,
 timing, digests) is written beside `neural.mkv`, hashed into the schema-5
@@ -547,7 +548,8 @@ independent. `ClassifyGpu` answers what the part is, which picks the cache
 identity, the receipt label and the render-pace prior; `NeuralAddonDesired`
 follows from RTX-ness alone, so a generation is never the reason the addon is
 withheld. The driver, classified against `kNeuralDriverFloor`, is the axis that
-refuses. `RenderPacePrior` returns zero for every generation nobody has timed,
+refuses. The floor is 610.47, on which an RTX 4080 SUPER has rendered with
+310.8; both NR DLLs declare 615.00. `RenderPacePrior` returns zero for every generation nobody has timed,
 and zero means unmeasured, not unsupported: a forecast built from it reports no
 verdict and keeps the full start cushion, where a prior-backed forecast reports
 one and shortens it. Both splits are pinned in `tests/PolicyTests.cpp` against
@@ -710,9 +712,9 @@ from 9.7-10.5 s to 0.07-0.43 s once the memo held the store, and the cold start
 from 17.9-21.9 s to 7.9-9.0 s.
 
 **Two runtime file sets exist, and they are deliberately different sizes.**
-`LockedRuntimeFileNames()` is the thirteen files hashed into `runtimeDigest` - the
-twelve vendor modules plus `NeuralWorker.exe` - and it is the set a preflight
-failure quotes. `LockPinnedRuntimeFileNames()` is the twelve that
+`LockedRuntimeFileNames()` is the fourteen files hashed into `runtimeDigest` - the
+thirteen vendor modules, both NR DLLs among them, plus `NeuralWorker.exe` - and it
+is the set a preflight failure quotes. `LockPinnedRuntimeFileNames()` is the thirteen that
 `packaging/runtime-lock.json` pins and `VerifyRuntimeLock` checks; the worker is
 never pinned, because every build of the player changes it. The worker is in the
 hashed set because otherwise rebuilding it with different guide or cut logic
@@ -821,9 +823,9 @@ Automatic cache selection probes `<exe>/cache/v1` before the LocalAppData fallba
 
 `SynchronizedPlayback` opens the original and neural files together, validates
 their geometry/rate/duration, and publishes timestamp-matched frame pairs.
-Neural Rendering defaults on for a fresh install and then follows the saved
+DLSS 5 neural rendering defaults on for a fresh install and then follows the saved
 view preference. The selected member is chosen after the first pair is ready
-and before it is presented. Toggling Neural Rendering changes the visible member of the
+and before it is presented. Toggling DLSS 5 neural rendering changes the visible member of the
 last-presented pair, so comparison never advances ahead of the audio clock.
 Seeking waits for both restarted decoders to produce a pair; temporary
 `NotReady` results do not unload playback. Tail seeks account for container
@@ -990,8 +992,8 @@ probe stays the verdict.
 The default performance/quality value is DLAA. That keeps input and output at
 native 1:1 resolution while preserving a real NGX feature creation/evaluation
 sequence for the optional interception layer in `neural-runtime/NeuralWorker.exe`.
-The main player does not load that proxy. Its independent runtime SR toggle
-defaults off, selects a supported NGX input range without resizing the source,
+The main player does not load that proxy. Its playback DLSS Super Resolution,
+one of the three upscaler choices under **Enhance**, defaults off, selects a supported NGX input range without resizing the source,
 and targets a 1920x1080, 2560x1440 or 3840x2160 bounding box. Auto, the default,
 makes the box a display decision rather than a stored preference: it takes the
 largest rung the monitor's current mode can scan out, because a rung above the
@@ -1100,7 +1102,7 @@ which keeps two refusals that matter: a source already landing evenly is never
 made uneven (30 fps on 120 Hz takes 2x or 4x, never 3x), and a panel that cannot
 double the source has nothing to offer. `BetterRefreshForSource` answers the rest
 from the display side - a monitor advertising 48, 72 or 120 Hz can land 24 fps
-film exactly - and `DLSS > Generated frames > Even cadence only` restores the old
+film exactly - and `Enhance > Frame generation rate > Even cadence only` restores the old
 behaviour as a setting.
 
 The phase evidence is a per-frame brightness centroid taken off a raw decode,
@@ -1172,7 +1174,7 @@ additional undocumented NGX/caller-shim lifetime beside the existing add-on.
 
 ## Stage export
 
-`DLSS > Convert & export > Export with DLSS stages` writes a single file with
+`File > Export…` writes a single file with
 any combination of Super Resolution, neural rendering and frame generation. It
 is separate from the cache: a cache entry is a playback carrier keyed on the
 source and its settings, while this is a one-off at a size and a rate the viewer
@@ -1231,17 +1233,17 @@ Every pass writes Matroska, so the last step is not a rename: `MuxStageExport`
 writes the container the chosen name's extension asks for
 (`ExportContainerFor`), stream-copying the video into MKV or MP4 (`hvc1` for
 HEVC in MP4, `+faststart`) and encoding GIF, PNG or JPEG exactly as "Save
-converted video" does. It stages beside the output and replaces it only once
+rendered video" does. It stages beside the output and replaces it only once
 the file is complete. `ExportContainerChoices` is what the dialog and `--render`
 offer for a video, an animation and a photo. The same step carries the original's audio,
 subtitles and chapters, trimmed to a range, onto every combination. The range
 is cut out of the source's own streams into a staging file first
-(`CutSourceStreamsToRange`, shared with "Save converted video"), and the mux
+(`CutSourceStreamsToRange`, shared with "Save rendered video"), and the mux
 never trims: an output `-ss` on a stream-copied render with B-frames drops every
 frame of it. The worker's carrier is video-only, and frame generation runs with
 `carryStreams=false` rather than muxing streams the last step would discard. `ExportStreamActionFor` decides per stream what each container can
 hold, and the step reads the audio count back off the staged file before it
-publishes it. "Save converted video" and the frame-generation mux map the
+publishes it. "Save rendered video" and the frame-generation mux map the
 source's streams through the same code (`AppendSourceStreams`), because a blind
 `-map 1:s?` fails every MKV of MP4 timed text and every MP4 of picture
 subtitles.
@@ -1280,7 +1282,7 @@ pass.
 
 ## Final image adjustments
 
-Brightness, contrast, saturation, gamma, temperature and tint are applied in the final presentation shader after DLSS. This has two useful properties:
+Brightness, contrast, saturation, gamma, temperature and tint (**View > Viewing adjustments…**, the Picture panel's viewing zone) are applied in the final presentation shader after DLSS. This has two useful properties:
 
 1. Changing display appearance does not invalidate temporal guides or require DLSS history resets.
 2. Diagnostic DLSS input/motion/depth views remain unmodified.
@@ -1351,7 +1353,8 @@ build named; the full entries are in `CHANGELOG.md` at tag
   `neural-runtime/310.8.SF-v2/nvngx_dlssnr.dll` the 0.28 runtime, in its own
   folder so the add-on keeps loading a file of that name and the top-level
   module check never sees two. RenoDX 10.8.0 loads the one `NRRuntimePath`
-  names. RTX 50 gets 310.9.16 unless **Previous runtime** is chosen; every other
+  names. RTX 50 gets 310.9.16 unless **Enhance > Picture… > Render pipeline >
+  Network** is set to **310.8.SF-v2 (previous runtime)**; every other
   generation gets 310.8.SF-v2, since no RTX 20-40 card has run 310.9.16 here.
   `NRPreset` is the network, forwarded as `DLSSNR.Hint.Render.Preset`: on
   310.9.16, 1 renders byte-identical to 310.8.SF-v2 (network A) and 0, 2 and 3
@@ -1360,8 +1363,9 @@ build named; the full entries are in `CHANGELOG.md` at tag
   about 36 % less model time and a milder picture, nearer the source. The runtime digest covers
   both DLLs; `NRRuntimePath` and `NRPreset` reach the cache key through the
   settings snapshot, the preflight key names the selected runtime, and a
-  preflight whose add-on loaded another file is refused, because 10.8.0 falls
-  back beside itself and to `%LOCALAPPDATA%\DLSS5-NR` when the named file fails.
+  preflight or an export whose add-on loaded another file, or a file of another
+  version, is refused, because 10.8.0 falls back to another DLL,
+  `%LOCALAPPDATA%\DLSS5-NR\runtime` first, when the named file fails.
   `docs/measurements/runtime-310916-20261031`.
 - **Streamline is 2.14.16.0 except `sl.dlss_nr.dll`** (0.30.0). No 2.14
   release ships that plugin, so it stays 2.13.0.0. At `EnableHooks=2`
@@ -1455,7 +1459,7 @@ was checked on, Schannel in the n9.0.2 build since P1.34, which refuses a
 self-signed certificate too (SEC_E_UNTRUSTED_ROOT); the flag is passed
 explicitly anyway because the pin moves (0.23.0). The render preset
 changes no pixels, on RenoDX 4.70 (0.15.0) and again on 6.5.3; colour strength,
-inert on 4.70, moves 68-89 % of bytes on 6.5.3 and is back in the dialog
+inert on 4.70, moves 68-89 % of bytes on 6.5.3 and is back in the Picture panel
 (docs/measurements/knobs-653-20260924).
 
 ## Remaining work
