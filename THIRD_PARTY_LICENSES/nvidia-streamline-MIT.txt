@@ -1,15 +1,16 @@
-NVIDIA Streamline 2.13.0.0 - neural-runtime/sl.*.dll
+NVIDIA Streamline 2.14.16.0 and 2.13.0.0 - neural-runtime/sl.*.dll
 
-The complete package ships eight NVIDIA-signed Streamline 2.13.0.0 modules in
+The complete package ships eight NVIDIA-signed Streamline modules in
 neural-runtime/, unmodified and pinned by SHA-256 in
-packaging/runtime-lock.json: sl.common.dll, sl.dlss.dll, sl.dlss_g.dll,
-sl.dlss_nr.dll, sl.interposer.dll, sl.nis.dll, sl.pcl.dll and sl.reflex.dll.
+packaging/runtime-lock.json: seven at 2.14.16.0 (sl.common.dll, sl.dlss.dll,
+sl.dlss_g.dll, sl.interposer.dll, sl.nis.dll, sl.pcl.dll and sl.reflex.dll)
+and sl.dlss_nr.dll at 2.13.0.0, which the 2.14.16.0 release does not include.
 Streamline's source and terms are published at
 https://github.com/NVIDIA-RTX/Streamline.
 
 The notice below is reproduced unmodified from license.txt on that
 repository's main branch. Upstream publishes no v2.13.0 tag, so the text of
-the licence as it stood for the 2.13.0.0 build could not be taken from a tag;
+the licence as it stood for these builds could not be taken from a tag;
 the MIT grant below is the one the repository carries. Its second block names
 sl_nvperf.h and sl_nvperf.dll, which are covered by the NVIDIA Nsight Perf SDK
 License instead; neither is shipped in this package.

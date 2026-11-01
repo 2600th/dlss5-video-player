@@ -8198,7 +8198,7 @@ private:
     }
     std::wstring UpscalingStatus()const{
         if(!m_upscalingError.empty())return m_upscalingError;
-        if(UpscalingActive())return L"DLSS Upscaling on \u00b7 "+std::to_wstring(m_renderer->OutputW())+L"×"+std::to_wstring(m_renderer->OutputH())+
+        if(UpscalingActive())return L"DLSS Super Resolution on \u00b7 "+std::to_wstring(m_renderer->OutputW())+L"×"+std::to_wstring(m_renderer->OutputH())+
             (m_upscaleAuto?L" (auto)":L"");
         // RTX VSR is the upscaler whenever DLSS Upscaling is off and the picture is
         // shown larger than the video; the line names it and the size it made.
@@ -8210,22 +8210,22 @@ private:
             // on a 4K panel has nothing to gain; a panel below 1080 lines has
             // nowhere to put the pixels. Both are "off", for opposite reasons, and a
             // viewer who sees the wrong reason goes looking for a broken toggle.
-            if(!EffectiveUpscaleHeight())return L"DLSS Upscaling off (display below 1080 lines)";
-            return L"DLSS Upscaling off (source meets output)";
+            if(!EffectiveUpscaleHeight())return L"DLSS Super Resolution off (display below 1080 lines)";
+            return L"DLSS Super Resolution off (source meets output)";
         }
-        // The feature is called DLSS Upscaling in the menu and on the pill, so
+        // The feature is called DLSS Super Resolution in the menu (0.30.0), so
         // the status line says that too. It used to report the same toggle as
         // "DLSS SR" one line below the control the user had just flipped.
-        if(UpscalingAvailable())return L"DLSS Upscaling off";
+        if(UpscalingAvailable())return L"DLSS Super Resolution off";
         // A GPU or driver with no DLSS at all is the one unavailability a viewer
         // cannot fix by resizing anything, and the only one that used to arrive
         // as a bare "unavailable".
         if(m_loaded&&m_renderer&&!m_renderer->DLSSAvailable())
-            return L"DLSS Upscaling unavailable (this GPU or driver has no DLSS)";
+            return L"DLSS Super Resolution unavailable (this GPU or driver has no DLSS)";
         // What is left once a DLSS-capable renderer exists and the target would
         // grow: the first frame has not been presented yet, which is the one
         // unavailability that clears itself.
-        return L"DLSS Upscaling unavailable (waiting for the first frame)";
+        return L"DLSS Super Resolution unavailable (waiting for the first frame)";
     }
     bool EnableUpscaling(uint32_t height){
         if(!m_loaded||!m_renderer||!HaveLastPlaybackFrame())return false;
@@ -8284,8 +8284,8 @@ private:
             // answer from SR failing to start, and it is the one to act on.
             const bool outsideRange=candidate->renderer&&candidate->renderer->DLSSSourceOutsideRange();
             m_upscalingError=outsideRange
-                ?L"DLSS Upscaling unavailable (source too small for a "+std::to_wstring(height)+L"p target)"
-                :std::wstring(L"DLSS Upscaling could not start; playback is unchanged \u00b7 see the log");
+                ?L"DLSS Super Resolution unavailable (source too small for a "+std::to_wstring(height)+L"p target)"
+                :std::wstring(L"DLSS Super Resolution could not start; playback is unchanged \u00b7 see the log");
             LOG("Playback SR candidate rejected; existing renderer preserved. sourceOutsideSupportedRange="<<outsideRange);
         }
         candidate.reset();m_currentSec=position;m_playStartSec=position;m_playStart=Clock::now();m_playing=playing;Audio().Pause(!playing);
@@ -8305,7 +8305,7 @@ private:
             m_upscalingRequested=false;m_renderer->SetDLSS(false);m_upscalingError.clear();
             if(const auto last=m_lastPlaybackFrame)RenderVideoFrame(*last,true);UpdateCachedStatus();InvalidateControls();
         }else if(!EnableUpscaling(EffectiveUpscaleHeight())){
-            MessageBoxW(m_hwnd,L"DLSS upscaling could not start at this output size. Your current video is unchanged. See DLSSVideoPlayer.log for details.",L"DLSS Upscaling",MB_OK|MB_ICONINFORMATION);
+            MessageBoxW(m_hwnd,L"DLSS Super Resolution could not start at this output size. Your current video is unchanged. See DLSSVideoPlayer.log for details.",L"DLSS Super Resolution",MB_OK|MB_ICONINFORMATION);
         }
     }
     // `height` 0 selects Auto; anything else must name a rung. A refused
@@ -9797,9 +9797,9 @@ private:
         // says only "Unavailable" sends a viewer looking for a broken toggle
         // when the answer is usually that their source already fills the panel.
         case ToolbarAction::ToggleUpscaling:return{UiIcon::Upscaling,
-            UpscalingAvailable()?(UpscalingActive()?std::wstring(L"DLSS Upscaling \u00b7 On")
-                                                   :std::wstring(L"DLSS Upscaling \u00b7 Off"))
-                                :std::wstring(L"DLSS Upscaling \u00b7 ")+UpscalingUnavailableReason(),
+            UpscalingAvailable()?(UpscalingActive()?std::wstring(L"DLSS Super Resolution \u00b7 On")
+                                                   :std::wstring(L"DLSS Super Resolution \u00b7 Off"))
+                                :std::wstring(L"DLSS Super Resolution \u00b7 ")+UpscalingUnavailableReason(),
             enabled,UpscalingActive()};
         // An action, not a toggle: it starts a conversion, and while one runs
         // the pill is the way to stop it rather than an inert label. Every arm
