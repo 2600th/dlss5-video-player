@@ -94,11 +94,14 @@
       "sameAs": ["{{REPO_URL}}"],
       "featureList": [
         "DLSS 5 neural rendering while the video plays",
+        "DLSS-NR 310.9.16 on RTX 50, with a choice of two networks",
         "The original and the render compared on the same frame: split, wipe, side by side, 2x2, Difference and a loupe",
         "Seek anywhere, rendered or not",
         "RTX Video Super Resolution upscaling, on by default wherever the window shows the video larger than it is",
         "Game screenshots and photos (PNG, JPEG, BMP, TIFF, WebP) and animated GIFs, as well as video",
-        "HDR10 and HLG tone mapping, and subtitles drawn after the render",
+        "HDR10 and HLG tone mapping, and subtitles drawn after the render, YouTube captions included",
+        "Resume where you left off, the next file in the folder, and copy and paste through the clipboard",
+        "Every key rebindable in input.conf, and the interface in English or Simplified Chinese",
         "A constant-quality render cache, reused while the source, runtime and settings match",
         "Export to PNG, JPEG, GIF, MP4 or MKV, from the player or the dlss5-convert command-line converter, one file or a folder at a time",
         "Super Resolution, neural rendering and frame generation combined in one export",
@@ -113,12 +116,12 @@
         {
           "@type": "Question",
           "name": "Is it safe to run?",
-          "acceptedAnswer": { "@type": "Answer", "text": "It is open source, but its neural runtime is a modified community build that nobody can sign, so decide with that in view. Each zip has a SHA-256 beside it. The core zip is built by CI from this repository and carries a signed build attestation (gh attestation verify); the complete zip is assembled by the maintainer and has a checksum only. Inside either, verify_package.ps1 checks every file against a pinned manifest before the first run. Scan the runtime as you would any unsigned software, or take the core zip and supply your own." }
+          "acceptedAnswer": { "@type": "Answer", "text": "It is open source, but its neural runtime is a modified community build that nobody can sign, both of its DLSS-NR builds included, so decide with that in view. Each zip has a SHA-256 beside it. The core zip is built by CI from this repository and carries a signed build attestation (gh attestation verify); the complete zip is assembled by the maintainer and has a checksum only. Inside either, verify_package.ps1 checks every file against a pinned manifest before the first run. Scan the runtime as you would any unsigned software, or take the core zip and supply your own." }
         },
         {
           "@type": "Question",
           "name": "Why is the neural runtime unsigned?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Because it has been modified. It includes NVIDIA's neural DLL modified by the community to run on every RTX generation, 20 through 50, which invalidates NVIDIA's signature, alongside community ReShade and RenoDX files that were never signed. Nobody is in a position to re-sign it, so it ships unsigned and says so. Its files are pinned by size and SHA-256, and the package verifier rejects any that have changed." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Because it has been modified. It includes two builds of NVIDIA's neural DLL, each modified by the community to run on every RTX generation, 20 through 50, which invalidates NVIDIA's signature: DLSS-NR 310.9.16, which RTX 50 cards render with, and 310.8.SF-v2, which every other GPU renders with. NVIDIA's signed 310.9.16 was not available to this release. Alongside them are community ReShade and RenoDX 10.8.0 files that were never signed. Nobody is in a position to re-sign it, so it ships unsigned and says so. Its files are pinned by size and SHA-256, and the package verifier rejects any that have changed." }
         },
         {
           "@type": "Question",
@@ -133,7 +136,7 @@
         {
           "@type": "Question",
           "name": "Does it upload my video anywhere?",
-          "acceptedAnswer": { "@type": "Answer", "text": "No. Rendering runs on your GPU and the cache stays on your disk. The player goes online to fetch a YouTube link you paste, and once a day to ask GitHub whether there is a new release, which [Updates] Enabled=0 in its settings file turns off. The start screen also fetches the seven built-in trailers' thumbnails from YouTube's image server, then again once a month, which [Start] ThumbnailFetch=0 turns off." }
+          "acceptedAnswer": { "@type": "Answer", "text": "No. Rendering runs on your GPU and the cache stays on your disk. The player goes online to fetch a YouTube link you paste, and its captions if you pick a track, and once a day to ask GitHub whether there is a new release, which [Updates] Enabled=0 in its settings file turns off. The start screen also fetches the seven built-in trailers' thumbnails from YouTube's image server, then again once a month, which [Start] ThumbnailFetch=0 turns off." }
         },
         {
           "@type": "Question",
@@ -143,12 +146,12 @@
         {
           "@type": "Question",
           "name": "Does it work on screenshots and photos?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Yes. Open a PNG, JPEG, BMP, TIFF or static WebP and press D: it renders once and stays on that frame, with the same compare views as a video, and saves as a PNG or JPEG at its own size. From the command line, a 2560×1440 game screenshot became a PNG in about 8 seconds on an RTX 4080 SUPER. Animated GIFs render frame by frame and keep their timing. The model is built for rendered games, and game screenshots are what it has been tried on; camera RAW and animated WebP are not supported." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. Open a PNG, JPEG, BMP, TIFF or static WebP and press D: it renders once and stays on that frame, with the same compare views as a video, and saves as a PNG or JPEG at its own size. From the command line, a 2560×1440 game screenshot became a PNG in 12 seconds on an RTX 5090, launch to exit. Animated GIFs render frame by frame and keep their timing. The model is built for rendered games, and game screenshots are what it has been tried on; camera RAW and animated WebP are not supported." }
         },
         {
           "@type": "Question",
           "name": "Can I keep the result?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video, from the player or from the command line with dlss5-convert, which also converts whole folders. MKV keeps the source audio, subtitles and chapters without re-encoding them. Export with DLSS stages writes Super Resolution, neural rendering and frame generation into one file, in NVIDIA's order." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes: PNG or JPEG for photos, GIF for animations, MP4 or MKV for video, from the player or from the command line with dlss5-convert, which also converts whole folders. MKV keeps the source audio, subtitles and chapters without re-encoding them. File > Export writes Super Resolution, neural rendering and frame generation into one file, in NVIDIA's order." }
         }
       ]
     },
@@ -474,8 +477,10 @@
       <h3 class="beat__title">See where the model changed the picture</h3>
       <p>
         <strong>Difference</strong> shows the change itself, amplified 1× to
-        32×. The loupe magnifies both at the same spot, and a setting changed
-        while paused re-renders that frame, so you decide on the picture.
+        32×. The loupe magnifies both at the same spot. In the one
+        <strong>Picture</strong> panel, a change in the render zone
+        re-renders the paused frame, so you decide on the picture; the viewing
+        zone is instant and changes only this screen.
       </p>
     </div>
     <figure class="beat__figure">
@@ -491,7 +496,7 @@
 
   <article class="beat beat--flip" id="vsr">
     <div class="beat__text">
-      <h3 class="beat__title">A larger picture, upscaled by RTX VSR <span class="new" title="In main, after v0.27.2; the next release carries it">New</span></h3>
+      <h3 class="beat__title">A larger picture, upscaled by RTX VSR</h3>
       <p>
         Wherever the window shows a video larger than it is, NVIDIA&rsquo;s RTX
         Video Super Resolution makes the picture at that size, on by default.
@@ -538,10 +543,11 @@
       <h3 class="beat__title">Come back and it is still there</h3>
       <p>
         Renders stay on disk until you clear them or the drive falls below
-        20&nbsp;GB free. Reopen a film weeks later and its whole-film render is
-        still attached, as long as the source, the runtime and the neural
-        settings still match. From 0.28.1, an update keeps them too, unless
-        its notes say otherwise.
+        20&nbsp;GB free. Reopen a film weeks later and it opens where you
+        stopped, with its whole-film render still attached, as long as the
+        source, the runtime and the neural settings still match. From 0.28.1,
+        an update keeps them too, unless its notes say otherwise, as
+        0.30.0&rsquo;s do: its new neural runtime renders each video once more.
       </p>
     </div>
     <figure class="beat__figure">
@@ -595,8 +601,8 @@
     <p class="readout__row"><span class="readout__k">Video</span><span class="readout__v readout__v--prose">MKV or MP4, of the whole video or a marked clip. MKV keeps the source audio, subtitles and chapters without re-encoding them.</span></p>
     <p class="readout__row"><span class="readout__k">GIF</span><span class="readout__v readout__v--prose">An animated GIF renders frame by frame with its own timing, and saves as GIF, MP4 or MKV.</span></p>
     <p class="readout__row"><span class="readout__k">Photo</span><span class="readout__v readout__v--prose">PNG, JPEG, BMP, TIFF or static WebP in; PNG or JPEG out, at the source size. The 2560×1440 frame <a href="#photos">above</a> took <span class="data">12&nbsp;s</span> from the command line on an RTX 5090, launch to exit.</span></p>
-    <p class="readout__row"><span class="readout__k">Stages</span><span class="readout__v readout__v--prose">Super Resolution, neural rendering and frame generation at 2× to 5× the frame rate, any combination, in one file and in NVIDIA&rsquo;s order. Super Resolution on its own runs on RTX VSR by default, or DLSS Super Resolution if you choose it. <span class="new" title="In main, after v0.27.2; the next release carries it">New</span></span></p>
-    <p class="readout__row"><span class="readout__k">Scripted</span><span class="readout__v readout__v--prose"><code>dlss5-convert clip.mp4</code> writes <code>clip-dlss.mkv</code> without opening the player, and takes folders and wildcards too. Every stage and Neural setting is an option: <code>--preset strong --passes 3</code> stacks three passes of the strong look, <code>--stages fg --multiplier 3</code> triples the frame rate. <code>dlss5-convert probe</code> says what a file is and what this machine can run on it; the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md#from-the-command-line" rel="noopener">usage guide</a> has the rest.</span></p>
+    <p class="readout__row"><span class="readout__k">Stages</span><span class="readout__v readout__v--prose">Super Resolution, neural rendering and frame generation at 2× to 5× the frame rate, any combination, in one file and in NVIDIA&rsquo;s order. Super Resolution on its own runs on RTX VSR by default, or DLSS Super Resolution if you choose it.</span></p>
+    <p class="readout__row"><span class="readout__k">Scripted</span><span class="readout__v readout__v--prose"><code>dlss5-convert clip.mp4</code> writes <code>clip-dlss.mkv</code> without opening the player, and takes folders and wildcards too. Every stage and render setting is an option: <code>--preset strong --passes 3</code> stacks three passes of the strong look, <code>--stages fg --multiplier 3</code> triples the frame rate. <code>dlss5-convert probe</code> says what a file is and what this machine can run on it; the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md#from-the-command-line" rel="noopener">usage guide</a> has the rest.</span></p>
     <p class="readout__row"><span class="readout__k">Left out</span><span class="readout__v readout__v--prose">Subtitles travel as tracks and are never burned in. Viewing adjustments and playback upscaling are not baked in; the stages export is how a larger size goes into the file.</span></p>
   </div>
 
@@ -613,10 +619,11 @@
   <p class="section__note">
     Details are in the <a href="{{REPO_URL}}/blob/main/docs/USAGE.md" rel="noopener">usage guide</a>.
     Nothing is uploaded: the work happens on your GPU and the cache stays on
-    your disk.
-    <!-- unreleased --><span class="unreleased-note">Items marked <span class="new" title="In main, after v0.27.2; the next release carries it">New</span> are in
-    <code>main</code>, after v0.27.2: the next release carries them. Until
-    then, <a href="{{REPO_URL}}/blob/main/docs/BUILDING.md" rel="noopener">build it yourself</a>.</span><!-- /unreleased -->
+    your disk. The menus are named for jobs (File, Playback, View, Compare,
+    Enhance, Tools, Help), and every key can be changed in
+    <code>input.conf</code>. The interface is in English or Simplified
+    Chinese; the Chinese was drafted with an AI model and has not yet been
+    reviewed by a native speaker.
   </p>
 
   <div class="matrix">
@@ -627,7 +634,7 @@
         <li>A Difference view of where the model changed the picture, amplified 1× to 32×</li>
         <li>A loupe and zoom to 8×, down to single pixels</li>
         <li>Hold the mouse on the picture to see the original in place</li>
-        <li>Save comparison image: exactly what is on screen, with a provenance footer</li>
+        <li>Save comparison image: exactly what is on screen, with a provenance footer; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies it to the clipboard</li>
       </ul>
     </section>
 
@@ -635,10 +642,13 @@
       <h3 class="matrix__title">Play</h3>
       <ul class="matrix__list">
         <li>Renders while you watch, and seeks anywhere, rendered or not</li>
-        <li>RTX Video Super Resolution upscales the picture, on by default wherever the window is larger than the video: <span class="data">87.5</span> VMAF against bicubic&rsquo;s <span class="data">80.5</span> in the <a href="{{REPO_URL}}/blob/main/docs/measurements/vsr-quality-20261002/REPORT.md" rel="noopener">measurement</a> <span class="new" title="In main, after v0.27.2; the next release carries it">New</span></li>
-        <li>Local files, public YouTube links, photos, animated GIFs and the bundled game trailers</li>
+        <li>On RTX 50, DLSS-NR 310.9.16 with a choice of network: A, the default, renders the same frames as 0.28.3; B is milder, with <span class="data">36&nbsp;%</span> less model time. Other GPUs keep 310.8.SF-v2</li>
+        <li>RTX Video Super Resolution upscales the picture, on by default wherever the window is larger than the video: <span class="data">87.5</span> VMAF against bicubic&rsquo;s <span class="data">80.5</span> in the <a href="{{REPO_URL}}/blob/main/docs/measurements/vsr-quality-20261002/REPORT.md" rel="noopener">measurement</a></li>
+        <li>Local files, public YouTube links, photos, animated GIFs and the bundled game trailers; <kbd>Ctrl</kbd>+<kbd>V</kbd> opens a file, link or picture you copied</li>
+        <li>Picks up where you left off; <kbd>PgDn</kbd> and <kbd>PgUp</kbd> open the next or previous file in the folder</li>
+        <li>YouTube sound plays on past the first minute and when DLSS&nbsp;5 is turned on</li>
         <li>HDR10 and HLG tone-mapped for the model, and the original shown in HDR on an HDR display</li>
-        <li>Subtitles (SRT, ASS, WebVTT, PGS, VobSub) drawn after the render, so text is never warped</li>
+        <li>Subtitles (SRT, ASS, WebVTT, PGS, VobSub) drawn after the render, so text is never warped, and a YouTube video&rsquo;s own captions</li>
       </ul>
     </section>
 
@@ -709,7 +719,7 @@
     <p class="readout__row"><span class="readout__k">Hardware</span><span class="readout__v readout__v--prose">An NVIDIA RTX card and driver 610.47 or newer; older drivers are refused up front. Checked on an RTX 4080 SUPER and an RTX 5090. RTX 20 and 30 cards lack native FP8, should be several times slower, and are untested; for their frame generation the player offers the unofficial community dlssg_sm86 add-on.</span></p>
     <p class="readout__row"><span class="readout__k">Speed</span><span class="readout__v readout__v--prose">On an RTX 5090 a live session costs <span class="data">6.8&nbsp;ms</span> a frame at 1080p30, <span class="data">9.9&nbsp;ms</span> at 1440p30 and <span class="data">23&nbsp;ms</span> at 4K30, all faster than the video plays. On an RTX 4080 SUPER a whole 4K render ran at <span class="data">14.8&nbsp;fps</span>, slower than a 30&nbsp;fps film plays.</span></p>
     <p class="readout__row"><span class="readout__k">Upscaling</span><span class="readout__v readout__v--prose">RTX Video Super Resolution upscales playback by default: <span class="data">87.5</span> VMAF against <span class="data">80.5</span> for bicubic on six clips, 960×540 to 1080p. DLSS Super Resolution scored below bicubic on all six; it is built for games, so it is off by default.</span></p>
-    <p class="readout__row"><span class="readout__k">Runtime</span><span class="readout__v readout__v--prose">The neural runtime is a modified, unsigned community build, not a signed NVIDIA package. <a href="#faq-unsigned">Why it is unsigned</a>.</span></p>
+    <p class="readout__row"><span class="readout__k">Runtime</span><span class="readout__v readout__v--prose">The neural runtime is a modified, unsigned community build, not a signed NVIDIA package. It carries two DLSS-NR builds, 310.9.16 for RTX 50 and 310.8.SF-v2 for every other GPU, and both are modified and unsigned. The RenoDX 10.8.0 add-on loads them in ReShade 6.8.0.2155. <a href="#faq-unsigned">Why they are unsigned</a>.</span></p>
     <p class="readout__row"><span class="readout__k">Artifacts</span><span class="readout__v readout__v--prose">Depth is estimated from the picture, and so is motion on cards without the optical flow engine. Expect some artifacts.</span></p>
     <p class="readout__row"><span class="readout__k">Low key</span><span class="readout__v readout__v--prose">In deep shadow the model can crush a face towards black and add speckle. The frame below is the plainest case found.</span></p>
     <p class="readout__row"><span class="readout__k">Cache</span><span class="readout__v readout__v--prose">A render started partway into a video is not joined to the rest, and below 20&nbsp;GB free the least recently watched renders are deleted first.</span></p>
@@ -767,7 +777,7 @@
         <tr><th scope="row">Export keeps</th><td class="versus__ours">Audio, subtitles and chapters</td><td>Audio and chapters; subtitles on some paths</td><td>Audio</td><td>Audio and subtitles</td><td>Audio</td></tr>
         <tr><th scope="row">HDR</th><td class="versus__ours">Shown on HDR displays; exports are SDR</td><td>10-bit HDR export; SDR&rarr;HDR</td><td>HDR10 recording; capture experimental</td><td>Kept; HEVC Main10 export</td><td>HDR10/HLG export</td></tr>
         <tr><th scope="row">Command line</th><td class="versus__ours"><code>dlss5-convert</code>: files, folders, JSON report</td><td><code>VE_CLI.exe</code></td><td>No; a GUI queue</td><td>Not documented</td><td>Not documented</td></tr>
-        <tr><th scope="row">Download</th><td class="versus__ours"><span class="data">377&nbsp;MB</span>, or <span class="data">36&nbsp;MB</span> without the runtime</td><td><span class="data">531&nbsp;MB</span> (.7z)</td><td><span class="data">229&nbsp;MB</span></td><td><span class="data">719&nbsp;MB</span> NVIDIA</td><td><span class="data">588&nbsp;MB</span> lite</td></tr>
+        <tr><th scope="row">Download</th><td class="versus__ours"><span class="data">588&nbsp;MB</span>, or <span class="data">50&nbsp;MB</span> without the runtime</td><td><span class="data">531&nbsp;MB</span> (.7z)</td><td><span class="data">229&nbsp;MB</span></td><td><span class="data">719&nbsp;MB</span> NVIDIA</td><td><span class="data">588&nbsp;MB</span> lite</td></tr>
         <tr><th scope="row">Verify</th><td class="versus__ours">SHA-256, GitHub attestations, a manifest and a verifier</td><td>GitHub&rsquo;s per-file digest</td><td>SHA256SUMS and a runtime manifest</td><td>SHA-256 files</td><td>Runtime hashes</td></tr>
         <tr><th scope="row">Licence</th><td class="versus__ours">MIT</td><td>Source-available, its own terms</td><td>PolyForm Strict, non-commercial</td><td>GPL-3.0; AGPL for streaming</td><td>GPL-3.0 since v3.0.0; MIT before</td></tr>
       </tbody>
@@ -798,11 +808,6 @@
     The only official download location is
     <a href="https://github.com/2600th/dlss5-video-player/releases" rel="noopener">github.com/2600th/dlss5-video-player/releases</a>;
     copies anywhere else are not this project&rsquo;s.
-    <!-- unreleased --><span class="unreleased-note">The features marked
-    <span class="new" title="In main, after v0.27.2; the next release carries it">New</span> come from <code>main</code>, after v0.27.2: RTX
-    VSR as the upscaler for playback and for Super Resolution exports. The next
-    release will carry them; until then,
-    <a href="{{REPO_URL}}/blob/main/docs/BUILDING.md" rel="noopener">build it yourself</a>.</span><!-- /unreleased -->
   </p>
 
   <div class="packages">
@@ -836,8 +841,10 @@
     <p>
       <strong>This is a community project — it is not an NVIDIA product.</strong>
       The neural runtime it ships with is a modified, <strong>unsigned</strong>
-      community build, so Windows and your antivirus will treat it as unknown
-      software (<a href="#faq-unsigned">why</a>). Neural rendering needs an
+      community build: both of its DLSS-NR builds, 310.9.16 for RTX 50 and
+      310.8.SF-v2 for other GPUs, are modified and unsigned. Windows and your
+      antivirus will treat it as unknown software
+      (<a href="#faq-unsigned">why</a>). Neural rendering needs an
       RTX card and NVIDIA driver 610.47 or newer.
     </p>
     <p>
@@ -856,7 +863,8 @@
       <summary>Is it safe to run?</summary>
       <p>
         It is open source, but its neural runtime is a modified community
-        build that nobody can sign, so decide with that in view. Each zip has a
+        build that nobody can sign, both of its DLSS-NR builds included, so
+        decide with that in view. Each zip has a
         SHA-256 beside it. The core zip is built by CI from this repository and
         carries a signed build attestation (<code>gh attestation verify</code>);
         the complete zip is assembled by the maintainer and has a checksum
@@ -868,13 +876,16 @@
     <details class="faq__item" id="faq-unsigned">
       <summary>Why is the neural runtime unsigned?</summary>
       <p>
-        Because it has been modified. It includes NVIDIA's neural DLL modified
-        by the community to run on every RTX generation, 20 through 50, which
-        invalidates NVIDIA's signature, alongside
-        community ReShade and RenoDX files that were never signed. Nobody is in
-        a position to re-sign it, so it ships unsigned and says so. Its files
-        are pinned by size and SHA-256, and the package verifier rejects any
-        that have changed.
+        Because it has been modified. It includes two builds of NVIDIA's
+        neural DLL, each modified by the community to run on every RTX
+        generation, 20 through 50, which invalidates NVIDIA's signature:
+        DLSS-NR 310.9.16, which RTX 50 cards render with, and 310.8.SF-v2, which
+        every other GPU renders with. NVIDIA's signed 310.9.16 was not
+        available to this release. Alongside them are community ReShade and
+        RenoDX 10.8.0 files that were never signed. Nobody is in a position to
+        re-sign it, so it ships unsigned and says so. Its files are pinned by
+        size and SHA-256, and the package verifier rejects any that have
+        changed.
       </p>
     </details>
     <details class="faq__item" id="faq-gpu">
@@ -909,7 +920,8 @@
       <summary>Does it upload my video anywhere?</summary>
       <p>
         No. Rendering runs on your GPU and the cache stays on your disk. The
-        player goes online to fetch a YouTube link you paste, and once a day
+        player goes online to fetch a YouTube link you paste, and its captions
+        if you pick a track, and once a day
         to ask GitHub whether there is a new release, which
         <code>[Updates] Enabled=0</code> in its settings file turns off.
         The start screen also fetches the seven built-in trailers' thumbnails
@@ -934,7 +946,8 @@
         Yes. Open a PNG, JPEG, BMP, TIFF or static WebP and press
         <kbd>D</kbd>: it renders once and stays on that frame, with the same
         compare views as a video, and saves as a PNG or JPEG at its own size.
-        From the command line, a 2560×1440 game screenshot became a PNG in about 8&nbsp;seconds on an RTX 4080 SUPER.
+        From the command line, a 2560×1440 game screenshot became a PNG in
+        12&nbsp;seconds on an RTX 5090, launch to exit.
         Animated GIFs render frame by frame and keep their timing. The model
         is built for rendered games, and game screenshots are what it has been
         tried on; camera RAW and animated WebP are not supported.
@@ -947,8 +960,8 @@
         from the player or from the command line with
         <code>dlss5-convert</code>, which also converts whole folders. MKV keeps the source audio, subtitles and
         chapters without re-encoding them.
-        Export with DLSS stages writes Super Resolution, neural rendering and
-        frame generation into one file, in NVIDIA's order.
+        <strong>File &gt; Export</strong> writes Super Resolution, neural
+        rendering and frame generation into one file, in NVIDIA's order.
       </p>
     </details>
   </div>
